@@ -309,12 +309,14 @@ Other options: `--no-entry` (don't analyse uncalled functions with unknown argum
 **VS Code.** Install [rowan from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan)
 (the engine is bundled for macOS, Linux and Windows): hover over a name to see `name = value` as
 Python (inside a function: for any call — the program's own, and any once the module has run,
-after any of its functions —, its parameters as annotated; a parameter: `name = (parameter)`),
-then **Requirements** (what the code reads of it: for a parameter, for any call of its function —
-`row["id"]`, `row["since"] (only if admin)`, tensor shapes it needs), **In Calls** (what each of
-the program's own calls gives or passes: `3 on line 5.`, with the reads that fail for it,
-`✗ row["since"]`) and **Notes** (what each name, mark and notation used means);
-accesses that may fail are diagnostics. Its source is in `vscode-rowan/`; the
+after any of its functions —, its parameters as annotated; a parameter: `name = (parameter)`, with
+its type or default when known, `(parameter) 4 | int(?)`), then **Requirements** (what the code
+reads of a parameter, for any call of its function — `row["id"]`, `row["since"] (only if admin)`,
+tensor shapes it needs —, or of an input read on that line, `cfg = json.loads(text)`), **In Calls**
+(what each of the program's own calls gives or passes: `3 on line 5.`, with the reads that fail for
+it, `✗ row["since"]`), **Allocation Sites** (where its objects were made, keys they never have) and
+**Notes** (what each name, mark and notation used above means; last, whether the analysis was cut
+at its deadline or ran on demand); accesses that may fail are diagnostics. Its source is in `vscode-rowan/`; the
 `.vsix` packages of each version are attached to the
 [GitHub releases](https://github.com/kaidaniel/rowan/releases).
 

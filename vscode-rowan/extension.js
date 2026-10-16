@@ -34,9 +34,11 @@ const MARK_TEXT = {
  * The notation of values (as the engine prints them): a test on the text, the mark, and its
  * meaning (Notes). `?` is said apart: with where its unknowns come from.
  */
-const UNKNOWN = (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/.test(t.replace(/\*\*\?/g, ""));
+const TYPED = /\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/g;
+const UNKNOWN = (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/.test(t.replace(/\*\*\?/g, "").replace(TYPED, "T"));
+/** The builtin types of the unknowns `t` shows (`int(?)`, `str(?)`), each with its Note. */
+const typedNotes = (t) => [...new Set([...t.matchAll(TYPED)].map((m) => m[1]))].map((ty) => `\`${ty}(?)\`: ${/^[aeiou]/.test(ty) ? "an" : "a"} ${ty} not known statically`);
 const NOTATION = [
-  [(t) => /\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/.test(t), "int(?)", "an int not known statically (`str(?)` a str, …)"],
   [(t) => /["'\w]\?[:=]/.test(t), '"k"?', "possible key"],
   [(t) => /["'\w]~[:=]/.test(t), '"k"~', "there unless code rowan cannot see removed it"],
   [(t) => t.includes("**?"), "**?", "other keys may exist"],
@@ -247,11 +249,12 @@ function bullets(items, max) {
 
 /**
  * The headline's lines: `name = value`, the value pretty-printed (`hoverValue`); a value that
- * is one of several long alternatives continues with `| B` lines, indented.
+ * is one of several long alternatives continues with `| B` lines, indented. `tag`: what the
+ * name is, before its value (`(parameter)`).
  */
-function headLines(name, value) {
-  const pre = `${name} = `;
-  if (value === "(parameter)") return [pre + value];
+function headLines(name, value, tag) {
+  const pre = `${name} = ${tag ? tag + (value ? " " : "") : ""}`;
+  if (!value) return [pre.trimEnd()];
   const lines = hoverValue(value);
   const alts = lines.length > 1 && lines[0].startsWith("  ") && lines.some((l) => l.startsWith("| "));
   if (alts) return [pre + lines[0].slice(2), ...lines.slice(1).map((l) => "  " + l)];
@@ -259,14 +262,34 @@ function headLines(name, value) {
 }
 
 /**
- * What the code needs of the name: the access paths it reads of it (`required`; a parameter at
- * its `def`: for any call, `contract`), always first, then under a test of the arguments
- * (`(only if admin)`), then on some paths; and tensor shapes (`x.dim() == 3`).
+ * A parameter's value for any call, after `(parameter)`: its default, its annotated type
+ * (`int(?)`) or both (`4 | int(?)`); the unknown argument itself (`x`, named by the parameter)
+ * is its type, or `?` beside a default (`3 | ?`: 3, or whatever a call passes); empty when
+ * nothing is known of it.
+ */
+function paramValue(text, name, type) {
+  const own = type ? `${type}(?)` : "?";
+  const alts = [...new Set(alternatives(text).map((a) => (a === name ? own : a)))];
+  if (alts.length === 1 && alts[0] === "?") return "";
+  return alts.filter((a) => a !== "?").concat(alts.includes("?") ? ["?"] : []).join(" | ");
+}
+
+/**
+ * What the code needs of the name. A parameter (at its `def`, for any call: `contract`; in the
+ * body, where it holds the argument of its name, what the code reads of it: `required`): tensor
+ * shapes (`x.dim() == 3`) and the access paths it reads, always first, then under a test of the
+ * arguments (`(only if admin)`), then on some paths. Any other name: what the program reads of
+ * an input it gets on this line (`cfg = json.loads(text)`: `cfg["name"]`, the columns of
+ * `pd.read_csv(…)`), else nothing (what its function needs is said at its parameters).
  */
 function requirementLines(f) {
+  const objs = [...(f.objects || []), ...(f.general_unknowns || [])];
+  const param = f.param || objs.some((o) => o.kind === "unknown" && (o.from || []).some((t) => t.startsWith(`argument \`${f.name}\` of `)));
+  const input = objs.some((o) => (o.origin && o.origin.line === f.line) || (o.from || []).some((t) => t.endsWith(`(line ${f.line})`)));
+  if (!param && !input) return [];
   const reads = (f.param ? f.contract : f.required) || [];
   const rank = (r) => (r.always ? 0 : r.only_if ? 1 : 2);
-  const out = (f.requires || []).map((r) => "`" + r + "`");
+  const out = (param ? f.requires || [] : []).map((r) => "`" + r + "`");
   for (const r of [...reads].sort((a, b) => rank(a) - rank(b))) {
     out.push("`" + r.path + "`" + (r.always ? "" : r.only_if ? ` (only if \`${r.only_if}\`)` : " on some paths"));
   }
@@ -287,7 +310,6 @@ function callLines(f, marks) {
     if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
     merged.set(t, m);
   }
-  const where = (ls) => (ls.length ? ` on line${ls.length > 1 ? "s" : ""} ${ls.length > 3 ? `${ls.slice(0, 3).join(", ")} and ${ls.length - 3} more` : ls.join(", ")}` : "");
   const check = (c) => {
     const mark = c && MARK[c.tier];
     if (!mark) return ".";
@@ -295,32 +317,101 @@ function callLines(f, marks) {
     const fails = c.fails.slice(0, 3).map((x) => "`" + x + "`").join(", ") + (c.fails.length > 3 ? ` and ${c.fails.length - 3} more` : "");
     return `: ${mark}` + (fails ? " " + fails : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
   };
-  return [...merged].map(([t, m]) => "`" + t + "`" + where(m.lines) + check(m.check));
+  return [...merged].map(([t, m]) => "`" + t + "`" + (m.lines.length ? " " + onLines(m.lines) : "") + check(m.check));
+}
+
+/** "on line 5", "on lines 5, 9, 12 and 2 more" */
+function onLines(ls) {
+  return `on line${ls.length > 1 ? "s" : ""} ${ls.length > 3 ? `${ls.slice(0, 3).join(", ")} and ${ls.length - 3} more` : ls.join(", ")}`;
+}
+
+/** Kinds of objects that are definitions or library objects, not data the program made. */
+const DEFS = ["function", "class", "module", "external", "bound", "method"];
+
+/**
+ * Where the objects the name may hold were made ("created on line 28", "one of 7 objects, all
+ * created on line 28 (by different calls or loop iterations)"), and the keys and attributes none
+ * of them has here ("never has key "x" here"). Nothing for a parameter at its `def` (its objects
+ * are the calls'), an unknown, or one object made on the hovered line itself.
+ */
+function siteLines(f) {
+  const listed = f.objects || [];
+  const objs = listed.filter((o) => o.kind !== "unknown" && !DEFS.includes(o.kind));
+  if (f.param || !objs.length) return [];
+  const total = Math.max(f.objects_total || 0, listed.length) - (listed.length - objs.length);
+  const made = objs.filter((o) => o.created);
+  const files = [...new Set(made.map((o) => o.created.file))];
+  const where = (file) => {
+    const ls = [...new Set(made.filter((o) => o.created.file === file).map((o) => o.created.line))].sort((a, b) => a - b);
+    return { ls, text: `${onLines(ls)}${file ? ` in ${file}` : ""}` };
+  };
+  const places = files.map(where);
+  const out = [];
+  if (total > 1) {
+    const one = places.length === 1 && places[0].ls.length === 1;
+    out.push(`one of ${total} objects${places.length ? `, ${one ? "all " : ""}created ${places.map((p) => p.text).join("; ")}` : ""}${one ? " (by different calls or loop iterations)" : ""}`);
+  } else if (places.length === 1 && !(places[0].ls[0] === f.line && !files[0])) {
+    out.push(`created ${places[0].text}`);
+  }
+  // (what every one of them lacks: all of them listed, no unknown among them)
+  if (listed.length === objs.length && total === objs.length) {
+    const common = (field) => objs.map((o) => o[field] || []).reduce((a, b) => a.filter((k) => b.includes(k)));
+    const keys = common("absent");
+    const attrs = common("absent_attrs").map((k) => k.replace(/^"|"$/g, ""));
+    const list = (xs) => xs.slice(0, 6).join(", ") + (xs.length > 6 ? ` and ${xs.length - 6} more` : "");
+    if (keys.length) out.push(`never has key${keys.length > 1 ? "s" : ""} ${list(keys)} here`);
+    if (attrs.length) out.push(`never has attribute${attrs.length > 1 ? "s" : ""} ${list(attrs)} here`);
+  }
+  return out;
+}
+
+/**
+ * How the analysis that answered was cut, for the last Note (null when it ran whole): the whole
+ * program's stopped at its deadline (`analysis.cut`); a module code's document while the whole
+ * program's runs or after it was cut (`module`, `whole`); a function run on its own (`fn`).
+ */
+function runNote(run) {
+  if (!run) return null;
+  const ctx = run.parent || run;
+  const n = (x) => Number(x).toLocaleString("en-US");
+  const secs = (ms) => (ms < 1 ? "under 1 ms" : ms < 1000 ? `${Math.round(ms)} ms` : `${Math.round(ms / 100) / 10} s`);
+  const stmts = (k) => `${n(k)} statement${k === 1 ? "" : "s"}`;
+  const done = (a) => (a && a.statements ? ` (after ${stmts(a.statements)})` : "");
+  const whole = ctx.whole ? `the whole program's analysis was cut at its ${secs(ctx.whole.deadline_ms)} deadline${done(ctx.whole)}` : ctx.pending ? "the whole program's analysis is still running" : "the whole program's analysis took too long";
+  if (run.fn) {
+    const a = run.analysis || {};
+    const cut = a.cut ? `; this run was cut at its own ${secs(a.deadline_ms)} deadline too, so code it had not reached is taken as unknown code` : "";
+    return `analysed on demand: this function alone, for any call, in ${secs(a.ms || 0)} (${stmts(a.statements || 0)}), because ${whole}${cut}`;
+  }
+  if (run.module) return `from the module's own code only (its functions are analysed when you hover them), because ${whole}`;
+  const a = run.analysis;
+  if (a && a.cut) return `the whole program's analysis was cut at its ${secs(a.deadline_ms)} deadline${done(a)}: code it had not reached by then is taken as unknown code, so values may say less than they could`;
+  return null;
 }
 
 /**
  * Markdown for one name, in the owner's format: a headline `name = value` (a parameter:
- * `name = (parameter)`), then the sections that have something: **Requirements** (what the code
- * needs of it), **In Calls** (what the program's own calls give, apart from the value for any
- * call) and **Notes** (what each name, mark and notation the hover uses means). `facts`: the
- * entries for (line, name); `verdicts`: the accesses on that line that involve the name (those
- * that may fail are diagnostics, which the editor shows in the same hover; an input's key
- * the code reads is a requirement).
+ * `name = (parameter)`, with its value for any call when something is known of it), then the
+ * sections that have something: **Requirements** (what the code needs of a parameter, or of an
+ * input read on this line), **In Calls** (what the program's own calls give, apart from the
+ * value for any call), **Allocation Sites** (where its objects were made, keys they never have)
+ * and **Notes** (what each name, mark and notation used above means; last, how the analysis
+ * was cut). `facts`: the entries for (line, name), each with how its document was made
+ * (`run`); `verdicts`: the accesses on that line that involve the name (those that may fail
+ * are diagnostics, which the editor shows in the same hover).
  */
 function renderHover(name, facts, verdicts) {
   // (a name of a function, class, module or library object: the language server says it)
-  const DEFS = ["function", "class", "module", "external", "bound", "method"];
   facts = facts.filter((f) => !((f.objects || []).length && f.objects.every((o) => DEFS.includes(o.kind)) && !(f.text || "").includes("(")));
   if (!facts.length) return null;
   const head = [];
   const reqs = [];
   const calls = [];
+  const sites = [];
   const symbols = [];
   const origins = [];
   const changed = [];
   const marks = new Set();
-  // (what the notation is looked for in: what the hover shows, Notes' own words apart)
-  const texts = [];
   const add = (list, xs) => xs.forEach((x) => list.includes(x) || list.push(x));
   for (const f of facts) {
     const text = (f.text || "").trim() || "?";
@@ -337,8 +428,14 @@ function renderHover(name, facts, verdicts) {
       legend.splice(self, 1);
     }
     const own = value === name && !legend.length;
+    let tag = null;
     if (f.param || (own && unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `)))) {
-      value = "(parameter)";
+      // a parameter: what any call may pass, when something is known of it
+      tag = "(parameter)";
+      value = paramValue(value, name, f.type);
+      if (/(^| )\?$/.test(value)) add(origins, ["whatever a call passes"]);
+    } else if (own && f.type) {
+      value = `${f.type}(?)`;
     } else if (own && !objs.length) {
       // a number the module computes from data rowan cannot see, named by its variable
       value = "?";
@@ -349,39 +446,41 @@ function renderHover(name, facts, verdicts) {
     } else if (value === "?" && !legend.length) {
       add(origins, unknown.map(origin).filter(Boolean).slice(0, 1));
     } else {
-      // the names the value mentions, with what is known about each; where an unknown printed
-      // as `?` comes from
-      for (const [sym, desc] of legend) add(symbols, [`\`${sym}\`: \`${desc}\``]);
-      texts.push(...legend.map(([, d]) => d));
+      // the names the value mentions, with what is known about each (Notes keeps those the
+      // hover shows); where an unknown printed as `?` comes from
+      for (const [sym, desc] of legend) if (!symbols.some(([s0]) => s0 === sym)) symbols.push([sym, desc]);
       add(origins, unknown.filter((o) => !o.symbol).map(origin).filter(Boolean));
     }
     // (what unknown code may have changed of the program's objects: where their `?` and `~` come from)
-    if (value !== "(parameter)") add(changed, objs.filter((o) => o.kind !== "unknown").flatMap((o) => (o.changed_by || []).map(callText)));
-    const hl = headLines(name, value);
-    head.push(...hl);
-    texts.push(hl.join("\n"));
-    const r = requirementLines(f);
-    add(reqs, r);
+    if (!tag) add(changed, objs.filter((o) => o.kind !== "unknown").flatMap((o) => (o.changed_by || []).map(callText)));
+    head.push(...headLines(name, value, tag));
+    add(reqs, requirementLines(f));
     // (on demand there are no calls of the program: the value is for any call)
-    const c = callLines(f, marks);
-    add(calls, c);
-    texts.push(...r, ...c);
+    add(calls, callLines(f, marks));
+    add(sites, siteLines(f));
   }
-  // an input's key read on this line, when the code's reads of it do not say it already
-  if (!facts.some((f) => (f.required || []).length)) add(reqs, verdicts.filter((v) => v.tier === "input").map((v) => "`" + v.text + "`"));
-  const all = texts.join("\n");
-  const notes = [...symbols];
+  // Notes: what the hover above uses, and only that — the symbols it mentions (with the
+  // notation their descriptions use), the notation and marks it shows
+  const body = [...head, ...reqs, ...calls, ...sites].join("\n");
+  const word = (w) => new RegExp(`(^|[^\\w.])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\w])`).test(body);
+  const used = symbols.filter(([sym]) => sym.split(", ").some(word));
+  const all = [body, ...used.map(([, d]) => d)].join("\n");
+  const notes = used.map(([sym, desc]) => `\`${sym}\`: \`${desc}\``);
   changed.sort((a, b) => (a === "other calls") - (b === "other calls"));
   const by = changed.length ? `may have been changed by ${changed.slice(0, 2).join(" or ")}${changed.length > 2 ? ` (or ${changed.length - 2} other call${changed.length > 3 ? "s" : ""})` : ""}` : null;
-  const unknown = UNKNOWN(all) || head.some((l) => / = \?$/.test(l));
-  const why = origins.slice(0, 3).concat(by && unknown ? [by] : []);
-  if (unknown) notes.push(`\`?\`: unknown${why.length ? ` (${why.join("; ")})` : ""}`);
-  for (const [used, mark, meaning] of NOTATION) if (used(all)) notes.push(`\`${mark}\`: ${meaning}${mark === '"k"~' && by && !unknown ? ` (${by})` : ""}`);
+  const unknownUsed = UNKNOWN(all) || head.some((l) => / = \?$/.test(l));
+  const why = origins.slice(0, 3).concat(by && unknownUsed ? [by] : []);
+  if (unknownUsed) notes.push(`\`?\`: unknown${why.length ? ` (${why.join("; ")})` : ""}`);
+  notes.push(...typedNotes(all));
+  for (const [test, mark, meaning] of NOTATION) if (test(all)) notes.push(`\`${mark}\`: ${meaning}${mark === '"k"~' && by && !unknownUsed ? ` (${by})` : ""}`);
   for (const m of Object.keys(MARK_TEXT)) if (marks.has(m)) notes.push(`${m}: ${MARK_TEXT[m]}`);
+  const cut = runNote(facts[0].run);
+  if (cut) notes.push(cut);
   const out = ["```python", ...head, "```"];
   const section = (title, items, max) => items.length && out.push("", `**${title}**`, ...bullets(items, max).map((x) => `- ${x}`));
   section("Requirements", reqs, 10);
   section("In Calls", calls, 6);
+  section("Allocation Sites", sites, 4);
   section("Notes", notes, 20);
   return out.join("\n");
 }
@@ -653,7 +752,7 @@ async function hoverServer(bin, file, line, extraArgs, timeoutSeconds) {
 
 /** Add an on-demand document's facts and verdicts to an indexed result (`indexResult`). */
 function mergeResult(idx, res) {
-  const more = indexResult(res);
+  const more = indexResult(res, idx.run);
   for (const [k, fs_] of more.facts) idx.facts.set(k, (idx.facts.get(k) || []).concat(fs_));
   for (const [l, vs] of more.verdicts) idx.verdicts.set(l, (idx.verdicts.get(l) || []).concat(vs));
 }
@@ -680,13 +779,22 @@ function runEngine(bin, file, extraArgs, timeoutSeconds) {
   });
 }
 
-/** Index a --facts document: facts by line then name; verdicts by line. */
-function indexResult(res) {
+/**
+ * Index a --facts document: facts by line then name; verdicts by line; `run`, how the analysis
+ * that made it was cut (`runNote`; null when it ran whole), shared by its facts: a function run
+ * on demand (`span`; `parent`: the run of the document it is merged into), a module code's
+ * document (`on_demand`, while the whole program's analysis runs: `pending`, or after it was
+ * cut: `whole`), a whole program's cut at its deadline.
+ */
+function indexResult(res, parent = null) {
+  const a = res.analysis;
+  const run = res.span ? { fn: true, analysis: a, parent } : res.on_demand ? { module: true, pending: !!res.pending, whole: res.whole || null } : a && a.cut ? { analysis: a } : null;
   const facts = new Map();
+  // (copies: the document itself stays as the engine gave it)
   for (const f of res.facts || []) {
     const key = `${f.line}:${f.name}`;
     if (!facts.has(key)) facts.set(key, []);
-    facts.get(key).push(f);
+    facts.get(key).push({ ...f, run });
   }
   const verdicts = new Map();
   for (const v of res.verdicts || []) {
@@ -694,7 +802,7 @@ function indexResult(res) {
     if (!verdicts.has(v.line)) verdicts.set(v.line, []);
     verdicts.get(v.line).push(v);
   }
-  return { facts, verdicts };
+  return { facts, verdicts, run };
 }
 
 // ----------------------------------------------------------------- VS Code glue
@@ -805,9 +913,16 @@ function activate(context) {
 
   // (the whole program's result, after an early answer from the module code: it replaces it)
   const onEvent = (msg) => {
-    if (msg.event !== "analysed" || !msg.ok) return;
     const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === msg.path);
     const prev = results.get(msg.path);
+    // (cut at its deadline: the module code's document stays, its hovers saying so)
+    if (msg.event === "cut" && prev && prev.run) {
+      prev.run.pending = false;
+      prev.run.whole = msg.whole;
+      status.text = "$(check) rowan: functions analysed when hovered (the whole program took too long)";
+      return;
+    }
+    if (msg.event !== "analysed" || !msg.ok) return;
     if (!doc || !prev || !prev.how) return;
     show(doc, msg.result, prev.how);
     status.show();

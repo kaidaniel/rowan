@@ -329,6 +329,12 @@ impl Analyzer {
         self.findings.row_absent_probes.push(probe);
     }
 
+    /// How the analysis went, for the editor's note on a cut one: whether the deadline (or a
+    /// cancel) cut it, the time it took and its deadline, the statements it ran.
+    pub fn analysis_json(&self) -> serde_json::Value {
+        serde_json::json!({"cut": self.budget.hard_cut, "ms": self.budget.elapsed_ms() as u64, "deadline_ms": super::limit("ms", super::DEADLINE_MS), "statements": self.budget.statements})
+    }
+
     /// The work done so far: statements, body runs, objects, havoc visits (see `work_line`).
     pub fn work_counts(&self) -> [usize; 4] {
         [self.budget.statements, self.budget.runs, self.heap.len(), self.havoc.visited as usize]

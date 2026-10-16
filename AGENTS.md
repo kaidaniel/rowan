@@ -125,7 +125,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value`, then Requirements, In Calls, Notes (every mark and notation used; none for accesses that work). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (`(parameter) int(?)`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites, Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 * Keep this file under 200 lines and up to date with every change.
 
 ## Commands

@@ -119,7 +119,9 @@ fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send 
 ///   program's completes within `EARLY`, the result is the module code's (`on_demand: true`;
 ///   its functions are analysed one at a time when asked, `hover`), with `pending: true` while
 ///   the whole program's goes on; when that completes (not cut by its deadline) its document
-///   follows as an event line `{"event":"analysed","path":P,"ms":…,"deps":…,"result":…}`.
+///   follows as an event line `{"event":"analysed","path":P,"ms":…,"deps":…,"result":…}`; cut,
+///   `{"event":"cut","path":P,"whole":…}` (how far it got, `analysis_json`; a module code's
+///   document answered after the cut carries it as `whole`).
 /// * `{"cmd":"hover","path":P,"line":L}` returns the `--facts` document of the function of `P`
 ///   defined over line L, from its run for any call (open parameters as annotated, from the
 ///   state the module ended in), cached per function until a file it depends on changes; it
@@ -245,8 +247,9 @@ fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (st
             let _ = first_tx.send(Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps, false)));
             return;
         }
+        // (cut at its deadline: how far it got, for the module code's document to say)
         if start == Start::Whole {
-            let _ = first_tx.send(Ok((String::new(), deps, true)));
+            let _ = first_tx.send(Ok((an.analysis_json().to_string(), deps, true)));
             return;
         }
         an.on_demand();
@@ -278,6 +281,8 @@ fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (st
             doc["span"] = serde_json::json!([span.0, span.1]);
             let after = an.work_counts();
             doc["work"] = serde_json::json!({"statements": after[0] - before[0], "runs": after[1] - before[1], "objects": after[2] - before[2], "havoc": after[3] - before[3]});
+            // (the function's run: its time, and whether its deadline cut it)
+            doc["analysis"]["statements"] = serde_json::json!(after[0] - before[0]);
             let r = serde_json::to_string(&doc).unwrap();
             done.push((span, r.clone()));
             let _ = reply.send(Ok(HoverReply { result: r, cached: false, span }));
@@ -473,13 +478,6 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
     };
     let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, whole_cancel);
     let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module, module_cancel);
-    let whole_doc = |r: First| -> Option<Result<(String, Vec<String>), String>> {
-        match r {
-            Ok((doc, deps, false)) => Some(Ok((doc, deps))),
-            Ok((_, _, true)) => None,
-            Err(e) => Some(Err(e)),
-        }
-    };
     let answer = |res: Result<(String, Vec<String>), String>, pending: bool| -> String {
         match res {
             Ok((doc, deps)) => {
@@ -490,8 +488,12 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
         }
     };
     // (the whole program's answer, if it comes early)
+    let mut whole_cut: Option<String> = None;
     let early = match whole_rx.recv_timeout(EARLY) {
-        Ok(r) => whole_doc(r),
+        Ok(r) => {
+            whole_cut = cut_of(&r);
+            whole_doc(r)
+        }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
         Err(_) => Some(Err("analysis panicked".to_string())),
     };
@@ -500,15 +502,20 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
     }
     let module = module_rx.recv().unwrap_or_else(|_| Err("analysis panicked".to_string()));
     // (done meanwhile: the whole program's)
-    if let Ok(r) = whole_rx.try_recv() {
-        if let Some(r) = whole_doc(r) {
-            return answer(r, false);
+    if whole_cut.is_none() {
+        if let Ok(r) = whole_rx.try_recv() {
+            whole_cut = cut_of(&r);
+            if let Some(r) = whole_doc(r) {
+                return answer(r, false);
+            }
         }
-        // (cut at its deadline: the module code's analysis answers, nothing follows)
+    }
+    // (cut at its deadline: the module code's analysis answers, saying so; nothing follows)
+    if let Some(info) = &whole_cut {
         return match module {
             Ok((doc, deps, _)) => {
                 keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx: module_tx });
-                answer(Ok((doc, deps)), false)
+                answer(Ok((with_whole(doc, info), deps)), false)
             }
             Err(e) => answer(Err(e), false),
         };
@@ -523,25 +530,64 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
     };
     keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx: module_tx });
     // (the whole program's document, when its analysis completes, replaces this one)
-    let (shared2, out2, path2) = (shared.clone(), out.clone(), path.to_string());
-    let waiter = std::thread::Builder::new().spawn(move || {
-        let _keep = _whole_tx;
-        let Ok(Some(Ok((doc, deps)))) = whole_rx.recv().map(whole_doc) else { return };
-        let mut sh = shared2.lock().unwrap();
-        if sh.latest.get(&path2) != Some(&generation) {
-            return;
-        }
-        let deps_h = hashed(&deps);
-        if !deps_h.iter().all(|(p, h)| file_hash(p) == Some(*h)) {
-            return;
-        }
-        sh.cache.insert(path2.clone(), (deps_h, doc.clone()));
-        sh.sessions.retain(|s| s.path != path2);
-        drop(sh);
-        send_line(&out2, &format!("{{\"event\":\"analysed\",\"ok\":true,\"path\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", serde_json::json!(path2), t0.elapsed().as_millis(), serde_json::json!(deps), doc));
+    let waiter = std::thread::Builder::new().spawn({
+        let (shared, out, path, module_doc) = (shared.clone(), out.clone(), path.to_string(), doc.clone());
+        move || follow_whole(&shared, &out, &path, generation, whole_rx, _whole_tx, module_doc, t0)
     });
     let pending = waiter.is_ok();
     answer(Ok((doc, deps)), pending)
+}
+
+/// A whole program's document, when its analysis completed (not cut by its deadline).
+fn whole_doc(r: First) -> Option<Result<(String, Vec<String>), String>> {
+    match r {
+        Ok((doc, deps, false)) => Some(Ok((doc, deps))),
+        Ok((_, _, true)) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// The whole program's analysis cut at its deadline: how far it got (`analysis_json`).
+fn cut_of(r: &First) -> Option<String> {
+    match r {
+        Ok((info, _, true)) => Some(info.clone()),
+        _ => None,
+    }
+}
+
+/// A module code's document, with what cut the whole program's analysis (`whole`).
+fn with_whole(doc: String, info: &str) -> String {
+    format!("{{\"whole\":{},{}", info, &doc[1..])
+}
+
+/// After a module code's document answered an `analyse` (`generation`, `module_doc`): the whole
+/// program's analysis, when it completes, as an `analysed` event (its document replaces the
+/// module code's); cut at its deadline, a `cut` event (the module code's document stays, saying
+/// so). Nothing when a newer `analyse` came, or a file it loaded changed.
+#[allow(clippy::too_many_arguments)]
+fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, path: &str, generation: u64, whole_rx: std::sync::mpsc::Receiver<First>, _whole_tx: std::sync::mpsc::Sender<HoverReq>, module_doc: String, t0: std::time::Instant) {
+    let Ok(r) = whole_rx.recv() else { return };
+    let mut sh = shared.lock().unwrap();
+    if sh.latest.get(path) != Some(&generation) {
+        return;
+    }
+    if let Some(info) = cut_of(&r) {
+        if let Some(c) = sh.cache.get_mut(path) {
+            c.1 = with_whole(module_doc, &info);
+        }
+        drop(sh);
+        send_line(out, &format!("{{\"event\":\"cut\",\"ok\":true,\"path\":{},\"whole\":{}}}", serde_json::json!(path), info));
+        return;
+    }
+    let Some(Ok((doc, deps))) = whole_doc(r) else { return };
+    let deps_h = hashed(&deps);
+    if !deps_h.iter().all(|(p, h)| file_hash(p) == Some(*h)) {
+        return;
+    }
+    sh.cache.insert(path.to_string(), (deps_h, doc.clone()));
+    sh.sessions.retain(|s| s.path != path);
+    drop(sh);
+    send_line(out, &format!("{{\"event\":\"analysed\",\"ok\":true,\"path\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), doc));
 }
 
 /// `rowan hovers FILE [--part I/N] [--only NAME]` (a measurement, `bench/hovers.py`): `FILE`'s module code

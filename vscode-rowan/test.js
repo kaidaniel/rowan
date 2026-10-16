@@ -1,7 +1,8 @@
 // node test.js — checks the hover and diagnostic rendering against real --facts documents:
 // what particular hovers say, and that every hover on several real programs has the owner's
-// format (`name = value`, then Requirements / In Calls / Notes), no internal names, no marks
-// for accesses that work, and every mark it uses explained in its Notes.
+// format (`name = value`, then Requirements / In Calls / Allocation Sites / Notes), no internal
+// names, no marks for accesses that work, Requirements only of parameters (and of an input read
+// on the line), every mark it uses explained in its Notes and every Note used above it.
 "use strict";
 const assert = require("assert");
 const fs = require("fs");
@@ -25,7 +26,7 @@ function allHovers(file) {
     const m = new RegExp(`(^|[^A-Za-z0-9_])(${name})($|[^A-Za-z0-9_])`).exec(src[line - 1] || "");
     const start = m ? m.index + m[1].length : 0;
     const h = renderHover(name, fs_, verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
-    if (h) out.push({ line, name, h });
+    if (h) out.push({ line, name, h, facts: fs_ });
   }
   return { res, hovers: out };
 }
@@ -48,7 +49,13 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");
-assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```");
+assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```\n\n**Allocation Sites**\n- one of 7 objects, all created on line 28 (by different calls or loop iterations)");
+// (an object made in another file of the program: where)
+{
+  const b001 = path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py");
+  const h = hover(indexResult(facts(b001)), fs.readFileSync(b001, "utf8").split("\n"), 51, "short3");
+  assert(h.includes("**Allocation Sites**\n- created on line 14 in shop/repo.py"), h);
+}
 // (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
 // entry, not two alike)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");
@@ -61,16 +68,21 @@ const set96 = hover(a002idx, a002src, 96, "settings");
 // (Notes explain the marks the hover shows, not those of parts the cuts leave out)
 const [body96, notes96] = set96.split("**Notes**");
 assert(notes96.includes("- `**?`: other keys") === body96.includes("**?") && notes96.includes("- `[*]`: any element") === body96.includes("[*]") && notes96.includes("- `a | b`: either a or b"), set96);
-// (an access that works has no mark: the hover says what may fail)
+// (an access that works has no mark: the hover says what may fail; `cfg` is `settings_from`'s
+// parameter, so what it reads of it is said; the objects its calls pass were made on line 92)
 const cfg63 = hover(a002idx, a002src, 63, "cfg");
-assert(!cfg63.includes("✓") && cfg63.includes('**Requirements**\n- `cfg["name"]`'), cfg63);
+assert(!cfg63.includes("✓") && cfg63.includes('**Requirements**\n- `cfg["name"]`') && cfg63.includes("**Allocation Sites**\n- one of 3 objects, all created on line 92"), cfg63);
+// (an input read on its line: what the program reads of it, the only non-parameter with
+// Requirements — what the JSON must have)
+const cfg92 = hover(a002idx, a002src, 92, "cfg");
+assert(cfg92.includes('```python\ncfg = json.loads(text)\n```\n\n**Requirements**\n- `cfg["name"]`\n\n**In Calls**'), cfg92);
 // (an access that may fail is a diagnostic, which the editor shows in the same hover: not repeated)
 const r9 = hover(a01idx, a01src, 9, "r");
 assert(!r9.includes("⚠") && (a01idx.verdicts.get(9) || []).some((v) => severityFor(v.tier) === "warning" && v.message === 'key "role" is only set on some paths'), r9);
 const r13 = hover(a01idx, a01src, 13, "r");
 assert(!r13.includes("✗") && (a01idx.verdicts.get(13) || []).some((v) => severityFor(v.tier) === "error"), r13);
 const u8 = hover(a01idx, a01src, 8, "u");
-assert(u8.includes("```python\nu = ?\n```\n\n**Requirements**\n- `u.id`"), u8);
+assert(u8.includes("```python\nu = ?\n```\n\n**Notes**") && !u8.includes("Requirements"), u8);
 assert(u8.includes("- `?`: unknown (`u` is not defined in this file)"), u8);
 // a parameter: any argument (the function's value for any call), what the program's call passes
 // (`u`, line 8), what the function reads of it
@@ -78,11 +90,18 @@ const user2 = hover(a01idx, a01src, 2, "user");
 assert(user2.includes("```python\nuser = (parameter)\n```") && user2.includes("**In Calls**\n- `u` on line 8.") && user2.includes("**Requirements**\n- `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
 // a key read only under a test of another argument: "(only if `admin`)", with its legend entry
+// (at the parameter; a line in the body that reads it has no Requirements)
 const z535 = path.join(root, "tests", "cases", "z535_requirements_under_parameter_tests.py");
 const z535src = fs.readFileSync(z535, "utf8").split("\n");
-const row11 = hover(indexResult(facts(z535)), z535src, z535src.indexOf('        return row["role"]') + 1, "row");
+const z535idx = indexResult(facts(z535));
+const row11 = hover(z535idx, z535src, z535src.indexOf("def contract(row, admin):") + 1, "row");
 assert(row11.includes('**Requirements**\n- `row["id"]` (only if `not admin`)\n- `row["role"]` (only if `admin`)'), row11);
 assert(row11.includes("- `(only if x)`: needed only on calls where `x` holds of the arguments as passed"), row11);
+// (in the body too, where it holds the argument of its name; a name built from it has none)
+const rowBody = hover(z535idx, z535src, z535src.indexOf('        return row["role"]') + 1, "row");
+assert(rowBody.includes("```python\nrow = (parameter)\n```\n\n**Requirements**\n") && rowBody.includes('- `row["role"]` (only if `admin`)'), rowBody);
+const userBody = hover(z535idx, z535src, 9, "user");
+assert(userBody && !userBody.includes("Requirements"), userBody);
 // ---- a parameter in its `def`: what the function reads of it for any call (its contract),
 // apart from what each of the program's calls passes and whether the reads work for it
 {
@@ -118,7 +137,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert(y.includes("```python\ny = 3 | x\n```") && y.includes("**In Calls**\n- `3` on line 44.\n- `7` on line 45."), y);
   assert(y.includes("- `a | b`: either a or b"), y);
   const b = hover(idx, src, 6, "b");
-  assert(b.includes("```python\nb = (parameter)\n```") && b.includes("**In Calls**\n- `False` on line 44.\n- `True` on line 45."), b);
+  assert(b.includes("```python\nb = (parameter) bool(?)\n```") && b.includes("**In Calls**\n- `False` on line 44.\n- `True` on line 45."), b);
   const m = hover(idx, src, 13, "m");
   assert(m.includes("```python\nm = n * 2\n```") && m.includes("**In Calls**\n- `10` on line 46.\n- `14` on line 46."), m);
   // a function nothing calls: only the value for any call
@@ -143,7 +162,46 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const size = hover(idx, src, 13, "size");
   assert(size.includes("```python\nsize = int(?)\n```"), size);
   const shown = hover(idx, src, 43, "shown");
-  assert(shown.includes("```python\nshown = str(?)\n```") && shown.includes("- `int(?)`: an int not known statically (`str(?)` a str, …)"), shown);
+  assert(shown.includes("```python\nshown = str(?)\n```") && shown.includes("- `str(?)`: a str not known statically") && !shown.includes("- `?`:"), shown);
+}
+
+// ---- a parameter's headline: `(parameter)`, with what any call may pass when something is
+// known of it (its annotated type, its default, both); typed unknowns inside containers
+{
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rowan-params-")), "params.py");
+  fs.writeFileSync(f, [
+    "def f(a, b: int, c=3, d: int = 4, e: str | None = None):",
+    "    return a, b, c, d, e",
+    "",
+    "",
+    "def g(words: list):",
+    "    sizes = {w: len(w) for w in words}",
+    "    nums = [int(w) for w in words]",
+    "    out = {\"sizes\": sizes, \"nums\": nums}",
+    "    return out",
+    "",
+    "",
+    "f(1, 2)",
+    "",
+  ].join("\n"));
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const idx = indexResult(facts(f));
+  const head = (name, line = 1) => hover(idx, src, line, name).split("\n")[1];
+  assert.strictEqual(head("a"), "a = (parameter)");
+  assert.strictEqual(head("b"), "b = (parameter) int(?)");
+  assert.strictEqual(head("c"), "c = (parameter) 3 | ?");
+  assert.strictEqual(head("d"), "d = (parameter) 4 | int(?)");
+  assert.strictEqual(head("e"), "e = (parameter) None | str(?)");
+  assert(hover(idx, src, 1, "c").includes("- `?`: unknown (whatever a call passes)"), hover(idx, src, 1, "c"));
+  assert(hover(idx, src, 2, "b").includes("b = (parameter) int(?)"), hover(idx, src, 2, "b"));
+  // (a dict whose keys only the program's stores under unknown keys put there; a list of
+  // unknown length: what each holds, of its type)
+  assert.strictEqual(head("sizes", 6), "sizes = dict[?, int(?)]");
+  assert.strictEqual(head("nums", 7), "nums = list[int(?)]");
+  const out = hover(idx, src, 8, "out");
+  assert(out.includes('out = {"nums": list[int(?)], "sizes": dict[?, int(?)]}'), out);
+  assert(out.includes("- `int(?)`: an int not known statically"), out);
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
@@ -212,7 +270,8 @@ const gsrc = fs.readFileSync(g, "utf8").split("\n");
 const gi = indexResult(facts(g));
 const qkv = hover(gi, gsrc, 64, "qkv");
 assert(qkv.includes("```python\nqkv = Tensor[B, T, 3*self.n_embd]\n```"), qkv);
-assert(qkv.includes("**Notes**\n- `B`: `x.shape[0]`") && qkv.includes("**Requirements**\n- `C == self.n_embd`"), qkv);
+// (Notes: only the dims the value uses — no `C`; what the line needs of `x` is said at `x`)
+assert(qkv.endsWith("**Notes**\n- `B`: `x.shape[0]`\n- `T`: `x.shape[1]`") && !qkv.includes("Requirements"), qkv);
 assert(qkv.includes("**In Calls**\n- `Tensor[3, 10, 96]` on line "), qkv);
 const gx = hover(gi, gsrc, 64, "x");
 assert(gx.includes("x = Tensor[B, T, C]") && gx.includes("- `B, T, C`: `x.shape`"), gx);
@@ -233,6 +292,9 @@ fs.writeFileSync(kinds, [
   "g = gen()",
   "t = 'line1\\nline2'",
   "s = 'é' + 'x'; d = {'k': 1}; v = d['q']",
+  "e = {'a': 1, 'b': 2}",
+  "del e['b']",
+  "n = len(e)",
   "",
 ].join("\n"));
 const ksrc = fs.readFileSync(kinds, "utf8").split("\n");
@@ -251,6 +313,9 @@ const hd = renderHover("d", ki.facts.get("12:d"), verdictsForWord(ki.verdicts.ge
 assert(hd.includes('```python\nd = {"k": 1}\n```') && !hd.includes("✗") && diagnosticMessage(vq) === 'key "q" is never set', hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
+// (where an object was made, when not on the hovered line; a key it never has here)
+assert(hover(ki, ksrc, 15, "e").endsWith('**Allocation Sites**\n- created on line 13\n- never has key "b" here'), hover(ki, ksrc, 15, "e"));
+assert(!hover(ki, ksrc, 13, "e").includes("Allocation Sites"), hover(ki, ksrc, 13, "e"));
 
 // ---- the owner's rnn (pytorch-playground): V = len(vocab) of unknown text names the dims
 {
@@ -319,37 +384,73 @@ const files = [
   path.join(root, "tests", "pandas", "models", fs.readdirSync(path.join(root, "tests", "pandas", "models")).filter((f) => f.endsWith(".py"))[0]),
 ];
 const INTERNAL = [/PH@/, /\bM\d+:L\d+/, /#\d{3,}/, /\bparam [\w.]+\.\w/, /\b(item|attr)\[/, /\bdef \w/, /\bresult of [^`]*@L/, /\u0001/];
+/** What each notation a Note explains looks like where it is used. */
+const USES = {
+  "?": (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/m.test(t.replace(/\*\*\?/g, "").replace(/\b\w+\(\?\)/g, "T")),
+  '"k"?': (t) => /["'\w]\?[:=]/.test(t),
+  '"k"~': (t) => /["'\w]~[:=]/.test(t),
+  "**?": (t) => t.includes("**?"),
+  "a | b": (t) => / \| |(^|\n)\s*\| /.test(t),
+  "Tensor[*]": (t) => /\bTensor\[\*\]/.test(t),
+  "[*]": (t) => /\[\*\]/.test(t.replace(/Tensor\[\*\]/g, "")),
+  "…": (t) => t.includes("…"),
+  "(only if x)": (t) => t.includes("(only if `"),
+};
+const MARKS = ["✗", "⚠~", "⚠", "◌"];
+/** How a whole program's or a function's run was cut: its Note's opening words. */
+const CUT_NOTE = /^- (analysed on demand: |from the module's own code only |the whole program's analysis was cut )/;
 /**
  * The owner's format: `name = value` in a code block, then only the sections Requirements, In
- * Calls and Notes, in that order, each a non-empty list; no mark for an access that works; every
- * mark and notation the hover shows explained in its Notes.
+ * Calls, Allocation Sites and Notes, in that order, each a non-empty list; Requirements only of
+ * a parameter (`(parameter)`) or of an input the line reads (`facts`); no mark for an access
+ * that works; every mark and notation the hover shows explained in its Notes, and every Note
+ * about something the hover shows (a symbol, a notation, a mark: above it, or in another
+ * Note's description), the Note on a cut analysis last and only for one.
  */
-function checkFormat(h, name, where) {
+function checkFormat(h, name, where, facts = []) {
   for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
   const parts = h.split("\n\n");
   assert(parts[0].startsWith("```python\n" + name + " = ") && parts[0].endsWith("\n```"), `headline in ${where}`);
   const titles = parts.slice(1).map((p) => p.split("\n")[0]);
-  const order = ["**Requirements**", "**In Calls**", "**Notes**"];
+  const order = ["**Requirements**", "**In Calls**", "**Allocation Sites**", "**Notes**"];
   assert(titles.every((t, k) => order.includes(t) && (k === 0 || order.indexOf(titles[k - 1]) < order.indexOf(t))), `sections in ${where}`);
   for (const p of parts.slice(1)) assert(p.split("\n").slice(1).every((l) => l.startsWith("- ")) && p.includes("\n- "), `section in ${where}`);
   assert(!h.includes("✓"), `a mark for an access that works in ${where}`);
-  const [body, notes = ""] = h.split("**Notes**");
+  if (h.includes("**Requirements**")) {
+    // (a parameter: at its `def`, or holding the argument of its name; an input read on the line)
+    const objs = (f) => [...(f.objects || []), ...(f.general_unknowns || [])];
+    const param = facts.some((f) => f.param || objs(f).some((o) => o.kind === "unknown" && (o.from || []).some((t) => t.startsWith(`argument \`${name}\` of `))));
+    const input = facts.some((f) => objs(f).some((o) => (o.origin && o.origin.line === f.line) || (o.from || []).some((t) => t.endsWith(`(line ${f.line})`))));
+    assert(param || input, `Requirements of a name that is not a parameter in ${where}`);
+  }
+  const [body, notesPart = ""] = h.split("**Notes**");
+  const notes = notesPart.split("\n").filter((l) => l.startsWith("- "));
   const code = body.replace(/\(only if `[^`]*`\)/g, "");
-  if (code.includes("**?")) assert(notes.includes("- `**?`:"), `unexplained **? in ${where}`);
-  if (/["'\w]\?[:=]/.test(code)) assert(notes.includes('- `"k"?`:'), `unexplained ?: in ${where}`);
-  if (/["'\w]~[:=]/.test(code)) assert(notes.includes('- `"k"~`:'), `unexplained ~: in ${where}`);
-  if (/(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/m.test(code.replace(/\*\*\?/g, ""))) assert(notes.includes("- `?`:"), `unexplained ? in ${where}`);
-  if (/ \| /.test(code)) assert(notes.includes("- `a | b`:"), `unexplained | in ${where}`);
-  if (code.includes("…")) assert(notes.includes("- `…`:"), `unexplained … in ${where}`);
-  if (/\[\*\]/.test(code.replace(/Tensor\[\*\]/g, ""))) assert(notes.includes("- `[*]`:"), `unexplained [*] in ${where}`);
-  if (body.includes("(only if `")) assert(notes.includes("- `(only if x)`:"), `unexplained (only if) in ${where}`);
-  for (const m of ["✗", "⚠~", "⚠", "◌"]) if (body.includes(m)) assert(notes.includes(`- ${m}: `), `unexplained ${m} in ${where}`);
+  // (every mark and notation used is explained)
+  const explained = (key) => notes.some((l) => l.startsWith(`- \`${key}\`:`));
+  for (const [key, used] of Object.entries(USES)) if (used(key === "(only if x)" ? body : code)) assert(explained(key), `unexplained ${key} in ${where}`);
+  for (const m of (code.match(/\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/g) || [])) assert(explained(m), `unexplained ${m} in ${where}`);
+  for (const m of MARKS) if (body.replace(/⚠~/g, m === "⚠" ? "" : "⚠~").includes(m)) assert(notes.some((l) => l.startsWith(`- ${m}: `)), `unexplained ${m} in ${where}`);
+  // (every Note is about something shown: above it, or in another Note's description)
+  notes.forEach((l, k) => {
+    const rest = [body, ...notes.filter((_, j) => j !== k).map((x) => x.replace(/^- `[^`]*`: /, ""))].join("\n");
+    if (CUT_NOTE.test(l)) return assert(k === notes.length - 1 && facts.some((f) => f.run), `cut note not last, or for a whole run, in ${where}`);
+    const mark = MARKS.find((m) => l.startsWith(`- ${m}: `));
+    if (mark) return assert(body.includes(mark), `unused ${mark} in ${where}`);
+    const key = (/^- `([^`]*)`: /.exec(l) || [])[1];
+    assert(key !== undefined, `a Note without a key in ${where}`);
+    if (USES[key]) return assert(USES[key](rest), `unused ${key} in ${where}`);
+    if (/^\w+\(\?\)$/.test(key)) return assert(rest.includes(key), `unused ${key} in ${where}`);
+    // (a symbol: a name the value mentions, with what is known of it)
+    const word = (w) => new RegExp(`(^|[^\\w.])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\w])`).test(body);
+    assert(key.split(", ").some(word), `unused symbol ${key} in ${where}`);
+  });
 }
 let n = 0;
 for (const f of files) {
-  for (const { line, name, h } of allHovers(f).hovers) {
+  for (const { line, name, h, facts: fs_ } of allHovers(f).hovers) {
     n++;
-    checkFormat(h, name, `${path.basename(f)}:${line} ${name}\n${h}`);
+    checkFormat(h, name, `${path.basename(f)}:${line} ${name}\n${h}`, fs_);
   }
 }
 assert(n > 100, `only ${n} hovers checked`);
@@ -391,8 +492,10 @@ async function onDemand() {
       if (!h) continue;
       m++;
       const where = `${path.basename(f)}:${line} ${name} (on demand)\n${h}`;
-      checkFormat(h, name, where);
+      checkFormat(h, name, where, fs_);
       assert(!h.includes("**In Calls**"), where);
+      // (said last: the function was analysed alone, for any call, and how long it took)
+      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long$/.test(h), where);
     }
   }
   stopServers();
@@ -422,8 +525,18 @@ async function early() {
   const res = await runEngineServer(bin, f, [], 60, []);
   const first = Date.now() - t0;
   // (a machine fast enough to analyse it whole within the wait: one answer)
+  // (the whole program's analysis cut at its deadline: its hovers say so, last)
+  const fsrc = fs.readFileSync(f, "utf8").split("\n");
+  const cutRes = JSON.parse(execFileSync(bin, [f, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "ms=1" }, maxBuffer: 64 * 1024 * 1024 }).toString());
+  assert(cutRes.analysis.cut, JSON.stringify(cutRes.analysis));
+  const cutRows = hover(indexResult(cutRes), fsrc, 1, "ROWS");
+  assert(/\n- the whole program's analysis was cut at its 1 ms deadline \(after [\d,]+ statements?\): code it had not reached by then is taken as unknown code, so values may say less than they could$/.test(cutRows), cutRows);
+  checkFormat(cutRows, "ROWS", cutRows, indexResult(cutRes).facts.get("1:ROWS"));
   if (!res.pending) return `whole program at once (${first} ms)`;
   assert(res.on_demand && first < 5000, `early answer: on demand at once (${first} ms)`);
+  // (the module code's document: said so, while the whole program's analysis goes on)
+  const rows = hover(indexResult(res), fsrc, 1, "ROWS");
+  assert(rows.endsWith("\n- from the module's own code only (its functions are analysed when you hover them), because the whole program's analysis is still running"), rows);
   const ev = await Promise.race([got, new Promise((r) => setTimeout(() => r(null), 60000))]);
   assert(ev && ev.ok && !ev.result.on_demand && ev.result.facts.length > 0, "the whole program's document follows");
   return `module code at ${first} ms, whole program at ${ev.ms} ms`;
