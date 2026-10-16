@@ -163,7 +163,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
   Profiles: the bench workflow's `perf` (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
-## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
+## Layout (`rowan/src/`, ~68k lines: the engine ~26k, the models ~42k)
 
 | file | role |
 | --- | --- |
@@ -191,7 +191,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~24 / ~6.4 s; 0.30 / 0.75 / 0.39 / 0.34 GB |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.2 / 8.9 / 5.3 / 28 s; per function p50 ≤ 1.4 ms, p99 0.23-0.8 s, max 0.6 / 2.8 / 5 / 20 s (havoc walks) |
 
 ## Known problems and next steps
