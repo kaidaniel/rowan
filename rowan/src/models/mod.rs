@@ -1016,9 +1016,18 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     let mut verdicts: Vec<bool> = Vec::new();
-    // (an unknown beside objects: it may be an instance or not)
+    // (an unknown beside objects: of the program's classes it is no instance — unknown values
+    // are not taken for the program's instances — of a builtin one perhaps, by its type)
     if !v.pts.is_empty() && !v.kv.is_bot() && !v.kv.is_literal() {
-        return Value::data("bool");
+        let user = classes.iter().all(|c| an.heap.kind(*c) == Kind::Class);
+        let ty = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l)));
+        match (user, ty) {
+            (true, _) => verdicts.push(false),
+            (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => verdicts.push(classes.iter().any(|c| builtin(an, *c).is_some_and(|b| b == t || b == "object" || (b == "int" && t == "bool")))),
+            // (a library class's: decided by the objects, as for the program's classes)
+            _ if classes.iter().all(|c| an.heap.kind(*c) != Kind::External || !an.heap.external_qual(*c).starts_with("builtins.")) => verdicts.push(false),
+            _ => return Value::data("bool"),
+        }
     }
     // literal values (with or without objects: both parts count)
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {

@@ -108,10 +108,10 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   request times out) cuts the analyses running for it as the deadline does (`Budget::cancel`, read on its own thread).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
-  `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
-  `Payload::Affix`), metaclasses and monkey-patching (rebinding a function or class too;
-  a module's function the program calls only by name has no other callers) are unknown or ignored;
-  unknown code does not shadow a class attribute on an instance of a library-based class; a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
+  `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit, `Payload::Affix`), metaclasses and
+  monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
+  unknown code does not shadow a class attribute on an instance of a library-based class; an unknown beside objects is no instance
+  of the program's or a library's classes (`isinstance`: a builtin's, by its type); a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items have no order (`ordered_items`).
 
 ## Working conventions (the owner's standing instructions)
