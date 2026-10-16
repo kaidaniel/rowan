@@ -1579,7 +1579,7 @@ impl Value {
         Value { pts: ObjSet::new(), kv }
     }
     pub fn single(&self) -> Option<ObjId> {
-        if self.pts.len() == 1 {
+        if self.pts.len() == 1 && self.kv.is_bot() {
             self.pts.first()
         } else {
             None
