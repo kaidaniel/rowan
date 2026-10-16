@@ -109,15 +109,7 @@ impl Analyzer {
             self.cx.comp_known.pop();
             // (one pass stands for every key; for none, too, only where the keys may be none:
             // what it stores under keys of its own may not be there)
-            let keys = match &elem {
-                Elem::One(v) => v.kv.clone(),
-                Elem::Pair(k, _) => k.kv.clone(),
-            };
-            let some = match &keys {
-                KeyVal::KeysOf(ko) => ko.objs.iter().all(|o| !state.row(o, ko.ns).definite.is_empty()),
-                _ => false,
-            };
-            let out = if some || nonempty { s2 } else { state.join(&mut s2) };
+            let out = if nonempty || surely_some_keys(&elem, state) { s2 } else { state.join(&mut s2) };
             state.replace_with(out);
             self.exhaust(&exhaust_after, state);
             return;
@@ -405,6 +397,19 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
             }
             false
         }
+        _ => false,
+    }
+}
+
+/// The keys an iteration's element ranges over are surely some (every object they are the
+/// keys of surely has one).
+fn surely_some_keys(elem: &Elem, state: &State) -> bool {
+    let kv = match elem {
+        Elem::One(v) => &v.kv,
+        Elem::Pair(k, _) => &k.kv,
+    };
+    match kv {
+        KeyVal::KeysOf(ko) => ko.objs.iter().all(|o| !state.row(o, ko.ns).definite.is_empty()),
         _ => false,
     }
 }

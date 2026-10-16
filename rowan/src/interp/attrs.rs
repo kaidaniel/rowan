@@ -560,7 +560,7 @@ impl Analyzer {
         if defs.is_empty() {
             defs.extend(self.class_lookup(cls, name));
         }
-        join_values(defs.iter().map(|c| state.slot_opt(*c, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*c, Ns::Attr, nk)).cloned()).unwrap_or_default()))
+        self.class_values(&defs, nk, state)
     }
 
     pub(super) fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, name: &str, node: &Node, state: &mut State) -> Value {
@@ -606,6 +606,47 @@ impl Analyzer {
         join_values(outs)
     }
 
+    /// What classes `defs` hold as `nk` (on this path, else on any).
+    fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
+        join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
+    }
+
+    fn attr_verdict(&mut self, node: &Node, nk: KeyId, cls: &Classification, oid: u32, guarded: bool) {
+        if guarded {
+            self.verdict_guarded(node, nk, cls, oid, Ns::Attr);
+        } else {
+            self.verdict(node, nk, cls, oid, Ns::Attr, None, None);
+        }
+    }
+
+    /// An instance's attribute its class `c` holds (it does not itself on this path): a class
+    /// attribute the read finds (it succeeds; a method read counts only where the receiver may
+    /// be other objects too, which may lack it; one stored on some paths only may fail). None:
+    /// no class of its MRO has it.
+    fn instance_class_attr(&mut self, oid: u32, c: u32, name: &str, row: &Row, node: &Node, state: &mut State, (guarded, try_guard, single_target): (bool, bool, bool)) -> Option<Value> {
+        let nk = key_str_lit(name);
+        let is_field = crate::models::dataclasses::dataclass_fields_mro(self, c).iter().any(|(f, _)| f == name);
+        let (defs, sure) = self.class_lookup_on_path(c, name, state);
+        if defs.is_empty() || is_field {
+            return None;
+        }
+        let cv = self.class_values(&defs, nk, state);
+        let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound) && !(self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()));
+        if plain || !single_target {
+            self.attr_verdict(node, nk, &Classification::new(if sure { Tier::Proven } else { Tier::Possibly }), oid, guarded);
+        }
+        if !sure && try_guard {
+            self.may_raise_here("AttributeError", state);
+        }
+        let out = self.bound_outs(&cv, oid, c, name, node, state);
+        // (an instance of a class of the program unknown code changed: it may hold the data
+        // name itself, over the class's)
+        if cv.pts.is_empty() && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
+            return Some(out.join(&Value::data(&format!("L{}", node.line))));
+        }
+        Some(out)
+    }
+
     pub(in crate::interp) fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
         if let Some(v) = self.instance_library_attr(oid, name, nk, node, state, guarded) {
@@ -615,12 +656,7 @@ impl Analyzer {
             // (found through `__getattr__`: on this object the read succeeds where it returned;
             // beside other objects that lack the name, it may fail)
             if state.reachable && (!single_target || self.mode.one_of_several) {
-                let cls = Classification::new(Tier::Proven);
-                if guarded {
-                    self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
-                } else {
-                    self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-                }
+                self.attr_verdict(node, nk, &Classification::new(Tier::Proven), oid, guarded);
             }
             return v;
         }
@@ -639,7 +675,7 @@ impl Analyzer {
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).map(|c| self.class_lookup_on_path(c, name, state));
             let mut class_v: Option<Value> = None;
             if let (true, Some((defs, sure))) = (row.present.contains(nk), class_attr) {
-                let cv = join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()));
+                let cv = self.class_values(&defs, nk, state);
                 let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound));
                 if plain && sure {
                     if !guarded {
@@ -654,11 +690,7 @@ impl Analyzer {
             }
             if row.present.contains(nk) {
                 let cls = classify(&row, nk);
-                if !guarded {
-                    self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-                } else {
-                    self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
-                }
+                self.attr_verdict(node, nk, &cls, oid, guarded);
                 // (there on some paths only: an AttributeError the enclosing try handles)
                 if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves(oid, name) {
                     self.may_raise_here("AttributeError", state);
@@ -672,32 +704,8 @@ impl Analyzer {
                 return v;
             }
         }
-        if let Some(c) = cls_of {
-            let is_field = crate::models::dataclasses::dataclass_fields_mro(self, c).iter().any(|(f, _)| f == name);
-            let (defs, sure) = self.class_lookup_on_path(c, name, state);
-            if !defs.is_empty() && !is_field {
-                let cv = join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()));
-                // a class attribute: the access succeeds (a method read counts only where the
-                // receiver may be other objects too, which may lack it); one stored on some
-                // paths only may fail
-                let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound) && !(self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()));
-                let cls = Classification::new(if sure { Tier::Proven } else { Tier::Possibly });
-                if !guarded && (plain || !single_target) {
-                    self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-                } else if guarded && (plain || !single_target) {
-                    self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
-                }
-                if !sure && try_guard {
-                    self.may_raise_here("AttributeError", state);
-                }
-                let out = self.bound_outs(&cv, oid, c, name, node, state);
-                // (an instance of a class of the program unknown code changed: it may hold the
-                // data name itself, over the class's)
-                if cv.pts.is_empty() && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
-                    return out.join(&Value::data(&format!("L{}", node.line)));
-                }
-                return out;
-            }
+        if let Some(v) = cls_of.and_then(|c| self.instance_class_attr(oid, c, name, &row, node, state, (guarded, try_guard, single_target))) {
+            return v;
         }
         let cls = classify(&row, nk);
         if !guarded {
