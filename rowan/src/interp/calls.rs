@@ -255,7 +255,7 @@ impl Analyzer {
     }
 
     /// Would a call of `f` not run, its function out of its budget (`call_user_inner`)?
-    fn out_of_budget(&self, f: ObjId) -> bool {
+    pub(super) fn out_of_budget(&self, f: ObjId) -> bool {
         let fi = self.heap.func_info(f);
         let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
         !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0

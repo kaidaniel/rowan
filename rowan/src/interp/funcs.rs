@@ -270,15 +270,38 @@ impl Analyzer {
     /// A builtin Python carries out by a dunder of its argument (`str(x)` calls
     /// `x.__str__()`): on the instances among `v` whose class defines one of `names` (the
     /// first defined, in order) that method runs with `args`, one alternative each (and one
-    /// where none runs, for the rest of `v`). Returns the results joined and the rest of `v`;
-    /// None when no instance defines one.
+    /// where none runs, for the rest of `v`); those that would not run, when several are, one
+    /// call that does not run (each function with its receivers, as `budget_skipped` makes for
+    /// a method of several receivers: `f"{obj}"` of any of a thousand instances). Returns the
+    /// results joined and the rest of `v`; None when no instance defines one.
     pub fn run_dunder(&mut self, v: &Value, names: &[&str], args: Vec<Value>, node: &Node, state: &mut State) -> Option<(Value, Value)> {
         let (calls, rest) = self.method_calls(v, names);
         if calls.is_empty() {
             return None;
         }
         let keep = !rest.empty();
-        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), Args::pos(&args), st, node, false));
+        let mut done: Vec<usize> = Vec::new();
+        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| {
+            if done.contains(&i) {
+                st.reachable = false;
+                return Value::new();
+            }
+            // (the rest that would not run now, when several: one call for them)
+            let past = an.budget.past_hover_work(an.cx.frames.len(), an.hover_work()) || an.budget.over_hard_deadline();
+            let skip: Vec<usize> = (i..calls.len()).filter(|j| past || an.out_of_budget(calls[*j].1)).collect();
+            if skip.len() > 1 && skip[0] == i {
+                let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+                for &(o, f) in skip.iter().map(|j| &calls[*j]) {
+                    match fns.iter_mut().find(|(g, _)| *g == f) {
+                        Some((_, r)) => *r = Some(r.take().unwrap_or_default().join(&Value::obj(o))),
+                        None => fns.push((f, Some(Value::obj(o)))),
+                    }
+                }
+                done = skip;
+                return an.skipped_calls(&fns, Args::pos(&args), st, node, None);
+            }
+            an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), Args::pos(&args), st, node, false)
+        });
         Some((r, rest))
     }
 
