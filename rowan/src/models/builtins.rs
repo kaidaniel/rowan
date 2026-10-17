@@ -2234,10 +2234,11 @@ fn part_kv(an: &Analyzer, c: &Call) -> KeyVal {
     }
 }
 
-/// `bool(x)`: the literal when the truthiness of `x` is decided, else unknown data.
+/// `bool(x)`: the literal when the truthiness of `x` is decided, else unknown data (a pandas
+/// Series or DataFrame: a ValueError).
 pub(super) fn m_bool(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::lit(intern::key(intern::Key::Bool(false))) };
-    match an.truthiness(v, st) {
+    match an.truth_of(v, st, &c.node) {
         Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
         None => Value::data("bool"),
     }

@@ -112,6 +112,7 @@ impl Analyzer {
             let kind = self.heap.kind(oid);
             match kind {
                 Kind::List | Kind::Tuple | Kind::Set => self.iter_sequence(oid, node, state, &mut acc),
+                Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => self.iter_series(oid, node, state, &mut acc),
                 Kind::Dict | Kind::Frame => self.iter_mapping(oid, node, state, &mut acc),
                 Kind::View => self.iter_view(oid, node, state, &mut acc),
                 // an sqlite cursor: its remaining rows
@@ -255,6 +256,16 @@ impl Analyzer {
         acc.elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
     }
 
+    /// A pandas Series: its values (not its labels, as a dict's keys).
+    fn iter_series(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        let (n, e) = crate::models::pandas::series_values(state, oid, node.line);
+        match (n, acc.items.as_mut()) {
+            (Some(n), Some(its)) => its.extend(std::iter::repeat_n(e.clone(), n)),
+            _ => acc.items = None,
+        }
+        acc.elems.push(e);
+    }
+
     /// A view: keys, values or (key, value) items of its dict; a frame's rows; an object's attributes.
     fn iter_view(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let Payload::View(vk, recv) = self.heap.obj(oid).payload.clone() else { return };
@@ -286,6 +297,14 @@ impl Analyzer {
                     }
                 }
             }
+            // (known keys in no known order: each item is any of them, as a set's)
+            (None, Some(its)) if matches!(vk, ViewKind::Keys | ViewKind::Proxy) => match recv.single().and_then(|r| self.unordered_dict_keys(r, state)) {
+                Some(ks) => {
+                    its.extend(ks.into_iter().map(Value::lit));
+                    acc.unordered = true;
+                }
+                None => acc.items = None,
+            },
             _ => acc.items = None,
         }
         match vk {
@@ -576,7 +595,7 @@ impl Analyzer {
     }
 
     /// What any element of `v` is: a container's `Elem` slot and scalars, a dict's or frame's
-    /// keys, else an unknown.
+    /// keys, a Series' values, else an unknown.
     pub fn elem_of(&mut self, v: &Value, node: &Node, state: &State) -> Value {
         let mut acc = Value::new();
         for oid in v.pts.iter() {
@@ -586,6 +605,7 @@ impl Analyzer {
                     let kv = state.elems.get(&oid).unwrap_or(DATA);
                     acc = acc.join(&Value::with_kv(e.pts, kv));
                 }
+                Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => acc = acc.join(&crate::models::pandas::series_values(state, oid, node.line).1),
                 Kind::Dict | Kind::Frame => acc = acc.join(&Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item)))),
                 _ => acc = acc.join(&Value::data(&format!("L{}", node.line))),
             }
@@ -636,7 +656,7 @@ impl Analyzer {
     pub fn maybe_dict_items(&mut self, v: &Value, state: &State) -> Option<Vec<(Value, bool)>> {
         let o = v.single().filter(|_| v.kv.is_bot())?;
         let (d, vk) = match (self.heap.kind(o), &self.heap.obj(o).payload) {
-            (Kind::Dict, _) => (o, ViewKind::Keys),
+            (Kind::Dict, _) if !crate::models::pandas::is_series_obj(self, o) => (o, ViewKind::Keys),
             (Kind::View, Payload::View(vk, recv)) if matches!(vk, ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy) => (recv.single().filter(|r| recv.kv.is_bot() && self.heap.kind(*r) == Kind::Dict)?, *vk),
             _ => return None,
         };

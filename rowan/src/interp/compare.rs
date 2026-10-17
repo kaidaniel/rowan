@@ -345,6 +345,15 @@ impl Analyzer {
     /// `truthiness`, with instances whose class defines `__bool__` / `__len__` decided by
     /// calling it (control-flow tests).
     pub fn truth_of(&mut self, v: &Value, state: &mut State, node: &Node) -> Option<bool> {
+        // (a pandas DataFrame or Series the models made: its truth is ambiguous, a ValueError)
+        let pandas = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Frame || crate::models::pandas::is_series_obj(an, o);
+        let n_pd = v.pts.iter().filter(|o| pandas(self, *o)).count();
+        if n_pd > 0 {
+            let rest = Value::with_kv(ObjSet::from_vec(v.pts.iter().filter(|o| !pandas(self, *o)).collect()), v.kv.clone());
+            let all = rest.pts.is_empty() && rest.kv.is_bot();
+            self.raise_exc("ValueError", None, None, all, state);
+            return if all { None } else { self.truth_of(&rest, state, node) };
+        }
         if !v.pts.is_empty() && v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance && self.has_truth_dunder(o)) {
             let mut verdicts: Vec<bool> = Vec::new();
             for o in v.pts.iter() {

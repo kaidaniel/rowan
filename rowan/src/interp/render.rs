@@ -290,7 +290,13 @@ fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32
     // (a frame by its columns, a Series / Counter / defaultdict by their keys, as
     // Python prints them)
     let label = an.heap.obj(o).label.clone();
-    let wrap = if kind == Kind::Frame { Some("DataFrame") } else { ["series@", "Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@')) };
+    let wrap = if kind == Kind::Frame {
+        Some("DataFrame")
+    } else if crate::models::pandas::is_series_obj(an, o) {
+        Some("Series")
+    } else {
+        ["Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@'))
+    };
     let body = if depth >= max_depth {
         if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
     } else if kind == Kind::Frame {
