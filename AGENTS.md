@@ -190,9 +190,9 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~9 / ~5.7 s; 0.12 / 0.07 / 0.13 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~13.7 / ~12.0 / ~4.9 s; 0.27 / 0.79 / 0.30 / 0.37 GB |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.1 / 2.4 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.13-0.25 s, max 0.44 / 0.43 / 0.70 / 3.4 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 2.3 / 0.08 s, max 1.2 / 5.3 / 2.3 / 1.1 s; `rowan serve` on each timm model file ≤ 0.7 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.9 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~0.7 / ~4.2 / ~4.6 s; 0.27 / 0.21 / 0.20 / 0.35 GB |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.42 / 0.47 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps
 
