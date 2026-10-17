@@ -658,7 +658,7 @@ impl Analyzer {
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
         let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
-        let mut r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
+        let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
@@ -669,22 +669,7 @@ impl Analyzer {
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
-        // (what its code keeps of its arguments: where the program may read it back — under
-        // its `__name__` when that is known)
-        for (v, dicts, returned) in kept {
-            for (d, by_name) in dicts {
-                let key = match by_name {
-                    KeptKey::Lit(k) => crate::domain::KeyVal::Lit(k),
-                    KeptKey::Name => self.load_attr(&v, "__name__", node, state, false).kv,
-                    _ => crate::domain::DATA,
-                };
-                let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
-                self.store_key(d, Ns::Item, &key, &v, false, node, state);
-            }
-            if returned {
-                r = r.join(&v);
-            }
-        }
+        let r = self.put_kept(kept, r, node, state);
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -732,6 +717,27 @@ impl Analyzer {
             Some(v) => r.join(v),
             None => r,
         }
+    }
+
+    /// A skipped call's arguments its code keeps (`Seen::kept`) put where the program may read
+    /// them back: the dicts' items (under the literal key, the function's `__name__` when that
+    /// is known, else any), the call's result `r`.
+    fn put_kept(&mut self, kept: Vec<(Value, Vec<(ObjId, KeptKey)>, bool)>, mut r: Value, node: &Node, state: &mut State) -> Value {
+        for (v, dicts, returned) in kept {
+            for (d, key) in dicts {
+                let key = match key {
+                    KeptKey::Lit(k) => crate::domain::KeyVal::Lit(k),
+                    KeptKey::Name => self.load_attr(&v, "__name__", node, state, false).kv,
+                    KeptKey::Any => crate::domain::DATA,
+                };
+                let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
+                self.store_key(d, Ns::Item, &key, &v, false, node, state);
+            }
+            if returned {
+                r = r.join(&v);
+            }
+        }
+        r
     }
 
     /// What a skipped call of `foid` on its one receiver among `recvs` stores on it on every way

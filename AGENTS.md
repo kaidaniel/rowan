@@ -50,7 +50,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; to library functions that only read, given no code: nothing, `read_only_library`; a dict, list or set changed
-  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: those keys, any if not named, not `likely`, `Flags::removes`), a local aliasing what it is bound to; class attributes by name, rebound
+  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: those keys, any if not named, not `likely`, `Flags::removes`), a local aliasing what it is bound to; a function argument its code only stores in a global dict, under a literal key or its own `__name__`, or returns: put there and in the result, not walked, `Flags::kept`; one only read: not walked; class attributes by name, rebound
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
@@ -67,7 +67,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
     the program's functions; several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
-    per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`).
+    per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
     sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
@@ -84,7 +84,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
   joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
   there-unless-removed too; deletes) changes what the generator reads after a yield (`Gens::watch`, also after the call
-  that started it while held, or a global holds it), it runs again with that changed at each yield (`with_gen_restart`).
+  that started it while held, or a global holds it), it runs again with that changed at each yield, and the changes reachable from it, through classes too (`with_gen_restart`).
   `@contextmanager` bodies run at yields. A `for` over a user iterator (`__iter__` returns self) calls `__next__` each round (`for_user_iterator`).
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
@@ -164,7 +164,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
   Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 

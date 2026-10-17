@@ -475,6 +475,27 @@ impl<'a> Flow<'a> {
         (!ps.is_empty() && self.first.is_none_or(|f| !ps.contains(&f))).then_some(ps)
     }
 
+    /// `G[k] = p` of a global G and a parameter p: p kept in G's items (`Flags::kept`); false
+    /// for any other assignment.
+    fn kept_store(&mut self, a: &'static ast::StmtAssign) -> bool {
+        let ([Expr::Subscript(x)], Some(ps)) = (a.targets.as_slice(), self.params_of(&a.value)) else { return false };
+        let Expr::Name(n) = &*x.value else { return false };
+        if self.local(n.id.as_str()) {
+            return false;
+        }
+        for p in ps {
+            let key = match &*x.slice {
+                Expr::StringLiteral(l) => KeptKey::Lit(crate::intern::key_str_lit(l.value.to_str())),
+                k if self.name_of(k, p) => KeptKey::Name,
+                _ => KeptKey::Any,
+            };
+            self.flags.entry(Origin::Param(p)).or_default().kept = true;
+            self.out.kept_in.entry(p).or_default().push((s(n.id.as_str()), key));
+        }
+        self.target(&a.targets[0]);
+        true
+    }
+
     /// Whether `e` is parameter `p`'s `__name__` (`fn.__name__`, or a local bound to only that).
     fn name_of(&self, e: &Expr, p: StrId) -> bool {
         let own = [(Origin::Param(p), Level::Held), (Origin::Attr(s("__name__")), Level::Own)];
@@ -1084,25 +1105,8 @@ impl<'a> Flow<'a> {
     fn stmt(&mut self, st: &'static Stmt) {
         match st {
             Stmt::Expr(x) => self.expr(&x.value, Pos::Read),
+            Stmt::Assign(a) if self.kept_store(a) => {}
             Stmt::Assign(a) => {
-                // (a parameter stored in the items of a global container: kept there)
-                if let ([Expr::Subscript(x)], Some(ps)) = (a.targets.as_slice(), self.params_of(&a.value)) {
-                    if let Expr::Name(n) = &*x.value {
-                        if !self.local(n.id.as_str()) {
-                            for p in ps {
-                                let by_name = match &*x.slice {
-                                    Expr::StringLiteral(l) => KeptKey::Lit(crate::intern::key_str_lit(l.value.to_str())),
-                                    k if self.name_of(k, p) => KeptKey::Name,
-                                    _ => KeptKey::Any,
-                                };
-                                self.flags.entry(Origin::Param(p)).or_default().kept = true;
-                                self.out.kept_in.entry(p).or_default().push((s(n.id.as_str()), by_name));
-                            }
-                            self.target(&a.targets[0]);
-                            return;
-                        }
-                    }
-                }
                 // (bound to locals only: where it goes is where they go)
                 let local = a.targets.iter().all(|t| self.all_local(t));
                 self.expr(&a.value, if local { Pos::Bind } else { Pos::Change });
