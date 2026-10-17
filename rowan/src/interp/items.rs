@@ -694,7 +694,7 @@ impl Analyzer {
         // defaultdict's or Counter's read put its default there — holds what any key not known
         // does, and nothing else)
         let stored = own_map && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.site.starts_with("store@L")));
-        let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.present.contains(k));
+        let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.definite.contains(k));
         if from_map {
             v = v.join(&star);
         } else if !star.pts.is_empty() && !stored {

@@ -1163,8 +1163,10 @@ pub(super) fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
 
 pub(super) fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.args.len() >= 2 {
-        if let Some(name) = c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) {
-            an.delete_item(&c.args[0], Ns::Attr, &Value::lit(key_str_lit(&name)), &c.node, st, true);
+        match c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) {
+            Some(name) => an.delete_item(&c.args[0], Ns::Attr, &Value::lit(key_str_lit(&name)), &c.node, st, true),
+            // (a name not known: any attribute may be the one removed)
+            None => an.delete_item(&c.args[0], Ns::Attr, &c.args[1], &c.node, st, true),
         }
     }
     an.none_v.clone()

@@ -371,6 +371,8 @@ class C:
 def pick(x, y):
     return x if n > 2 else y
 n = len(sys.argv)
+# (`ax`: "w", or on other runs an unknown call's result that is "u")
+ax = "w" if n > 2 else (sys.argv[0][:0] + "U").lower()
 a = A(1)
 b = B("s")
 r = 0"""
@@ -389,6 +391,9 @@ def attrs_op() -> list:
         ["try:", f"    del {o}.{at}  #ACC {at!r}", "except AttributeError:", "    r = -2  #BAD"],
         [f"if {at!r} in vars({o}):", f"    del {o}.{at}"], [f"r = {cl}.k"], [f"{o}.k = {o}.k + '!' if isinstance({o}.k, str) else 'x'"],
         [f"{o}.items = [{v}]"], [f"r = len(vars({o}))"], [f"if isinstance({o}, A):", f"    {o}.v = {v}"],
+        [f"setattr({o}, ax, {v})"], [f"r = getattr({o}, ax, {v})"], [f"if hasattr({o}, ax):", f"    r = {o}.{at}"], [f"{o}.__dict__[ax] = {v}"],
+        [f"if isinstance({o}, A):", f"    {o}.put(ax, {v})"], [f"if ax in vars({o}):", f"    delattr({o}, ax)"],
+        ["try:", f"    delattr({o}, ax)", "except AttributeError:", "    r = -3"],
     ])
 
 

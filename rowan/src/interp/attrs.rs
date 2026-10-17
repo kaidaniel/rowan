@@ -683,6 +683,11 @@ impl Analyzer {
         if !code && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
             return Some(out.join(&Value::data(&format!("L{}", node.line))));
         }
+        // (stored under a name not known, `setattr(o, name, v)`: the instance may hold it, over the
+        // class's)
+        if let Some(star) = self.data_stored(oid, nk, row, state).filter(|_| !code) {
+            return Some(out.join(&star));
+        }
         Some(out)
     }
 
@@ -711,6 +716,10 @@ impl Analyzer {
             // base's own code is taken not to set the program's names, `nn.Module`'s)
             if !row.mutators.is_empty() && !row.definite.contains(nk) && cls_of.is_some_and(|c| self.hierarchy_closed(c)) {
                 v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+            }
+            // (on the paths that did not store it, a store under a name not known may have)
+            if let Some(star) = self.data_stored(oid, nk, &row, state) {
+                v = v.join(&star);
             }
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail where the class surely has it)
@@ -861,14 +870,15 @@ impl Analyzer {
             if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
-                    if !row.present.contains(nk) {
+                    let by_data = self.data_stored(oid, nk, &row, state);
+                    if !row.present.contains(nk) && by_data.is_none() {
                         return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
                     }
                     // (set on some paths: `__getattr__` runs on the others only — when it raises
                     // there, the paths that have the attribute go on)
                     let mut missing = state.copy();
                     let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
-                    let own = state.slot(oid, Ns::Attr, nk);
+                    let own = state.slot(oid, Ns::Attr, nk).join(&by_data.unwrap_or_default());
                     if missing.reachable {
                         let j = state.join(&mut missing);
                         state.replace_with(j);
@@ -878,6 +888,15 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    /// What stores under names not known (`setattr(o, name, v)`) may have put under `nk` of an
+    /// instance that does not surely have it: the `*` slot.
+    fn data_stored(&self, oid: ObjId, nk: KeyId, row: &Row, state: &State) -> Option<Value> {
+        if row.definite.contains(nk) || row.absent.contains(nk) || !row.sources.iter().any(|(s, _)| crate::source::source_is_data(s)) {
+            return None;
+        }
+        state.slot_opt(oid, Ns::Attr, crate::intern::STAR)
     }
 
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable.
