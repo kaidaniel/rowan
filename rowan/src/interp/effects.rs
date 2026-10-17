@@ -59,8 +59,8 @@ type Loc = (ObjId, Ns, KeyId);
 
 /// A closure's walk (`walk_closure`): the closure so far, the code still to walk, the names the
 /// code walked uses, the classes met (those up to `classes_seen` looked at for the names as
-/// `names_seen` says they were used then), the class attributes followed, and those changed
-/// with the flags applied to them.
+/// `names_seen` says they were used then, found by `by_name`), the class attributes followed,
+/// and those changed with the flags applied to them.
 #[derive(Default)]
 pub struct ClosureWalk {
     out: Closure,
@@ -73,6 +73,8 @@ pub struct ClosureWalk {
     done_attrs: FxHashMap<(ObjId, KeyId), Flags>,
     classes_seen: usize,
     names_seen: FxHashMap<StrId, (bool, Option<Flags>, bool)>,
+    /// per attribute name, the classes met that have it
+    by_name: FxHashMap<KeyId, Vec<ObjId>>,
 }
 
 impl ClosureWalk {
@@ -527,7 +529,7 @@ impl Analyzer {
     /// since: the closure is the same whatever order the code is met in).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
-        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen } = w;
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
@@ -575,31 +577,32 @@ impl Analyzer {
             }
             fresh_keys.sort_unstable();
             fresh_keys.dedup();
-            // (a few names are looked up, more filter the class's attributes)
-            let few = fresh_keys.len() <= 8;
-            for (i, &c) in classes.iter().enumerate() {
-                let slots: Vec<(KeyId, Value)> = if i >= *classes_seen {
-                    state.obj_slots(c, Ns::Attr)
-                } else if few {
-                    fresh_keys.iter().filter_map(|&k| state.slot_opt(c, Ns::Attr, k).map(|v| (k, v))).collect()
-                } else if fresh_keys.is_empty() {
-                    Vec::new()
-                } else {
-                    state.obj_slots(c, Ns::Attr).into_iter().filter(|(k, _)| fresh_keys.binary_search(k).is_ok()).collect()
-                };
-                for (k, v) in slots {
-                    let name = intern::key_str_id(k);
-                    if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
-                        code(self, &v, work);
-                    }
-                    let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
-                    if flags.is_some() || rebinds {
-                        let mut f = flags.unwrap_or_default();
-                        f.rebinds = rebinds;
-                        // (again when its flags grew: the walk met more code changing it)
-                        if done_attrs.insert((c, k), f) != Some(f) {
-                            self.apply_flags(&f, (c, Ns::Attr, k), state, out);
-                        }
+            // (a class met before: its attributes under those names, by the index of the names
+            // the classes have; a class met now: all of them, indexed)
+            let mut slots: Vec<(ObjId, KeyId, Value)> = Vec::new();
+            for &k in &fresh_keys {
+                for &c in by_name.get(&k).map(|v| v.as_slice()).unwrap_or_default() {
+                    slots.extend(state.slot_opt(c, Ns::Attr, k).map(|v| (c, k, v)));
+                }
+            }
+            for &c in &classes[*classes_seen..] {
+                for (k, v) in state.obj_slots(c, Ns::Attr) {
+                    by_name.entry(k).or_default().push(c);
+                    slots.push((c, k, v));
+                }
+            }
+            for (c, k, v) in slots {
+                let name = intern::key_str_id(k);
+                if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
+                    code(self, &v, work);
+                }
+                let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
+                if flags.is_some() || rebinds {
+                    let mut f = flags.unwrap_or_default();
+                    f.rebinds = rebinds;
+                    // (again when its flags grew: the walk met more code changing it)
+                    if done_attrs.insert((c, k), f) != Some(f) {
+                        self.apply_flags(&f, (c, Ns::Attr, k), state, out);
                     }
                 }
             }
