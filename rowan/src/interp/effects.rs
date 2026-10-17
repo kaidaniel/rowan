@@ -867,10 +867,43 @@ impl Analyzer {
     /// What may happen to a value the code of `fi` gives to a call by name: what the callee does
     /// with that parameter, when the name holds only the program's functions; else anything.
     fn passed_flags(&mut self, fi: &FuncInfo, uses: &CodeUses, p: &Pass, state: &State) -> Flags {
-        let Some(fs) = self.program_callees(fi, uses, p.callee, state, true) else { return Flags::CHANGE };
+        let Some(fs) = self.program_callees(fi, uses, p.callee, state, true) else {
+            // (a library function that only reads it: used, as an iteration uses it)
+            return if self.library_reader(fi, uses, p, state) { Flags { iterated: true, ..Flags::default() } } else { Flags::CHANGE };
+        };
         let mut out = Flags::default();
         fs.into_iter().for_each(|f| out.join(&self.param_flags(f, p.slot)));
         out
+    }
+
+    /// Whether the call by name that `p` is given to is of a library function that only reads
+    /// its arguments (`tables::read_only_library`), given none of the program's code: no
+    /// argument may be code but the names' values, and those are none.
+    fn library_reader(&self, fi: &FuncInfo, uses: &CodeUses, p: &Pass, state: &State) -> bool {
+        let Some(args) = &p.args else { return false };
+        let external = |v: &Value| v.single().filter(|o| self.heap.kind(*o) == Kind::External && v.kv.is_bot()).map(|o| self.heap.external_qual(o));
+        let qual = match p.callee.1 {
+            None => self.callee_value(fi, uses, p.callee, state).and_then(|v| external(&v)),
+            Some(a) => match self.resolve_use(fi, uses, p.callee.0) {
+                Ok(l) => external(&state.slot(l.0, l.1, l.2)).map(|m| format!("{}.{}", m, str_get(a))),
+                Err(_) => None,
+            },
+        };
+        if !qual.is_some_and(|q| crate::models::tables::read_only_library(&q)) {
+            return false;
+        }
+        args.iter().all(|(o, _)| {
+            let callee = match *o {
+                Origin::Name(n) => (n, None),
+                Origin::NameAttr(n, a) => (n, Some(a)),
+                _ => return false,
+            };
+            self.callee_value(fi, uses, callee, state).is_some_and(|v| !v.pts.iter().any(|x| match self.heap.kind(x) {
+                Kind::Function | Kind::Bound | Kind::Partial | Kind::Class => true,
+                Kind::Instance => self.heap.instance_class(x).is_none_or(|c| self.class_lookup(c, "__call__").is_some()),
+                _ => false,
+            }))
+        })
     }
 
     /// What may happen to what the code of `fi` returns: what its callers do with it, when the
