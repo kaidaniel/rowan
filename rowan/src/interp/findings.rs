@@ -327,12 +327,12 @@ impl Findings {
 }
 
 impl Analyzer {
-    /// Records the verdict `cls` of an access of `key` on `oid` at `node` (unless quiet, or a
-    /// `map`): weakened to possibly when the receiver may also be a scalar or the call is one of
+    /// Records the verdict `cls` of an access of `key` on `oid` at `node` (unless quiet; a `map`
+    /// is not reported alone, `report::dedupe`): weakened to possibly when the receiver may also be a scalar or the call is one of
     /// several a value picks; under the running call chain, with the guard mode.
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
         self.gens.read(oid, Some((ns, key)));
-        if matches!(cls.tier, Tier::Map) || self.findings.quiet || self.findings.quiet_records {
+        if self.findings.quiet || self.findings.quiet_records {
             return;
         }
         // (a followed library's own accesses are not the program's findings)

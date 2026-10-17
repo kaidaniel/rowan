@@ -52,6 +52,11 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
         tiers.sort();
         tiers.dedup();
+        // (a key of a mapping built from data, on every object: not decided, not reported; beside
+        // an object that lacks it, it may be missing)
+        if tiers == [Tier::Map] {
+            continue;
+        }
         // (with an object rowan knows nothing of, the group says nothing — but where the
         // access fails on another object: it may fail)
         if tiers.contains(&Tier::Unknown) && !tiers.contains(&Tier::Missing) {

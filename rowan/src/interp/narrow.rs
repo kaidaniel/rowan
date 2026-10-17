@@ -389,7 +389,8 @@ impl Analyzer {
             // (numbers too: `1 == 1.0 == True` though their keys differ)
             let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)));
             let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
-            if !ks.is_empty() && !by_value {
+            // (beside objects — an unknown, an instance with its `__eq__` — b may equal anything)
+            if !ks.is_empty() && !by_value && rv.pts.is_empty() {
                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
             }
         } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {

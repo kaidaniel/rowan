@@ -286,7 +286,8 @@ def scalars_program():
 # (`#ACC k` marks an access whose verdict is checked: CPython's runs say whether it may fail;
 # `#BAD` the handler that runs when it does)
 DV = ["0", "1", "2", '"s"', "None", "[1]"]
-DK = ['"k"', '"m"', '"z"', "1"]
+# (`kx`: "m", or on other runs an unknown call's result that is "k" — a key beside an unknown object)
+DK = ['"k"', '"m"', '"z"', "1", "kx"]
 DICTS_HEAD = """import sys
 def fill(d, k):
     if k not in d:
@@ -303,6 +304,7 @@ def merge(a, b):
 def pick(x, y):
     return x if n > 2 else y
 n = len(sys.argv)
+kx = "m" if n > 2 else (sys.argv[0][:0] + "K").lower()
 d = {"k": 0}
 e = {}
 f = {"k": 1, "m": None}
@@ -757,6 +759,9 @@ def annotate(head: list, body: list, probes: list, limits: str = "") -> str | No
         sys.settrace(None)
         sys.argv = saved
     for i, key in keys.items():
+        # (a key of a name, `kx`, has no verdict of its own name)
+        if key.isidentifier():
+            continue
         tiers = (["sound"] if 1 in acc.get(i, ()) else []) + (["fails"] if 0 in acc.get(i, ()) else [])
         if tiers:
             lines[i] += "  #@ " + " ; ".join(f"{t} {key}" for t in tiers)

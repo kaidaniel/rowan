@@ -986,12 +986,16 @@ impl Analyzer {
         match kv {
             KeyVal::Lit(k) => {
                 state.store_key_row(oid, ns, *k, strong);
-                state.set_slot(oid, ns, *k, v.clone(), strong);
+                if strong {
+                    state.set_slot(oid, ns, *k, v.clone(), true);
+                } else {
+                    weak_store(state, oid, ns, *k, v);
+                }
             }
             KeyVal::Lits(ks) => {
                 state.set_row(oid, ns, row.store_many(ks));
                 for k in ks.iter() {
-                    state.set_slot(oid, ns, k, v.clone(), false);
+                    weak_store(state, oid, ns, k, v);
                 }
             }
             KeyVal::KeysOf(ko) => {
@@ -1004,7 +1008,7 @@ impl Analyzer {
                             continue;
                         }
                         if let Some(k2) = lens_apply(ko.chain, k) {
-                            state.set_slot(oid, ns, k2, v.clone(), false);
+                            weak_store(state, oid, ns, k2, v);
                         }
                     }
                 }
@@ -1078,7 +1082,11 @@ impl Analyzer {
         }
         for (k, val) in vals {
             let sure = strong && self.heap.obj(oid).single && k != intern::STAR && srcrow.definite.contains(k) && recs.iter().all(|x| state.row(*x, ns_of(self, *x)).definite.contains(k));
-            state.set_slot(oid, ns, k, val, sure);
+            if sure {
+                state.set_slot(oid, ns, k, val, true);
+            } else {
+                weak_store(state, oid, ns, k, &val);
+            }
         }
     }
 
@@ -1175,7 +1183,7 @@ impl Analyzer {
             let key = &ckey;
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
-            let mut raise: Option<(bool, KeyId)> = None;
+            let mut raise: Option<(bool, Value)> = None;
             for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
                 let cls = classify(&row, k);
                 if report && !self.is_guarded(ns) {
@@ -1184,10 +1192,11 @@ impl Analyzer {
                         self.require_providers_k(&cls, &row, false, state, Some(k), ns);
                     }
                 }
-                // (a `del` of a key that is not there raises KeyError)
-                if !matches!(cls.tier, Tier::Proven | Tier::Map) {
+                // (a `del` of a key that is not there raises KeyError; one of a mapping built from
+                // data may not be there)
+                if cls.tier != Tier::Proven {
                     let surely = cls.tier == Tier::Missing && is_lit && strong;
-                    raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
+                    raise = Some((surely || raise.as_ref().is_some_and(|r| r.0), Value::lit(k)));
                 }
                 row = row.delete(k, strong && is_lit);
                 // (one of several objects, or one of several keys: the value may still be there)
@@ -1199,12 +1208,17 @@ impl Analyzer {
             // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
             let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
             let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
-            let raise = raise.map(|(surely, k)| (surely && !cls.is_some_and(|c| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state))), k));
-            if let Some((surely, k)) = raise.filter(|_| (ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises) {
+            // (a key not known: it may be none of the record's keys)
+            if !key.kv.is_literal() {
+                raise = Some((false, key.clone()));
+            }
+            let raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
+            // (not reported: a model's removal, `pop` with a default, raises on its own terms)
+            if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
                 if !self.unwind.tries.is_empty() {
-                    let e = crate::models::exceptions::exception_object(self, exc, vec![Value::lit(k)], node, state);
+                    let e = crate::models::exceptions::exception_object(self, exc, vec![kv], node, state);
                     self.unwind.cur_exc = Some(e);
                 }
                 if surely {
@@ -1348,4 +1362,14 @@ fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
         }
     }
     state.reqs = reqs;
+}
+
+/// A store that may not happen of `v` under `k`: a key with no value of its own yet may hold
+/// what a store under a key not known put there (the `*` slot).
+fn weak_store(state: &mut State, oid: ObjId, ns: Ns, k: KeyId, v: &Value) {
+    let v = match (state.slot_opt(oid, ns, k), state.slot_opt(oid, ns, STAR)) {
+        (None, Some(star)) => star.join(v),
+        _ => v.clone(),
+    };
+    state.set_slot(oid, ns, k, v, false);
 }
