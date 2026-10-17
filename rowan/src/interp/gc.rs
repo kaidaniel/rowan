@@ -333,8 +333,10 @@ impl Analyzer {
         // (older objects reach young ones only through those roots: a young one was made
         // since, so whatever refers to it was written since; only young ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
+        // (only young objects go into `reached`: the walk stops at older ones, and only young
+        // ones are looked up after it)
         while let Some(o) = work.pop() {
-            if !reached.insert(o) || !young(self, o) {
+            if !young(self, o) || !reached.insert(o) {
                 continue;
             }
             self.budget.walk_visit();
