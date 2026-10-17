@@ -436,9 +436,20 @@ const z618src = fs.readFileSync(z618, "utf8").split("\n");
 const hIt = hover(indexResult(facts(z618)), z618src, z618src.findIndex((l) => l.startsWith("def describe(")) + 1, "it");
 for (const part of ["ident=int(?)", "label=str(?)", "note=None | str(?)", "tags=list[str(?)]"]) assert(hIt.includes(part), hIt);
 
+// ---- a parameter's own argument beside its default, in its body and in In Calls (a framework's
+// request: the annotated type, never the parameter's name as a value)
+const f043 = path.join(root, "tests", "fastapi", "small", "f043_request_parameters_as_annotated.py");
+const f043src = fs.readFileSync(f043, "utf8").split("\n");
+const f043idx = indexResult(facts(f043));
+const defLine = f043src.findIndex((l) => l.startsWith("def read_run(")) + 1;
+const hLimit = hover(f043idx, f043src, defLine, "limit");
+assert(hLimit.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```") && hLimit.includes("- `10 | int(?)` on line ") && !/`[^`]*\blimit\b[^`]*` on line/.test(hLimit), hLimit);
+const hLimit2 = hover(f043idx, f043src, defLine + 3, "limit");
+assert(hLimit2.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```"), hLimit2);
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
-  a01, z, g, kinds, z618,
+  a01, z, g, kinds, z618, f043,
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"),
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py"),
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),

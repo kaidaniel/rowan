@@ -310,7 +310,10 @@ function requirementLines(f) {
 function callLines(f, marks) {
   const merged = new Map();
   for (const c of f.calls || []) {
-    const t = shorten(c.text, VALUE_WIDTH);
+    // (a parameter's own argument, from a caller rowan cannot see, a framework's request: its
+    // annotated type, else `?`)
+    const text = f.param ? [...new Set(alternatives(c.text).map((a) => (a === f.name ? (f.type ? typeText(f.type) : "?") : a)))].join(" | ") : c.text;
+    const t = shorten(text, VALUE_WIDTH);
     const m = merged.get(t) || { lines: [], check: null };
     m.lines = m.lines.concat((c.lines || []).filter((l) => !m.lines.includes(l)));
     if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
@@ -438,8 +441,11 @@ function renderHover(name, facts, verdicts) {
       legend.splice(self, 1);
     }
     const own = value === name && !legend.length;
+    // (the argument of the parameter of this name, perhaps beside its default: `18 | min_age`)
+    const argument = unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `));
+    const withDefault = !own && argument && alternatives(value).includes(name) && !legend.some(([sym]) => sym !== name);
     let tag = null;
-    if (f.param || (own && unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `)))) {
+    if (f.param || (own && argument) || withDefault) {
       // a parameter: what any call may pass, when something is known of it
       tag = "(parameter)";
       value = paramValue(value, name, f.type);

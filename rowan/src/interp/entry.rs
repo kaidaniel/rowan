@@ -12,7 +12,6 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::annotations::{builtin_annotation, container_annotation};
 use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, FuncInfo, FuncNode, Payload, debug_enabled};
 use crate::domain::{Ns, ObjId, ReqInfo, Row, Value};
 use crate::frontend::{self, Node};
@@ -703,14 +702,8 @@ impl Analyzer {
             None => {
                 let o = self.param_source(fi, a, st);
                 // (`x: int`: an int, as the annotation says; `x: int | None` an int or None)
-                match ann.and_then(builtin_annotation) {
-                    Some((t, none)) => {
-                        self.heap.obj_mut(o).ty = Some(t);
-                        if let Some(c) = ann.and_then(container_annotation) {
-                            self.heap.ann.insert(o, (c, fi.module));
-                        }
-                        if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
-                    }
+                match ann {
+                    Some(ann) => self.as_annotated(o, ann, fi.module),
                     None => Value::obj(o),
                 }
             }

@@ -72,6 +72,18 @@ impl Analyzer {
         None
     }
 
+    /// Unknown `o`, what a caller passes for a parameter annotated `ann` (written in `module`),
+    /// as the annotation says when it names a builtin type: of that type (`int(?)`; a
+    /// container's parts too), with None beside it when it allows None.
+    pub fn as_annotated(&mut self, o: ObjId, ann: &'static ast::Expr, module: ObjId) -> Value {
+        let Some((t, none)) = builtin_annotation(ann) else { return Value::obj(o) };
+        self.heap.obj_mut(o).ty = Some(t);
+        if let Some(c) = container_annotation(ann) {
+            self.heap.ann.insert(o, (c, module));
+        }
+        if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
+    }
+
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
     /// tensor or module, an instance of a class of the program (`annotated_instance`), an open
     /// DataFrame; None when the annotation names none of those.
