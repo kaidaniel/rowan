@@ -168,6 +168,21 @@ assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], 
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
 assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
 
+// ---- a parameter needs the same in the body as at its `def`: what the function reads of it (not
+// `cfg["verbose"]`, read of the input by the module code); an `__init__` whose class has a subclass too
+{
+  const z641 = path.join(root, "tests", "cases", "z641_parameter_requirements_in_body.py");
+  const src = fs.readFileSync(z641, "utf8").split("\n");
+  const idx = indexResult(facts(z641));
+  for (const line of [22, 23]) {
+    const h = hover(idx, src, line, "cfg");
+    assert(h.includes('**Requirements**\n- `cfg["min_amount"]`\n\n') && !h.includes("verbose"), h);
+  }
+  for (const line of [14, 15]) {
+    const h = hover(idx, src, line, "cfg");
+    assert(h.includes('**Requirements**\n- `cfg["name"]`\n\n'), h);
+  }
+}
 // ---- a function's value for any call, apart from what the program's calls give (with their lines)
 {
   const z532 = path.join(root, "tests", "cases", "z532_general_and_call_values.py");
