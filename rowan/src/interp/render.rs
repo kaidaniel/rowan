@@ -75,8 +75,14 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
-    // a part nothing is known about (data, keys of something): `?`
-    if let Some(t) = crate::models::torch::t_render(an, v, state) {
+    // a part nothing is known about (data, keys of something): `?`; keys of a builtin type
+    let keys = match &v.kv {
+        KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
+        _ => None,
+    };
+    if let Some(t) = keys {
+        parts.push(format!("{}(?)", t));
+    } else if let Some(t) = crate::models::torch::t_render(an, v, state) {
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
@@ -426,7 +432,8 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     if let (true, Some(v)) = (stored_only, state.slot_opt(o, ns, STAR)) {
         let shown = render_value(an, state, &v, depth + 1, seen);
         seen.pop();
-        return format!("dict[?, {}]", shown);
+        let key = state.keys_type(std::iter::once(o), ns).map_or("?".to_string(), |t| format!("{}(?)", t));
+        return format!("dict[{}, {}]", key, shown);
     }
     if !row.closed() {
         items.push("**?".into());

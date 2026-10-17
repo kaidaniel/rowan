@@ -992,7 +992,12 @@ impl Analyzer {
                 state.set_slot(oid, ns, STAR, v.clone(), false);
             }
             _ => {
-                let site = format!("store@L{}", node.line);
+                // (a key of a builtin type, `counts[w]` with `w` a `str(?)`: what the dict's keys
+                // not known are, `render::keys_type`)
+                let site = match kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))) {
+                    Some(t) => format!("store@L{}:{}", node.line, t),
+                    None => format!("store@L{}", node.line),
+                };
                 state.set_row(oid, ns, row.data_store(Source::new(&site, SourceKind::Data)));
                 state.set_slot(oid, ns, STAR, v.clone(), false);
                 // the unknown key may be any of the keys there: each may hold the value now

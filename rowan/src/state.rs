@@ -222,6 +222,33 @@ thread_local! {
 }
 
 impl State {
+    /// The builtin type of every key of records `objs` (in `ns`), when each key not a literal was
+    /// put there by a store under a key of that type (`counts[w] = …` with `w` a `str(?)`: the
+    /// source `store@L4:str`) and the literal keys are of it too; None when an input, unknown
+    /// code or a copy may have put others there.
+    pub fn keys_type(&self, objs: impl Iterator<Item = ObjId>, ns: Ns) -> Option<&'static str> {
+        let mut ty: Option<&'static str> = None;
+        for o in objs {
+            let row = self.row(o, ns);
+            if row.top || !row.mutators.is_empty() || row.sources.is_empty() {
+                return None;
+            }
+            for (src, _) in row.sources.iter() {
+                let t = with_source(src, |s| (s.kind == crate::source::SourceKind::Data && s.path.is_empty()).then(|| s.site.strip_prefix("store@L")?.split_once(':').map(|(_, t)| t.to_string())).flatten())?;
+                let t = crate::domain::TYPE_NAMES.iter().copied().find(|x| *x == t)?;
+                if ty.is_some_and(|u| u != t) {
+                    return None;
+                }
+                ty = Some(t);
+            }
+            let internal = |k: KeyId| crate::intern::key_as_str(k).is_some_and(|s| s.starts_with('\u{1}'));
+            if !row.present.iter().all(|k| internal(k) || ty.is_some_and(|t| crate::domain::key_type(k, t))) {
+                return None;
+            }
+        }
+        ty
+    }
+
     /// The name's object has `k` from here on.
     pub fn add_name_key(&mut self, n: StrId, k: KeyId) {
         if !self.name_keys.contains(&(n, k)) {

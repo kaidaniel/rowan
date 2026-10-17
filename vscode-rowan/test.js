@@ -193,6 +193,12 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert(hover(idx, src, 20, "j").startsWith("```python\nj = int(?)\n```"), hover(idx, src, 20, "j"));
   assert(hover(idx, src, 27, "parts").startsWith("```python\nparts = list[str(?)]\n```"), hover(idx, src, 27, "parts"));
   assert(hover(idx, src, 27, "parts").includes("- `str(?)`: a str not known statically"), hover(idx, src, 27, "parts"));
+  // a word count: keys stored under str keys are str (was `dict[?, int(?)]`, `k = ?`)
+  const z643 = path.join(root, "tests", "cases", "z643_keys_of_a_builtin_type.py");
+  const src3 = fs.readFileSync(z643, "utf8").split("\n");
+  const idx3 = indexResult(facts(z643));
+  assert(hover(idx3, src3, 14, "counts").startsWith("```python\ncounts = dict[str(?), int(?)]\n```"), hover(idx3, src3, 14, "counts"));
+  assert(hover(idx3, src3, 15, "k").startsWith("```python\nk = str(?)\n```"), hover(idx3, src3, 15, "k"));
 }
 // ---- a function's value for any call, apart from what the program's calls give (with their lines)
 {
