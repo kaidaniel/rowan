@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, KeptKey, Level, Like, NameUses, Origin, Pass, Removes, Slot};
+use super::flows::{Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -669,7 +669,7 @@ impl Analyzer {
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
-        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
+        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v, args, kwargs, state);
         // (the classes it meets are followed below, their dunders among their code)
         self.havoc.classes_followed = true;
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
@@ -737,16 +737,27 @@ impl Analyzer {
     /// them back: the dicts' items (under the literal key, the function's `__name__` when that
     /// is known, else any), the call's result `r`.
     fn put_kept(&mut self, kept: Vec<(Value, Vec<(ObjId, KeptKey)>, bool)>, mut r: Value, node: &Node, state: &mut State) -> Value {
-        for (v, dicts, returned) in kept {
-            for (d, key) in dicts {
+        for (v, places) in kept.iter().map(|(v, p, _)| (v, p)) {
+            for &(d, key) in places {
                 let key = match key {
                     KeptKey::Lit(k) => crate::domain::KeyVal::Lit(k),
-                    KeptKey::Name => self.load_attr(&v, "__name__", node, state, false).kv,
+                    KeptKey::Name => self.load_attr(v, "__name__", node, state, false).kv,
                     KeptKey::Any => crate::domain::DATA,
+                    // (among a list's items, appended some number of times: its length not
+                    // known past what it was)
+                    KeptKey::Elem => {
+                        let n = self.heap.llen(d, state).or_else(|| self.heap.prefix(d, state).map(|p| p as usize)).unwrap_or(0);
+                        self.add_elem(d, v, state);
+                        self.heap.set_prefix(d, state, n);
+                        state.clear_last(d);
+                        continue;
+                    }
                 };
                 let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
-                self.store_key(d, Ns::Item, &key, &v, false, node, state);
+                self.store_key(d, Ns::Item, &key, v, false, node, state);
             }
+        }
+        for (v, _, returned) in kept {
             if returned {
                 r = r.join(&v);
             }
@@ -929,7 +940,8 @@ impl Analyzer {
     /// those left out hold (instances' classes, functions it calls: what reading them may run).
     /// One its code keeps (`Flags::kept`) where its places are known is left out too: it goes
     /// there (`kept`), not to code that may call it.
-    fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> Seen {
+    fn args_as_seen(&mut self, foid: ObjId, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> Seen {
+        let bound = recv.is_some();
         let slots: Vec<Slot> = (0..args.len()).map(|i| Slot::Pos(i + usize::from(bound))).chain(kwargs.keys().map(|k| Slot::Kw(*k))).collect();
         let mut kept = Vec::new();
         let mut flags: Vec<Flags> = Vec::new();
@@ -937,7 +949,7 @@ impl Analyzer {
             let mut f = self.param_flags(foid, slot);
             // (functions: what calling them may do is followed where they are called from there)
             let code = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Function);
-            if let Some((dicts, returned)) = (f.kept && code).then(|| self.kept_places(foid, slot, state)).flatten() {
+            if let Some((dicts, returned)) = (f.kept && code).then(|| self.kept_places(foid, slot, recv, state, 0)).flatten() {
                 f.kept = false;
                 kept.push((v.clone(), dicts, returned));
             }
@@ -977,10 +989,12 @@ impl Analyzer {
         Seen { args, kwargs, code, kept }
     }
 
-    /// Where the code of `foid` keeps the argument in `slot` (`Flags::kept`): the dicts whose
-    /// items may hold it (the global names it stores it under hold dicts only; under what
-    /// key), and whether it returns it; None where those places are not known.
-    fn kept_places(&mut self, foid: ObjId, slot: Slot, state: &State) -> Option<(Vec<(ObjId, KeptKey)>, bool)> {
+    /// Where the code of `foid` (on receiver `recv`, if bound) keeps the argument in `slot`
+    /// (`Flags::kept`): the containers whose items may hold it (dicts by a key, lists among
+    /// their items: what the names and attributes it names hold), those of the program's
+    /// functions it gives it to (`depth`: calls deep, at most 3; their code does nothing else
+    /// with it), and whether it returns it; None where those places are not known.
+    fn kept_places(&mut self, foid: ObjId, slot: Slot, recv: Option<&Value>, state: &State, depth: u32) -> Option<(Vec<(ObjId, KeptKey)>, bool)> {
         let fi = self.heap.func_info(foid);
         let ps = fi.node.params()?;
         let p = match slot {
@@ -989,16 +1003,67 @@ impl Analyzer {
         };
         let p = s(p.parameter.name.id.as_str());
         let uses = self.code_uses(&fi);
-        let mut dicts = Vec::new();
-        for (n, by_name) in uses.kept_in.get(&p).into_iter().flatten() {
-            let loc = self.resolve_use(&fi, &uses, *n).ok()?;
-            let v = state.slot(loc.0, loc.1, loc.2);
-            if v.pts.is_empty() || !v.kv.is_bot() || !v.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict) {
+        let mut places = Vec::new();
+        for place in uses.kept_in.get(&p).into_iter().flatten() {
+            let (base, attrs, key) = match place {
+                KeptPlace::Name(n, attrs, key) => {
+                    let base = match self.resolve_use(&fi, &uses, *n) {
+                        Ok(loc) => state.slot(loc.0, loc.1, loc.2),
+                        Err(m) => Value::obj(m),
+                    };
+                    (base, attrs, *key)
+                }
+                KeptPlace::Recv(attrs, key) => (recv?.clone(), attrs, *key),
+                KeptPlace::Passed(callee, slot) => {
+                    if depth >= 3 {
+                        return None;
+                    }
+                    for f in self.program_callees(&fi, &uses, *callee, state, true)? {
+                        let fl = self.param_flags(f, *slot);
+                        let (more, returned) = self.kept_places(f, *slot, None, state, depth + 1)?;
+                        // (its code does nothing else with it; what it returns is dropped)
+                        let _ = returned;
+                        if fl != (Flags { kept: true, ..Flags::default() }) {
+                            return None;
+                        }
+                        places.extend(more);
+                    }
+                    continue;
+                }
+            };
+            let v = self.attr_path(base, attrs, state)?;
+            let fits = |o: ObjId| match key {
+                KeptKey::Elem => self.heap.kind(o) == Kind::List && !self.heap.obj(o).iterator,
+                _ => self.heap.kind(o) == Kind::Dict,
+            };
+            if v.pts.is_empty() || !v.kv.is_bot() || !v.pts.iter().all(fits) {
                 return None;
             }
-            dicts.extend(v.pts.iter().map(|d| (d, *by_name)));
+            places.extend(v.pts.iter().map(|d| (d, key)));
         }
-        Some((dicts, uses.kept_returned.contains(&p)))
+        Some((places, uses.kept_returned.contains(&p)))
+    }
+
+    /// What `base` holds through attributes `attrs` (a module's globals, a class's attributes,
+    /// an instance's on this path); None where one of them is something else, or not there.
+    fn attr_path(&self, mut v: Value, attrs: &[StrId], state: &State) -> Option<Value> {
+        for a in attrs {
+            let k = key_str_lit(&str_get(*a));
+            let mut next = Value::new();
+            for o in v.pts.iter() {
+                let x = match self.heap.kind(o) {
+                    Kind::Module | Kind::Instance if state.row(o, Ns::Attr).definite.contains(k) || self.heap.kind(o) == Kind::Module => state.slot(o, Ns::Attr, k),
+                    Kind::Class => self.class_attr_value(o, &str_get(*a), state),
+                    _ => return None,
+                };
+                next = next.join(&x);
+            }
+            if next.empty() || !v.kv.is_bot() {
+                return None;
+            }
+            v = next;
+        }
+        Some(v)
     }
 
     /// What a function's code adds to a closure: what may happen to the values of the names it

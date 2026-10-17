@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::intern::{key_as_str, s, KeyId, StrId};
 
-/// The key a parameter is kept under in a global container (`CodeUses::kept_in`).
+/// The key a parameter is kept under in a container (`KeptPlace`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum KeptKey {
     /// a literal str (`REG["k"] = p`)
@@ -22,6 +22,27 @@ pub enum KeptKey {
     /// its own `__name__` (`REG[fn.__name__] = fn`)
     Name,
     Any,
+    /// among a list's items (`REG.append(p)`)
+    Elem,
+}
+
+/// A container by how the function names it (`Flow::container_path`).
+#[derive(Clone)]
+enum KeptBase {
+    Name(StrId, Vec<StrId>),
+    Recv(Vec<StrId>),
+}
+
+/// Where a parameter is kept (`CodeUses::kept_in`).
+#[derive(Clone, PartialEq, Debug)]
+pub enum KeptPlace {
+    /// in the container a name the function does not bind holds, or holds through attributes
+    /// (`G[k] = p`, `G.reg[k] = p`, `G.append(p)`, `G.setdefault(k, p)`), under the key
+    Name(StrId, Vec<StrId>, KeptKey),
+    /// in a container the receiver holds through attributes (`self.reg[k] = p`)
+    Recv(Vec<StrId>, KeptKey),
+    /// given to a call by name whose result is dropped (`add(name, p)`): where the callee keeps it
+    Passed(Callee, Slot),
 }
 
 /// Where a value comes from.
@@ -213,9 +234,8 @@ pub struct CodeUses {
     pub attrs: FxHashMap<StrId, Flags>,
     /// per parameter: what may happen to its value (a default's, for one)
     pub params: FxHashMap<StrId, Flags>,
-    /// per parameter kept (`Flags::kept`): the global names whose items it is stored in, each
-    /// with the key
-    pub kept_in: FxHashMap<StrId, Vec<(StrId, KeptKey)>>,
+    /// per parameter kept (`Flags::kept`): where (containers, under which key; callees)
+    pub kept_in: FxHashMap<StrId, Vec<KeptPlace>>,
     /// the parameters kept that it returns
     pub kept_returned: FxHashSet<StrId>,
     pub imports: FxHashMap<StrId, String>,
@@ -475,25 +495,132 @@ impl<'a> Flow<'a> {
         (!ps.is_empty() && self.first.is_none_or(|f| !ps.contains(&f))).then_some(ps)
     }
 
-    /// `G[k] = p` of a global G and a parameter p: p kept in G's items (`Flags::kept`); false
-    /// for any other assignment.
+    /// `G[k] = p` (`G.a[k] = p`, `self.a[k] = p`) of a global G and a parameter p: p kept in
+    /// the container's items (`Flags::kept`); false for any other assignment.
     fn kept_store(&mut self, a: &'static ast::StmtAssign) -> bool {
         let ([Expr::Subscript(x)], Some(ps)) = (a.targets.as_slice(), self.params_of(&a.value)) else { return false };
-        let Expr::Name(n) = &*x.value else { return false };
-        if self.local(n.id.as_str()) {
-            return false;
-        }
+        let Some(base) = self.container_path(&x.value) else { return false };
         for p in ps {
-            let key = match &*x.slice {
-                Expr::StringLiteral(l) => KeptKey::Lit(crate::intern::key_str_lit(l.value.to_str())),
-                k if self.name_of(k, p) => KeptKey::Name,
-                _ => KeptKey::Any,
-            };
-            self.flags.entry(Origin::Param(p)).or_default().kept = true;
-            self.out.kept_in.entry(p).or_default().push((s(n.id.as_str()), key));
+            let key = self.kept_key(&x.slice, p);
+            self.keep(p, &base, key);
         }
         self.target(&a.targets[0]);
         true
+    }
+
+    /// A call statement keeping parameters (its result dropped): `G.append(p)`,
+    /// `G.setdefault(k, p)` of a container as `kept_store` takes them, `f(…, p, …)` /
+    /// `m.f(…, p, …)` of a name the function does not bind (where the callee keeps it, if the
+    /// program's function does; else p changes). The rest of the call as any call's.
+    fn kept_call(&mut self, c: &'static ast::ExprCall) -> bool {
+        if self.depth > 0 || !c.arguments.keywords.is_empty() || c.arguments.args.iter().any(|x| matches!(x, Expr::Starred(_))) {
+            return false;
+        }
+        let args = &c.arguments.args;
+        let mut kept: Vec<(StrId, Option<(KeptBase, KeptKey)>, Slot)> = Vec::new();
+        let mut passed_to: Option<Callee> = None;
+        if let Expr::Attribute(a) = &*c.func {
+            let value = match (a.attr.as_str(), &args[..]) {
+                ("append", [v]) => Some((v, None)),
+                ("setdefault", [k, v]) if self.params_of(k).is_none() => Some((v, Some(k))),
+                _ => None,
+            };
+            if let Some((v, k)) = value {
+                let (Some(ps), Some(base)) = (self.params_of(v), self.container_path(&a.value)) else { return false };
+                for p in ps {
+                    let key = match k {
+                        Some(k) => self.kept_key(k, p),
+                        None => KeptKey::Elem,
+                    };
+                    kept.push((p, Some((base.clone(), key)), Slot::Pos(args.len() - 1)));
+                }
+            }
+        }
+        if kept.is_empty() {
+            let callee = match &*c.func {
+                Expr::Name(f) if !self.local(f.id.as_str()) && !PASSING_BUILTINS.contains(&f.id.as_str()) && !super::PURE_BUILTINS.contains(&f.id.as_str()) => (s(f.id.as_str()), None),
+                Expr::Attribute(a) => match &*a.value {
+                    Expr::Name(n) if !self.local(n.id.as_str()) && !pure_method(a.attr.as_str()) => (s(n.id.as_str()), Some(s(a.attr.as_str()))),
+                    _ => return false,
+                },
+                _ => return false,
+            };
+            for (i, x) in args.iter().enumerate() {
+                for p in self.params_of(x).unwrap_or_default() {
+                    kept.push((p, None, Slot::Pos(i)));
+                }
+            }
+            passed_to = Some(callee);
+        }
+        // (each kept parameter given once, and as nothing else)
+        let ps: Vec<StrId> = kept.iter().map(|(p, _, _)| *p).collect();
+        let given = |p: StrId| args.iter().filter(|x| self.params_of(x).is_some_and(|q| q.contains(&p))).count();
+        if kept.is_empty() || ps.iter().any(|p| given(*p) != 1) {
+            return false;
+        }
+        let before: Vec<(StrId, Option<Flags>)> = ps.iter().map(|p| (*p, self.flags.get(&Origin::Param(*p)).copied())).collect();
+        self.call(c);
+        for (p, f) in before {
+            match f {
+                Some(f) => drop(self.flags.insert(Origin::Param(p), f)),
+                None => drop(self.flags.remove(&Origin::Param(p))),
+            }
+        }
+        for (p, place, slot) in kept {
+            match (place, passed_to) {
+                (Some((base, key)), _) => self.keep(p, &base, key),
+                (None, Some(callee)) => {
+                    self.flags.entry(Origin::Param(p)).or_default().kept = true;
+                    self.out.kept_in.entry(p).or_default().push(KeptPlace::Passed(callee, slot));
+                }
+                (None, None) => {}
+            }
+        }
+        true
+    }
+
+    /// p kept in the container `base` stands for, under `key`.
+    fn keep(&mut self, p: StrId, base: &KeptBase, key: KeptKey) {
+        self.flags.entry(Origin::Param(p)).or_default().kept = true;
+        let place = match base {
+            KeptBase::Name(n, attrs) => KeptPlace::Name(*n, attrs.clone(), key),
+            KeptBase::Recv(attrs) => KeptPlace::Recv(attrs.clone(), key),
+        };
+        self.out.kept_in.entry(p).or_default().push(place);
+    }
+
+    /// The key `G[k] = p` keeps p under.
+    fn kept_key(&self, k: &Expr, p: StrId) -> KeptKey {
+        match k {
+            Expr::StringLiteral(l) => KeptKey::Lit(crate::intern::key_str_lit(l.value.to_str())),
+            k if self.name_of(k, p) => KeptKey::Name,
+            _ => KeptKey::Any,
+        }
+    }
+
+    /// A container a parameter may be kept in: a name the function does not bind, or what it
+    /// or the receiver holds through attributes (`G`, `G.a.b`, `self.a`).
+    fn container_path(&mut self, e: &Expr) -> Option<KeptBase> {
+        match e {
+            Expr::Name(n) if !self.local(n.id.as_str()) => Some(KeptBase::Name(s(n.id.as_str()), Vec::new())),
+            Expr::Attribute(a) => {
+                let attr = s(a.attr.as_str());
+                if self.depth == 0 && self.recv_base(&a.value) {
+                    return Some(KeptBase::Recv(vec![attr]));
+                }
+                match self.container_path(&a.value)? {
+                    KeptBase::Name(n, mut attrs) => {
+                        attrs.push(attr);
+                        Some(KeptBase::Name(n, attrs))
+                    }
+                    KeptBase::Recv(mut attrs) => {
+                        attrs.push(attr);
+                        Some(KeptBase::Recv(attrs))
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Whether `e` is parameter `p`'s `__name__` (`fn.__name__`, or a local bound to only that).
@@ -1104,6 +1231,7 @@ impl<'a> Flow<'a> {
     /// A statement's uses.
     fn stmt(&mut self, st: &'static Stmt) {
         match st {
+            Stmt::Expr(x) if matches!(&*x.value, Expr::Call(c) if self.kept_call(c)) => {}
             Stmt::Expr(x) => self.expr(&x.value, Pos::Read),
             Stmt::Assign(a) if self.kept_store(a) => {}
             Stmt::Assign(a) => {
