@@ -2040,7 +2040,12 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
             }
             Value::data(&format!("L{}", c.line))
         }
-        "split" | "splitlines" | "partition" | "rsplit" => {
+        // (the parts of a text not known: texts of its type, `str(?)`; a partition's three)
+        "partition" | "rpartition" => {
+            let part = part_kv(an, c);
+            an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::kv_only(part.clone()); 3]), Value::new(), part, st)
+        }
+        "split" | "splitlines" | "rsplit" => {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("split@L{}", c.line));
             an.heap.set_llen(oid, st, None);
             // a literal string split by a literal separator: the parts, in order; a parameter
@@ -2070,10 +2075,19 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
                 }
             }
             st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
-            st.elems.insert(oid, DATA);
+            st.elems.insert(oid, part_kv(an, c));
             Value::obj(oid)
         }
         _ => Value::data(&format!("L{}", c.line)),
+    }
+}
+
+/// A part of the receiver of a split or partition rowan does not compute: a text of its type
+/// (`str(?)`, `bytes(?)`), or anything when that is not known.
+fn part_kv(an: &Analyzer, c: &Call) -> KeyVal {
+    match c.recv.as_ref().and_then(|r| an.value_type(r)) {
+        Some(t @ ("str" | "bytes")) => KeyVal::data(&crate::domain::typed_label(t, "")),
+        _ => DATA,
     }
 }
 
