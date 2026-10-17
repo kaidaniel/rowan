@@ -92,8 +92,9 @@ impl Analyzer {
     /// sequence's position, an unknown's placeholder, … joined; a requirement one of several
     /// receivers records is only sometimes needed.
     pub(super) fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
-        // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
-        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown)) && !obj.pts.is_empty() {
+        // (objects in the key: an unknown key — of a list or tuple, a position not known; frames
+        // and Series are indexed by their own rules: a column list, a mask)
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown | Kind::List | Kind::Tuple)) && !obj.pts.is_empty() {
             self.opaque_key(key, state)
         } else {
             key.clone()
