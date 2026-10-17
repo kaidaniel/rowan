@@ -187,6 +187,9 @@ pub(super) fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if recv.pts.iter().any(|o| an.hashes_keys(o)) {
         an.check_hashable(key, st);
     }
+    // (a key that may be an object: an unknown key)
+    let okey = an.opaque_key(key, st);
+    let key = &okey;
     let has_default = c.args.len() > 1;
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);

@@ -533,6 +533,20 @@ impl Analyzer {
         }) {
             return r;
         }
+        // (an argument of literals beside an unknown object, which may be anything: for the model
+        // a value not known — a model reading its literals would leave the unknown's cases out)
+        let beside_unknown = |v: &Value| !v.pts.is_empty() && v.kv.is_literal() && kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown);
+        let opaque;
+        let call = if call.args.iter().any(beside_unknown) {
+            let mut c = call.clone();
+            for a in c.args.iter_mut().filter(|a| beside_unknown(a)) {
+                *a = Value::with_kv(a.pts.clone(), DATA);
+            }
+            opaque = c;
+            &opaque
+        } else {
+            call
+        };
         let r = self.in_model(|an| m(an, state, call));
         crate::models::itertools::after_model_consume(self, call, &r, state);
         r
