@@ -395,11 +395,12 @@ impl Analyzer {
         let any = Value::obj(crate::interp::any_object(&mut self.heap));
         let walk = self.havoc.new_walk();
         self.havoc.code.clear();
+        let mut walk_so_far = None;
         loop {
             roots.append(&mut self.havoc.code);
             roots.sort_unstable();
             roots.dedup();
-            let cl = self.code_closure(&roots, state);
+            let cl = self.code_closure(&roots, &mut walk_so_far, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
             // (values whose parts may change, not themselves: their parts; whose parts' parts

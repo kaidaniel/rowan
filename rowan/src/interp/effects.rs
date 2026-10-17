@@ -62,7 +62,7 @@ type Loc = (ObjId, Ns, KeyId);
 /// `names_seen` says they were used then), the class attributes followed, and those changed
 /// with the flags applied to them.
 #[derive(Default)]
-struct ClosureWalk {
+pub struct ClosureWalk {
     out: Closure,
     work: Vec<ObjId>,
     attrs: FxHashMap<StrId, Flags>,
@@ -477,8 +477,9 @@ impl Analyzer {
     /// change (mutable defaults, bound receivers). Computed once per set of roots: the code a
     /// name holds is taken as fixed (rebinding a function or class is monkey-patching), and
     /// methods called by a computed name are not followed; the code in the data those values
-    /// hold is followed where the call is (`skipped_call`).
-    pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], state: &State) -> std::rc::Rc<Closure> {
+    /// hold is followed where the call is (`skipped_call`). `from`: the walk of a subset of the
+    /// roots, resumed (and left there), unless the closure is cached.
+    pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
         let whole = self.effects.whole.is_some();
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
@@ -499,9 +500,13 @@ impl Analyzer {
             self.effects.library = lib;
             return c;
         }
-        let mut w = ClosureWalk { work: roots.to_vec(), ..Default::default() };
+        // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
+        // code the last one's data held)
+        let mut w = from.take().unwrap_or_default();
+        w.work.extend_from_slice(roots);
         self.walk_closure(&mut w, state);
         let c = std::rc::Rc::new(w.finished());
+        *from = Some(w);
         // (a cache of what the program's code reaches, by root set: on large programs the root
         // sets rarely repeat, so it is emptied past a bound on what it holds)
         if whole {
