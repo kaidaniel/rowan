@@ -25,6 +25,11 @@ HERE = Path(__file__).resolve().parent
 GUARD = HERE.parent / ".guard" / "run"
 
 
+def guarded(t: int) -> list[str]:
+    """The guard's prefix on the owner's Mac (.guard/run, not in the repository); none elsewhere (CI)."""
+    return [str(GUARD), "-t", str(t)] if GUARD.exists() else []
+
+
 def functions(path: Path, n: int) -> list[tuple[str, int]]:
     """Up to n functions of the file (module-level defs, methods of module-level classes),
     spread over it: (qualified name, a line inside it)."""
@@ -44,6 +49,18 @@ def functions(path: Path, n: int) -> list[tuple[str, int]]:
         step = len(out) / n
         out = [out[int(i * step)] for i in range(n)]
     return out
+
+
+def reply(p: subprocess.Popen, rid: int) -> dict:
+    """The server's answer to request `rid`; events (`{"event":"analysed",…}`, the whole
+    program's document after an on-demand answer) may come before it and are skipped."""
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            return {"ok": False, "error": "the server exited"}
+        r = json.loads(line)
+        if r.get("id") == rid:
+            return r
 
 
 def pct(xs: list[float], p: float) -> float:
@@ -71,14 +88,14 @@ def main() -> None:
         fns = functions(f, a.per_module)
         env = dict(os.environ)
         env.pop("ROWAN_DEBUG", None)
-        p = subprocess.Popen([str(GUARD), "-t", "0", a.rowan, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+        p = subprocess.Popen(guarded(0) + [a.rowan, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
         setup_ms = None
         mod = {"file": str(f.relative_to(root)), "hovers": []}
         for i, (qn, line) in enumerate(fns):
             for again in (False, True):
                 p.stdin.write(json.dumps({"id": i, "cmd": "hover", "path": str(f), "line": line}) + "\n")
                 p.stdin.flush()
-                r = json.loads(p.stdout.readline())
+                r = reply(p, i)
                 if not r.get("ok"):
                     mod["hovers"].append({"function": qn, "line": line, "error": r.get("error")})
                     break
@@ -95,7 +112,7 @@ def main() -> None:
         mod["setup_ms"] = setup_ms
         if a.whole:
             t0 = time.monotonic()
-            w = subprocess.run([str(GUARD), "-t", "600", a.rowan, str(f), "--facts"], capture_output=True, text=True, env=dict(env, ROWAN_LIMITS="ms=100000000"))
+            w = subprocess.run(guarded(600) + [a.rowan, str(f), "--facts"], capture_output=True, text=True, env=dict(env, ROWAN_LIMITS="ms=100000000"))
             mod["whole_s"] = round(time.monotonic() - t0, 2)
             mod["whole_ok"] = w.returncode == 0
         cold = [h["ms"] for h in mod["hovers"] if "ms" in h and not h["cached"]]

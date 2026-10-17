@@ -1,6 +1,7 @@
 # Benchmarks: rowan on large real programs (stdlib12k, email, rich, click; and the frontier of
 # ~130k-350k-line packages: pip, timm, sktime, functional), without its deadlines, one job each in
-# parallel, cut at 10 minutes. Records wall time, peak memory, rowan's deterministic work
+# parallel, cut at 10 minutes; the on-demand hover timings (rich, pip) and the site-packages
+# benchmark. Records wall time, peak memory, rowan's deterministic work
 # counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
 # flamegraph as an artifact). Informational only: every job has continue-on-error, and this
 # workflow must not be a required status check, so it never blocks a merge.
@@ -134,6 +135,120 @@ jobs:
           path: results/
           retention-days: 30
 
+  # Time to information on demand (the editor's hovers): every function of the program run
+  # alone after the setup (bench/hovers.py: `rowan hovers`, 4 processes), and `rowan serve`'s
+  # time to the first hover in 12 of its files (bench/first_hover.py). rich: a small program;
+  # pip: a large one (timm takes ~4 minutes of hovers).
+  hovers:
+    name: hovers ${{ matrix.program }}
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        program: [rich, pip]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - name: Prepare the program
+        run: uv run --no-project python bench/prepare.py ${{ matrix.program }}
+
+      - name: Every function on demand
+        run: uv run --no-project python bench/hovers.py bin/rowan ${{ matrix.program }} -j 4 --out results
+
+      - name: Time to the first hover (rowan serve)
+        if: always()
+        run: uv run --no-project python bench/first_hover.py bin/rowan ${{ matrix.program }} --out results
+
+      - name: Job summary
+        if: always()
+        run: |
+          uv run --no-project python - ${{ matrix.program }} >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import json, sys
+          from pathlib import Path
+          name = sys.argv[1]
+          print(f"### hovers: {name}\n")
+          h = Path(f"results/{name}-hovers.json")
+          if h.exists():
+              s = json.loads(h.read_text())["summary"]
+              print("| functions | setup | p50 | p95 | p99 | max | over 1 s | cut |")
+              print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+              print(f"| {s['timed']} / {s['functions']} | {s['setup_ms']} ms | {s['p50']} ms | {s['p95']} ms | {s['p99']} ms | {s['max']} ms | {s['over_1s']} | {s['cut']} |")
+          else:
+              print("hovers.py: no result")
+          f = Path(f"results/{name}-first.json")
+          if f.exists():
+              s = json.loads(f.read_text())["summary"]
+              t = s["first_hover_ms"]
+              print(f"\nFirst hover in a file (rowan serve, {s['modules']} files, {s['on_demand']} on demand): p50 {t['p50']} ms, p95 {t['p95']} ms, max {t['max']} ms; peak memory {s['peak_mb']} MB")
+          else:
+              print("\nfirst_hover.py: no result")
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-hovers-${{ matrix.program }}
+          path: results/
+          retention-days: 30
+
+  # What following installed packages costs and buys (bench/sitepackages.py: five pinned venvs,
+  # `--follow` off / '*' / the company package alone; not the uncapped mode, which runs for
+  # minutes). The venvs are cached by their pins and the local package.
+  sitepackages:
+    name: site-packages
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - uses: actions/cache@v4
+        with:
+          path: bench/work/sitepackages
+          key: sitepackages-${{ runner.os }}-${{ hashFiles('bench/sitepackages.py', 'bench/sitepackages/**', '.python-version') }}
+
+      - name: Site-packages benchmark
+        run: |
+          mkdir -p results
+          {
+            echo "### site-packages (bench/sitepackages.py)"
+            echo
+            uv run --no-project python bench/sitepackages.py --rowan bin/rowan --out results/sitepackages.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-sitepackages
+          path: results/
+          retention-days: 30
+
   # Soundness without per-call-site runs: the golden suites with `tab=0` (main before the
   # summaries were removed: every call used its function's summary) and `budget=0` (every call
   # past its function's budget: an unknown call, and a reporting run with open parameters).
@@ -212,7 +327,7 @@ jobs:
   # Actions): https://kaidaniel.github.io/rowan/dev/bench/
   history:
     name: history
-    needs: [bench, golden-fallback]
+    needs: [bench, golden-fallback, hovers, sitepackages]
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     continue-on-error: true

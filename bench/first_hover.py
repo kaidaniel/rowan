@@ -7,7 +7,7 @@ it starts a `rowan serve` (as the extension does), sends `{"cmd":"analyse"}` for
 once that is answered a hover inside a function of the file (the middle one): the time to the
 first hover is from the analyse request to the hover's answer. When the analysis is on demand
 (`on_demand`), the hover runs the function; otherwise the analyse document answers it. Also
-the server's peak memory (`/usr/bin/time -l`).
+the server's peak memory (`/usr/bin/time`: `-l` on macOS, `-v` on Linux).
 
 Prints per module the analyse time, whether it went on demand, the hover time and the total;
 then p50 / p95 / max of the totals. Writes DIR/NAME-first.json.
@@ -18,13 +18,23 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
-from serve_hovers import functions, pct
+from serve_hovers import functions, pct, reply
 
 HERE = Path(__file__).resolve().parent
 GUARD = HERE.parent / ".guard" / "run"
+
+
+# peak memory: BSD time's `-l` (bytes), GNU time's `-v` (kbytes); left out where there is none
+TIMER = (["/usr/bin/time", "-l"] if sys.platform == "darwin" else ["/usr/bin/time", "-v"]) if os.path.exists("/usr/bin/time") else []
+
+
+def guarded(t: int) -> list[str]:
+    """The guard's prefix on the owner's Mac (.guard/run, not in the repository); none elsewhere (CI)."""
+    return [str(GUARD), "-t", str(t)] if GUARD.exists() else []
 
 
 def main() -> None:
@@ -46,11 +56,11 @@ def main() -> None:
     for f in files:
         fns = functions(f, 3)
         qn, line = fns[len(fns) // 2]
-        p = subprocess.Popen([str(GUARD), "-t", "0", "/usr/bin/time", "-l", a.rowan, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        p = subprocess.Popen(guarded(0) + TIMER + [a.rowan, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         t0 = time.monotonic()
         p.stdin.write(json.dumps({"id": 1, "cmd": "analyse", "path": str(f)}) + "\n")
         p.stdin.flush()
-        r = json.loads(p.stdout.readline())
+        r = reply(p, 1)
         analyse_ms = (time.monotonic() - t0) * 1000
         demand = bool(r.get("ok") and r["result"].get("on_demand"))
         hover_ms = 0.0
@@ -58,7 +68,7 @@ def main() -> None:
             t1 = time.monotonic()
             p.stdin.write(json.dumps({"id": 2, "cmd": "hover", "path": str(f), "line": line}) + "\n")
             p.stdin.flush()
-            h = json.loads(p.stdout.readline())
+            h = reply(p, 2)
             hover_ms = (time.monotonic() - t1) * 1000
             if not h.get("ok"):
                 hover_ms = -1
@@ -67,7 +77,8 @@ def main() -> None:
         p.stdin.flush()
         _, err = p.communicate()
         m = re.search(r"(\d+)\s+maximum resident set size", err)
-        mb = int(m.group(1)) / 1e6 if m else None
+        g = re.search(r"Maximum resident set size \(kbytes\): (\d+)", err)
+        mb = int(m.group(1)) / 1e6 if m else int(g.group(1)) / 1e3 if g else None
         row = {"file": str(f.relative_to(root)), "function": qn, "line": line, "ok": r.get("ok"), "analyse_ms": round(analyse_ms), "on_demand": demand, "hover_ms": round(hover_ms), "total_ms": round(total), "peak_mb": mb and round(mb)}
         print(f"{row['file']}: analyse {row['analyse_ms']} ms{' (on demand)' if demand else ''}, hover {row['hover_ms']} ms, first hover at {row['total_ms']} ms, {row['peak_mb']} MB", flush=True)
         rows.append(row)
