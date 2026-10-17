@@ -168,6 +168,41 @@ assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], 
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
 assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
 
+// ---- a parameter needs the same in the body as at its `def`: what the function reads of it (not
+// `cfg["verbose"]`, read of the input by the module code); an `__init__` whose class has a subclass too
+{
+  const z641 = path.join(root, "tests", "cases", "z641_parameter_requirements_in_body.py");
+  const src = fs.readFileSync(z641, "utf8").split("\n");
+  const idx = indexResult(facts(z641));
+  for (const line of [22, 23]) {
+    const h = hover(idx, src, line, "cfg");
+    assert(h.includes('**Requirements**\n- `cfg["min_amount"]`\n\n') && !h.includes("verbose"), h);
+  }
+  for (const line of [14, 15]) {
+    const h = hover(idx, src, line, "cfg");
+    assert(h.includes('**Requirements**\n- `cfg["name"]`\n\n'), h);
+  }
+  // (a parameter in its body is one, also beside a call's input: was `cfg = cfg`, and
+  // `{"name": cfg["name"], **?} | ?` where two runs for any call each had their object)
+  for (const line of [15, 23]) assert(hover(idx, src, line, "cfg").startsWith("```python\ncfg = (parameter)\n```"), hover(idx, src, line, "cfg"));
+}
+// ---- values of a known builtin type: a range's items, enumerate's index, input() and what follows
+// (they were `?`)
+{
+  const z642 = path.join(root, "tests", "cases", "z642_builtin_results_of_known_type.py");
+  const src = fs.readFileSync(z642, "utf8").split("\n");
+  const idx = indexResult(facts(z642));
+  assert(hover(idx, src, 15, "i").startsWith("```python\ni = int(?)\n```"), hover(idx, src, 15, "i"));
+  assert(hover(idx, src, 20, "j").startsWith("```python\nj = int(?)\n```"), hover(idx, src, 20, "j"));
+  assert(hover(idx, src, 27, "parts").startsWith("```python\nparts = list[str(?)]\n```"), hover(idx, src, 27, "parts"));
+  assert(hover(idx, src, 27, "parts").includes("- `str(?)`: a str not known statically"), hover(idx, src, 27, "parts"));
+  // a word count: keys stored under str keys are str (was `dict[?, int(?)]`, `k = ?`)
+  const z643 = path.join(root, "tests", "cases", "z643_keys_of_a_builtin_type.py");
+  const src3 = fs.readFileSync(z643, "utf8").split("\n");
+  const idx3 = indexResult(facts(z643));
+  assert(hover(idx3, src3, 14, "counts").startsWith("```python\ncounts = dict[str(?), int(?)]\n```"), hover(idx3, src3, 14, "counts"));
+  assert(hover(idx3, src3, 15, "k").startsWith("```python\nk = str(?)\n```"), hover(idx3, src3, 15, "k"));
+}
 // ---- a function's value for any call, apart from what the program's calls give (with their lines)
 {
   const z532 = path.join(root, "tests", "cases", "z532_general_and_call_values.py");
@@ -458,7 +493,7 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   const found = path.join(tmp, "found.py");
   fs.writeFileSync(found, ["import sys", "text = sys.argv[1]", "idx = {c: i for i, c in enumerate(sorted(set(text)))}", "def enc(s):", "    return [idx[c] for c in s]", 'a = enc("ab")', 'b = enc("ab")', ""].join("\n"));
   const h = hover(indexResult(facts(found)), fs.readFileSync(found, "utf8").split("\n"), 5, "idx");
-  assert(h.includes("```python\nidx = {") && !h.includes("✓"), h);
+  assert(h.includes("```python\nidx = dict[?, int(?)]") && !h.includes("✓"), h); // (keys only possible, of values not known, are `**?`'s)
 }
 
 // ---- a parameter annotated with a dataclass: its fields (its bases' too) as annotated

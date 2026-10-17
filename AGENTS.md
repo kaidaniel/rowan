@@ -11,7 +11,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
-  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`).
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins (`result_type`; a range's items, `enumerate`'s index, `os.environ`'s values, `read_text`, a str's items), operators; the keys of some objects: `State::keys_type`, from typed stores' sources `store@L4:str`). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
@@ -130,7 +130,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 

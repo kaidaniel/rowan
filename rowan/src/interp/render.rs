@@ -75,8 +75,14 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
-    // a part nothing is known about (data, keys of something): `?`
-    if let Some(t) = crate::models::torch::t_render(an, v, state) {
+    // a part nothing is known about (data, keys of something): `?`; keys of a builtin type
+    let keys = match &v.kv {
+        KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
+        _ => None,
+    };
+    if let Some(t) = keys {
+        parts.push(format!("{}(?)", t));
+    } else if let Some(t) = crate::models::torch::t_render(an, v, state) {
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
@@ -396,6 +402,11 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
         keys.retain(|k| *k != intern::key_str_lit("args") && !no_cause(*k));
         items.extend(args_items(an, state, &args, depth, seen));
     }
+    // (an open record's key that may be there, of a value not known, says no more than `**?`:
+    // left out — a loop's item read on earlier rounds was `{"id"?: ?, "name"?: ?, **?}`)
+    if !row.closed() {
+        keys.retain(|k| row.likely.contains(*k) || state.slot_opt(o, ns, *k).is_some_and(|sv| render_value(an, state, &sv, depth + 1, &mut seen.clone()) != "?"));
+    }
     for k in keys.iter().take(MAX_ITEMS) {
         let val = match state.slot_opt(o, ns, *k) {
             Some(sv) => render_value(an, state, &sv, depth + 1, seen),
@@ -421,7 +432,8 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     if let (true, Some(v)) = (stored_only, state.slot_opt(o, ns, STAR)) {
         let shown = render_value(an, state, &v, depth + 1, seen);
         seen.pop();
-        return format!("dict[?, {}]", shown);
+        let key = state.keys_type(std::iter::once(o), ns).map_or("?".to_string(), |t| format!("{}(?)", t));
+        return format!("dict[{}, {}]", key, shown);
     }
     if !row.closed() {
         items.push("**?".into());
@@ -496,7 +508,14 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
                     // keys seen on it describe it; objects an unknown call was given are what it
                     // may also be (besides anything else)
                     let given = an.names.origins.get(&o).map(|(_, _, g)| !g.is_empty()).unwrap_or(false);
-                    let desc = if parts.is_empty() { "?".to_string() } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
+                    // (named by an expression, nothing more known of it than its type: `str(?)`; a
+                    // parameter's type is the hover's own, `Fact` `type`)
+                    let expr = !sym.chars().all(|c| c.is_alphanumeric() || c == '_');
+                    let unknown = match an.heap.obj(o).ty {
+                        Some(t) if parts.is_empty() && expr => format!("{}(?)", t),
+                        _ => "?".to_string(),
+                    };
+                    let desc = if parts.is_empty() { unknown } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
                     out.push((sym.clone(), desc));
                 }
                 // (what a container holds: under its keys, attributes, positions, elements)

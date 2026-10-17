@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ruff_python_ast as ast;
 
 use super::{Analyzer, Payload, ViewKind};
-use crate::domain::{classify, kv_literals, label_type, Chain, Classification, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, kv_literals, label_type, Chain, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
@@ -138,6 +138,8 @@ impl Fact {
         }
         for (sym, desc) in legend {
             match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
+                // (`X | ?` is `?`: anything)
+                Some((_, d)) if *d == "?" || desc == "?" => *d = "?".into(),
                 Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
                 Some(_) => {}
                 None => self.legend.push((sym, desc)),
@@ -544,7 +546,11 @@ impl Analyzer {
             info.lits = kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
-            typed(&mut info, v.kv.data_site().and_then(|l| label_type(&intern::str_get(l))));
+            let ty = match &v.kv {
+                KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
+                kv => kv.data_site().and_then(|l| label_type(&intern::str_get(l))),
+            };
+            typed(&mut info, ty);
         }
         for o in v.pts.iter() {
             match self.heap.kind(o) {

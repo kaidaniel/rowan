@@ -703,9 +703,13 @@ impl Analyzer {
         }
     }
 
-    /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
+    /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input); while an
+    /// instance for entry runs is made, another one: an `__init__` run on an instance its own run
+    /// for any call made would find its argument's keys already read (no contract) and its
+    /// `self.cfg` the very object passed.
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
-        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id))
+        let ctx = if self.entry.fresh_in_progress.is_empty() { "" } else { "instance" };
+        self.unknown_source_in(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), ctx)
     }
 
     /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
@@ -823,10 +827,8 @@ impl Analyzer {
                 }
                 let fi = self.heap.func_info(init);
                 let Some(params_all) = fi.node.params() else { continue };
-                let saved_scope = self.entry.scope;
-                if self.entry.torch_modules.contains(&fi.module) {
-                    self.entry.scope = Some(init);
-                }
+                // (its parameters are `__init__`'s names, not those of the method run on it)
+                let saved_scope = self.entry.scope.replace(init);
                 // (any arguments, as annotated, or the defaults: the instance any construction
                 // may make, so that a method run on it holds for any call; or the defaults, as a
                 // caller that passes nothing)

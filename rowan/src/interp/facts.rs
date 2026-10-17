@@ -183,6 +183,17 @@ fn fact_object_json(an: &Analyzer, f: &Fact, oid: ObjId, item: &Option<Row>, att
 /// What the code reads of the inputs a hover's objects come from, as access paths from the
 /// name (with whether every path reads it).
 fn fact_required(an: &Analyzer, f: &Fact, name: StrId) -> Vec<Need> {
+    // (a name holding the argument of its function's parameter of that name: the function's
+    // contract, as at its `def` — not what the whole program reads of the inputs the calls
+    // passed, `cfg["verbose"]` read by a caller of the function)
+    let own = format!(".{}", name);
+    let param = f.general_rows.values().flat_map(|(i, a)| [i, a]).flatten().flat_map(|r| r.sources.iter().map(|(s, _)| s)).find_map(|src| {
+        let (site, kind) = intern::with_source(src, |s| (s.site.to_string(), s.kind));
+        (kind == crate::source::SourceKind::Param && site.ends_with(&own)).then(|| crate::source::Source::new(&site, kind))
+    });
+    if let Some(src) = param {
+        return an.findings.contracts.as_ref().map(|st| reads_below(st, src, &intern::str_get(name), false)).unwrap_or_default();
+    }
     let mut required: Vec<Need> = Vec::new();
     if let Some(st) = &an.findings.final_state {
         for (_, (item, attr)) in f.shown_rows() {

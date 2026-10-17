@@ -183,10 +183,15 @@ impl Analyzer {
     /// `label` (its source's label if empty); a parameter or an unbound name also gets its name
     /// as the report's symbol.
     pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str) -> ObjId {
+        self.unknown_source_in(site, kind, state, label, "")
+    }
+
+    /// `unknown_source`'s object in context `ctx`: another object open through the same input.
+    pub(in crate::interp) fn unknown_source_in(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str, ctx: &str) -> ObjId {
         let src = Source::new(site, kind);
         let slabel = source_label(src);
         let label = if label.is_empty() { slabel.clone() } else { label.to_string() };
-        let oid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind.name(), slabel), "", true, &label, Payload::None);
+        let oid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind.name(), slabel), ctx, true, &label, Payload::None);
         for n in [Ns::Item, Ns::Attr] {
             if !state.has_row(oid, n) {
                 state.set_row(oid, n, Row::with_source(src));

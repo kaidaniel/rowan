@@ -302,6 +302,18 @@ impl Analyzer {
                 return Value::kv_only(KeyVal::lits(o));
             }
         }
+        // a text not known indexed or sliced: a str (an index of bytes: an int), the index perhaps
+        // out of range, the key perhaps of a wrong type
+        if let (true, Some(t @ ("str" | "bytes"))) = (obj.pts.is_empty() && !obj.kv.is_literal() && !self.m.torch_on, self.value_type(&obj)) {
+            let slice = matches!(&*sub.slice, ast::Expr::Slice(_));
+            if !slice {
+                self.may_raise_here("IndexError", state);
+                if !matches!(self.value_type(&key), Some("int" | "bool")) {
+                    self.may_raise_here("TypeError", state);
+                }
+            }
+            return Value::data(&crate::domain::typed_label(if t == "bytes" && !slice { "int" } else { t }, ""));
+        }
         let nd = frontend::node(node);
         // a key the name's object surely has (stored through the name): no failure
         if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {

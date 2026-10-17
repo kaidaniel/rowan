@@ -531,6 +531,10 @@ pub fn m_seq_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if !count {
         an.may_raise_here("ValueError", st);
     }
+    // (of the program's lists and tuples: an int)
+    if !an.m.torch_on && !recv.pts.is_empty() && recv.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple)) {
+        return Value::data(&crate::domain::typed_label("int", ""));
+    }
     Value::data(if count { "count" } else { "index" })
 }
 
