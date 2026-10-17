@@ -586,7 +586,8 @@ async function early() {
   const res = await runEngineServer(bin, f, [], 60, []);
   const first = Date.now() - t0;
   // (a machine fast enough to analyse it whole within the wait: one answer)
-  // (the whole program's analysis cut at its deadline: its hovers say so, last)
+  // (the whole program's analysis cut at its deadline: its hovers say so, last; the grids'
+  // entry runs take seconds, so a run past 1 ms is cut even when the module code is done by then)
   const fsrc = fs.readFileSync(f, "utf8").split("\n");
   const cutRes = JSON.parse(execFileSync(bin, [f, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "ms=1" }, maxBuffer: 64 * 1024 * 1024 }).toString());
   assert(cutRes.analysis.cut, JSON.stringify(cutRes.analysis));
