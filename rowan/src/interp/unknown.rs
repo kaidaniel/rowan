@@ -219,6 +219,10 @@ impl Havoc {
 }
 
 impl Analyzer {
+    /// A call of code rowan cannot see (`qual`: its name; `recv`: a method's receiver): it may
+    /// raise; what it is given, and everything that reaches, may change (`havoc_reachable`); the
+    /// program's functions it is given may run (`follow_code`); it returns an unknown named by
+    /// the call, which may be one of the known objects it was given.
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise
@@ -348,6 +352,7 @@ impl Analyzer {
         }
     }
 
+    /// The records (and namespaces) `vals` reach through slots, at most `depth` steps below them.
     pub(in crate::interp) fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
         let mut out: Vec<(u32, Ns)> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();

@@ -314,6 +314,8 @@ impl Analyzer {
         self.load_item(&obj, Ns::Item, &key, &nd, state, true)
     }
 
+    /// A subscript's key: a tuple of literals is one literal key, else a tuple object; a slice
+    /// an unknown labelled with its known bounds (`slice[1:3:1]@L5`); else the expression.
     pub fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
             ast::Expr::Tuple(t) => {

@@ -11,16 +11,20 @@
 //! * the interpreter's `pub` methods, which are these:
 //!   - evaluation: `eval`, `eval_key`, `exec_block`, `run_module`, `stmt_try_parts`, `load_name`,
 //!     `frame`, `frame_mut`;
+//!   - modules: `import_module`, `make_module`, `is_local_module`, `type_only_name`,
+//!     `file_of_frame`;
 //!   - reads and writes: `load_attr`, `load_item`, `store_attr`, `store_item`, `store_key`,
-//!     `delete_item`, `copy_into`, `copy_object`, `method_value`, `class_lookup`, the literal
-//!     views (`lit_keys`, `literal_mapping`, `literal_dict_items`, `maybe_dict_items`,
-//!     `known_members`, `known_positions`, `all_values`, `record_objects`) and their writers
-//!     (`set_members`, `set_positions`, `normalize_set`, `literal_set`), keys (`unkey`,
-//!     `opaque_key`, `value_key`, `rename_kv`), `path_placeholder_value`;
+//!     `delete_item`, `delete_subscript`, `copy_into`, `copy_object`, `method_value`,
+//!     `class_lookup`, `class_lookup_on_path`, the literal views (`lit_keys`, `sure_lit_keys`,
+//!     `literal_mapping`, `literal_dict_items`, `maybe_dict_items`, `known_members`,
+//!     `known_positions`, `all_values`, `record_objects`) and their writers (`set_members`,
+//!     `set_positions`, `add_elem`, `normalize_set`, `literal_set`), keys (`unkey`, `opaque_key`,
+//!     `value_key`, `rename_kv`, `hashes_keys`, `check_hashable`, `check_hashable_if`),
+//!     `path_placeholder_value`;
 //!   - operations: `binop`, `truthiness`, `truth_of`, `instance_less`, `isinstance_classes`,
-//!     `instance_of`, `hierarchy_closed`;
-//!   - iteration: `iterate`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`, `cursor_of`,
-//!     `set_cursor`, `exhaust`;
+//!     `instance_of`, `hierarchy_closed`, `value_type`, `as_type`;
+//!   - iteration: `iterate`, `iterable_part`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`,
+//!     `cursor_of`, `set_cursor`, `exhaust`, `gen_took_item`;
 //!   - calls: `call_value`, `call_one`, `call_user`, `call_external`, `unknown_call`,
 //!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
 //!     `decorator_qualname`;
@@ -30,8 +34,10 @@
 //!     `reraise_rec`, `guards`;
 //!   - verdicts and requirements: `verdict`, `verdict_guarded`, `is_guarded`,
 //!     `require_providers`, `require_providers_k`;
-//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`,
-//!     and the driver's `run`.
+//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`;
+//!   - the driver's: `new`, `run`, `was_cut`, `set_cancel`, and for runs on demand
+//!     `main_block_unrun`, `on_demand`, `general_run_at`, `general_run_of`,
+//!     `outermost_functions`.
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -45,19 +51,25 @@ use crate::state::State;
 /// Everything a model needs about a call.
 #[derive(Clone)]
 pub struct Call {
+    /// the qualified name of what is called (`json.loads`, `dict.get`)
     pub qual: String,
+    /// a method's receiver
     pub recv: Option<Value>,
     pub args: Vec<Value>,
     pub kwargs: IndexMap<StrId, Value>,
+    /// the values of `*xs` and `**kw` arguments
     pub star_args: Vec<Value>,
     pub star_kwargs: Vec<Value>,
     pub node: Node,
+    /// the call as written (None: a call the interpreter makes, a dunder, a callback)
     pub call_ast: Option<&'static ast::ExprCall>,
+    /// `L{line}`: where the call's objects are made
     pub site: String,
     pub line: u32,
 }
 
 impl Call {
+    /// Argument `i`, or the keyword `name`.
     pub fn arg(&self, i: usize, name: Option<&str>) -> Option<Value> {
         if i < self.args.len() {
             return Some(self.args[i].clone());
@@ -69,6 +81,7 @@ impl Call {
         }
         None
     }
+    /// The keyword argument `name`.
     pub fn kw(&self, name: &str) -> Option<Value> {
         self.kwargs.get(&s(name)).cloned()
     }
@@ -101,10 +114,11 @@ impl Analyzer {
         &self.program.user_classes
     }
 
-    /// The main module's object and frontend index.
+    /// The main module's object.
     pub fn main_module(&self) -> ObjId {
         self.program.main_module
     }
+    /// The main module's frontend index.
     pub fn main_idx(&self) -> u32 {
         self.program.main_idx
     }

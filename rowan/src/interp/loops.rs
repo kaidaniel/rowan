@@ -18,6 +18,8 @@ use super::{Analyzer, LoopCtx, UNROLL_MAX};
 pub const LOOP_MAX_ITER: usize = 40;
 
 impl Analyzer {
+    /// A `while` loop: iterations whose test is decided at the head unrolled, the rest a
+    /// fixpoint (`stmt_while_loop`).
     pub(super) fn stmt_while(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         // iterations whose test is decided at the head run as straight-line code (a constant
         // test such as `while True` is decided by the body alone: not unrolled); the rest of
@@ -109,6 +111,8 @@ impl Analyzer {
         }
     }
 
+    /// A `while` loop run to its fixpoint: each round splits on the test, runs the body; the
+    /// exit is where the test is false, joined with the breaks.
     pub(super) fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let sp = an.split(&w.test, body_s.copy());
@@ -220,6 +224,9 @@ impl Analyzer {
         breaks
     }
 
+    /// A `for` loop: over a user iterator one `__next__` per round; over known items unrolled
+    /// (`for_unrolled`), over a known prefix partly so (`for_known_prefix`); else a fixpoint
+    /// over any element, the requirements on the elements' inputs read per element.
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let itv = self.iterable_part(&itv, state);

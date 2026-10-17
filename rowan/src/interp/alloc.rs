@@ -8,17 +8,18 @@ use rustc_hash::FxHashSet;
 use super::{site_string, Analyzer, Payload};
 use crate::domain::{Ns, ObjId, Row};
 use crate::frontend::Node;
-use crate::intern::{self, KeyId};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
 impl Analyzer {
     // ------------------------------------------------------------ allocation
+    /// The one object of a site in no context (a builtin's, a model's shared object).
     pub(in crate::interp) fn alloc_global(&mut self, kind: Kind, site: &str, label: &str, payload: Payload) -> ObjId {
         let label = if label.is_empty() { site } else { label };
         self.heap.alloc_raw(kind, site, "", true, label, payload)
     }
 
+    /// A node's site label (`site_string`).
     pub(in crate::interp) fn site_of(&self, node: &Node) -> String {
         site_string(node)
     }
@@ -178,19 +179,14 @@ impl Analyzer {
         self.alloc_at(kind, node, state, label, Payload::None, None, Ns::Item, None, None)
     }
 
-    pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str, ctx: &str, _ns: Ns, path: Vec<KeyId>) -> ObjId {
-        let src = intern::source(Source { site: site.into(), kind, path });
+    /// The unknown object standing for input `site` (of `kind`): open through it, labelled
+    /// `label` (its source's label if empty); a parameter or an unbound name also gets its name
+    /// as the report's symbol.
+    pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str) -> ObjId {
+        let src = Source::new(site, kind);
         let slabel = crate::source::source_label(src);
-        let kname = match kind {
-            SourceKind::External => "external",
-            SourceKind::Call => "call",
-            SourceKind::Param => "param",
-            SourceKind::Name => "name",
-            SourceKind::Data => "data",
-            SourceKind::Class => "class",
-        };
         let label = if label.is_empty() { slabel.clone() } else { label.to_string() };
-        let oid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kname, slabel), ctx, true, &label, Payload::None);
+        let oid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind.name(), slabel), "", true, &label, Payload::None);
         for n in [Ns::Item, Ns::Attr] {
             if !state.has_row(oid, n) {
                 state.set_row(oid, n, Row::with_source(src));

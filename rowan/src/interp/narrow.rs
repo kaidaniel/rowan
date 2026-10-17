@@ -486,6 +486,8 @@ impl Analyzer {
         }
     }
 
+    /// Narrows `cur` (then written back to `store`) by `isinstance(…, cls_expr)` being `truth`:
+    /// the objects that are surely (not) instances go.
     pub(in crate::interp) fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
         let Some(cv) = self.traced(cls_expr) else { return };
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
@@ -612,6 +614,7 @@ impl Analyzer {
         true
     }
 
+    /// Is the program's class `cls` `base` or derived from it (through the program's classes)?
     pub(in crate::interp) fn is_subclass(&self, cls: u32, base: u32) -> bool {
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
@@ -865,6 +868,7 @@ impl Analyzer {
         }
     }
 
+    /// Narrows name `name`'s scalar part by `name in keys` (`restrict`) or `not in`.
     pub(in crate::interp) fn narrow_kv(&mut self, name: StrId, keys: &KeySet, restrict: bool, state: &mut State) {
         if keys.is_empty() {
             return;
@@ -905,6 +909,8 @@ impl Analyzer {
         }
     }
 
+    /// Narrows the records `rec` may be by `k in rec` being `member`: the key there (a closed
+    /// record without it: the path cannot run), or not there.
     pub(in crate::interp) fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
         let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         let single = targets.len() == 1;
@@ -980,6 +986,8 @@ fn membership_record(right: &'static ast::Expr) -> &'static ast::Expr {
     }
 }
 
+/// Is a library class one `isinstance` checks by structure, not by class (`collections.abc`,
+/// `typing` protocols, `numbers`, …): no instance surely is not one?
 pub fn is_structural_qual(q: &str) -> bool {
     q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
 }

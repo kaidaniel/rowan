@@ -287,7 +287,7 @@ fn fa_param(an: &mut Analyzer, func: ObjId, p: &'static ast::ParameterWithDefaul
     let marker = meta.or_else(|| fa_marker(an, &fi, &pname));
     let ann_name = ann.map(scalar_ann_name).unwrap_or_default();
     let open = |an: &mut Analyzer, st: &mut State| -> Value {
-        Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
+        Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname)))
     };
     // a dependency: its result
     if let Some((q, g)) = &marker {
@@ -314,7 +314,7 @@ fn fa_param(an: &mut Analyzer, func: ObjId, p: &'static ast::ParameterWithDefaul
                 Some(j) => j,
                 None if req.is_some() => Value::data("body"),
                 None => {
-                    let src = Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("{}.json()", pname), "", Ns::Item, vec![]));
+                    let src = Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("{}.json()", pname)));
                     src
                 }
             };
@@ -762,7 +762,7 @@ pub fn fa_entry_through_middleware(an: &mut Analyzer, func: ObjId, state: &mut S
     let first = *mws.first()?;
     let idx = an.m.fa_routes.iter().position(|r| r.func == Some(func))?;
     let fi = an.heap.func_info(func);
-    let body = Value::obj(an.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
+    let body = Value::obj(an.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()"));
     let robj = fa_obj(an, state, node, "fastapi.request", body, &format!("entryreq{}", func));
     let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
     let n = an.m.fa_pending.len();

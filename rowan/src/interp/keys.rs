@@ -156,6 +156,8 @@ impl Analyzer {
         Value::with_kv(pts, kv)
     }
 
+    /// The scalar with each literal key as record `oid` holds it (`canon_key`: `True` as an
+    /// existing `1`, …).
     pub(in crate::interp) fn canon_kv(&self, oid: u32, ns: Ns, kv: &KeyVal, state: &State) -> KeyVal {
         match kv {
             KeyVal::Lit(k) => KeyVal::Lit(self.canon_key(oid, ns, *k, state)),

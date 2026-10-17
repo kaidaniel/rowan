@@ -417,6 +417,20 @@ pub enum SourceKind {
     Class,
 }
 
+impl SourceKind {
+    /// The kind's name (in an unknown input's allocation site).
+    pub fn name(self) -> &'static str {
+        match self {
+            SourceKind::External => "external",
+            SourceKind::Call => "call",
+            SourceKind::Param => "param",
+            SourceKind::Name => "name",
+            SourceKind::Data => "data",
+            SourceKind::Class => "class",
+        }
+    }
+}
+
 /// A reason an object may have keys rowan does not see: an input, named by where it comes
 /// from (`site`), and the keys below it the object was read through (`path`:
 /// `json.loads@L3['db']`). Interned: rows hold `SourceId`s.

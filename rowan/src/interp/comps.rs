@@ -19,6 +19,8 @@ impl Analyzer {
         self.with_gen_restart(state, true, &mut |an, st| an.comp_scoped(gens, limit, st, body, own));
     }
 
+    /// Runs a comprehension's generators (`comp_gen`) with `body` per item, its variables in a
+    /// scope of their own (the enclosing names they shadow put back after), and their cells.
     pub(super) fn comp_scoped(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         let mut names: Vec<intern::StrId> = gens.iter().flat_map(|g| names_in(&g.target)).map(|n| s(&n)).collect();
         names.sort_unstable();
@@ -42,6 +44,8 @@ impl Analyzer {
         }
     }
 
+    /// Generator level `i` of a comprehension: its items unrolled when known (up to `limit`),
+    /// else a fixpoint over any item; its filters split the state; the next level, or `body`.
     pub(super) fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         if i == gens.len() {
             body(self, state);
@@ -216,6 +220,8 @@ impl Analyzer {
         decided
     }
 
+    /// Binds a comprehension's target to an item (each pass over any item a view of its own),
+    /// and the cells of its variables.
     pub(super) fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
         self.bind_iter_target(target, it, state);
         // (a pass standing for every item: each one an object of its own)
@@ -236,6 +242,8 @@ impl Analyzer {
         }
     }
 
+    /// A dict comprehension: a dict whose keys and values the items give (strong per item when
+    /// unrolled, else open through the keys).
     pub(super) fn expr_dictcomp(&mut self, dc: &'static ast::ExprDictComp, node: &'static ast::Expr, state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(Kind::Dict, &nd, state, &format!("dictcomp@L{}", nd.line), Payload::None, None, Ns::Item, None, None);
@@ -255,6 +263,8 @@ impl Analyzer {
         Value::obj(oid)
     }
 
+    /// A list, set or generator comprehension: a container of the items' values (positions per
+    /// unrolled item when the filters are decided, else elements of no known length).
     pub(super) fn seq_comp(&mut self, node: &'static ast::Expr, kind: Kind, elt: &'static ast::Expr, gens: &'static [ast::Comprehension], state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}comp@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);

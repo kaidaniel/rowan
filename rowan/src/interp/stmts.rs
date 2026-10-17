@@ -13,7 +13,8 @@ use crate::syntax::{collect_assigned, contains_jump};
 use super::{Finally, Handler, Analyzer, FuncNode, Payload};
 
 impl Analyzer {
-
+    /// Runs statements in order, until the path ends (`after_stmt`: the hover facts and row
+    /// checks of each).
     pub fn exec_block(&mut self, stmts: &'static [ast::Stmt], state: &mut State) {
         for st in stmts {
             if !state.reachable {
@@ -24,6 +25,8 @@ impl Analyzer {
         }
     }
 
+    /// Runs one statement, charged to the running function's budget (past the deadline a
+    /// function body stops: `cut_body`).
     pub(in crate::interp) fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.budget.charge(self.cx.frames.last().map(|f| f.code).unwrap_or(0));
         if self.cut_body(state) {

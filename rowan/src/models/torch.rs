@@ -366,7 +366,7 @@ pub fn t_param(an: &mut Analyzer, ann: &'static ruff_python_ast::Expr, fi: &crat
         ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
         _ => return None,
     };
-    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::source::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::source::SourceKind::Param, state, &format!("param {}", pname));
     if is_str {
         if let Some(sy) = t_sym_of_obj(an, poid) {
             an.m.t_strs.insert(sy);

@@ -195,6 +195,7 @@ impl Default for State {
 pub struct Joins(Vec<(State, usize)>);
 
 impl Joins {
+    /// One more state to join.
     pub fn add(&mut self, s: State) {
         let mut cur = (s, 1);
         while let Some((mut prev, n)) = self.0.pop() {
@@ -207,6 +208,7 @@ impl Joins {
         self.0.push(cur);
     }
 
+    /// The join of the states added (None: none).
     pub fn finish(self) -> Option<State> {
         State::join_all(self.0.into_iter().map(|(s, _)| s).collect())
     }

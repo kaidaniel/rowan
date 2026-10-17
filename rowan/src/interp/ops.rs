@@ -192,6 +192,9 @@ impl Analyzer {
         }
     }
 
+    /// `a op b`: each part on its own (literals beside objects), CPython's result on known
+    /// literals, the program's operator dunders, the models' (tensors, frames, …), else an
+    /// unknown of the type the operands' types give (`int + int`: `int(?)`).
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(r) = self.split_mixed(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
             return r;
@@ -656,7 +659,7 @@ impl Analyzer {
                 if !v.pts.is_empty() && v.kv.is_literal() {
                     let nd = frontend::node(node);
                     let site = format!("fstring@L{}", nd.line);
-                    let o = self.unknown_source(&site, crate::source::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    let o = self.unknown_source(&site, crate::source::SourceKind::Data, state, &site);
                     self.heap.obj_mut(o).payload = Payload::Affix(pre, post);
                     return Value::with_kv(ObjSet::one(o), kv);
                 }

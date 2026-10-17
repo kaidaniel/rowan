@@ -45,6 +45,7 @@ pub struct Recursion {
 }
 
 impl Recursion {
+    /// Is this activation running (a call of it is recursive)?
     pub(in crate::interp) fn is_active(&self, key: &ActKey) -> bool {
         self.active.contains(key)
     }

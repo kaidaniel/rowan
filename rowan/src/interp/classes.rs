@@ -11,6 +11,9 @@ use crate::state::{Kind, State};
 use super::{Analyzer, ClassInfo, Frame, FrameKind, Payload};
 
 impl Analyzer {
+    /// A `class` statement: its bases (library ones say what it is), the class object, its body
+    /// run in a class frame (names become class attributes), then its decorators and what its
+    /// library bases make of it (enum members, dataclass fields, pydantic, NamedTuple, …).
     pub(super) fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
         let fr_module = self.frame().module;
         let fr_ctx = self.frame().ctx.clone();

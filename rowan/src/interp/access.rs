@@ -62,15 +62,18 @@ impl Analyzer {
         })
     }
 
+    /// Does a running handler catch a failing read in namespace `ns` here?
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want = self.guard_names(ns);
         self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
+    /// The records among the objects `v` may be.
     pub fn record_objects(&self, v: &Value) -> Vec<u32> {
         v.pts.iter().filter(|o| self.heap.is_record(*o)).collect()
     }
 
+    /// `require_providers_k` for an item read of no particular key.
     pub fn require_providers(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State) {
         self.require_providers_k(cls, row, with_alts, state, None, Ns::Item)
     }

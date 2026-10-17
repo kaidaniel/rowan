@@ -340,6 +340,9 @@ impl Analyzer {
         self.truthiness(v, state)
     }
 
+    /// Is `v` surely true or surely false (None: either)? Literals by Python's rules; a list,
+    /// tuple or set of known length; a dict with a key on every path, or none; instances without
+    /// `__bool__` / `__len__`, functions, classes and modules are true.
     pub fn truthiness(&mut self, v: &Value, state: &State) -> Option<bool> {
         if v.pts.is_empty() && v.kv.is_literal() {
             let lits = crate::domain::kv_literals(&v.kv);
@@ -360,9 +363,6 @@ impl Analyzer {
         let mut verdicts: Vec<bool> = Vec::new();
         for oid in v.pts.iter() {
             match self.heap.kind(oid) {
-                Kind::List | Kind::Tuple | Kind::Set if self.heap.llen(oid, state).is_some() => {
-                    verdicts.push(self.heap.llen(oid, state).unwrap() > 0);
-                }
                 Kind::Dict => {
                     let row = state.row(oid, Ns::Item);
                     if !row.definite.is_empty() {

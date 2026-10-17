@@ -34,10 +34,13 @@ pub enum Origin {
 /// The value an origin gives, or something it holds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Level {
+    /// the value itself
     Own,
+    /// something it holds (its items, its attributes' values)
     Held,
 }
 
+/// Where a value comes from: an origin, and whether it is that value or something it holds.
 pub type Src = (Origin, Level);
 
 /// A callee by the name the code calls it: `f(…)` (f, None), `m.f(…)` (m, Some(f)).
@@ -203,6 +206,7 @@ pub struct RecvUse {
 pub struct Like(Vec<Result<String, Option<String>>>);
 
 impl Like {
+    /// Could the template make the name `k` (it starts and ends as the template's literal ends)?
     pub fn matches(&self, k: crate::intern::KeyId) -> bool {
         let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
         let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
@@ -276,6 +280,7 @@ pub struct Flow<'a> {
 }
 
 impl<'a> Flow<'a> {
+    /// A scan of code whose own names `locals` picks, `me` its receiver's name, in package `pkg`.
     pub fn new(locals: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
         Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
     }
@@ -1136,6 +1141,7 @@ pub struct NameUses {
 }
 
 impl NameUses {
+    /// Adds the names these statements call and use.
     pub fn scan(&mut self, body: &'static [Stmt]) {
         body.iter().for_each(|st| ast::visitor::Visitor::visit_stmt(self, st));
     }

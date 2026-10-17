@@ -741,7 +741,7 @@ impl Analyzer {
     /// A declared row for an annotated entry-point parameter.
     /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
-        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), "", Ns::Item, vec![])
+        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id))
     }
 
     /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
@@ -858,7 +858,7 @@ impl Analyzer {
         let ci = self.heap.class_info(cls_oid);
         if self.entry.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance
-            return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]));
+            return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name)));
         }
         let any = self.entry.any_instance;
         self.entry.fresh_in_progress.insert(cls_oid);

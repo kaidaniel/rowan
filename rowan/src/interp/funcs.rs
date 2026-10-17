@@ -18,6 +18,7 @@ use crate::state::{Kind, State};
 use super::iter::Elem;
 use super::{is_builtin_name, Analyzer, FrameKind, FuncInfo, FuncNode, Payload, KNOWN_IDENTITY_DECORATORS};
 
+/// The key a closure cell's value is under (`Ns::Cell`).
 pub fn cell_key() -> KeyId {
     key_str_lit("v")
 }
@@ -359,7 +360,7 @@ impl Analyzer {
             let oid = self.heap.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, &nm, Payload::Str(format!("builtins.{}", nm)));
             return Value::obj(oid);
         }
-        let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm), "", Ns::Item, vec![]);
+        let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm));
         Value::obj(oid)
     }
 
