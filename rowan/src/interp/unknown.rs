@@ -186,7 +186,7 @@ impl Havoc {
                 state.slots.each(&o, &mut |_, v| met.extend(v.pts.iter()));
             }
         }
-        self.code.extend(met.into_iter().filter_map(|o| code_of(heap, o)));
+        self.code.extend(met.into_iter().filter_map(|o| compared_code(heap, o)));
     }
 
     /// Where a walk from the same values by the same code left off (`memo`): the objects it
@@ -453,6 +453,11 @@ impl Analyzer {
             state.facts = std::sync::Arc::new(kept);
         }
     }
+}
+
+/// The code comparing or hashing `o` may run (a function's runs none of its code).
+pub(in crate::interp) fn compared_code(heap: &Heap, o: ObjId) -> Option<ObjId> {
+    code_of(heap, o).filter(|c| heap.kind(*c) != Kind::Function)
 }
 
 /// The code object `o` is or is an instance of (what running or comparing it may run).

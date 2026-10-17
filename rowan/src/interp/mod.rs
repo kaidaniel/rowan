@@ -70,6 +70,9 @@ pub use crate::models::tables::*;
 /// A `for` over at most this many known items is unrolled (each iteration straight-line code);
 /// a comprehension that calls nothing per item, up to four times as many (`comps.rs`).
 pub const UNROLL_MAX: usize = 16;
+/// A call of a value that may be more than this many of the program's functions is one call
+/// none of which runs (`budget_skipped`).
+pub const PICK_MAX: usize = 64;
 /// How many keys deep below an open input a read makes placeholders (`path_placeholder_value`);
 /// deeper reads are unknowns.
 pub const PATH_DEPTH: u32 = 3;
