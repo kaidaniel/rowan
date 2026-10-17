@@ -1240,7 +1240,7 @@ impl Analyzer {
         let label = format!("{} of {}@L{}", tag, base, node.line);
         let payload = self.heap.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
-        self.heap.copy_root.insert(nid, root);
+        self.heap.set_copy_root(nid, root);
         seen.insert(oid, nid);
         let ll = self.heap.llen(oid, state);
         self.heap.set_llen(nid, state, ll);

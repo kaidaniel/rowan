@@ -727,7 +727,7 @@ impl Analyzer {
                 v.push_objs(&mut work);
             }
         }
-        self.gc_pinned(&mut work, None);
+        self.gc_pinned(&mut work, None, None);
         // (at module level the target is a global: the module's other names)
         let module = matches!(self.frame().kind, super::FrameKind::Module).then(|| self.frame().module);
         let mut seen: rustc_hash::FxHashSet<ObjId> = Default::default();
