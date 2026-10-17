@@ -624,7 +624,7 @@ fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize), only: Opti
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let after = an.work_counts();
         let w: Vec<usize> = (0..4).map(|i| after[i] - before[i]).collect();
-        let _ = writeln!(so, "{}", serde_json::json!({"function": fi.py_qualname(), "file": file, "line": first, "ms": (ms * 10.0).round() / 10.0, "statements": w[0], "runs": w[1], "objects": w[2], "havoc": w[3], "cut": an.was_cut()}));
+        let _ = writeln!(so, "{}", serde_json::json!({"function": fi.py_qualname(), "file": file, "line": first, "ms": (ms * 10.0).round() / 10.0, "statements": w[0], "runs": w[1], "objects": w[2], "havoc": w[3], "cut": an.was_cut(), "callees_cut": !an.analysis_json()["callees_cut"].is_null()}));
         // (as `rowan serve` does: set up again past `REBUILD_OBJECTS`, the functions' objects
         // the same — the module's code makes them alike)
         if after[2] > setup_objects + REBUILD_OBJECTS {

@@ -4342,7 +4342,7 @@ fn pivot(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => known_or_open(None, &base, c.line, "pivot_table"),
         },
         Some(_) => {
-            let flat = values_single || (!table && values.as_ref().map(|v| v.len() == 1).unwrap_or(false) && values_single);
+            let flat = values_single;
             match (&colvals, &vcols) {
                 (Some(k), _) if flat => {
                     let mut r = k.row();
@@ -5729,4 +5729,66 @@ fn select_from(an: &mut Analyzer, recv: &Value, cols: Option<Value>, node: &Node
         an.set_symbol(sid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
     }
     Value::obj(sid)
+}
+
+/// `x.drop(columns=[…])` / `x.drop([…], axis=1)` / `x.drop(index=…)` on a value of unknown type
+/// holding an input (`unknown_input`): a selection of x without those columns, tied to x (what
+/// code reads of it, it reads of x). Dropping a column reads it of x (a missing one raises
+/// KeyError, unless `errors="ignore"`). None: not such a call (`inplace=True`, a `**` argument,
+/// labels not written out).
+pub fn unknown_drop(an: &mut Analyzer, c: &'static ruff_python_ast::ExprCall, node: &Node, st: &mut State) -> Option<Value> {
+    use ruff_python_ast::Expr as E;
+    let E::Attribute(a) = &*c.func else { return None };
+    if a.attr.as_str() != "drop" || !matches!(&*a.value, E::Name(_)) || c.arguments.args.len() > 1 || c.arguments.args.iter().any(|x| x.is_starred_expr()) {
+        return None;
+    }
+    let kw = |n: &str| c.arguments.keywords.iter().find(|k| k.arg.as_ref().is_some_and(|x| x.as_str() == n)).map(|k| &k.value);
+    if c.arguments.keywords.iter().any(|k| k.arg.is_none() || !matches!(k.arg.as_ref().unwrap().as_str(), "columns" | "index" | "labels" | "axis" | "errors")) {
+        return None;
+    }
+    let recv = an.eval(&a.value, st);
+    if !unknown_input(an, &recv, st) {
+        return None;
+    }
+    let lit = |e: Option<&'static E>| e.map(|e| match e {
+        E::StringLiteral(s) => Some(s.value.to_str().to_string()),
+        E::NumberLiteral(n) => match &n.value {
+            ruff_python_ast::Number::Int(i) => Some(i.to_string()),
+            _ => None,
+        },
+        _ => None,
+    });
+    let on_columns = matches!(lit(kw("axis")), Some(Some(ref x)) if x == "columns" || x == "1");
+    let labels = c.arguments.args.first().or_else(|| kw("labels"));
+    let cols_e = kw("columns").or(if on_columns { labels } else { None });
+    let rows_e = kw("index").or(if on_columns { None } else { labels });
+    if kw("axis").is_some() && !on_columns && !matches!(lit(kw("axis")), Some(Some(ref x)) if x == "index" || x == "0") {
+        return None;
+    }
+    let cols_v = cols_e.map(|e| an.eval(e, st));
+    if let Some(e) = rows_e {
+        an.eval(e, st);
+    }
+    let cols: Vec<KeyId> = match &cols_v {
+        Some(v) => match lit_key_seq(an, st, v).or_else(|| v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| vec![k])) {
+            Some(ks) => ks,
+            None => return Some(an.unknown_call("drop", Some(&recv), &[], &Default::default(), &[], &[], st, node)),
+        },
+        None => Vec::new(),
+    };
+    if !matches!(lit(kw("errors")), Some(Some(ref x)) if x == "ignore") {
+        for k in &cols {
+            an.load_item(&recv, Ns::Item, &Value::lit(*k), node, st, true);
+        }
+    }
+    let v = select_from(an, &recv, None, node, st);
+    if let Some(sid) = v.single() {
+        let mut r = st.row(sid, Ns::Item);
+        for k in &cols {
+            r = r.delete(*k, true);
+            st.pop_slot(sid, Ns::Item, *k);
+        }
+        st.set_row(sid, Ns::Item, r);
+    }
+    Some(v)
 }

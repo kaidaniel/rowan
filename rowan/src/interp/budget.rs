@@ -53,6 +53,8 @@ pub struct Budget {
     /// the frames it runs in (its own calls run; past `past_hover_work`, its callees' calls are
     /// unknown)
     pub hover: Option<(usize, usize)>,
+    /// on demand, a callee's call was past `past_hover_work` (the run's note says so)
+    pub hover_cut: std::cell::Cell<bool>,
     /// calls run no body (`skips_calls`): the main module's `if __name__ == "__main__":` block
     /// while the module code is set up for runs on demand (`Analyzer::main_block_unrun`)
     pub skip_calls: bool,
@@ -117,12 +119,22 @@ impl Budget {
         self.out.clear();
         self.started = Clock::default();
         self.hard_cut = false;
+        self.hover_cut.set(false);
     }
 
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
     /// one of a callee's, past the work a function's run on demand may do (four budgets)?
     pub fn past_hover_work(&self, frames: usize, work: usize) -> bool {
-        self.skip_calls || self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > 4 * limit("budget", FN_BUDGET))
+        let past = self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > Self::hover_work_limit());
+        if past {
+            self.hover_cut.set(true);
+        }
+        self.skip_calls || past
+    }
+
+    /// The work a function's run on demand may do before its callees' calls are unknown.
+    pub fn hover_work_limit() -> usize {
+        4 * limit("budget", FN_BUDGET)
     }
 
     /// Has the deadline cut the analysis? Checked at every statement (`cut_body`): one statement

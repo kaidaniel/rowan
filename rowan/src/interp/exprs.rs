@@ -193,6 +193,9 @@ impl Analyzer {
 
     /// A call: the callee, its arguments (`*` / `**` unpacked), `call_value`.
     fn expr_call(&mut self, c: &'static ast::ExprCall, node: &'static ast::Expr, state: &mut State) -> Value {
+        if let Some(v) = crate::models::pandas::unknown_drop(self, c, &frontend::node(node), state) {
+            return v;
+        }
         // (the tensor model reads `x.dim` as a method only when it is called)
         self.m.t_called_attr = frontend::node(&*c.func).addr;
         self.mode.callee_nodes.insert(self.m.t_called_attr);

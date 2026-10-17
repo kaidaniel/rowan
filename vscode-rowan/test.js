@@ -181,6 +181,10 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
     "    return out",
     "",
     "",
+    "def h(hits: list[dict[str, str]], opt: dict[str, list[int | None]] | None, t: tuple[int, ...]):",
+    "    return hits, opt, t",
+    "",
+    "",
     "f(1, 2)",
     "",
   ].join("\n"));
@@ -201,6 +205,11 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const out = hover(idx, src, 8, "out");
   assert(out.includes('out = {"nums": list[int(?)], "sizes": dict[?, int(?)]}'), out);
   assert(out.includes("- `int(?)`: an int not known statically"), out);
+  // (a builtin container annotation: with its parts' types)
+  assert.strictEqual(head("hits", 12), "hits = (parameter) list[dict[str(?), str(?)]]");
+  assert.strictEqual(head("opt", 12), "opt = (parameter) None | dict[str(?), list[int(?) | None]]");
+  assert.strictEqual(head("t", 12), "t = (parameter) tuple[int(?), ...]");
+  assert(hover(idx, src, 12, "hits").includes("- `str(?)`: a str not known statically"), hover(idx, src, 12, "hits"));
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
@@ -313,9 +322,18 @@ const hd = renderHover("d", ki.facts.get("12:d"), verdictsForWord(ki.verdicts.ge
 assert(hd.includes('```python\nd = {"k": 1}\n```') && !hd.includes("✗") && diagnosticMessage(vq) === 'key "q" is never set', hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
-// (where an object was made, when not on the hovered line; a key it never has here)
-assert(hover(ki, ksrc, 15, "e").endsWith('**Allocation Sites**\n- created on line 13\n- never has key "b" here'), hover(ki, ksrc, 15, "e"));
+// (where an object was made, when not on the hovered line nor by the name's own assignment;
+// a key it never has here, unless the headline shows the dict whole: `e = {"a": 1}` on line 15
+// says both)
+assert(!hover(ki, ksrc, 15, "e").includes("Allocation Sites"), hover(ki, ksrc, 15, "e"));
 assert(!hover(ki, ksrc, 13, "e").includes("Allocation Sites"), hover(ki, ksrc, 13, "e"));
+assert(hover(a01idx, a01src, 9, "r").includes("**Allocation Sites**\n- created on line 2\n"), hover(a01idx, a01src, 9, "r"));
+assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx, a01src, 5, "d"));
+{
+  const pm = path.join(root, "tests", "pandas", "models", "pm01_sales_etl.py");
+  const h = hover(indexResult(facts(pm)), fs.readFileSync(pm, "utf8").split("\n"), 71, "df");
+  assert(h.includes('**Allocation Sites**\n- one of 3 objects, all created on line 67 (by different calls or loop iterations)\n- never has key "discount" here'), h);
+}
 
 // ---- the owner's rnn (pytorch-playground): V = len(vocab) of unknown text names the dims
 {
@@ -466,6 +484,15 @@ async function onDemand() {
   assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?`: possible key'), d5);
   const u2 = hover(bidx, a01src, 2, "user");
   assert(u2.includes("```python\nuser = (parameter)\n```\n\n**Requirements**\n- `user.id`") && !u2.includes("In Calls"), u2);
+  // (its callees past the work a run on demand may do: the note says their calls were unknown)
+  const cutCallees = indexResult({ ...b.result, analysis: { ...b.result.analysis, callees_cut: 16384 } });
+  const d5c = hover(cutCallees, a01src, 5, "d");
+  assert(/\n- analysed on demand: this function alone, for any call, in [^\n]*, because the whole program's analysis took too long; past 16,384 statements, the calls made by the functions it calls were taken as unknown code$/.test(d5c), d5c);
+  // (and the engine says when it happened: `main` calls functions that call others, past a
+  // budget of 5 statements)
+  const deploy = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
+  const runs = execFileSync(bin, ["hovers", deploy, "--only", "main"], { env: { ...process.env, ROWAN_LIMITS: "budget=5" } }).toString().trim().split("\n").slice(1).map((l) => JSON.parse(l));
+  assert(runs.length === 1 && runs[0].callees_cut === true, JSON.stringify(runs));
   // (a second hover in the same function: the cached document, merged once into the index)
   const again = await hoverServer(bin, a01, 4, [], 60);
   assert.deepStrictEqual(again.span, [1, 5]);
@@ -495,7 +522,7 @@ async function onDemand() {
       checkFormat(h, name, where, fs_);
       assert(!h.includes("**In Calls**"), where);
       // (said last: the function was analysed alone, for any call, and how long it took)
-      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long$/.test(h), where);
+      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long(; past [\d,]+ statements, the calls made by the functions it calls were taken as unknown code)?$/.test(h), where);
     }
   }
   stopServers();

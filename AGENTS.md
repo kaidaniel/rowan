@@ -53,19 +53,20 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
-  * **Recursion:** the inner call uses the running activation's partial result; the activation
-    reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
+  * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
     and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
     cannot change); the program's functions among it may run (`follow_code`). A walk from the same
-    values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
-    Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their
-    arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives` (unknown values: one
-    unknown call; a method on several receivers: one call per function when it would not run, or on demand; those
-    none of which runs — out of budget, past the work on demand or the deadline — one `skipped_calls`).
+    values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything; its
+    items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
+    through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
+    known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
+    the program's functions; several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one
+    call per function when it would not run, or on demand; those none of which runs — out of budget, past the work on demand
+    or the deadline — one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict or set (`check_hashable`). Models,
     operators and subscripts on literals beside objects (`"a" if c else [1]`) run on each part (`split_mixed`).
@@ -75,15 +76,15 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
     end after any of the program's functions ran (`follow_code` over all, a result as its callers
     use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
-    module code's calls (`note_call`); parameters as annotated, a method on any instance (on demand, of a subclass past 64
+    module code's calls (`note_call`); parameters as annotated (`list[dict[str, int]]`'s parts too: `Heap::ann`), a method on any instance (on demand, of a subclass past 64
     of them: any attributes), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
-* **Generators** run whole at their first consumption (`force_gen`), in the creating call's
-  context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
-  not known, or one object for several runs, some yield's; joined in where the consumer changed them). If code between items (where the consumer asks for one:
-  `note_resume`; unknown code, deletes too) changes what the generator reads after a yield
-  (`Gens::watch`, also after the call that started it while held, or a global holds it), it runs again
-  with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields. A `for`
-  over a user iterator (`__iter__` returns self) calls `__next__` before each iteration (`for_user_iterator`).
+* **Generators** run whole at their first consumption (`force_gen`), in the creating call's context; a consumer of item
+  *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
+  joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
+  there-unless-removed too; deletes) changes what the generator reads after a yield (`Gens::watch`, also after the call
+  that started it while held, or a global holds it), it runs again with that changed at each yield (`with_gen_restart`).
+  `@contextmanager` bodies run at yields. A `for` over a user iterator (`__iter__` returns self) calls `__next__` before each
+  iteration (`for_user_iterator`).
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
@@ -93,15 +94,14 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`): `proven`, `possibly`,
   `missing`, `input` are sound; `likely` / `likely-missing` optimistic (unknown code removed nothing). In one of
   several functions a value picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
-* **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
-  see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
-  CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
-  sqlite, csv…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
-  selection holds its columns), pydantic / FastAPI validation and routing, and torch / numpy shapes
+* **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that see the `Heap`, their
+  `models::Tables` and the interpreter's public methods) compute CPython's result on known values (str / bytes, formatting,
+  json, re, datetime, decimal, sqlite, csv…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
+  selection holds its columns, its `drop(columns=…)` the others), pydantic / FastAPI validation and routing, and torch / numpy shapes
   (dims as polynomials; an undecided condition is a requirement and then a fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
   **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
-  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, several callees one `skipped_calls`,
+  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, `callees_cut`, several callees one `skipped_calls`,
   classes among them their instances made there; every run starts from the module's end, `demand_start`). `rowan serve` starts the whole run and the module code's
   (`__main__` block's calls skipped) together; the latter answers unless the former completes within `EARLY` (1 s), whose
   document then follows as an event. A changed file, a newer `analyse` of it or a `cancel` (the extension's, when a
@@ -126,7 +126,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (`(parameter) int(?)`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites, Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (`(parameter) int(?)`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 

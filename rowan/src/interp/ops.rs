@@ -444,6 +444,14 @@ impl Analyzer {
             state.elems.insert(oid, acc.kv);
             return Some(Value::obj(oid));
         }
+        // (two unknowns — sequences, texts, numbers, arrays: as sequences, the elements of
+        // either; a slice or concatenation stands for its sequences)
+        let unknowns = |v: &Value| !v.pts.is_empty() && matches!(v.kv, KeyVal::Bot | KeyVal::Data(_)) && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown && !self.is_any(o));
+        if unknowns(a) && unknowns(b) {
+            let bases: Vec<u32> = both.iter().flat_map(|o| self.slice_base(o).map(|s| s.to_vec()).unwrap_or_else(|| vec![o])).collect();
+            let sid = self.elems_of(&crate::domain::ObjSet::from_vec(bases), "", state);
+            return Some(Value::obj(sid));
+        }
         None
     }
 
