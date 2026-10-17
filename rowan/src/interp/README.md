@@ -79,7 +79,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `calls.rs` | calls, construction, frames, binding arguments |
 | `narrow.rs` | tests split into true and false states, narrowing |
 | `guards.rs` | tests of a function's own parameters along a path (`only if` requirements) |
-| `annotations.rs` | what a value annotated `X` is for any call: a builtin type's unknown, a container whose parts follow the annotation, an instance of the program's class with its declared fields as annotated |
+| `annotations.rs` | what a value annotated `X` is for any call: a builtin type's unknown, a container whose parts follow the annotation, an instance of the program's class with its declared fields as annotated; an unknown the program gives an annotated field (`field_as_annotated`) |
 | `access.rs` | what every access shares: guards, requirements, per-receiver runs |
 | `items.rs` | item access: reads, stores, deletes, copies of keys, positions, elements |
 | `attrs.rs` | attribute access through classes, instances, unknowns |

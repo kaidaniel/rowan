@@ -2,12 +2,13 @@
 //! run, a field of an instance such a run makes): a builtin type's unknown (`int(?)`), a
 //! container whose parts follow the annotation (`list[str]`), an instance of the program's class
 //! (a dataclass's, NamedTuple's, TypedDict's or pydantic model's with its declared fields, each
-//! as annotated; another's as its `__init__` makes it), a torch module's tensor, a DataFrame.
+//! as annotated; another's as its `__init__` makes it), a torch module's tensor, a DataFrame; and
+//! what an unknown the program gives a field of a scalar builtin type is (`field_as_annotated`).
 
 use ruff_python_ast as ast;
 
 use super::{Analyzer, FuncInfo, Payload};
-use crate::domain::{Ns, ObjId, Row, RowData, Value};
+use crate::domain::{KeyVal, Ns, ObjId, Row, RowData, Value};
 use crate::frontend;
 use crate::intern::{self, key_str_lit, KeyId, KeySet};
 use crate::source::{Source, SourceKind};
@@ -180,6 +181,60 @@ impl Analyzer {
         Some(Value::obj(inst))
     }
 
+    /// `v`, given by the program for field `name` of `cls` (its generated `__init__`), as the
+    /// field's annotation says when that names one scalar builtin type (`str`, `Optional[int]`;
+    /// `float` only when `validated`: an int passes for one otherwise): its unknown parts
+    /// (untyped unknown scalars, unknown objects of no known type) are of that type, or None
+    /// when the annotation allows it; literals and the program's objects stay as they are.
+    pub fn field_as_annotated(&mut self, cls: ObjId, name: &str, v: Value, validated: bool, state: &mut State) -> Value {
+        let Some((ann, _)) = self.field_annotation(cls, name) else { return v };
+        let (members, none) = annotation_members(ann);
+        let [m] = members[..] else { return v };
+        let t = match builtin_annotation(m) {
+            Some((t, _)) if matches!(t, "bool" | "bytes" | "int" | "str") => t,
+            _ if validated && dotted_last(m) == "float" && !matches!(m, ast::Expr::Subscript(_)) => "float",
+            _ => return v,
+        };
+        // (an unknown carrying a model's facts — a tensor dim, a shape — keeps them)
+        let special = |an: &Analyzer, o: ObjId| an.m.t_numbers.contains_key(&o);
+        let unknown_objs: Vec<ObjId> = v.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Unknown && self.heap.obj(*o).ty.is_none() && !special(self, *o)).collect();
+        let scalar = match &v.kv {
+            KeyVal::Data(l) => {
+                let l = intern::str_get(*l);
+                (crate::domain::label_type(&l).is_none() && !l.starts_with('\u{1}')).then(|| crate::domain::label_name(&l).to_string())
+            }
+            _ => None,
+        };
+        if unknown_objs.is_empty() && scalar.is_none() {
+            return v;
+        }
+        let mut out = Value::objs(crate::domain::ObjSet::from_vec(v.pts.iter().filter(|o| !unknown_objs.contains(o)).collect()));
+        out.kv = if scalar.is_some() { KeyVal::Bot } else { v.kv.clone() };
+        // (beside None: an unknown object of the type, as a general run's field holds)
+        let typed = match none {
+            false => Value::data(&crate::domain::typed_label(t, scalar.as_deref().unwrap_or(""))),
+            true => self.typed_object(&format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name), t, false, 0, None, state).join(&self.none_v),
+        };
+        out.join(&typed)
+    }
+
+    /// An unknown object of builtin type `t` made at `site` (one beside other values, or a
+    /// container whose parts follow annotation `ann`).
+    fn typed_object(&mut self, site: &str, t: &'static str, single: bool, depth: u32, ann: Option<(&'static ast::Expr, ObjId)>, state: &mut State) -> Value {
+        let o = self.heap.alloc_raw(Kind::Unknown, site, "", single, "?", Payload::None);
+        self.heap.obj_mut(o).ty = Some(t);
+        self.heap.obj_mut(o).depth = depth;
+        if let Some(a) = ann {
+            self.heap.ann.insert(o, a);
+        }
+        for n in [Ns::Item, Ns::Attr] {
+            if !state.has_row(o, n) {
+                state.set_row(o, n, Row::top());
+            }
+        }
+        Value::obj(o)
+    }
+
     /// What part `k` of unknown `oid` holds when `oid` follows a container annotation whose part
     /// there names a class of the program, or a union with one (`list[User]`, `dict[str,
     /// Optional[Item]]`): an instance of it (`annotated_instance`; the element standing for
@@ -259,18 +314,7 @@ impl Analyzer {
             if alone && c.is_none() && crate::domain::TYPE_NAMES.contains(&t) {
                 return Value::data(&crate::domain::typed_label(t, ""));
             }
-            let o = an.heap.alloc_raw(Kind::Unknown, &format!("ann:{}:{}", path, k), "", single, "?", Payload::None);
-            an.heap.obj_mut(o).ty = Some(t);
-            an.heap.obj_mut(o).depth = depth + 1;
-            if let Some(c) = c {
-                an.heap.ann.insert(o, (c, module));
-            }
-            for n in [Ns::Item, Ns::Attr] {
-                if !state.has_row(o, n) {
-                    state.set_row(o, n, Row::top());
-                }
-            }
-            Value::obj(o)
+            an.typed_object(&format!("ann:{}:{}", path, k), t, single, depth + 1, c.map(|c| (c, module)), state)
         };
         let mut out = if none { self.none_v.clone() } else { Value::new() };
         if members.is_empty() && !none {

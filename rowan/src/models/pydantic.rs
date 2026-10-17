@@ -1772,8 +1772,8 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
             if matches!(t, "int" | "float" | "bool") {
                 // (a value already of the type — validated before, `int(x)` — converts)
                 // (`len(x)`, a frame's row count: ints)
-                let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows");
-                let of_type = |d: &str| d == t || (t == "float" && int_label(d)) || (t == "int" && int_label(d)) || d.starts_with('\u{1}');
+                let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows") || matches!(crate::domain::label_type(d), Some("int" | "bool"));
+                let of_type = |d: &str| d == t || crate::domain::label_type(d) == Some(t) || (t == "float" && int_label(d)) || (t == "int" && int_label(d)) || d.starts_with('\u{1}');
                 let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d) if of_type(&intern::str_get(*d)));
                 let obj_part = val.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Unknown));
                 if data_part || obj_part {
@@ -1787,7 +1787,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     if t == "int" {
                         pyd_err(an, loc, "int_from_float", false, false);
                     }
-                    let known_str = matches!(&val.kv, KeyVal::Data(d) if &*intern::str_get(*d) == "str") && !obj_part;
+                    let known_str = matches!(&val.kv, KeyVal::Data(d) if crate::domain::label_type(&intern::str_get(*d)) == Some("str")) && !obj_part;
                     if data_part && !known_str {
                         let tcode = match t {
                             "int" => "int_type",
@@ -1818,10 +1818,10 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     pyd_err(an, loc, code, containers == total, false);
                 }
                 // (what is neither a container nor a literal — something unknown — may be one)
-                let rest = Value::kv_only(coerce_kv(t, &val.kv));
-                return if containers == val.pts.len() { rest } else { rest.join(&Value::data(t)) };
+                let rest = Value::kv_only(validated_kv(t, &val.kv));
+                return if containers == val.pts.len() { rest } else { rest.join(&Value::data(&crate::domain::typed_label(t, ""))) };
             }
-            Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
+            Value::with_kv(val.pts.clone(), validated_kv(t, &val.kv))
         }
         Ann::Enum(c) => {
             let vk = key_str_lit("value");
@@ -2114,6 +2114,23 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
         KeyVal::Lit(k) => KeyVal::Lit(conv(*k)),
         KeyVal::Lits(ks) => KeyVal::lits(KeySet::from_iter(ks.iter().map(conv))),
         other => other.clone(),
+    }
+}
+
+/// `kv` validated as a `t` (`coerce_kv`): an unknown of a builtin type is of that type now
+/// (`float(?)` from an int too), named as it was; a model's label (a tensor dim) stays.
+fn validated_kv(t: &str, kv: &KeyVal) -> KeyVal {
+    match kv {
+        KeyVal::Data(l) if crate::domain::TYPE_NAMES.contains(&t) => {
+            let l = intern::str_get(*l);
+            if l.starts_with('\u{1}') || crate::domain::label_type(&l) == Some(t) {
+                return kv.clone();
+            }
+            let name = crate::domain::label_name(&l);
+            let name = if matches!(name, "str" | "int" | "bool" | "float") { "" } else { name };
+            KeyVal::data(&crate::domain::typed_label(t, name))
+        }
+        _ => coerce_kv(t, kv),
     }
 }
 
