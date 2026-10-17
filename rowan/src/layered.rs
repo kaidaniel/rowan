@@ -486,6 +486,14 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
         Some(v)
     }
 
+    /// Removes every key whose image agrees with `k`'s from bit `bits` up (an object's rows in
+    /// all namespaces), in one path copy.
+    pub fn remove_block(&mut self, k: &K, bits: u32) {
+        if let Some(rest) = self.root.as_ref().and_then(|t| remove_hi(t, k.key64() >> bits, bits)) {
+            self.root = rest;
+        }
+    }
+
     /// Keys on one side only are kept; keys on both sides are combined with f (unless equal).
     pub fn join(&self, o: &LayerMap<K, V>, f: &mut dyn FnMut(&V, &V) -> V) -> LayerMap<K, V> {
         let mut both = |_: &K, a: &V, b: &V| Some(f(a, b));
@@ -602,19 +610,19 @@ fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
     }
 }
 
-/// `t` without the keys whose high 32 bits are `hi`, in one path copy (None: nothing changes;
-/// Some(rest), rest None: empty).
-fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64) -> Option<Option<Tree<K, V>>> {
+/// `t` without the keys whose bits from `bits` up are `hi`, in one path copy (None: nothing
+/// changes; Some(rest), rest None: empty).
+fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64, bits: u32) -> Option<Option<Tree<K, V>>> {
     match &**t {
-        Node::Leaf { h, .. } => (h >> 32 == hi).then_some(None),
+        Node::Leaf { h, .. } => (h >> bits == hi).then_some(None),
         // (every key below shares the high bits)
-        Node::Branch { p, m, .. } if *m < 1 << 32 => (p >> 32 == hi).then_some(None),
+        Node::Branch { p, m, .. } if *m < 1 << bits => (p >> bits == hi).then_some(None),
         Node::Branch { p, m, l, r } => {
-            let lo = hi << 32;
+            let lo = hi << bits;
             if !match_prefix(lo, *p, *m) {
                 return None;
             }
-            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi)?, None) })
+            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi, bits)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi, bits)?, None) })
         }
     }
 }
@@ -724,7 +732,7 @@ impl<K: PKey, IK: IKey, V: MapValue> TwoLevel<K, IK, V> {
 
     /// Removes every inner entry of `key`.
     pub fn drop_key(&mut self, key: &K) {
-        if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64())) {
+        if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64(), 32)) {
             self.m.root = rest;
         }
     }
