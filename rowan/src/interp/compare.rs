@@ -263,17 +263,31 @@ impl Analyzer {
             let inside = if *step > 0 { x >= *lo && x < *hi } else { x <= *lo && x > *hi };
             return decide(inside && (x - lo) % step == 0);
         }
-        // literals in a positional container of known literals: decided when every one
-        // is there, or none is (by Python's equality: `1.0 in [1, 2]`)
+        // literals in a positional container whose items are known literals (each one of
+        // some): decided when every one is surely there, or none may be (by Python's
+        // equality: `1.0 in [1, 2]`); of an unknown length, when none may be among its elements
         if let Some(o) = b.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
-            let n = self.heap.llen(o, state)?;
-            let items: Vec<KeyId> = (0..n).map(|i| {
-                let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+            let known = |an: &mut Analyzer, sv: Value, state: &mut State| {
                 // (Enum members / identity objects as their keys)
-                let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
-                sv.kv.as_lit().filter(|_| sv.pts.is_empty())
-            }).collect::<Option<_>>()?;
-            let eqs: Vec<bool> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect::<Option<_>>()?;
+                let sv = if sv.pts.is_empty() { sv } else { an.keyify_in(&sv, state) };
+                Some(kv_literals(&sv.kv)).filter(|ks| sv.pts.is_empty() && sv.kv.is_literal() && !ks.is_empty())
+            };
+            let n = self.heap.llen(o, state);
+            let items: Vec<KeySet> = match n {
+                Some(n) => (0..n).map(|i| known(self, state.slot(o, Ns::Pos, key_int(i as i64)), state)).collect::<Option<_>>()?,
+                None => {
+                    let e = Value::with_kv(state.slot(o, Ns::Elem, intern::STAR).pts, state.elems.get(&o).unwrap_or(DATA));
+                    vec![known(self, e, state)?]
+                }
+            };
+            let found = |k: KeyId| -> Option<bool> {
+                let sure = n.is_some() && items.iter().any(|its| its.len() == 1 && lit_eq(its.iter().next().unwrap(), k) == Some(true));
+                // (a NaN is in a container holding that very object: by identity)
+                let nan = |x: KeyId| intern::with_key(x, |kk| matches!(kk, intern::Key::Float(b) if f64::from_bits(*b).is_nan()));
+                let maybe = items.iter().any(|its| its.iter().any(|x| nan(x) || lit_eq(x, k) != Some(false)));
+                if sure { Some(true) } else if !maybe { Some(false) } else { None }
+            };
+            let eqs: Vec<bool> = lits.iter().map(found).collect::<Option<_>>()?;
             let hits = eqs.iter().filter(|b| **b).count();
             return if hits == lits.len() || hits == 0 { decide(hits > 0) } else { None };
         }
