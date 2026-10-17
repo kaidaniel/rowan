@@ -17,6 +17,12 @@ const LIB_ENTRY: usize = 16;
 /// The work all of them may do, in quarter budgets.
 const LIB_TOTAL: usize = 64;
 
+/// The budget the library allowances are counted in: a function's, at least 64 statements (with
+/// `budget=0` a small library still runs, as each function's first call does).
+fn lib_budget() -> usize {
+    limit("budget", FN_BUDGET).max(64)
+}
+
 /// When the analysis started (the deadline counts from it).
 #[derive(Clone, Copy)]
 pub struct Clock(std::time::Instant);
@@ -157,15 +163,14 @@ impl Budget {
     /// A followed library's code is called within an entry, with the work done so far `work`:
     /// past the work one entry may do (`LIB_ENTRY`), the entry stops (`lib_abort`).
     pub fn library_over(&mut self, work: usize) -> bool {
-        let b = limit("budget", FN_BUDGET);
-        self.lib_abort |= self.lib_entry.is_some_and(|w0| work - w0 > limit("lib", LIB_ENTRY) * b / 4);
+        self.lib_abort |= self.lib_entry.is_some_and(|w0| work - w0 > LIB_ENTRY * lib_budget() / 4);
         self.lib_abort
     }
 
     /// May the program's code enter a followed library's code again, with all entries so far
     /// within `LIB_TOTAL`?
     pub fn library_open(&self) -> bool {
-        self.lib_work <= limit("libtotal", LIB_TOTAL) * limit("budget", FN_BUDGET) / 4
+        self.lib_work <= LIB_TOTAL * lib_budget() / 4
     }
 
     /// Has the deadline cut the analysis? Checked at every statement (`cut_body`): one statement

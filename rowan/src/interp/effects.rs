@@ -59,7 +59,7 @@ type Loc = (ObjId, Ns, KeyId);
 
 /// A closure's walk (`walk_closure`): the closure so far, the code still to walk, the names the
 /// code walked uses, the classes met (those up to `classes_seen` looked at for the names in
-/// `names_seen`), the class attributes followed or changed.
+/// `names_seen`: read, or changed), the class attributes followed or changed.
 #[derive(Default)]
 struct ClosureWalk {
     out: Closure,
@@ -71,7 +71,9 @@ struct ClosureWalk {
     done: FxHashSet<(ObjId, KeyId)>,
     done_attrs: FxHashSet<(ObjId, KeyId)>,
     classes_seen: usize,
-    names_seen: FxHashSet<StrId>,
+    names_seen: FxHashSet<(bool, StrId)>,
+    /// grown again later (the library's): a class met before is looked at for new names only
+    incremental: bool,
 }
 
 impl ClosureWalk {
@@ -447,6 +449,7 @@ impl Analyzer {
         let library = roots.iter().any(|r| self.heap.func_info_opt(*r).is_some_and(|fi| self.heap.module_info(fi.module).library));
         if library && !whole {
             let mut lib = std::mem::take(&mut self.effects.library);
+            lib.walk.incremental = true;
             let fresh: Vec<ObjId> = roots.iter().copied().filter(|r| !lib.walk.out.code.contains(r)).collect();
             if !fresh.is_empty() || lib.closure.is_none() {
                 lib.walk.work.extend(fresh);
@@ -479,7 +482,7 @@ impl Analyzer {
     /// walked again; a class already met is looked at again only for the names met since).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
-        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen } = w;
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, incremental } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
@@ -518,16 +521,21 @@ impl Analyzer {
             // the methods of the classes reached that the code reads (dunders run implicitly),
             // and their attributes it may change or rebind: of a class met before, by the names
             // met since
-            let fresh_names: Vec<StrId> = reads.iter().chain(attrs.keys()).chain(class_stores.iter()).copied().filter(|n| !names_seen.contains(n)).collect();
-            names_seen.extend(fresh_names.iter().copied());
+            let fresh_keys: Vec<KeyId> = if *incremental && *classes_seen > 0 {
+                // (a name newly read, or newly changed: either asks the classes again)
+                let fresh: FxHashSet<StrId> = reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))).filter(|p| !names_seen.contains(p)).map(|(_, n)| n).collect();
+                fresh.iter().map(|n| key_str_lit(&str_get(*n))).collect()
+            } else {
+                Vec::new()
+            };
+            if *incremental {
+                names_seen.extend(reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))));
+            }
             for (i, &c) in classes.iter().enumerate() {
-                let slots: Vec<(KeyId, Value)> = if i >= *classes_seen {
+                let slots: Vec<(KeyId, Value)> = if !*incremental || i >= *classes_seen {
                     state.obj_slots(c, Ns::Attr)
                 } else {
-                    fresh_names.iter().filter_map(|n| {
-                        let k = key_str_lit(&str_get(*n));
-                        state.slot_opt(c, Ns::Attr, k).map(|v| (k, v))
-                    }).collect()
+                    fresh_keys.iter().filter_map(|&k| state.slot_opt(c, Ns::Attr, k).map(|v| (k, v))).collect()
                 };
                 for (k, v) in slots {
                     let name = intern::key_str_id(k);
