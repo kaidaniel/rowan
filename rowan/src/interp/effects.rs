@@ -81,18 +81,14 @@ pub struct ClosureWalk {
 
 impl ClosureWalk {
     /// The closure walked so far, its slots sorted (a slot whose flags grew as the walk went
-    /// on is where its final flags put it: its value, else what it holds, …).
+    /// on is where each of its flags put it: a value that may change keeps what it holds that
+    /// may, a walk from it does not reach all of that).
     fn finished(&self) -> Closure {
         let mut c = self.out.clone();
         for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs] {
             l.sort_unstable();
             l.dedup();
         }
-        let (locs, held) = (c.locs.clone(), c.held_locs.clone());
-        c.held_locs.retain(|l| locs.binary_search(l).is_err());
-        c.held2_locs.retain(|l| locs.binary_search(l).is_err() && held.binary_search(l).is_err());
-        let edited = c.edited_locs.clone();
-        c.iterated_locs.retain(|l| edited.binary_search(l).is_err());
         let mut removed: Vec<(Loc, Removes)> = Vec::new();
         for (l, r) in std::mem::take(&mut c.removed_locs) {
             match removed.iter_mut().find(|(m, _)| *m == l) {
