@@ -447,9 +447,18 @@ assert(hLimit.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```") && h
 const hLimit2 = hover(f043idx, f043src, defLine + 3, "limit");
 assert(hLimit2.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```"), hLimit2);
 
+// ---- exceptions as Python writes them: their arguments by position, `__cause__` when set
+const z619 = path.join(root, "tests", "cases", "z619_exception_values.py");
+const z619src = fs.readFileSync(z619, "utf8").split("\n");
+const z619idx = indexResult(facts(z619));
+const errLine = z619src.findIndex((l) => l.trim() === "err = e") + 1;
+assert(hover(z619idx, z619src, errLine, "err").startsWith('```python\nerr = AppError("too big")\n```'), hover(z619idx, z619src, errLine, "err"));
+const codedLine = z619src.findIndex((l) => l.trim() === "coded = c") + 1;
+assert(hover(z619idx, z619src, codedLine, "coded").startsWith('```python\ncoded = Coded("negative", __cause__=KeyError("k"), code=400)\n```'), hover(z619idx, z619src, codedLine, "coded"));
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
-  a01, z, g, kinds, z618, f043,
+  a01, z, g, kinds, z618, f043, z619,
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"),
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py"),
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),
