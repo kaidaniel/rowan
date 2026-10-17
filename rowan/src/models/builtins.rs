@@ -827,8 +827,19 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name_v = c.args.get(1).cloned().unwrap_or_default();
     // (one name: with a default, the default where the attribute is surely not there, both
     // where it may not be)
-    let by_name = |an: &mut Analyzer, st: &mut State, name: &str| {
-        let Some(d) = c.args.get(2) else { return an.load_attr(&obj, name, &c.node, st, true) };
+    // (one of several names: no verdict — the read is only on the paths where the name is
+    // that one —, an AttributeError where it may be missing)
+    let by_name = |an: &mut Analyzer, st: &mut State, name: &str, report: bool| {
+        let Some(d) = c.args.get(2) else {
+            if report {
+                return an.load_attr(&obj, name, &c.node, st, true);
+            }
+            let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
+            if has.kv.as_lit() != Some(intern::key_bool(true)) || !has.pts.is_empty() {
+                an.may_raise_here("AttributeError", st);
+            }
+            return an.load_attr(&obj, name, &c.node, st, false);
+        };
         let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
         let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, name, &c.node, st, false);
         match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
@@ -838,7 +849,7 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     };
     if let (Some(name), true) = (name_v.kv.as_lit().and_then(intern::key_as_str), name_v.pts.is_empty()) {
-        return by_name(an, st, &name);
+        return by_name(an, st, &name, true);
     }
     // the names it may be: literals, the keys of closed records (`for k in d`), the attributes
     // whose names fit the text known of it (`f"run_{mode}"`: `run_*`); any other part is a
@@ -866,8 +877,9 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     names.sort();
     names.dedup();
+    let one = names.len() == 1 && !unknown && afs.is_empty();
     for n in names {
-        v = v.join(&by_name(an, st, &n));
+        v = v.join(&by_name(an, st, &n, one));
     }
     if unknown {
         v = v.join(&getattr_any_name(an, &obj, &name_v, c, st));
@@ -902,39 +914,56 @@ fn getattr_names(kv: &KeyVal, st: &State) -> (Vec<String>, bool) {
 /// `getattr(obj, name)` by a name nothing is known of: any attribute the program's objects
 /// (instances, classes, modules) have — their own and their classes', bound as a read binds
 /// them, properties run —, what a `__getattr__` makes of the name, and what their keys under
-/// unknown names hold; any other object's attribute (a dict's, a list's methods) is a library
-/// attribute: the object goes to unknown code (as a library object's does) and the result is
-/// unknown. Without a default the read may raise.
+/// unknown names hold (read quietly: the reads are speculative, their verdicts would claim
+/// what no run may do); a dict's, list's or set's attribute is a method that runs unknown
+/// code on it when called (so are more of the program's objects than a wide read); an
+/// unknown object's is what it holds or unknown (its methods take it no more than `u.m()`
+/// does). Without a default the read may raise.
 fn getattr_any_name(an: &mut Analyzer, obj: &Value, name_v: &Value, c: &Call, st: &mut State) -> Value {
     let mut v = join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
-    let mut lib: Vec<ObjId> = Vec::new();
-    for o in obj.pts.iter() {
-        match an.heap.kind(o) {
-            Kind::Instance | Kind::Class | Kind::Module => {}
-            // (a library object's: below, in `m_getattr`)
-            Kind::External => continue,
-            _ => {
-                lib.push(o);
-                continue;
-            }
-        }
-        let one = Value::obj(o);
-        for n in attr_names_like(an, &one, &[(String::new(), String::new())], st) {
-            v = v.join(&an.load_attr(&one, &n, &c.node, st, false));
-        }
-        let hook = an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__getattr__").is_some());
-        if hook {
-            v = v.join(&an.call_method_with(&one, "__getattr__", vec![name_v.clone()], &c.node, st).unwrap_or_default());
-        }
+    let user = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module);
+    // (more of the program's objects than a wide read: one method of them all, unknown code
+    // run on them when called — a method of each would be an object per receiver and name)
+    let wide = obj.pts.iter().filter(|o| user(an, *o)).count() > crate::interp::WIDE_READ;
+    let coarse = obj.pts.filter(|o| (wide && user(an, o)) || matches!(an.heap.kind(o), Kind::List | Kind::Dict | Kind::Set));
+    if !coarse.is_empty() {
+        v = v.join(&getattr_method(an, c, &Value::objs(coarse)));
     }
-    if !lib.is_empty() || !obj.kv.is_bot() {
-        let given = vec![Value::with_kv(crate::intern::IdSet::from_iter(lib), crate::domain::BOT)];
-        v = v.join(&an.unknown_call(&c.qual, None, Args::pos(&given), st, &c.node));
+    for o in obj.pts.iter() {
+        let one = Value::obj(o);
+        if wide || !user(an, o) {
+            continue;
+        }
+        // (speculative reads: their own accesses give no verdicts)
+        an.quietly(|an| {
+            for n in attr_names_like(an, &one, &[(String::new(), String::new())], st) {
+                v = v.join(&an.load_attr(&one, &n, &c.node, st, false));
+            }
+            let hook = an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__getattr__").is_some());
+            if hook {
+                v = v.join(&an.call_method_with(&one, "__getattr__", vec![name_v.clone()], &c.node, st).unwrap_or_default());
+            }
+        });
+    }
+    if !obj.kv.is_bot() || obj.pts.iter().any(|o| !matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module | Kind::External)) {
+        v = v.join(&Value::data("getattr"));
     }
     if c.args.len() < 3 {
         an.may_raise_here("AttributeError", st);
     }
     v
+}
+
+/// The method `getattr` at call `c` may give of objects whose attributes are not followed: one
+/// object per call site (its receivers all those seen there), unknown code run on them when
+/// called.
+fn getattr_method(an: &mut Analyzer, c: &Call, recv: &Value) -> Value {
+    let key = format!("getattr:M{}:L{}:{}", c.node.module, c.node.line, c.node.col);
+    let o = an.heap.alloc_raw(Kind::Method, &key, "", true, "getattr", Payload::Method("unknown.getattr".into(), recv.clone()));
+    if let Payload::Method(q, r) = an.heap.obj(o).payload.clone() {
+        an.heap.obj_mut(o).payload = Payload::Method(q, r.join(recv));
+    }
+    Value::obj(o)
 }
 
 /// The attribute names of `obj` (its own and its classes') that start and end with one of the
