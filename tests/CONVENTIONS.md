@@ -38,7 +38,7 @@ fields — and the **values** of names when they follow from the program text.
 * `#@general NAME: …` (the same clauses): NAME's value for **any** call of the function the line
   is in — the program's own, and any once the module has run, after any of its functions ran:
   its parameters anything their annotations allow, a method's receiver any instance (its
-  `__init__` given any arguments). The oracle checks an `exactly` here against every call the
+  `__init__` given any arguments; `__init__`'s own, of a class without subclasses: a new one). The oracle checks an `exactly` here against every call the
   program makes (they pass what the annotations say).
 * `#@ TIER key` on an access line (`d["k"]`, `o.k`, `d.pop("k")`, `M(**d)`, …): `ok` (never
   fails), `missing` (always fails), `possibly` (some paths), `input` (depends on input data),
