@@ -484,7 +484,7 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   const found = path.join(tmp, "found.py");
   fs.writeFileSync(found, ["import sys", "text = sys.argv[1]", "idx = {c: i for i, c in enumerate(sorted(set(text)))}", "def enc(s):", "    return [idx[c] for c in s]", 'a = enc("ab")', 'b = enc("ab")', ""].join("\n"));
   const h = hover(indexResult(facts(found)), fs.readFileSync(found, "utf8").split("\n"), 5, "idx");
-  assert(h.includes("```python\nidx = {") && !h.includes("✓"), h);
+  assert(h.includes("```python\nidx = dict[?, int(?)]") && !h.includes("✓"), h); // (keys only possible, of values not known, are `**?`'s)
 }
 
 // ---- a parameter annotated with a dataclass: its fields (its bases' too) as annotated

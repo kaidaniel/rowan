@@ -396,6 +396,11 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
         keys.retain(|k| *k != intern::key_str_lit("args") && !no_cause(*k));
         items.extend(args_items(an, state, &args, depth, seen));
     }
+    // (an open record's key that may be there, of a value not known, says no more than `**?`:
+    // left out — a loop's item read on earlier rounds was `{"id"?: ?, "name"?: ?, **?}`)
+    if !row.closed() {
+        keys.retain(|k| row.likely.contains(*k) || state.slot_opt(o, ns, *k).is_some_and(|sv| render_value(an, state, &sv, depth + 1, &mut seen.clone()) != "?"));
+    }
     for k in keys.iter().take(MAX_ITEMS) {
         let val = match state.slot_opt(o, ns, *k) {
             Some(sv) => render_value(an, state, &sv, depth + 1, seen),
