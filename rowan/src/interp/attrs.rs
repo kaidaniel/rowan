@@ -43,6 +43,21 @@ impl Analyzer {
         }
     }
 
+    /// `class_resolves` on this path: a class attribute stored on some paths only (`if c: Cls.x =
+    /// 1`) may be missing on this one.
+    pub(crate) fn class_resolves_on_path(&self, oid: u32, name: &str, state: &State) -> bool {
+        if !self.class_resolves(oid, name) {
+            return false;
+        }
+        if self.heap.kind(oid) != Kind::Instance || OBJECT_ATTRS.contains(&name) {
+            return true;
+        }
+        match self.heap.instance_class(oid) {
+            Some(c) if self.class_lookup(c, "__getattr__").is_none() && self.class_lookup(c, "__getattribute__").is_none() => self.class_lookup_on_path(c, name, state).1,
+            _ => true,
+        }
+    }
+
     /// The attribute names `__slots__` allows on instances of `cls`, when every class of its MRO
     /// declares them (literally) and none gives a `__dict__`.
     pub(in crate::interp) fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
@@ -719,7 +734,7 @@ impl Analyzer {
                 let cls = classify(&row, nk);
                 self.attr_verdict(node, nk, &cls, oid, guarded);
                 // (there on some paths only: an AttributeError the enclosing try handles)
-                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves(oid, name) {
+                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves_on_path(oid, name, state) {
                     self.may_raise_here("AttributeError", state);
                 }
                 if let Some(c) = cls_of {
