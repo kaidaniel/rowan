@@ -683,8 +683,26 @@ impl Analyzer {
     /// (its body runs when consumed); else its body runs here (`call_user_inner`).
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, entry: bool) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
-        // (its run for any call starts from the heap here too)
-        self.note_call(foid, self_v.as_ref(), state);
+        // (its run for any call starts from the heap here too; a followed library's code has none)
+        let library = self.heap.module_info(self.heap.func_info(foid).module).library;
+        if !library {
+            self.note_call(foid, self_v.as_ref(), state);
+        }
+        // a followed library's code: from the program's code, one entry into it, which runs
+        // within its allowance or not at all (`library_entry`); within one, past the allowance,
+        // the entry stops
+        if library && self.budget.lib_entry.is_none() {
+            let r = self.library_entry(state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
+            return r.map(|r| self.named_by_call(r, node)).unwrap_or_else(|| {
+                self.gens.force_at = None;
+                let q = self.heap.func_info(foid).qualname.clone();
+                self.skipped_call(foid, &q, self_v.as_ref(), a, state, node)
+            });
+        }
+        if library && self.budget.library_over(self.library_work()) {
+            state.reachable = false;
+            return Value::new();
+        }
         // (on demand, past the work a function's run may do, its callees' calls are unknown)
         if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             self.gens.force_at = None;
@@ -760,7 +778,7 @@ impl Analyzer {
         // every statement a function code runs counts against its budget (entry runs aside: one
         // per function); past it a call is unknown code, so the whole analysis is bounded by the
         // number of functions times the budget
-        if !entry && self.budget.exhausted(fi.node.addr()) {
+        if !entry && self.budget.exhausted(fi.node.addr()) && !self.heap.module_info(fi.module).library {
             let q = fi.qualname.clone();
             self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
             self.budget.out.insert(foid);

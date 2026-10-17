@@ -308,6 +308,18 @@ impl Registry {
 
 /// Is there a model for anything in module `name` (so following its source is not wanted)?
 pub fn has_module_models(name: &str) -> bool {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<FxHashMap<String, bool>> = std::cell::RefCell::new(FxHashMap::default());
+    }
+    if let Some(b) = KNOWN.with(|k| k.borrow().get(name).copied()) {
+        return b;
+    }
+    let b = module_models_uncached(name);
+    KNOWN.with(|k| k.borrow_mut().insert(name.to_string(), b));
+    b
+}
+
+fn module_models_uncached(name: &str) -> bool {
     let dotted = format!("{}.", name);
     if PREFIXES.iter().any(|p| p.starts_with(&dotted) || *p == dotted) || ALLOWLIST_PREFIXES.iter().any(|p| p.starts_with(&dotted) || *p == dotted) {
         return true;

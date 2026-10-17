@@ -31,6 +31,8 @@ pub struct EffectsCache {
     closures: FxHashMap<Vec<ObjId>, std::rc::Rc<Closure>>,
     /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
     closures_size: usize,
+    /// the followed libraries' code given so far, one closure (`LibClosure`)
+    library: LibClosure,
     /// on demand: what the program's functions may do to attributes by name, and the names
     /// they store (`program_uses`)
     program: Option<std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)>>,
@@ -55,10 +57,50 @@ pub struct RecvEffects {
 /// A slot: (object, namespace, key).
 type Loc = (ObjId, Ns, KeyId);
 
+/// A closure's walk (`walk_closure`): the closure so far, the code still to walk, the names the
+/// code walked uses, the classes met (those up to `classes_seen` looked at for the names in
+/// `names_seen`: read, or changed), the class attributes followed or changed.
+#[derive(Default)]
+struct ClosureWalk {
+    out: Closure,
+    work: Vec<ObjId>,
+    attrs: FxHashMap<StrId, Flags>,
+    reads: FxHashSet<StrId>,
+    class_stores: FxHashSet<StrId>,
+    classes: Vec<ObjId>,
+    done: FxHashSet<(ObjId, KeyId)>,
+    done_attrs: FxHashSet<(ObjId, KeyId)>,
+    classes_seen: usize,
+    names_seen: FxHashSet<(bool, StrId)>,
+    /// grown again later (the library's): a class met before is looked at for new names only
+    incremental: bool,
+}
+
+impl ClosureWalk {
+    /// The closure walked so far, its slots sorted.
+    fn finished(&self) -> Closure {
+        let mut c = self.out.clone();
+        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound] {
+            l.sort_unstable();
+            l.dedup();
+        }
+        c
+    }
+}
+
+/// The closure of all the followed libraries' code given to code that does not run, grown as
+/// more is given: a library function's closure is much of its library, and the decorators
+/// applied at import give each function in turn (computed apart, quadratic in the library).
+#[derive(Default)]
+pub struct LibClosure {
+    walk: ClosureWalk,
+    closure: Option<std::rc::Rc<Closure>>,
+}
+
 /// What a piece of code may change beyond what it is given (`code_closure`): the slots whose
 /// values may change, those whose values' parts may (`held_locs`: a container iterated, an
 /// attribute's value given away), those it may rebind, and other values likewise.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Closure {
     /// the code it reaches
     pub code: FxHashSet<ObjId>,
@@ -402,12 +444,45 @@ impl Analyzer {
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
             return c.clone();
         }
-        let mut out = Closure::default();
-        let mut work: Vec<ObjId> = roots.to_vec();
-        let (mut attrs, mut reads, mut class_stores): (FxHashMap<StrId, Flags>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
-        let mut classes: Vec<ObjId> = Vec::new();
-        let (mut done, mut done_attrs): (FxHashSet<(ObjId, KeyId)>, FxHashSet<(ObjId, KeyId)>) = Default::default();
+        // (a followed library's code: one closure of all such code given so far, grown as more
+        // is given — a library's closures are much of the library each, `LibClosure`)
+        let library = roots.iter().any(|r| self.heap.func_info_opt(*r).is_some_and(|fi| self.heap.module_info(fi.module).library));
+        if library && !whole {
+            let mut lib = std::mem::take(&mut self.effects.library);
+            lib.walk.incremental = true;
+            let fresh: Vec<ObjId> = roots.iter().copied().filter(|r| !lib.walk.out.code.contains(r)).collect();
+            if !fresh.is_empty() || lib.closure.is_none() {
+                lib.walk.work.extend(fresh);
+                self.walk_closure(&mut lib.walk, state);
+                lib.closure = Some(std::rc::Rc::new(lib.walk.finished()));
+            }
+            let c = lib.closure.clone().expect("the library closure");
+            self.effects.library = lib;
+            return c;
+        }
+        let mut w = ClosureWalk { work: roots.to_vec(), ..Default::default() };
+        self.walk_closure(&mut w, state);
+        let c = std::rc::Rc::new(w.finished());
+        // (a cache of what the program's code reaches, by root set: on large programs the root
+        // sets rarely repeat, so it is emptied past a bound on what it holds)
+        if whole {
+            return c;
+        }
+        let size = roots.len() + c.code.len() + c.locs.len() + c.held_locs.len() + c.rebound.len() + c.values.len() + c.held_values.len();
+        self.effects.closures_size += size;
+        if self.effects.closures_size > CLOSURE_CACHE {
+            self.effects.closures.clear();
+            self.effects.closures_size = size;
+        }
+        self.effects.closures.insert(roots.to_vec(), c.clone());
+        c
+    }
+
+    /// Walk the code `w.work` holds into `w`'s closure (resumable: code already in it is not
+    /// walked again; a class already met is looked at again only for the names met since).
+    fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, incremental } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
@@ -416,13 +491,13 @@ impl Analyzer {
                 match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
-                        self.function_closure(&fi, state, &mut out, &mut attrs, &mut reads, &mut class_stores, &mut work);
+                        self.function_closure(&fi, state, out, attrs, reads, class_stores, work);
                     }
                     (Kind::Module, _) => {
                         // (a module used as a value: any of its globals)
                         for (k, v) in state.obj_slots(o, Ns::Attr) {
                             out.locs.push((o, Ns::Attr, k));
-                            code(self, &v, &mut work);
+                            code(self, &v, work);
                         }
                     }
                     (Kind::Class, _) => {
@@ -437,47 +512,47 @@ impl Analyzer {
                         out.values.push(recv.clone());
                     }
                     (Kind::Partial, Payload::Partial(f, args, kw)) => {
-                        code(self, f, &mut work);
+                        code(self, f, work);
                         out.values.extend(args.iter().chain(kw.values()).cloned());
                     }
                     _ => {}
                 }
             }
             // the methods of the classes reached that the code reads (dunders run implicitly),
-            // and their attributes it may change or rebind
-            for &c in &classes {
-                for (k, v) in state.obj_slots(c, Ns::Attr) {
+            // and their attributes it may change or rebind: of a class met before, by the names
+            // met since
+            let fresh_keys: Vec<KeyId> = if *incremental && *classes_seen > 0 {
+                // (a name newly read, or newly changed: either asks the classes again)
+                let fresh: FxHashSet<StrId> = reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))).filter(|p| !names_seen.contains(p)).map(|(_, n)| n).collect();
+                fresh.iter().map(|n| key_str_lit(&str_get(*n))).collect()
+            } else {
+                Vec::new()
+            };
+            if *incremental {
+                names_seen.extend(reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))));
+            }
+            for (i, &c) in classes.iter().enumerate() {
+                let slots: Vec<(KeyId, Value)> = if !*incremental || i >= *classes_seen {
+                    state.obj_slots(c, Ns::Attr)
+                } else {
+                    fresh_keys.iter().filter_map(|&k| state.slot_opt(c, Ns::Attr, k).map(|v| (k, v))).collect()
+                };
+                for (k, v) in slots {
                     let name = intern::key_str_id(k);
                     if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
-                        code(self, &v, &mut work);
+                        code(self, &v, work);
                     }
                     let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
                     if (flags.is_some() || rebinds) && done_attrs.insert((c, k)) {
                         let mut f = flags.unwrap_or_default();
                         f.rebinds = rebinds;
-                        self.apply_flags(&f, (c, Ns::Attr, k), state, &mut out);
+                        self.apply_flags(&f, (c, Ns::Attr, k), state, out);
                     }
                 }
             }
+            *classes_seen = classes.len();
             if work.is_empty() {
-                for l in [&mut out.locs, &mut out.held_locs, &mut out.held2_locs, &mut out.rebound] {
-                    l.sort_unstable();
-                    l.dedup();
-                }
-                let c = std::rc::Rc::new(out);
-                // (a cache of what the program's code reaches, by root set: on large programs
-                // the root sets rarely repeat, so it is emptied past a bound on what it holds)
-                if whole {
-                    return c;
-                }
-                let size = roots.len() + c.code.len() + c.locs.len() + c.held_locs.len() + c.rebound.len() + c.values.len() + c.held_values.len();
-                self.effects.closures_size += size;
-                if self.effects.closures_size > CLOSURE_CACHE {
-                    self.effects.closures.clear();
-                    self.effects.closures_size = size;
-                }
-                self.effects.closures.insert(roots.to_vec(), c.clone());
-                return c;
+                return;
             }
         }
     }

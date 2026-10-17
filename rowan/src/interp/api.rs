@@ -399,6 +399,11 @@ impl Analyzer {
         [self.budget.statements, self.budget.runs, self.heap.len(), self.havoc.visited as usize]
     }
 
+    /// Entries into followed libraries (run, undone, refused) and the work they did.
+    pub fn library_counts(&self) -> ([usize; 3], usize) {
+        (self.budget.lib_counts, self.budget.lib_work)
+    }
+
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
         format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited)

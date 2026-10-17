@@ -382,6 +382,12 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     seen.push(o);
     let mut items: Vec<String> = Vec::new();
     let mut keys: Vec<KeyId> = intern::sorted_by_str(row.present.iter()).into_iter().filter(|k| !is_internal_key(*k)).collect();
+    // (an instance of a followed library's class: its public attributes, the rest as `…`)
+    let library = ns == Ns::Attr && an.heap.instance_class(o).and_then(|c| an.heap.class_info_opt(c)).is_some_and(|ci| an.heap.module_info(ci.module).library);
+    let private = library && keys.iter().any(|k| intern::key_as_str(*k).is_some_and(|n| n.starts_with('_')));
+    if library {
+        keys.retain(|k| !intern::key_as_str(*k).is_some_and(|n| n.starts_with('_')));
+    }
     // an exception as Python writes it: its `args` first, by position (`AppError("too big",
     // code=400)`), its `__cause__` when one is set
     if let Some(args) = exception_args(an, state, o, ns, &row) {
@@ -406,7 +412,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
             items.push(format!("{}{}: {}", key, row.mark(*k), val));
         }
     }
-    if keys.len() > MAX_ITEMS {
+    if keys.len() > MAX_ITEMS || private {
         items.push("…".into());
     }
     // (a dict whose keys only the program's stores under keys not known put there: what any

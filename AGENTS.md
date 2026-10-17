@@ -1,7 +1,6 @@
 # AGENTS.md: working on rowan
 
-`README.md` says what rowan does for a user; this file is for working on the engine (how it works, the
-owner's conventions, tests, switches, layout), true at the last commit; details are in doc comments.
+`README.md` says what rowan does for a user; this file is for working on the engine (how it works, the owner's conventions, tests, switches, layout), true at the last commit; details are in doc comments.
 
 ## How rowan works
 
@@ -108,6 +107,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   (`__main__` block's calls skipped) together; the latter answers unless the former completes within `EARLY` (1 s), whose
   document then follows as an event. A changed file, a newer `analyse` of it or a `cancel` (the extension's, when a
   request times out) cuts the analyses running for it as the deadline does (`Budget::cancel`, read on its own thread).
+* **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`; no per-function budgets)
+  or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit, `Payload::Affix`), metaclasses and

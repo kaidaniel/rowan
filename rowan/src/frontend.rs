@@ -463,3 +463,21 @@ pub fn utf16_col(module: u32, line: u32, col: u32) -> u32 {
         m.source.get(s..s + col as usize).map(|t| t.encode_utf16().count() as u32).unwrap_or(col)
     })
 }
+
+/// The modules parsed so far and their lines, all and those read from site-packages:
+/// `[modules, lines, site modules, site lines]` (`ROWAN_DEBUG`'s `loaded:` line).
+pub fn loaded_counts() -> [usize; 4] {
+    REG.with(|r| {
+        let mut c = [0usize; 4];
+        for m in r.borrow().modules.iter() {
+            let n = m.source.lines().count();
+            c[0] += 1;
+            c[1] += n;
+            if m.path.as_deref().is_some_and(|p| p.contains("site-packages")) {
+                c[2] += 1;
+                c[3] += n;
+            }
+        }
+        c
+    })
+}
