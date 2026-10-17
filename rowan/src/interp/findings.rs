@@ -378,7 +378,7 @@ impl Analyzer {
         } else {
             (None, FxHashMap::default(), Vec::new())
         };
-        let render = |an: &Analyzer| crate::report::in_scope(scope, || (crate::report::render_value(an, state, v, 0, &mut Vec::new()), crate::report::value_legend(an, state, v)));
+        let render = |an: &Analyzer| crate::interp::render::in_scope(scope, || (crate::interp::render::render_value(an, state, v, 0, &mut Vec::new()), crate::interp::render::value_legend(an, state, v)));
         let (text, mut legend) = match pctx {
             Some(ctx) => crate::models::shape::with_ctx(ctx, || render(self)),
             None => render(self),

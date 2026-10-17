@@ -52,7 +52,7 @@ impl Names {
     /// symbol uses the names of its function, module-level ones are visible everywhere.
     pub fn visible(&self, oid: ObjId) -> Option<&String> {
         let s = self.scope(oid);
-        if s == 0 || s == crate::report::render_scope() {
+        if s == 0 || s == crate::interp::render::render_scope() {
             self.symbols.get(&oid)
         } else {
             None

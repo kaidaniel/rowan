@@ -46,6 +46,8 @@ pub mod stmts;
 
 // What the models, the report and the driver see.
 pub mod api;
+pub mod facts;
+pub mod render;
 pub mod report;
 
 pub use api::Call;
