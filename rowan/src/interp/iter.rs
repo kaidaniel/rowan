@@ -77,6 +77,19 @@ struct ItemsAcc {
     unordered: bool,
 }
 
+impl ItemsAcc {
+    /// One more element, or (key, value) pair, the items may be.
+    fn add_elem(&mut self, e: Elem) {
+        match e {
+            Elem::One(e) => self.elems.push(e),
+            Elem::Pair(k, v) => {
+                self.pair = true;
+                self.pairs.push((k, v));
+            }
+        }
+    }
+}
+
 impl Analyzer {
     /// Iterating `v` (a generator among it runs first): per kind of object its items and
     /// element (`iter_sequence`, `iter_mapping`, `iter_view`, `iter_zip`, …), and the scalar
@@ -406,13 +419,7 @@ impl Analyzer {
                 return;
             }
             let sub = self.iterate(&rest, node, state);
-            match sub.elem {
-                Elem::One(e) => acc.elems.push(e),
-                Elem::Pair(k, v) => {
-                    acc.pair = true;
-                    acc.pairs.push((k, v));
-                }
-            }
+            acc.add_elem(sub.elem);
             return;
         }
         let sub = self.iterate(&r, node, state);
@@ -421,13 +428,7 @@ impl Analyzer {
             _ => acc.items = None,
         }
         acc.exhaustive = false;
-        match sub.elem {
-            Elem::One(e) => acc.elems.push(e),
-            Elem::Pair(k, v) => {
-                acc.pair = true;
-                acc.pairs.push((k, v));
-            }
-        }
+        acc.add_elem(sub.elem);
     }
 
     /// The items of an iterator object through `__next__`, when every call is decided (None:

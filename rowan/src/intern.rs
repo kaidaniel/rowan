@@ -135,6 +135,11 @@ pub fn key(k: Key) -> KeyId {
     INTERN.with(|i| KeyId(i.borrow_mut().keys.intern(k)))
 }
 
+/// The str key whose text is the string `id` (a name as a record's key: `x` → `"x"`).
+pub fn key_of_str(id: StrId) -> KeyId {
+    key_str_lit(&str_get(id))
+}
+
 /// The key of a str literal.
 pub fn key_str_lit(s: &str) -> KeyId {
     if let Some(k) = INTERN.with(|i| i.borrow().str_keys.get(s).copied()) {

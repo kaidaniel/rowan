@@ -258,7 +258,7 @@ impl Analyzer {
             let found = cls.and_then(|c| names.iter().find_map(|n| Some((self.class_lookup(c, n)?, *n))));
             match found {
                 Some((m, n)) => {
-                    let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit(n))).cloned().unwrap_or_default();
+                    let fv = self.heap.class_attr(m, n);
                     calls.extend(fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).map(|f| (o, f)));
                 }
                 None => rest.pts = rest.pts.insert(o),
@@ -289,7 +289,7 @@ impl Analyzer {
         if node.line == 0 {
             return;
         }
-        let key = intern::key(intern::Key::Str(str_get(name)));
+        let key = intern::key_of_str(name);
         let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "is only assigned on some paths");
         self.verdict(node, key, &cls, module, Ns::Name, None, None);
         self.may_raise_here(exc, state);
@@ -322,7 +322,7 @@ impl Analyzer {
                     return v;
                 }
                 if node.line > 0 {
-                    let key = intern::key(intern::Key::Str(str_get(name)));
+                    let key = intern::key_of_str(name);
                     let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "is not assigned on any path to here");
                     self.verdict(node, key, &cls, fr_module, Ns::Name, None, None);
                     self.raise_here("UnboundLocalError", state);
@@ -332,16 +332,16 @@ impl Analyzer {
         }
         if fr_kind == FrameKind::Class {
             let cls = self.frame().class_oid.unwrap();
-            if let Some(v) = state.slot_opt(cls, Ns::Attr, intern::key(intern::Key::Str(str_get(name)))) {
+            if let Some(v) = state.slot_opt(cls, Ns::Attr, intern::key_of_str(name)) {
                 return v;
             }
             if let Some(&cid) = self.frame().cells.get(&name) {
                 return state.slot(cid, Ns::Cell, cell_key());
             }
         }
-        if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name)))) {
+        if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key_of_str(name)) {
             if fr_kind == FrameKind::Module {
-                let k = intern::key(intern::Key::Str(str_get(name)));
+                let k = intern::key_of_str(name);
                 let row = state.row(fr_module, Ns::Attr);
                 if row.present.contains(k) && !row.definite.contains(k) && row.mutators.is_empty() && !row.top && row.sources.is_empty() {
                     self.unbound_read(name, fr_module, node, state, "NameError");
@@ -411,7 +411,7 @@ impl Analyzer {
         }
         let fr_kind = self.frame().kind;
         let fr_module = self.frame().module;
-        let key = intern::key(intern::Key::Str(str_get(name)));
+        let key = intern::key_of_str(name);
         if self.frame().comp_names.iter().any(|ns| ns.contains(&name)) {
             state.env.insert(name, v);
             return;

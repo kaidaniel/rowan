@@ -924,7 +924,7 @@ impl Analyzer {
         }
         let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
-            let inits = self.heap.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            let inits = self.heap.class_attr(init_cls, "__init__");
             for init in inits.pts.iter() {
                 if self.heap.kind(init) != Kind::Function {
                     continue;

@@ -823,7 +823,7 @@ pub(super) fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         if an.heap.kind(o) == Kind::Instance {
             let nid = an.copy_object(o, &c.node, st, false, &mut IndexMap::new());
             for (k, v) in c.kwargs.iter() {
-                an.store_key(nid, Ns::Attr, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, &c.node, st);
+                an.store_key(nid, Ns::Attr, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
             }
             outs.push(Value::obj(nid));
         }
@@ -925,7 +925,7 @@ pub(super) fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
         }
     }
     for (k, v) in c.kwargs.iter() {
-        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, &c.node, st);
+        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
     }
     Value::obj(oid)
 }

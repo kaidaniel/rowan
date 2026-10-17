@@ -820,7 +820,7 @@ impl Analyzer {
         if let Some(v) = st.env.get(&n) {
             return Some(v.clone());
         }
-        st.slot_opt(self.frame().module, Ns::Attr, intern::key(intern::Key::Str(intern::str_get(n))))
+        st.slot_opt(self.frame().module, Ns::Attr, intern::key_of_str(n))
     }
 
     /// A name's value for a fact's dependencies: its binding, else the (fixed) unknown object

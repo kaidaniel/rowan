@@ -65,7 +65,7 @@ impl Analyzer {
                     }
                     ast::CmpOp::In | ast::CmpOp::NotIn => {
                         let (ast::Expr::StringLiteral(k), Some(n)) = (l, name(r)) else { return false };
-                        let key = intern::key(intern::Key::Str(k.value.to_str().into()));
+                        let key = intern::key_str_lit(k.value.to_str());
                         let v = self.dep_value(pre, n);
                         unwritten(&v, pre, Some(key))
                     }

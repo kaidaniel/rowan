@@ -350,7 +350,7 @@ impl Analyzer {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
-                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
+                        let f = self.heap.class_attr(m, "forward");
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
                         let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node);
                         return crate::models::torch::t_forward_hooks(self, oid, args, r, state, node);
@@ -402,7 +402,7 @@ impl Analyzer {
             Kind::Instance => {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__call__") {
-                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__call__"))).cloned().unwrap_or_default();
+                        let f = self.heap.class_attr(m, "__call__");
                         if f.pts.is_empty() {
                             return Value::new();
                         }
@@ -557,7 +557,7 @@ impl Analyzer {
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
         if let Some(owner) = self.class_lookup(cls, "__new__") {
-            let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
+            let fv = self.heap.class_attr(owner, "__new__");
             let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect();
             if !fns.is_empty() {
                 let mut nargs = vec![Value::obj(cls)];
@@ -568,7 +568,7 @@ impl Analyzer {
                     out = out.join(&r);
                 }
                 if let Some(init) = self.class_lookup(cls, "__init__") {
-                    let iv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+                    let iv = self.heap.class_attr(init, "__init__");
                     let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).is_some_and(|c| self.heap.mro(c).contains(&cls))).collect();
                     for inst in insts {
                         for f in iv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
@@ -585,7 +585,7 @@ impl Analyzer {
             return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
-            let fv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            let fv = self.heap.class_attr(init, "__init__");
             self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
@@ -986,12 +986,12 @@ impl Analyzer {
                 if used_kw.contains(name) {
                     continue;
                 }
-                let nk = intern::key(intern::Key::Str(intern::str_get(*name)));
+                let nk = intern::key_of_str(*name);
                 row = row.store(nk, true);
                 state.set_slot(did, Ns::Item, nk, v.clone(), true);
             }
             state.set_row(did, Ns::Item, row);
-            let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key(intern::Key::Str(intern::str_get(*n)))));
+            let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key_of_str(*n)));
             for sk in star_kwargs {
                 self.copy_into(did, Ns::Item, sk, state, true, &kill);
             }
@@ -1004,7 +1004,7 @@ impl Analyzer {
     /// default (joined with it when the key is only possibly there); a required one only
     /// `**kw` supplies is read from it (a requirement on an input).
     fn unbound_param_value(&mut self, fi: &FuncInfo, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
-        let nk = intern::key(intern::Key::Str(intern::str_get(name)));
+        let nk = intern::key_of_str(name);
         let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
         let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
         if let (Some(d), false) = (fi.defaults.get(&name), kw_present) {

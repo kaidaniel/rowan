@@ -355,7 +355,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                 }
                 ast::Stmt::FunctionDef(fd) => {
                     let fname = fd.name.id.to_string();
-                    let fv = an.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(&fname))).cloned().unwrap_or_default();
+                    let fv = an.heap.class_attr(c, &fname);
                     let Some(func) = fv.pts.iter().find(|o| an.heap.kind(*o) == Kind::Function) else { continue };
                     for d in &fd.decorator_list {
                         let (callee, call) = match &d.expression {
@@ -1242,7 +1242,7 @@ fn pyd_init_privates(an: &mut Analyzer, cls: ObjId, inst: ObjId, state: &mut Sta
         state.set_slot(inst, Ns::Attr, priv_key(&name), v, true);
     }
     if let Some(defc) = an.class_lookup(cls, "model_post_init") {
-        let fv = an.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
+        let fv = an.heap.class_attr(defc, "model_post_init");
         for f in fv.pts.iter().filter(|f| an.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
             an.call_user(f, Some(Value::obj(inst)), vec![an.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
         }

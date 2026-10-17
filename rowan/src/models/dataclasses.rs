@@ -148,7 +148,7 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
     }
     // the generated __init__ ends by calling __post_init__ when the class defines one
     if let Some(pc) = an.class_lookup(cls, "__post_init__") {
-        let fv = an.heap.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
+        let fv = an.heap.class_attr(pc, "__post_init__");
         for f in fv.pts.iter() {
             if an.heap.kind(f) == Kind::Function {
                 an.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, false);
@@ -587,7 +587,7 @@ pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value],
             }
         }
         for (k, v) in kwargs.iter() {
-            an.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
+            an.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key_of_str(*k)), v, true, node, state);
         }
         for sk in star_kwargs {
             an.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());

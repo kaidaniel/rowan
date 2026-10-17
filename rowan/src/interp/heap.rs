@@ -563,6 +563,12 @@ impl Heap {
     }
 
     // ------------------------------------------------------------ classes
+    /// What class `owner` holds under attribute `name` (flow-insensitive, `cls_slots`; the
+    /// empty value when nothing).
+    pub fn class_attr(&self, owner: ObjId, name: &str) -> Value {
+        self.cls_slots.get(&(owner, Ns::Attr, intern::key_str_lit(name))).cloned().unwrap_or_default()
+    }
+
     /// Breadth-first linearisation of the user classes above `cls` (when C3 fails).
     pub fn mro_bfs(&self, cls: u32) -> Vec<u32> {
         let mut seen: Vec<u32> = Vec::new();

@@ -100,7 +100,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     for (k, v) in c.kwargs.iter() {
-        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, &c.node, st);
+        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
     }
     for sk in &c.star_kwargs {
         an.copy_into(oid, Ns::Item, sk, st, true, &KeySet::new());

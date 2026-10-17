@@ -136,7 +136,7 @@ pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         for (k, v) in c.kwargs.iter() {
-            an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, strong, &c.node, st);
+            an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, strong, &c.node, st);
         }
         for sk in &c.star_kwargs {
             an.copy_into(oid, Ns::Item, sk, st, strong, &KeySet::new());
@@ -821,7 +821,7 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             for (k, v) in c.kwargs.iter() {
-                an.store_key(oid, Ns::Attr, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, strong, &c.node, st);
+                an.store_key(oid, Ns::Attr, &KeyVal::Lit(intern::key_of_str(*k)), v, strong, &c.node, st);
             }
             for sk in &c.star_kwargs {
                 an.copy_into(oid, Ns::Attr, sk, st, strong, &KeySet::new());

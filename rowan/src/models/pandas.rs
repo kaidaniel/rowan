@@ -400,7 +400,7 @@ fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<K
     let mut out = Vec::new();
     for (k, v) in c.kwargs.iter() {
         if c.qual.ends_with(".agg") || c.qual.ends_with(".aggregate") {
-            out.push((intern::key(intern::Key::Str(intern::str_get(*k))), true, col_of(v)));
+            out.push((intern::key_of_str(*k), true, col_of(v)));
         }
     }
     for sk in &c.star_kwargs {
@@ -2574,7 +2574,7 @@ fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut row = recv_row(an, st, c);
     let mut colvals: Vec<(KeyId, Option<Known>)> = Vec::new();
     for (k, v) in c.kwargs.iter() {
-        let col = intern::key(intern::Key::Str(intern::str_get(*k)));
+        let col = intern::key_of_str(*k);
         // a callable gets the frame as built so far (earlier keywords included)
         if v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Class)) {
             let tmp = an.alloc(Kind::Frame, &format!("{}:assign:{}", crate::interp::site_string(&c.node), intern::key_py_str(col)), st, &format!("frame@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
@@ -3527,7 +3527,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut cols = Row::new();
         let mut names = Vec::new();
         for (k, v) in c.kwargs.iter() {
-            names.push(intern::key(intern::Key::Str(intern::str_get(*k))));
+            names.push(intern::key_of_str(*k));
             for x in v.pts.iter() {
                 if an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, st) == Some(2) {
                     if let Some(col) = st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit() {

@@ -684,7 +684,7 @@ impl Analyzer {
         if !insts.is_empty() && rv.pts.len() == 1 {
             if let Some(cls) = self.heap.instance_class(insts[0]) {
                 if let Some(m) = self.class_lookup(cls, "__contains__") {
-                    let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__contains__"))).cloned().unwrap_or_default();
+                    let fv = self.heap.class_attr(m, "__contains__");
                     for f in fv.pts.iter() {
                         if self.heap.kind(f) != Kind::Function {
                             continue;

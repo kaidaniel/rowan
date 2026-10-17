@@ -104,7 +104,7 @@ impl Analyzer {
             return true;
         }
         let Some(dc) = self.class_lookup(c, name) else { return false };
-        let cv = self.heap.cls_slots.get(&(dc, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
+        let cv = self.heap.class_attr(dc, name);
         let runs = cv.pts.iter().any(|f| (self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) || (self.heap.kind(f) == Kind::Instance && self.heap.instance_class(f).is_some_and(|fc| self.class_lookup(fc, if store { "__set__" } else { "__get__" }).is_some())));
         runs
     }

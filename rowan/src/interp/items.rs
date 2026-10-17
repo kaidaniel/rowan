@@ -422,7 +422,7 @@ impl Analyzer {
         let cls = self.heap.instance_class(oid);
         if let Some(cls) = cls {
             if let Some(m) = self.class_lookup(cls, "__getitem__") {
-                let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
+                let fv = self.heap.class_attr(m, "__getitem__");
                 for f in fv.pts.iter() {
                     if self.heap.kind(f) == Kind::Function {
                         let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
@@ -923,7 +923,7 @@ impl Analyzer {
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.heap.instance_class(oid) {
                         if let Some(m) = self.class_lookup(cls, "__setitem__") {
-                            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__setitem__"))).cloned().unwrap_or_default();
+                            let fv = self.heap.class_attr(m, "__setitem__");
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
                                     self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
@@ -1124,7 +1124,7 @@ impl Analyzer {
             if kind == Kind::Instance && ns == Ns::Item {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__delitem__") {
-                        let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__delitem__"))).cloned().unwrap_or_default();
+                        let fv = self.heap.class_attr(m, "__delitem__");
                         for f in fv.pts.iter() {
                             if self.heap.kind(f) == Kind::Function {
                                 self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
