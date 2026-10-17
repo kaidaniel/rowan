@@ -35,6 +35,16 @@ impl PKey for SourceId {
     }
 }
 
+/// A map's value. Writing a value the key already has (`same_write`) copies nothing, so the
+/// map stays shared with its copies.
+pub trait MapValue: Clone + PartialEq {
+    fn same_write(&self, o: &Self) -> bool {
+        self == o
+    }
+}
+
+impl MapValue for u32 {}
+
 enum Node<K, V> {
     Leaf { h: u64, k: K, v: V },
     /// keys agree with `p` above the branching bit `m`; those with `m` clear go left
@@ -89,13 +99,18 @@ fn link<K, V>(p0: u64, t0: Tree<K, V>, p1: u64, t1: Tree<K, V>) -> Tree<K, V> {
     }
 }
 
-/// A branch from possibly empty children; `orig` is returned when both children are its own.
+/// A branch from possibly empty children; `orig` (or `alt`, a branch of the other map at the
+/// same place) is returned when both children are its own, so joins keep subtrees shared.
 fn branch<K, V>(p: u64, m: u64, l: Option<Tree<K, V>>, r: Option<Tree<K, V>>, orig: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
+    branch2(p, m, l, r, orig, None)
+}
+
+fn branch2<K, V>(p: u64, m: u64, l: Option<Tree<K, V>>, r: Option<Tree<K, V>>, orig: Option<&Tree<K, V>>, alt: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
     match (l, r) {
         (None, None) => None,
         (Some(x), None) | (None, Some(x)) => Some(x),
         (Some(l), Some(r)) => {
-            if let Some(o) = orig {
+            for o in orig.into_iter().chain(alt) {
                 if let Node::Branch { l: ol, r: or, .. } = &**o {
                     if Arc::ptr_eq(ol, &l) && Arc::ptr_eq(or, &r) {
                         return Some(o.clone());
@@ -191,13 +206,17 @@ pub struct Merge<'a, K, V> {
     pub equal_identity: bool,
 }
 
-fn map_side<K: Clone, V: Clone>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
+fn map_side<K: Clone, V: Clone + PartialEq>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
     if g.one_side_identity {
         return Some(t.clone());
     }
     match &**t {
         Node::Leaf { h, k, v } => {
             let nv = if left { (g.left)(k, v) } else { (g.right)(k, v) }?;
+            // (an unchanged value keeps its leaf: the result shares it)
+            if nv == *v {
+                return Some(t.clone());
+            }
             Some(Arc::new(Node::Leaf { h: *h, k: k.clone(), v: nv }))
         }
         Node::Branch { p, m, l, r } => {
@@ -208,29 +227,35 @@ fn map_side<K: Clone, V: Clone>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>)
     }
 }
 
-fn both_leaf<K: Clone, V: Clone + PartialEq>(h: u64, k: &K, a: &V, b: &V, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
-    if g.equal_identity && a == b {
-        return Some(Arc::new(Node::Leaf { h, k: k.clone(), v: a.clone() }));
-    }
+/// Leaves `ta` (left) and `tb` (right) with one key merged: a result equal to one side's value
+/// is that side's leaf (the joined map keeps sharing it: later joins and diffs skip it).
+fn both_leaf<K: Clone, V: Clone + PartialEq>(ta: &Tree<K, V>, tb: &Tree<K, V>, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
+    let (Node::Leaf { h, k, v: a }, Node::Leaf { v: b, .. }) = (&**ta, &**tb) else { unreachable!() };
     let v = (g.both)(k, a, b)?;
-    Some(Arc::new(Node::Leaf { h, k: k.clone(), v }))
+    if v == *a {
+        return Some(ta.clone());
+    }
+    if v == *b {
+        return Some(tb.clone());
+    }
+    Some(Arc::new(Node::Leaf { h: *h, k: k.clone(), v }))
 }
 
 /// A leaf of the left map merged with a tree of the right one.
 fn merge_leaf<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, leaf_left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
-    let Node::Leaf { h, k, v } = &**s else { unreachable!() };
+    let Node::Leaf { h, v, .. } = &**s else { unreachable!() };
     match &**t {
         Node::Leaf { h: j, k: _, v: w } if j == h => {
             if leaf_left {
                 if g.equal_identity && v == w {
                     return Some(s.clone());
                 }
-                both_leaf(*h, k, v, w, g)
+                both_leaf(s, t, g)
             } else {
                 if g.equal_identity && v == w {
                     return Some(t.clone());
                 }
-                both_leaf(*h, k, w, v, g)
+                both_leaf(t, s, g)
             }
         }
         Node::Branch { p, m, l, r } if match_prefix(*h, *p, *m) => {
@@ -269,7 +294,7 @@ fn merge<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, g: &mut
             if m == n && p == q {
                 let nl = merge(s0, t0, g);
                 let nr = merge(s1, t1, g);
-                branch(*p, *m, nl, nr, Some(s))
+                branch2(*p, *m, nl, nr, Some(s), Some(t))
             } else if m > n && match_prefix(*q, *p, *m) {
                 if zero_bit(*q, *m) {
                     let nl = merge(s0, t, g);
@@ -384,13 +409,13 @@ impl<K, V> Clone for LayerMap<K, V> {
     }
 }
 
-impl<K: PKey, V: Clone + PartialEq> Default for LayerMap<K, V> {
+impl<K: PKey, V: MapValue> Default for LayerMap<K, V> {
     fn default() -> Self {
         LayerMap { root: None }
     }
 }
 
-impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
+impl<K: PKey, V: MapValue> LayerMap<K, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -448,6 +473,8 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         let h = k.key64();
         match &mut self.root {
             None => self.root = Some(Arc::new(Node::Leaf { h, k, v })),
+            // (writing the value already there copies nothing: the map stays shared)
+            Some(t) if get(t, h).is_some_and(|old| old.same_write(&v)) => {}
             Some(t) => insert(t, h, k, v),
         }
     }
@@ -457,6 +484,14 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         let (rest, v) = remove(t, k.key64())?;
         self.root = rest;
         Some(v)
+    }
+
+    /// Removes every key whose image agrees with `k`'s from bit `bits` up (an object's rows in
+    /// all namespaces), in one path copy.
+    pub fn remove_block(&mut self, k: &K, bits: u32) {
+        if let Some(rest) = self.root.as_ref().and_then(|t| remove_hi(t, k.key64() >> bits, bits)) {
+            self.root = rest;
+        }
     }
 
     /// Keys on one side only are kept; keys on both sides are combined with f (unless equal).
@@ -575,19 +610,19 @@ fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
     }
 }
 
-/// `t` without the keys whose high 32 bits are `hi`, in one path copy (None: nothing changes;
-/// Some(rest), rest None: empty).
-fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64) -> Option<Option<Tree<K, V>>> {
+/// `t` without the keys whose bits from `bits` up are `hi`, in one path copy (None: nothing
+/// changes; Some(rest), rest None: empty).
+fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64, bits: u32) -> Option<Option<Tree<K, V>>> {
     match &**t {
-        Node::Leaf { h, .. } => (h >> 32 == hi).then_some(None),
+        Node::Leaf { h, .. } => (h >> bits == hi).then_some(None),
         // (every key below shares the high bits)
-        Node::Branch { p, m, .. } if *m < 1 << 32 => (p >> 32 == hi).then_some(None),
+        Node::Branch { p, m, .. } if *m < 1 << bits => (p >> bits == hi).then_some(None),
         Node::Branch { p, m, l, r } => {
-            let lo = hi << 32;
+            let lo = hi << bits;
             if !match_prefix(lo, *p, *m) {
                 return None;
             }
-            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi)?, None) })
+            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi, bits)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi, bits)?, None) })
         }
     }
 }
@@ -605,13 +640,13 @@ impl<K, IK, V> Clone for TwoLevel<K, IK, V> {
     }
 }
 
-impl<K: PKey, IK: IKey, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
+impl<K: PKey, IK: IKey, V: MapValue> Default for TwoLevel<K, IK, V> {
     fn default() -> Self {
         TwoLevel { m: LayerMap::new() }
     }
 }
 
-impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
+impl<K: PKey, IK: IKey, V: MapValue> TwoLevel<K, IK, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -697,7 +732,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
 
     /// Removes every inner entry of `key`.
     pub fn drop_key(&mut self, key: &K) {
-        if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64())) {
+        if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64(), 32)) {
             self.m.root = rest;
         }
     }

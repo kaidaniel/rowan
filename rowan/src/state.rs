@@ -807,9 +807,8 @@ impl State {
     /// Forget all of an object (an object that is garbage on this path: a join takes the
     /// other paths' facts about it).
     pub fn forget_obj(&mut self, oid: ObjId) {
-        for ns in [Ns::Item, Ns::Attr, Ns::Cell, Ns::Pos, Ns::Elem, Ns::Meta] {
-            self.rows.remove(&(oid, ns));
-        }
+        // (the rows of every namespace: keys `oid << 3 | ns`)
+        self.rows.remove_block(&(oid, Ns::Item), 3);
         self.slots.drop_key(&oid);
         self.elems.remove(&oid);
         self.lens.remove(&oid);

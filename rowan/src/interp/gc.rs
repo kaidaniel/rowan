@@ -131,7 +131,10 @@ impl Analyzer {
         }
         each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
         each(&self.m.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
-        for m in [&self.m.attr_mirrors, &self.heap.copy_root, &self.m.sql_cursors] {
+        if o.is_some() {
+            work.extend(self.heap.copy_root.get(&o.unwrap()).copied());
+        }
+        for m in [&self.m.attr_mirrors, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
         }
         work.extend(each(&self.entry.instances, o).flatten());
@@ -154,10 +157,12 @@ impl Analyzer {
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
-    /// objects (those still in use are reachable from the names).
-    pub(in crate::interp) fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
+    /// objects (those still in use are reachable from the names). `since`: a collector after
+    /// that mark, which expands only objects born since (older ones may be left out).
+    pub(in crate::interp) fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>, since: Option<u64>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
+        self.heap.push_copy_roots(since, work);
         for v in self.unwind.cur_exc.iter().chain(self.unwind.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
@@ -319,7 +324,7 @@ impl Analyzer {
                 work.extend(ko.objs.iter());
             }
         }
-        self.gc_pinned(&mut work, unwind);
+        self.gc_pinned(&mut work, unwind, Some(mark));
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         // (a loop's item is not found again by a path: garbage when nothing holds it)
@@ -328,8 +333,10 @@ impl Analyzer {
         // (older objects reach young ones only through those roots: a young one was made
         // since, so whatever refers to it was written since; only young ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
+        // (only young objects go into `reached`: the walk stops at older ones, and only young
+        // ones are looked up after it)
         while let Some(o) = work.pop() {
-            if !reached.insert(o) || !young(self, o) {
+            if !young(self, o) || !reached.insert(o) {
                 continue;
             }
             self.budget.walk_visit();
@@ -389,7 +396,7 @@ impl Analyzer {
         let mut work: Vec<ObjId> = roots.into_iter().chain(b.roots.iter().copied()).collect();
         b.held = b.looks > Self::DROP_LOOKS || self.reaches_young(&b, target, &mut work, state);
         if !b.held {
-            self.gc_pinned(&mut work, Some(envs));
+            self.gc_pinned(&mut work, Some(envs), None);
             b.held = self.reaches_young(&b, target, &mut work, state);
         }
         if !b.held {

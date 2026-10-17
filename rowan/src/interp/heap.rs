@@ -325,6 +325,12 @@ pub struct Heap {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
+    /// `copy_root`'s distinct originals: what the copies pin for the collectors
+    copy_roots: rustc_hash::FxHashSet<ObjId>,
+    /// when an original became young for the collectors (made one, or renewed while one), in
+    /// serial order: a collector after mark `m` finds the young originals at the log's end (a
+    /// generational collector's remembered set)
+    root_log: Vec<(u64, ObjId)>,
     /// the builtin container annotation an unknown follows (`list[dict[str, int]]`): its
     /// parts' types (`entry::part_annotation`)
     pub ann: FxHashMap<ObjId, &'static ruff_python_ast::Expr>,
@@ -333,7 +339,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
@@ -380,6 +386,26 @@ impl Heap {
     }
 
     /// Was `o` made (or made new) before `mark`?
+    /// Records that `copy` is a copy of `root`.
+    pub fn set_copy_root(&mut self, copy: ObjId, root: ObjId) {
+        self.copy_root.insert(copy, root);
+        if self.copy_roots.insert(root) {
+            self.root_log.push((self.serial, root));
+        }
+    }
+
+    /// The originals of copies (what the collectors keep), or only those born since `mark`
+    /// (older objects are never collected after it).
+    pub fn push_copy_roots(&self, mark: Option<u64>, work: &mut Vec<ObjId>) {
+        match mark {
+            Some(m) => {
+                let from = self.root_log.partition_point(|(s, _)| *s < m);
+                work.extend(self.root_log[from..].iter().map(|(_, o)| *o).filter(|o| !self.born_before(*o, m)));
+            }
+            None => work.extend(self.copy_roots.iter().copied()),
+        }
+    }
+
     pub fn born_before(&self, o: ObjId, mark: u64) -> bool {
         self.objects[o as usize].born < mark
     }
@@ -388,6 +414,9 @@ impl Heap {
     pub fn renew(&mut self, oid: ObjId) {
         self.objects[oid as usize].born = self.serial;
         self.serial += 1;
+        if self.copy_roots.contains(&oid) {
+            self.root_log.push((self.serial - 1, oid));
+        }
     }
 
     /// The object at (kind, site, context), made if there is none yet; an existing one is weak
