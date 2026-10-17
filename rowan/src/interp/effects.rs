@@ -412,6 +412,10 @@ impl Analyzer {
             let k = key_str_lit(name);
             let mro = self.heap.mro(rc);
             let Some(at) = mro.iter().position(|c| *c == cls) else { return KeySet::new() };
+            // (a base rowan does not see may be the one called)
+            if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) {
+                return KeySet::new();
+            }
             for c in &mro[at + 1..] {
                 if let Some(v) = self.heap.cls_slots.get(&(*c, Ns::Attr, k)) {
                     return match v.single().filter(|g| fi_is_method(self, *g) && v.kv.is_bot()) {
@@ -422,7 +426,8 @@ impl Analyzer {
             }
             KeySet::new()
         };
-        let mut w = MustWalk { me: me.parameter.name.id.as_str(), ret: None, supers: Vec::new(), sup: &sup, rebound: false };
+        let cls = fi.qualname.rsplit('.').nth(1).unwrap_or("");
+        let mut w = MustWalk { me: me.parameter.name.id.as_str(), cls, ret: None, supers: Vec::new(), sup: &sup, rebound: false };
         let fall = w.block(&f.body, KeySet::new());
         if w.rebound {
             return KeySet::new();
@@ -1213,6 +1218,8 @@ fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
 /// not complete; a loop, `with` or `match` keeps what was stored before it (its returns count).
 struct MustWalk<'a> {
     me: &'a str,
+    /// the name of the method's class
+    cls: &'a str,
     ret: Option<KeySet>,
     /// locals bound to a method of `super()` (`init = super().__init__`)
     supers: Vec<(&'static str, &'static str)>,
@@ -1249,17 +1256,23 @@ impl MustWalk<'_> {
         }
     }
 
-    /// `super().m` / `super(C, self).m`: m.
-    fn super_method(e: &'static Expr) -> Option<&'static str> {
+    /// `super().m` / `super(C, self).m` of the method's own class C: m.
+    fn super_method(&self, e: &'static Expr) -> Option<&'static str> {
         let Expr::Attribute(a) = e else { return None };
         let Expr::Call(c) = &*a.value else { return None };
-        matches!(&*c.func, Expr::Name(n) if n.id.as_str() == "super").then(|| a.attr.as_str())
+        let name = |x: &Expr, n: &str| matches!(x, Expr::Name(y) if y.id.as_str() == n);
+        let own = match &c.arguments.args[..] {
+            [] => true,
+            [k, me] => name(k, self.cls) && name(me, self.me),
+            _ => false,
+        };
+        (name(&c.func, "super") && own).then(|| a.attr.as_str())
     }
 
     fn stmt(&mut self, st: &'static Stmt, acc: KeySet) -> Option<KeySet> {
         match st {
             Stmt::Assign(a) => {
-                if let ([Expr::Name(n)], Some(m)) = (a.targets.as_slice(), Self::super_method(&a.value)) {
+                if let ([Expr::Name(n)], Some(m)) = (a.targets.as_slice(), self.super_method(&a.value)) {
                     self.supers.push((n.id.as_str(), m));
                 }
                 Some(a.targets.iter().fold(acc, |acc, t| self.target(t, acc)))
@@ -1268,7 +1281,7 @@ impl MustWalk<'_> {
             Stmt::AugAssign(a) => Some(self.target(&a.target, acc)),
             Stmt::Expr(e) => {
                 let Expr::Call(c) = &*e.value else { return Some(acc) };
-                let m = Self::super_method(&c.func).or_else(|| match &*c.func {
+                let m = self.super_method(&c.func).or_else(|| match &*c.func {
                     Expr::Name(n) => self.supers.iter().rev().find(|(l, _)| *l == n.id.as_str()).map(|(_, m)| *m),
                     _ => None,
                 });
