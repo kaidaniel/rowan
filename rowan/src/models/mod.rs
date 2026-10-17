@@ -396,6 +396,8 @@ fn m_ordered_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_dict(an, st, &call)
 }
 
+/// The model of a library function known to change nothing it is given: an unknown result
+/// (a call given the program's functions is an unknown call all the same: it may call them).
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (a library function given the program's functions may call them: `inspect.getmembers(x,
     // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
