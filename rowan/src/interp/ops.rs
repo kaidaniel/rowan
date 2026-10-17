@@ -501,15 +501,48 @@ impl Analyzer {
             }
             Some(out)
         };
-        let (calls, other) = match methods(self, a, &format!("__{}__", name)) {
-            Some(m) => (m, b.clone()),
-            None => (methods(self, b, &format!("__r{}__", name))?, a.clone()),
+        let reflected = format!("__r{}__", name);
+        let run = |an: &mut Analyzer, calls: Vec<(u32, u32)>, other: &Value, state: &mut State| {
+            let outs: Vec<Value> = calls.into_iter().map(|(o, f)| an.call_user(f, Some(Value::obj(o)), Args::pos(&[other.clone()]), state, node, false)).collect();
+            join_values(outs)
         };
-        let mut outs = Vec::new();
-        for (o, f) in calls {
-            outs.push(self.call_user(f, Some(Value::obj(o)), Args::pos(&[other.clone()]), state, node, false));
+        // a path where a method returns NotImplemented goes on as Python's does: to the other
+        // operand's reflected method, else a TypeError (it is not the result)
+        let not_impl = |an: &Analyzer, v: &Value| v.pts.iter().filter(|o| an.heap.kind(*o) == Kind::External && an.heap.external_qual(*o) == "builtins.NotImplemented").collect::<Vec<_>>();
+        let (r, other_side) = match methods(self, a, &format!("__{}__", name)) {
+            Some(m) => (run(self, m, b, state), Some((b, a))),
+            None => {
+                let m = methods(self, b, &reflected)?;
+                let r = run(self, m, a, state);
+                // (an operand that is no instance of the program's classes may have its own
+                // method, run first, whose result may be anything; a known builtin's is not one
+                // for the program's instance)
+                let open = !a.pts.is_empty() || (matches!(a.kv, KeyVal::Data(_)) && self.value_type(a).is_none());
+                (if open { r.join(&Value::data(&format!("L{}", node.line))) } else { r }, None)
+            }
+        };
+        let ni = not_impl(self, &r);
+        if ni.is_empty() {
+            return Some(r);
         }
-        Some(join_values(outs))
+        let mut r = Value::with_kv(r.pts.filter(|o| !ni.contains(&o)), r.kv.clone());
+        self.flag_may_raise(state);
+        if let Some((b, a)) = other_side {
+            match methods(self, b, &reflected) {
+                Some(m) => {
+                    let back = run(self, m, a, state);
+                    let ni = not_impl(self, &back);
+                    r = r.join(&Value::with_kv(back.pts.filter(|o| !ni.contains(&o)), back.kv.clone()));
+                }
+                None if !b.pts.is_empty() || matches!(b.kv, KeyVal::Data(_)) => r = r.join(&Value::data(&format!("L{}", node.line))),
+                None => {}
+            }
+        }
+        // (only NotImplemented: the operation raises)
+        if r.pts.is_empty() && r.kv.is_bot() {
+            state.reachable = false;
+        }
+        Some(r)
     }
 
     /// The text `pre` + v + `post` for a value v that is one of a few texts or some keys:
