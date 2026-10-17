@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::Node;
 use ruff_python_ast as ast;
-use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
+use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
 use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Slot};
@@ -398,26 +398,40 @@ impl Analyzer {
         Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code, stores_like })
     }
 
-    /// The attribute names a method's own code stores on its receiver on every way it
-    /// completes: the top-level `self.x = …` statements before any statement that may return.
-    pub(in crate::interp) fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
-        let Payload::Func(fi) = &self.heap.obj(foid).payload else { return Vec::new() };
-        let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return Vec::new() };
-        let me = me.parameter.name.id.as_str();
-        let mine = |t: &Expr| match t {
-            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == me) => Some(key_str_lit(a.attr.as_str())),
-            _ => None,
-        };
-        let mut out = Vec::new();
-        for st in f.body.iter().take_while(|st| !crate::syntax::contains_return(std::slice::from_ref(*st)) && !crate::syntax::is_generator(std::slice::from_ref(*st))) {
-            match st {
-                Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
-                Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),
-                Stmt::AugAssign(a) => out.extend(mine(&a.target)),
-                _ => {}
-            }
+    /// The attribute names method `foid`'s code stores on its receiver `recv` on every way it
+    /// completes (`MustWalk`), those of the method `super().m(…)` calls in it too.
+    pub(in crate::interp) fn must_stores(&self, foid: ObjId, recv: ObjId, depth: usize) -> KeySet {
+        let Some(fi) = self.heap.func_info_opt(foid) else { return KeySet::new() };
+        let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return KeySet::new() };
+        if depth > 4 || crate::syntax::is_generator(&f.body) {
+            return KeySet::new();
         }
-        out
+        // (`super().m(…)`: the next class after `foid`'s along the receiver's MRO defining m)
+        let sup = |name: &str| -> KeySet {
+            let (Some(cls), Some(rc)) = (fi.cls, self.heap.instance_class(recv)) else { return KeySet::new() };
+            let k = key_str_lit(name);
+            let mro = self.heap.mro(rc);
+            let Some(at) = mro.iter().position(|c| *c == cls) else { return KeySet::new() };
+            for c in &mro[at + 1..] {
+                if let Some(v) = self.heap.cls_slots.get(&(*c, Ns::Attr, k)) {
+                    return match v.single().filter(|g| fi_is_method(self, *g) && v.kv.is_bot()) {
+                        Some(g) => self.must_stores(g, recv, depth + 1),
+                        None => KeySet::new(),
+                    };
+                }
+            }
+            KeySet::new()
+        };
+        let mut w = MustWalk { me: me.parameter.name.id.as_str(), ret: None, supers: Vec::new(), sup: &sup, rebound: false };
+        let fall = w.block(&f.body, KeySet::new());
+        if w.rebound {
+            return KeySet::new();
+        }
+        match (fall, w.ret) {
+            (Some(a), Some(b)) => a.intersection(&b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => KeySet::new(),
+        }
     }
 
     /// Where `name` (read in the code of `fi`) is bound — a cell, a module's global — or the
@@ -587,9 +601,17 @@ impl Analyzer {
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
-        // (on one receiver: the stores its code makes on every way it completes)
-        let must: Vec<KeyId> = match effs.as_slice() {
-            [(_, e)] if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k) && !self.setter_of(recvs[0], *k)).collect(),
+        // (on one receiver: the stores its code makes on every way it completes; where the
+        // receiver escapes or the class hooks attribute access, unknown code may remove them)
+        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| ["__setattr__", "__delattr__", "__getattribute__"].iter().any(|h| an.class_lookup(c, h).is_some()));
+        let must: Vec<KeyId> = match recvs.as_slice() {
+            [o] if fi_is_method(self, foid) && !hooked(self, *o) => {
+                let deleted: Vec<KeyId> = match effs.as_slice() {
+                    [(_, e)] => e.deletes.clone(),
+                    _ => self.code_uses(&self.heap.func_info(foid)).deleted.iter().map(|n| key_str_lit(&str_get(*n))).collect(),
+                };
+                self.must_stores(foid, *o, 0).iter().filter(|k| !deleted.contains(k) && !self.setter_of(*o, *k)).collect()
+            }
             _ => Vec::new(),
         };
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
@@ -653,9 +675,12 @@ impl Analyzer {
             let o = *o;
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
             let mut row = state.row(o, Ns::Attr);
-            for k in must {
+            for &k in &must {
                 state.set_slot(o, Ns::Attr, k, any.clone(), true);
                 row = row.store(k, true);
+            }
+            if !by_names {
+                row = row.mutate_like(site, &|k| must.contains(&k));
             }
             state.set_row(o, Ns::Attr, row);
         }
@@ -1184,4 +1209,136 @@ impl Analyzer {
 /// A function run with a receiver (not a static / class method).
 fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
     an.heap.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
+}
+
+/// A walk of a method's statements for what it stores on its receiver (`me`) on every way it
+/// completes: `block` gives the names stored when the block falls through (None: it never
+/// does), from those stored before it; each `return` meets its names into `ret`. A raise does
+/// not complete; a loop, `with` or `match` keeps what was stored before it (its returns count).
+struct MustWalk<'a> {
+    me: &'a str,
+    ret: Option<KeySet>,
+    /// locals bound to a method of `super()` (`init = super().__init__`)
+    supers: Vec<(&'static str, &'static str)>,
+    sup: &'a dyn Fn(&str) -> KeySet,
+    /// the receiver's name is rebound: its stores may go elsewhere
+    rebound: bool,
+}
+
+impl MustWalk<'_> {
+    fn block(&mut self, body: &'static [Stmt], mut acc: KeySet) -> Option<KeySet> {
+        for st in body {
+            acc = self.stmt(st, acc)?;
+        }
+        Some(acc)
+    }
+
+    fn meet(a: Option<KeySet>, b: Option<KeySet>) -> Option<KeySet> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.intersection(&b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn target(&mut self, t: &'static Expr, acc: KeySet) -> KeySet {
+        match t {
+            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == self.me) => acc.insert(key_str_lit(a.attr.as_str())),
+            Expr::Name(n) if n.id.as_str() == self.me => {
+                self.rebound = true;
+                acc
+            }
+            Expr::Tuple(t) => t.elts.iter().fold(acc, |acc, e| self.target(e, acc)),
+            Expr::List(t) => t.elts.iter().fold(acc, |acc, e| self.target(e, acc)),
+            _ => acc,
+        }
+    }
+
+    /// `super().m` / `super(C, self).m`: m.
+    fn super_method(e: &'static Expr) -> Option<&'static str> {
+        let Expr::Attribute(a) = e else { return None };
+        let Expr::Call(c) = &*a.value else { return None };
+        matches!(&*c.func, Expr::Name(n) if n.id.as_str() == "super").then(|| a.attr.as_str())
+    }
+
+    fn stmt(&mut self, st: &'static Stmt, acc: KeySet) -> Option<KeySet> {
+        match st {
+            Stmt::Assign(a) => {
+                if let ([Expr::Name(n)], Some(m)) = (a.targets.as_slice(), Self::super_method(&a.value)) {
+                    self.supers.push((n.id.as_str(), m));
+                }
+                Some(a.targets.iter().fold(acc, |acc, t| self.target(t, acc)))
+            }
+            Stmt::AnnAssign(a) if a.value.is_some() => Some(self.target(&a.target, acc)),
+            Stmt::AugAssign(a) => Some(self.target(&a.target, acc)),
+            Stmt::Expr(e) => {
+                let Expr::Call(c) = &*e.value else { return Some(acc) };
+                let m = Self::super_method(&c.func).or_else(|| match &*c.func {
+                    Expr::Name(n) => self.supers.iter().rev().find(|(l, _)| *l == n.id.as_str()).map(|(_, m)| *m),
+                    _ => None,
+                });
+                Some(match m {
+                    Some(m) => acc.union(&(self.sup)(m)),
+                    None => acc,
+                })
+            }
+            Stmt::Return(_) => {
+                self.ret = Self::meet(self.ret.take(), Some(acc));
+                None
+            }
+            Stmt::Raise(_) => None,
+            Stmt::If(i) => {
+                let mut fall = self.block(&i.body, acc.clone());
+                let mut has_else = false;
+                for c in &i.elif_else_clauses {
+                    has_else |= c.test.is_none();
+                    let f = self.block(&c.body, acc.clone());
+                    fall = if fall.is_none() { f } else if f.is_none() { fall } else { Self::meet(fall, f) };
+                }
+                if !has_else {
+                    fall = Self::meet(fall, Some(acc));
+                }
+                fall
+            }
+            Stmt::Try(t) if !crate::syntax::contains_return(&t.finalbody) => {
+                let mut fall = self.block(&t.body, acc.clone()).and_then(|b| self.block(&t.orelse, b));
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    let f = self.block(&h.body, acc.clone());
+                    fall = if fall.is_none() { f } else if f.is_none() { fall } else { Self::meet(fall, f) };
+                }
+                fall.and_then(|f| self.block(&t.finalbody, f))
+            }
+            Stmt::For(_) | Stmt::While(_) | Stmt::With(_) | Stmt::Match(_) => {
+                // (their returns, with what was stored before them along the body)
+                let bodies: Vec<&'static [Stmt]> = match st {
+                    Stmt::For(f) => vec![&f.body, &f.orelse],
+                    Stmt::While(w) => vec![&w.body, &w.orelse],
+                    Stmt::With(w) => vec![&w.body],
+                    Stmt::Match(m) => m.cases.iter().map(|c| c.body.as_slice()).collect(),
+                    _ => Vec::new(),
+                };
+                for b in bodies {
+                    self.block(b, acc.clone());
+                }
+                Some(acc)
+            }
+            // (a `return` in a `finally`: every way out has what was stored before)
+            Stmt::Try(_) => {
+                self.ret = Self::meet(self.ret.take(), Some(acc.clone()));
+                Some(acc)
+            }
+            Stmt::Delete(d) => {
+                let mut acc = acc;
+                for t in &d.targets {
+                    match t {
+                        Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == self.me) => acc = acc.remove(key_str_lit(a.attr.as_str())),
+                        Expr::Name(n) if n.id.as_str() == self.me => self.rebound = true,
+                        _ => {}
+                    }
+                }
+                Some(acc)
+            }
+            _ => Some(acc),
+        }
+    }
 }
