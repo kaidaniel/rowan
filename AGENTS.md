@@ -60,7 +60,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
     and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
-    cannot change); the program's functions among it may run (`follow_code`). A walk from the same
+    cannot change); the program's functions among it may run (`follow_code`: their code's closure, in rounds that resume one walk; a class
+    attribute's flags applied again as they grow). A walk from the same
     values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything; its
     items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
@@ -79,7 +80,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
     module code's calls (`note_call`); parameters as annotated (`annotations.rs`: `list[dict[str, int]]`'s parts too, `Heap::ann`; a dataclass's, NamedTuple's, TypedDict's or pydantic model's instance has its fields, bases' too, each as annotated, a part annotated with one such an instance), a method on any instance (on demand, of a subclass past 64
     of them: any attributes; `__init__` of a class without subclasses on a new one, `new_instance`), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
-* **Generators** run whole at their first consumption (`force_gen`), in the creating call's context; a consumer of item
+* **Generators** run whole at their first consumption (`force_gen`; `iter()` gives one back, running nothing), in the creating call's context; a consumer of item
   *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
   joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
   there-unless-removed too; deletes) changes what the generator reads after a yield (`Gens::watch`, also after the call
@@ -189,9 +190,9 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~6.5 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.7 / ~15 / ~11.9 / ~6.1 s; 0.27 / 0.79 / 0.27 / 0.35 GB |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.23 / 8.7 / 5.0 / 28 s; per function p50 ≤ 7.6 ms, p99 0.16-0.45 s, max 0.5 / 0.5 / 0.7 / 3.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 3.7 / 0.2 s, max 1.2 / 4.8 / 3.8 / 1.1 s; `rowan serve` on each timm model file ≤ 0.9 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~9 / ~5.7 s; 0.12 / 0.07 / 0.13 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~13.7 / ~12.0 / ~4.9 s; 0.27 / 0.79 / 0.30 / 0.37 GB |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.1 / 2.4 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.13-0.25 s, max 0.44 / 0.43 / 0.70 / 3.4 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 2.3 / 0.08 s, max 1.2 / 5.3 / 2.3 / 1.1 s; `rowan serve` on each timm model file ≤ 0.7 GB |
 
 ## Known problems and next steps
 
