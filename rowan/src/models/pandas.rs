@@ -178,6 +178,12 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let fs = frames(an, c.recv.as_ref());
     let strong = fs.len() == 1 && an.heap.obj(fs[0]).single;
+    // (what is known of the values: the result's, else not known)
+    for f in &fs {
+        for k in st.row(*f, Ns::Item).present.iter() {
+            cells_may_hold(an, st, *f, k, &Value::data("cell"));
+        }
+    }
     for r in frames(an, Some(&res)) {
         let row = st.row(r, Ns::Item);
         let meta: Vec<(crate::state::SlotKey, Value)> = st.slots_of(r).into_iter().filter(|((ns, _), _)| *ns == Ns::Meta).collect();
@@ -4942,9 +4948,13 @@ fn transform(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `update(other)`: values change in place, the columns do not (the other's extra columns
 /// are ignored).
+/// `df.update(other)`: some cells of the columns both have change (which: not known).
 fn df_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let _ = st;
-    let _ = c;
+    for f in frames(an, c.recv.as_ref()) {
+        for k in st.row(f, Ns::Item).present.iter() {
+            cells_may_hold(an, st, f, k, &Value::data("cell"));
+        }
+    }
     an.none_v.clone()
 }
 
@@ -5321,7 +5331,21 @@ pub fn view_setattr(an: &mut Analyzer, vid: u32, name: &str, v: &Value, state: &
 pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &Node, state: &mut State, strong: bool) {
     if name == "columns" {
         let row = state.row(oid, Ns::Item);
+        // (what is known of the values goes with the columns' positions; else it is lost)
+        let old: Option<Vec<(Option<Known>, Option<Value>)>> = row.ordered_keys().filter(|_| row.closed() && row.present == row.definite).map(|ks| ks.iter().map(|k| (vals(state, oid, *k), state.slot_opt(oid, Ns::Meta, dtype_key(*k)))).collect());
+        for k in row.present.iter() {
+            set_vals(state, oid, k, None);
+            set_dtype(state, oid, k, None, true);
+        }
         if let Some(seq) = lit_key_seq(an, state, v) {
+            if let Some(old) = old.filter(|o| o.len() == seq.len()) {
+                for (k, (vs, dt)) in seq.iter().zip(old) {
+                    set_vals(state, oid, *k, vs.as_ref());
+                    if let Some(dt) = dt {
+                        state.set_slot(oid, Ns::Meta, dtype_key(*k), dt, true);
+                    }
+                }
+            }
             state.set_row(oid, Ns::Item, closed_ordered(&seq));
             return;
         }
@@ -5368,7 +5392,11 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
     }
     // `df.x = v` sets column x when the frame has it, else an instance attribute (a pandas
     // UserWarning): the columns do not change either way
-    let _ = (v, strong);
+    let _ = strong;
+    let k = key_str_lit(name);
+    if state.row(oid, Ns::Item).present.contains(k) {
+        cells_may_hold(an, state, oid, k, v);
+    }
 }
 
 /// The top level of MultiIndex columns (tuple keys) as a row.
@@ -5566,6 +5594,10 @@ pub fn frame_setitem(an: &mut Analyzer, oid: u32, key: &Value, v: &Value, node: 
         return;
     }
     if is_seriesish(an, key) {
+        // (`df[mask] = v`: the rows the mask picks, in every column)
+        for k in row.present.iter() {
+            cells_may_hold(an, state, oid, k, v);
+        }
         return;
     }
     state.set_row(oid, Ns::Item, row.data_store(Source::new(&format!("store@L{}", node.line), SourceKind::Data)));
