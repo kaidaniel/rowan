@@ -50,6 +50,9 @@ pub struct Havoc {
     pub guard: Vec<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
     /// objects visited by walks: part of the work measure
     pub visited: usize,
+    /// the next unknown call is a skipped call's, which follows the classes it meets itself
+    /// (their dunders among their code)
+    pub classes_followed: bool,
 }
 
 /// The object standing for any value unknown code may have stored: nothing known about it.
@@ -225,6 +228,7 @@ impl Analyzer {
     /// the call, which may be one of the known objects it was given.
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
+        let classes_followed = std::mem::take(&mut self.havoc.classes_followed);
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise
         // recursion over unknown values makes new objects without end)
@@ -256,6 +260,9 @@ impl Analyzer {
         // (a library object's logging / writing / comparing method — the receiver is not one
         // of the program's objects — changes nothing it is given)
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
+            // (`log.info("%s", obj)`: it may run the dunders of the instances it is given)
+            let vals: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
+            self.library_dunders(&vals, state, node);
             self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
         }
@@ -284,6 +291,20 @@ impl Analyzer {
         let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
         if !callables.is_empty() {
             self.follow_code(callables, rid, site_id, state);
+        }
+        // (the dunders of the instances it met may run: what they change, their receivers
+        // changed already; followed apart, as the same dunders recur)
+        let mut dunders: Vec<ObjId> = Vec::new();
+        // (`xs.append(o)` / `setattr` store it, running none of its code)
+        let stores = matches!(name, "append" | "insert" | "__setattr__" | "setattr");
+        let classes: Vec<ObjId> = found.iter().copied().filter(|o| !classes_followed && !stores && self.heap.kind(*o) == Kind::Class).collect();
+        for c in classes {
+            dunders.extend(self.changing_dunders(c, state).iter().copied());
+        }
+        if !dunders.is_empty() {
+            dunders.sort_unstable();
+            dunders.dedup();
+            self.follow_code(dunders, rid, site_id, state);
         }
         self.havoc.code = found;
         self.name_unknown_result(rid, site_id, &arg_recs, node);

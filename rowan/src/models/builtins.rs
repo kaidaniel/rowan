@@ -1064,6 +1064,28 @@ pub(super) fn m_shuffle(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.none_v.clone()
 }
 
+/// `random.choice(seq)` (`secrets.choice`): one of seq's items; `random.sample(seq, k)` /
+/// `random.choices(seq, …)`: a new list of them. Of anything but the program's lists and
+/// tuples (and literals: a str's characters): what `noeffect` gives.
+pub(super) fn m_random_pick(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let seq = c.arg(0, Some(if c.qual == "random.sample" || c.qual == "random.choices" { "population" } else { "seq" })).unwrap_or_default();
+    let sequence = seq.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple) && !an.heap.obj(o).iterator);
+    if seq.pts.is_empty() || !sequence {
+        return noeffect(an, st, c);
+    }
+    let it = an.iterate(&seq, &c.node, st);
+    let e = an.elem_value(&it.elem, &c.node, "pick");
+    // (an empty one: IndexError, `sample`'s k past its length: ValueError)
+    an.may_raise_here(if c.qual == "random.sample" { "ValueError" } else { "IndexError" }, st);
+    if c.qual.ends_with(".choice") {
+        return e;
+    }
+    crate::models::itertools::it_list(an, None, e, &c.node, st, "pick").single().map(|o| {
+        an.heap.obj_mut(o).iterator = false;
+        Value::obj(o)
+    }).unwrap_or_default()
+}
+
 /// `reprlib.repr(x)`: a str; it runs the `__repr__` of what x reaches, so with an instance of
 /// a class defining one (or anything unknown, or more than a few hundred objects) it is an
 /// unknown call.
