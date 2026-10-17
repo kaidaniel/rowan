@@ -14,6 +14,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::intern::{key_as_str, s, KeyId, StrId};
 
+/// The key a parameter is kept under in a global container (`CodeUses::kept_in`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum KeptKey {
+    /// a literal str (`REG["k"] = p`)
+    Lit(KeyId),
+    /// its own `__name__` (`REG[fn.__name__] = fn`)
+    Name,
+    Any,
+}
+
 /// Where a value comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Origin {
@@ -78,6 +88,10 @@ pub struct Flags {
     pub iterated: bool,
     /// it is called (its code runs; a library method runs on its receiver)
     pub called: bool,
+    /// a parameter the code itself keeps where the program may read it back, and nowhere else
+    /// it may change: the items of a global container (`REG[k] = p`, `CodeUses::kept_in`) or
+    /// the result (`return p`, `kept_returned`); a skipped call puts it there (`effects.rs`)
+    pub kept: bool,
     /// a method is called on it (`v.m(…)`, not one known to change nothing): on an instance of
     /// the program's classes that runs their code, which changes it only by attribute names
     pub methods: bool,
@@ -139,13 +153,13 @@ impl Removes {
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false, removes: Removes::No };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, kept: false, methods: false, rebinds: false, edits: false, removes: Removes::No };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
         match level {
             Level::Own => Flags { rebinds: false, ..*self },
-            Level::Held => Flags { held: self.changes || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
+            Level::Held => Flags { held: self.changes || self.kept || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
         }
     }
 
@@ -155,6 +169,7 @@ impl Flags {
         self.held2 |= o.held2;
         self.iterated |= o.iterated;
         self.called |= o.called;
+        self.kept |= o.kept;
         self.rebinds |= o.rebinds;
         self.methods |= o.methods;
         self.edits |= o.edits;
@@ -198,6 +213,11 @@ pub struct CodeUses {
     pub attrs: FxHashMap<StrId, Flags>,
     /// per parameter: what may happen to its value (a default's, for one)
     pub params: FxHashMap<StrId, Flags>,
+    /// per parameter kept (`Flags::kept`): the global names whose items it is stored in, each
+    /// with the key
+    pub kept_in: FxHashMap<StrId, Vec<(StrId, KeptKey)>>,
+    /// the parameters kept that it returns
+    pub kept_returned: FxHashSet<StrId>,
     pub imports: FxHashMap<StrId, String>,
     /// the attribute names it assigns (`x.a = …`, `setattr(x, "a", …)`) and deletes
     pub stored: FxHashSet<StrId>,
@@ -441,6 +461,28 @@ impl<'a> Flow<'a> {
             self.out.recv = Some(std::mem::take(&mut self.recv));
         }
         self.out
+    }
+
+    /// The parameters a local name in the function's own code (not a nested one's) stands
+    /// for, when it stands for nothing else.
+    fn params_of(&self, e: &Expr) -> Option<Vec<StrId>> {
+        let Expr::Name(n) = e else { return None };
+        let srcs = self.alias.get(&s(n.id.as_str())).filter(|_| self.depth == 0 && self.local(n.id.as_str()))?;
+        let ps: Vec<StrId> = srcs.iter().map(|x| match x {
+            (Origin::Param(p), Level::Own) => Some(*p),
+            _ => None,
+        }).collect::<Option<_>>()?;
+        (!ps.is_empty() && self.first.is_none_or(|f| !ps.contains(&f))).then_some(ps)
+    }
+
+    /// Whether `e` is parameter `p`'s `__name__` (`fn.__name__`, or a local bound to only that).
+    fn name_of(&self, e: &Expr, p: StrId) -> bool {
+        let own = [(Origin::Param(p), Level::Held), (Origin::Attr(s("__name__")), Level::Own)];
+        match e {
+            Expr::Attribute(a) => a.attr.as_str() == "__name__" && self.params_of(&a.value) == Some(vec![p]),
+            Expr::Name(n) => self.depth == 0 && self.local(n.id.as_str()) && self.alias.get(&s(n.id.as_str())).is_some_and(|v| v.len() == 2 && own.iter().all(|x| v.contains(x))),
+            _ => false,
+        }
     }
 
     /// A name the function binds (an import inside it is a name of the module it binds).
@@ -1043,6 +1085,24 @@ impl<'a> Flow<'a> {
         match st {
             Stmt::Expr(x) => self.expr(&x.value, Pos::Read),
             Stmt::Assign(a) => {
+                // (a parameter stored in the items of a global container: kept there)
+                if let ([Expr::Subscript(x)], Some(ps)) = (a.targets.as_slice(), self.params_of(&a.value)) {
+                    if let Expr::Name(n) = &*x.value {
+                        if !self.local(n.id.as_str()) {
+                            for p in ps {
+                                let by_name = match &*x.slice {
+                                    Expr::StringLiteral(l) => KeptKey::Lit(crate::intern::key_str_lit(l.value.to_str())),
+                                    k if self.name_of(k, p) => KeptKey::Name,
+                                    _ => KeptKey::Any,
+                                };
+                                self.flags.entry(Origin::Param(p)).or_default().kept = true;
+                                self.out.kept_in.entry(p).or_default().push((s(n.id.as_str()), by_name));
+                            }
+                            self.target(&a.targets[0]);
+                            return;
+                        }
+                    }
+                }
                 // (bound to locals only: where it goes is where they go)
                 let local = a.targets.iter().all(|t| self.all_local(t));
                 self.expr(&a.value, if local { Pos::Bind } else { Pos::Change });
@@ -1107,6 +1167,14 @@ impl<'a> Flow<'a> {
                         let first = self.first.map(|f| (Origin::Param(f), Level::Own));
                         let others: Vec<Src> = self.srcs(v).into_iter().filter(|x| Some(*x) != first).collect();
                         self.mark(&others, Pos::Change);
+                    }
+                    // (a parameter returned: kept in the result)
+                    Some(v) if self.depth == 0 && self.params_of(v).is_some() => {
+                        self.out.returns_other = true;
+                        for p in self.params_of(v).unwrap_or_default() {
+                            self.flags.entry(Origin::Param(p)).or_default().kept = true;
+                            self.out.kept_returned.insert(p);
+                        }
                     }
                     // (names' values and calls' results go to the callers)
                     Some(v) if self.depth == 0 => {

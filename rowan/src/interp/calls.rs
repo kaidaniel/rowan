@@ -264,25 +264,29 @@ impl Analyzer {
     /// Among a call's callees (functions, methods, receiver groups), those out of their budget,
     /// when several are: they make one call that does not run (`skipped_calls`; each its own
     /// walked all it is given again — `self.__init__(**params)` on any of a thousand
-    /// instances). The rest stay.
+    /// instances). More than `PICK_MAX` of them: all of them (a registry's entry point, any of
+    /// a thousand: timm's `create_model`). The rest stay.
     #[allow(clippy::type_complexity)]
     fn budget_skipped(&mut self, groups: Vec<(ObjId, Value, usize)>, targets: Vec<ObjId>) -> (Vec<(ObjId, Option<Value>)>, Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
         let callee = |an: &Analyzer, o: ObjId| an.function_callee(o);
-        let n = groups.iter().filter(|g| self.out_of_budget(g.0)).count() + targets.iter().filter(|o| callee(self, **o).is_some_and(|(f, _)| self.out_of_budget(f))).count();
+        let many = groups.len() + targets.iter().filter(|o| callee(self, **o).is_some()).count() > super::PICK_MAX;
+        let skip = |an: &Analyzer, f: ObjId| many || an.out_of_budget(f);
+        let n = groups.iter().filter(|g| skip(self, g.0)).count() + targets.iter().filter(|o| callee(self, **o).is_some_and(|(f, _)| skip(self, f))).count();
         if n < 2 {
             return (Vec::new(), groups, targets);
         }
         let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
-        let (out, groups): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| self.out_of_budget(g.0));
+        let (out, groups): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| skip(self, g.0));
         fns.extend(out.into_iter().map(|(f, r, _)| (f, Some(r))));
         let mut rest = Vec::new();
         for o in targets {
-            match callee(self, o).filter(|(f, _)| self.out_of_budget(*f)) {
+            match callee(self, o).filter(|(f, _)| skip(self, *f)) {
                 Some(c) => fns.push(c),
                 None => rest.push(o),
             }
         }
-        for (f, _) in &fns {
+        let out: Vec<ObjId> = fns.iter().map(|(f, _)| *f).filter(|f| self.out_of_budget(*f)).collect();
+        for f in &out {
             self.budget.out.insert(*f);
             let q = self.heap.func_info(*f).qualname.clone();
             self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));

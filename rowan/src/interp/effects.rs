@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Removes, Slot};
+use super::flows::{Callee, CodeUses, Flags, KeptKey, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -56,6 +56,16 @@ pub struct RecvEffects {
 
 /// A slot: (object, namespace, key).
 type Loc = (ObjId, Ns, KeyId);
+
+/// A skipped call's arguments as its code may change them (`args_as_seen`), the code reading
+/// them may run, and those it keeps: each with the dicts whose items may hold it and whether
+/// the call returns it.
+struct Seen {
+    args: Vec<Value>,
+    kwargs: IndexMap<StrId, Value>,
+    code: Vec<ObjId>,
+    kept: Vec<(Value, Vec<(ObjId, KeptKey)>, bool)>,
+}
 
 /// A closure's walk (`walk_closure`): the closure so far, the code still to walk, the names the
 /// code walked uses, the classes met (those up to `classes_seen` looked at for the names as
@@ -533,6 +543,7 @@ impl Analyzer {
                 if !out.code.insert(o) {
                     continue;
                 }
+                self.budget.walk_visit();
                 match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
@@ -596,6 +607,7 @@ impl Analyzer {
                 }
             }
             for (c, k, v) in slots {
+                self.budget.walk_visit();
                 let name = intern::key_str_id(k);
                 if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
                     code(self, &v, work);
@@ -645,8 +657,8 @@ impl Analyzer {
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
-        let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
-        let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
+        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
+        let mut r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
@@ -657,6 +669,22 @@ impl Analyzer {
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
+        // (what its code keeps of its arguments: where the program may read it back — under
+        // its `__name__` when that is known)
+        for (v, dicts, returned) in kept {
+            for (d, by_name) in dicts {
+                let key = match by_name {
+                    KeptKey::Lit(k) => crate::domain::KeyVal::Lit(k),
+                    KeptKey::Name => self.load_attr(&v, "__name__", node, state, false).kv,
+                    _ => crate::domain::DATA,
+                };
+                let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
+                self.store_key(d, Ns::Item, &key, &v, false, node, state);
+            }
+            if returned {
+                r = r.join(&v);
+            }
+        }
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -767,21 +795,37 @@ impl Analyzer {
     /// The arguments of a call of `foid` that does not run, as what its code may change of
     /// them: one its parameter only reads is left out, one whose parts only it may change gives
     /// its parts (a generator's or coroutine's code runs later: all of them); and the code
-    /// those left out hold (functions, instances' classes: what reading them may run).
-    #[allow(clippy::type_complexity)]
-    fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> (Vec<Value>, IndexMap<StrId, Value>, Vec<ObjId>) {
-        let pos: Vec<Flags> = (0..args.len()).map(|i| self.param_flags(foid, Slot::Pos(i + usize::from(bound)))).collect();
-        let kw: Vec<Flags> = kwargs.keys().map(|k| self.param_flags(foid, Slot::Kw(*k))).collect();
+    /// those left out hold (instances' classes, functions it calls: what reading them may run).
+    /// One its code keeps (`Flags::kept`) where its places are known is left out too: it goes
+    /// there (`kept`), not to code that may call it.
+    fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> Seen {
+        let slots: Vec<Slot> = (0..args.len()).map(|i| Slot::Pos(i + usize::from(bound))).chain(kwargs.keys().map(|k| Slot::Kw(*k))).collect();
+        let mut kept = Vec::new();
+        let mut flags: Vec<Flags> = Vec::new();
+        for (slot, v) in slots.into_iter().zip(args.iter().chain(kwargs.values())) {
+            let mut f = self.param_flags(foid, slot);
+            // (functions: what calling them may do is followed where they are called from there)
+            let code = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Function);
+            if let Some((dicts, returned)) = (f.kept && code).then(|| self.kept_places(foid, slot, state)).flatten() {
+                f.kept = false;
+                kept.push((v.clone(), dicts, returned));
+            }
+            flags.push(f);
+        }
+        let kw = flags.split_off(args.len());
+        let pos = flags;
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
             let (own, held) = (own || f.edits, held || f.held2);
             // (a container iterated: what its items run when compared)
             if !own && f.iterated {
-                v.pts.iter().for_each(|o| state.slots.each(&o, &mut |_, x| code.extend(x.pts.iter().filter_map(|i| super::unknown::code_of(&an.heap, i)))));
+                v.pts.iter().for_each(|o| state.slots.each(&o, &mut |_, x| code.extend(x.pts.iter().filter_map(|i| super::unknown::compared_code(&an.heap, i)))));
             }
             if !own {
                 code.extend(v.pts.iter().filter_map(|o| match (an.heap.kind(o), &an.heap.obj(o).payload) {
+                    // (reading a function's attributes runs none of its code)
+                    (Kind::Function, _) if !f.called => None,
                     (Kind::Function | Kind::Class | Kind::Bound | Kind::Partial, _) => Some(o),
                     (Kind::Instance, Payload::Cls(c)) => Some(*c),
                     _ => None,
@@ -799,7 +843,31 @@ impl Analyzer {
         };
         let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v)).collect();
         let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v))).collect();
-        (args, kwargs, code)
+        Seen { args, kwargs, code, kept }
+    }
+
+    /// Where the code of `foid` keeps the argument in `slot` (`Flags::kept`): the dicts whose
+    /// items may hold it (the global names it stores it under hold dicts only; under what
+    /// key), and whether it returns it; None where those places are not known.
+    fn kept_places(&mut self, foid: ObjId, slot: Slot, state: &State) -> Option<(Vec<(ObjId, KeptKey)>, bool)> {
+        let fi = self.heap.func_info(foid);
+        let ps = fi.node.params()?;
+        let p = match slot {
+            Slot::Pos(i) => ps.posonlyargs.iter().chain(ps.args.iter()).nth(i)?,
+            Slot::Kw(k) => ps.args.iter().chain(ps.kwonlyargs.iter()).find(|p| s(p.parameter.name.id.as_str()) == k)?,
+        };
+        let p = s(p.parameter.name.id.as_str());
+        let uses = self.code_uses(&fi);
+        let mut dicts = Vec::new();
+        for (n, by_name) in uses.kept_in.get(&p).into_iter().flatten() {
+            let loc = self.resolve_use(&fi, &uses, *n).ok()?;
+            let v = state.slot(loc.0, loc.1, loc.2);
+            if v.pts.is_empty() || !v.kv.is_bot() || !v.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict) {
+                return None;
+            }
+            dicts.extend(v.pts.iter().map(|d| (d, *by_name)));
+        }
+        Some((dicts, uses.kept_returned.contains(&p)))
     }
 
     /// What a function's code adds to a closure: what may happen to the values of the names it
@@ -1024,7 +1092,7 @@ impl Analyzer {
         }
         let uses = self.code_uses(&fi);
         let flags = |p: &ast::Parameter| uses.params.get(&s(p.name.id.as_str())).copied().unwrap_or_default();
-        let rest = |p: Option<&ast::Parameter>| p.map(flags).map(|f| Flags { changes: f.changes || f.methods || f.held, ..Flags::default() }).unwrap_or_default();
+        let rest = |p: Option<&ast::Parameter>| p.map(flags).map(|f| Flags { changes: f.changes || f.kept || f.methods || f.held, ..Flags::default() }).unwrap_or_default();
         match slot {
             Slot::Pos(i) => match ps.posonlyargs.iter().chain(ps.args.iter()).nth(i) {
                 Some(p) => flags(&p.parameter),
@@ -1215,7 +1283,7 @@ impl Analyzer {
         // (a library layer called runs its model)
         let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, _state);
         let plain = v.pts.iter().all(plain);
-        let own = f.changes || f.methods || ((f.iterated || f.edits) && !plain) || (f.called && !v.pts.iter().all(code_only));
+        let own = f.changes || f.kept || f.methods || ((f.iterated || f.edits) && !plain) || (f.called && !v.pts.iter().all(code_only));
         (own, f.held || f.iterated && !plain)
     }
 
