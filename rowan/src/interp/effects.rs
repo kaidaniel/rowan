@@ -13,11 +13,20 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, KeptKey, Level, Like, NameUses, Origin, Pass, Removes, Slot};
+use super::flows::{Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
 pub const CLOSURE_CACHE: usize = 1 << 21;
+
+/// The dunders library code may run on the objects it is given without changing them itself
+/// (`library_dunders`): formatting, comparing, hashing, converting, copying, arithmetic.
+const LIBRARY_DUNDERS: &[&str] = &[
+    "__str__", "__repr__", "__format__", "__bytes__", "__hash__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__bool__", "__len__",
+    "__iter__", "__next__", "__contains__", "__getitem__", "__int__", "__float__", "__complex__", "__index__", "__round__", "__trunc__", "__floor__",
+    "__ceil__", "__fspath__", "__getattr__", "__getattribute__", "__copy__", "__deepcopy__", "__reduce__", "__reduce_ex__", "__getstate__", "__add__",
+    "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__truediv__", "__rtruediv__", "__neg__", "__abs__",
+];
 
 /// Caches of what code may change when it does not run. `code_uses` is a function of the
 /// program text; a closure is computed once per set of roots from the state of its first
@@ -40,6 +49,9 @@ pub struct EffectsCache {
     /// (`FuncNode::addr`) whose callers are all the program's code by name, what they may do
     /// with its result (`caller_returns`); a function not here gives its result away
     pub whole: Option<std::rc::Rc<FxHashMap<usize, Flags>>>,
+    /// per class: its dunders library code may run whose code may change something
+    /// (`changing_dunders`; the code a class attribute holds is taken as fixed, as for closures)
+    dunders: FxHashMap<ObjId, std::rc::Rc<[ObjId]>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -657,7 +669,9 @@ impl Analyzer {
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
-        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
+        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v, args, kwargs, state);
+        // (the classes it meets are followed below, their dunders among their code)
+        self.havoc.classes_followed = true;
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
@@ -723,16 +737,27 @@ impl Analyzer {
     /// them back: the dicts' items (under the literal key, the function's `__name__` when that
     /// is known, else any), the call's result `r`.
     fn put_kept(&mut self, kept: Vec<(Value, Vec<(ObjId, KeptKey)>, bool)>, mut r: Value, node: &Node, state: &mut State) -> Value {
-        for (v, dicts, returned) in kept {
-            for (d, key) in dicts {
+        for (v, places) in kept.iter().map(|(v, p, _)| (v, p)) {
+            for &(d, key) in places {
                 let key = match key {
                     KeptKey::Lit(k) => crate::domain::KeyVal::Lit(k),
-                    KeptKey::Name => self.load_attr(&v, "__name__", node, state, false).kv,
+                    KeptKey::Name => self.load_attr(v, "__name__", node, state, false).kv,
                     KeptKey::Any => crate::domain::DATA,
+                    // (among a list's items, appended some number of times: its length not
+                    // known past what it was)
+                    KeptKey::Elem => {
+                        let n = self.heap.llen(d, state).or_else(|| self.heap.prefix(d, state).map(|p| p as usize)).unwrap_or(0);
+                        self.add_elem(d, v, state);
+                        self.heap.set_prefix(d, state, n);
+                        state.clear_last(d);
+                        continue;
+                    }
                 };
                 let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
-                self.store_key(d, Ns::Item, &key, &v, false, node, state);
+                self.store_key(d, Ns::Item, &key, v, false, node, state);
             }
+        }
+        for (v, _, returned) in kept {
             if returned {
                 r = r.join(&v);
             }
@@ -769,6 +794,116 @@ impl Analyzer {
         out
     }
 
+    /// Library code given `vals` (taken to change nothing it is given, or code rowan cannot
+    /// see) may run the dunders of the program's instances they reach (`LIBRARY_DUNDERS`:
+    /// formatting, comparing, hashing, converting, copying): those whose code may change
+    /// something (`changes_nothing`) are one call none of which runs (`skipped_calls`).
+    pub fn library_dunders(&mut self, vals: &[Value], state: &mut State, node: &Node) {
+        let fns = self.given_dunders(vals, state);
+        if !fns.is_empty() {
+            let fns: Vec<(ObjId, Option<Value>)> = fns.into_iter().map(|(f, r)| (f, Some(r))).collect();
+            self.skipped_calls(&fns, Args::pos(&[]), state, node, None);
+        }
+    }
+
+    /// The dunders of the instances `vals` reach (through at most 256 objects) whose code may
+    /// change something, by function, with their receivers.
+    pub(in crate::interp) fn given_dunders(&mut self, vals: &[Value], state: &State) -> Vec<(ObjId, Value)> {
+        let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        let mut by_class: FxHashMap<ObjId, Vec<ObjId>> = FxHashMap::default();
+        while let Some(o) = work.pop() {
+            if seen.len() >= 256 || !seen.insert(o) || matches!(self.heap.kind(o), Kind::Class | Kind::Module | Kind::Function | Kind::External | Kind::Unknown) {
+                continue;
+            }
+            if let (Kind::Instance, Some(c)) = (self.heap.kind(o), self.heap.instance_class(o)) {
+                by_class.entry(c).or_default().push(o);
+            }
+            self.obj_edges(o, state, &mut work);
+        }
+        let mut out: Vec<(ObjId, Value)> = Vec::new();
+        let mut classes: Vec<(ObjId, Vec<ObjId>)> = by_class.into_iter().collect();
+        classes.sort_unstable();
+        for (c, recvs) in classes {
+            for f in self.changing_dunders(c, state).iter().copied() {
+                let r = Value::objs(recvs.iter().copied().collect());
+                match out.iter_mut().find(|(g, _)| *g == f) {
+                    Some((_, v)) => *v = v.join(&r),
+                    None => out.push((f, r)),
+                }
+            }
+        }
+        out
+    }
+
+    /// The dunders of class `c` library code may run (`LIBRARY_DUNDERS`) whose code may change
+    /// something.
+    pub(in crate::interp) fn changing_dunders(&mut self, c: ObjId, state: &State) -> std::rc::Rc<[ObjId]> {
+        if let Some(d) = self.effects.dunders.get(&c) {
+            return d.clone();
+        }
+        let mut out = Vec::new();
+        for name in LIBRARY_DUNDERS {
+            let Some(owner) = self.class_lookup(c, name) else { continue };
+            let k = key_str_lit(name);
+            let v = state.slot_opt(owner, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned()).unwrap_or_default();
+            for f in v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))).collect::<Vec<_>>() {
+                if !out.contains(&f) && !self.changes_nothing(f, c, state, 0, &mut Vec::new()) {
+                    out.push(f);
+                }
+            }
+        }
+        let out: std::rc::Rc<[ObjId]> = out.into();
+        self.effects.dunders.insert(c, out.clone());
+        out
+    }
+
+    /// Does a call of `f` on an instance of class `c` change nothing (its receiver, its
+    /// arguments, what its code reaches)? The methods it calls on its receiver neither
+    /// (`depth`: at most 3 calls deep; `seen`: those met).
+    fn changes_nothing(&mut self, f: ObjId, c: ObjId, state: &State, depth: u32, seen: &mut Vec<ObjId>) -> bool {
+        if seen.contains(&f) {
+            return true;
+        }
+        seen.push(f);
+        let fi = self.heap.func_info(f);
+        if let super::FuncNode::Def(d) = fi.node {
+            if d.is_async || crate::syntax::is_generator(&d.body) {
+                return false;
+            }
+        }
+        let u = self.code_uses(&fi);
+        let quiet = |f: &Flags| !(f.changes || f.held || f.held2 || f.called || f.kept || f.methods || f.rebinds || f.edits);
+        // (the receiver: by what its code does with it; a part of it returned is not changed)
+        let me = fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next()).map(|p| s(p.parameter.name.id.as_str()));
+        let Some(r) = u.recv.as_ref() else { return false };
+        if r.escapes || !r.stores.is_empty() || !r.deletes.is_empty() || !r.stores_like.is_empty() || !r.deletes_like.is_empty() || !u.params.iter().all(|(p, f)| Some(*p) == me || quiet(f)) {
+            return false;
+        }
+        let called: Vec<StrId> = r.calls.iter().chain(r.supers.iter()).copied().collect();
+        for m in called {
+            if depth >= 3 {
+                return false;
+            }
+            for k in self.heap.mro(c) {
+                let v = state.slot_opt(k, Ns::Attr, key_str_lit(&str_get(m))).or_else(|| self.heap.cls_slots.get(&(k, Ns::Attr, key_str_lit(&str_get(m)))).cloned()).unwrap_or_default();
+                if !v.kv.is_bot() || v.pts.iter().any(|g| !matches!(self.heap.obj(g).payload, Payload::Func(_))) {
+                    return false;
+                }
+                for g in v.pts.iter().collect::<Vec<_>>() {
+                    if !self.changes_nothing(g, c, state, depth + 1, seen) {
+                        return false;
+                    }
+                }
+            }
+        }
+        let cl = self.code_closure(&[f], &mut None, state);
+        [&cl.locs, &cl.held_locs, &cl.held2_locs, &cl.rebound, &cl.edited_locs].iter().all(|l| l.is_empty())
+            && [&cl.values, &cl.held_values, &cl.edited_values].iter().all(|v| v.is_empty())
+            && cl.removed_locs.is_empty()
+            && cl.removed_values.is_empty()
+    }
+
     /// One call of several of the program's functions (with their receivers, if bound) none of
     /// which runs (on demand, past the work its run may do): an unknown call given the arguments
     /// and every receiver whole, that may also change what all their code reaches. It covers
@@ -785,6 +920,7 @@ impl Analyzer {
         for (f, r) in fns {
             removed.extend(self.removed_args(*f, r.is_some(), a.pos, a.kw));
         }
+        self.havoc.classes_followed = true;
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
         self.names.skipped_sites.insert(site);
@@ -804,7 +940,8 @@ impl Analyzer {
     /// those left out hold (instances' classes, functions it calls: what reading them may run).
     /// One its code keeps (`Flags::kept`) where its places are known is left out too: it goes
     /// there (`kept`), not to code that may call it.
-    fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> Seen {
+    fn args_as_seen(&mut self, foid: ObjId, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> Seen {
+        let bound = recv.is_some();
         let slots: Vec<Slot> = (0..args.len()).map(|i| Slot::Pos(i + usize::from(bound))).chain(kwargs.keys().map(|k| Slot::Kw(*k))).collect();
         let mut kept = Vec::new();
         let mut flags: Vec<Flags> = Vec::new();
@@ -812,7 +949,7 @@ impl Analyzer {
             let mut f = self.param_flags(foid, slot);
             // (functions: what calling them may do is followed where they are called from there)
             let code = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Function);
-            if let Some((dicts, returned)) = (f.kept && code).then(|| self.kept_places(foid, slot, state)).flatten() {
+            if let Some((dicts, returned)) = (f.kept && code).then(|| self.kept_places(foid, slot, recv, state, 0)).flatten() {
                 f.kept = false;
                 kept.push((v.clone(), dicts, returned));
             }
@@ -852,10 +989,12 @@ impl Analyzer {
         Seen { args, kwargs, code, kept }
     }
 
-    /// Where the code of `foid` keeps the argument in `slot` (`Flags::kept`): the dicts whose
-    /// items may hold it (the global names it stores it under hold dicts only; under what
-    /// key), and whether it returns it; None where those places are not known.
-    fn kept_places(&mut self, foid: ObjId, slot: Slot, state: &State) -> Option<(Vec<(ObjId, KeptKey)>, bool)> {
+    /// Where the code of `foid` (on receiver `recv`, if bound) keeps the argument in `slot`
+    /// (`Flags::kept`): the containers whose items may hold it (dicts by a key, lists among
+    /// their items: what the names and attributes it names hold), those of the program's
+    /// functions it gives it to (`depth`: calls deep, at most 3; their code does nothing else
+    /// with it), and whether it returns it; None where those places are not known.
+    fn kept_places(&mut self, foid: ObjId, slot: Slot, recv: Option<&Value>, state: &State, depth: u32) -> Option<(Vec<(ObjId, KeptKey)>, bool)> {
         let fi = self.heap.func_info(foid);
         let ps = fi.node.params()?;
         let p = match slot {
@@ -864,16 +1003,67 @@ impl Analyzer {
         };
         let p = s(p.parameter.name.id.as_str());
         let uses = self.code_uses(&fi);
-        let mut dicts = Vec::new();
-        for (n, by_name) in uses.kept_in.get(&p).into_iter().flatten() {
-            let loc = self.resolve_use(&fi, &uses, *n).ok()?;
-            let v = state.slot(loc.0, loc.1, loc.2);
-            if v.pts.is_empty() || !v.kv.is_bot() || !v.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict) {
+        let mut places = Vec::new();
+        for place in uses.kept_in.get(&p).into_iter().flatten() {
+            let (base, attrs, key) = match place {
+                KeptPlace::Name(n, attrs, key) => {
+                    let base = match self.resolve_use(&fi, &uses, *n) {
+                        Ok(loc) => state.slot(loc.0, loc.1, loc.2),
+                        Err(m) => Value::obj(m),
+                    };
+                    (base, attrs, *key)
+                }
+                KeptPlace::Recv(attrs, key) => (recv?.clone(), attrs, *key),
+                KeptPlace::Passed(callee, slot) => {
+                    if depth >= 3 {
+                        return None;
+                    }
+                    for f in self.program_callees(&fi, &uses, *callee, state, true)? {
+                        let fl = self.param_flags(f, *slot);
+                        let (more, returned) = self.kept_places(f, *slot, None, state, depth + 1)?;
+                        // (its code does nothing else with it; what it returns is dropped)
+                        let _ = returned;
+                        if fl != (Flags { kept: true, ..Flags::default() }) {
+                            return None;
+                        }
+                        places.extend(more);
+                    }
+                    continue;
+                }
+            };
+            let v = self.attr_path(base, attrs, state)?;
+            let fits = |o: ObjId| match key {
+                KeptKey::Elem => self.heap.kind(o) == Kind::List && !self.heap.obj(o).iterator,
+                _ => self.heap.kind(o) == Kind::Dict,
+            };
+            if v.pts.is_empty() || !v.kv.is_bot() || !v.pts.iter().all(fits) {
                 return None;
             }
-            dicts.extend(v.pts.iter().map(|d| (d, *by_name)));
+            places.extend(v.pts.iter().map(|d| (d, key)));
         }
-        Some((dicts, uses.kept_returned.contains(&p)))
+        Some((places, uses.kept_returned.contains(&p)))
+    }
+
+    /// What `base` holds through attributes `attrs` (a module's globals, a class's attributes,
+    /// an instance's on this path); None where one of them is something else, or not there.
+    fn attr_path(&self, mut v: Value, attrs: &[StrId], state: &State) -> Option<Value> {
+        for a in attrs {
+            let k = key_str_lit(&str_get(*a));
+            let mut next = Value::new();
+            for o in v.pts.iter() {
+                let x = match self.heap.kind(o) {
+                    Kind::Module | Kind::Instance if state.row(o, Ns::Attr).definite.contains(k) || self.heap.kind(o) == Kind::Module => state.slot(o, Ns::Attr, k),
+                    Kind::Class => self.class_attr_value(o, &str_get(*a), state),
+                    _ => return None,
+                };
+                next = next.join(&x);
+            }
+            if next.empty() || !v.kv.is_bot() {
+                return None;
+            }
+            v = next;
+        }
+        Some(v)
     }
 
     /// What a function's code adds to a closure: what may happen to the values of the names it
@@ -1069,10 +1259,10 @@ impl Analyzer {
                     };
                     // (what an object other than a container holds: a module's, an instance's
                     // attribute by a computed name)
-                    if *l == Level::Held && v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set)) {
+                    if *l != Level::Own && v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set)) {
                         return true;
                     }
-                    self.classes_within(&v, state, if *l == Level::Held { 2 } else { 0 }, out);
+                    self.classes_within(&v, state, if *l != Level::Own { 2 } else { 0 }, out);
                 }
                 Origin::Result(n, a) if depth > 0 => {
                     if self.result_classes(&gi, &gu, (*n, *a), state, depth - 1, out) {
@@ -1251,8 +1441,14 @@ impl Analyzer {
     fn apply_flags(&self, f: &Flags, loc: Loc, state: &State, out: &mut Closure) {
         let v = state.slot(loc.0, loc.1, loc.2);
         let (own, held) = self.flag_effect(f, &v, state);
+        // (what it holds under a few literal keys only, where those are its dicts' slots: they)
+        let parts: Option<Vec<Loc>> = f.parts.keys().filter(|_| held && !(f.iterated && !f.held)).and_then(|ks| {
+            v.pts.iter().flat_map(|d| ks.iter().map(move |k| (d, *k))).map(|(d, k)| (self.heap.kind(d) == Kind::Dict && state.has_slot(d, Ns::Item, k)).then_some((d, Ns::Item, k))).collect()
+        }).filter(|_| v.kv.is_bot() && !v.pts.is_empty());
         if own {
             out.locs.push(loc);
+        } else if let Some(ps) = parts {
+            out.locs.extend(ps);
         } else if held {
             out.held_locs.push(loc);
         } else if f.held2 {

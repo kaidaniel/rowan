@@ -687,16 +687,22 @@ impl Analyzer {
         // (a map only the program filled, under keys it computed: a key it has holds one
         // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
         let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src));
-        let from_map = own_map && v.empty() && !star.empty();
+        // (a key it may not have: what any key not known holds — a defaultdict's or Counter's
+        // read put its default there already)
+        // (one the program filled by stores alone, `store@L…`: a key it may not have — a
+        // defaultdict's or Counter's read put its default there — holds what any key not known
+        // does, and nothing else)
+        let stored = own_map && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.site.starts_with("store@L")));
+        let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.present.contains(k));
         if from_map {
-            v = star;
-        } else if !star.pts.is_empty() {
-            v = v.join(&Value::with_kv(star.pts, DATA));
+            v = v.join(&star);
+        } else if !star.pts.is_empty() && !stored {
+            v = v.join(&Value::with_kv(star.pts.clone(), DATA));
         }
         // (a key of an open record stored on some paths only: on the others its value is
         // the input's, or what unknown code put there, which a slot one path made does not cover)
         let partly_stored = !v.empty() && (row0.has_input() || !row0.mutators.is_empty()) && !(row0.definite.contains(k) && row0.stored.contains(k));
-        if !from_map && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
+        if !from_map && !(stored && !star.empty()) && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
             let p = self.path_placeholder_value(oid, ns, k, row, state);
             v = v.join(&p);
             if is_lit {

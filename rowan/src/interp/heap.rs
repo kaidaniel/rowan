@@ -23,6 +23,9 @@ use crate::state::{mark_merged, Kind, State};
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
 /// onto one context-free summary object.
 pub const MAX_CLONES: usize = 256;
+/// Objects of a site made past `MAX_CLONES` in calls the main file's own code makes
+/// (`Heap::from_main`): a registry's helper the main file calls once more keeps its result.
+pub const MAIN_CLONES: usize = 16;
 
 /// What a view object (`Kind::View`) shows of the object it views.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -314,6 +317,11 @@ pub struct Heap {
     index: FxHashMap<(Kind, StrId, StrId), ObjId>,
     /// objects made per allocation site (`MAX_CLONES`)
     site_clones: FxHashMap<String, usize>,
+    /// the allocation is in a call the main file's own code makes (not its imports'): past
+    /// `MAX_CLONES`, up to `MAIN_CLONES` more objects of the site are its own
+    pub from_main: bool,
+    /// those more objects made per site
+    main_clones: FxHashMap<String, usize>,
     /// allocations so far (`Obj::born`): the collectors' marks
     serial: u64,
     /// keys standing for objects
@@ -345,7 +353,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
@@ -438,7 +446,10 @@ impl Heap {
             return oid;
         }
         let n = self.site_clones.get(site).copied().unwrap_or(0);
-        if n >= MAX_CLONES && !ctx.is_empty() {
+        let more = n >= MAX_CLONES && self.from_main && self.main_clones.get(site).copied().unwrap_or(0) < MAIN_CLONES;
+        if more {
+            *self.main_clones.entry(site.to_string()).or_default() += 1;
+        } else if n >= MAX_CLONES && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             let o = self.alloc_raw(kind, site, "", false, label, payload);
             mark_merged(o);

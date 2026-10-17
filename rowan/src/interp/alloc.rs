@@ -19,6 +19,13 @@ impl Analyzer {
         self.heap.alloc_raw(kind, site, "", true, label, payload)
     }
 
+    /// Is the running code a call the main file's module code makes (no other module's code
+    /// below it: not an import, not an entry run)?
+    fn in_main_call(&self) -> bool {
+        let fs = &self.cx.frames;
+        fs.len() > 1 && fs[0].kind == super::FrameKind::Module && fs[0].module == self.main_module() && fs[0].ctx.is_empty() && fs[1..].iter().all(|f| f.kind == super::FrameKind::Function)
+    }
+
     /// A node's site label (`site_string`).
     pub(in crate::interp) fn site_of(&self, node: &Node) -> String {
         site_string(node)
@@ -56,7 +63,9 @@ impl Analyzer {
         } else {
             let existed = self.heap.find(kind, site, &ctx);
             let payload2 = payload.clone();
+            self.heap.from_main = self.in_main_call();
             let mut oid = self.heap.alloc_raw(kind, site, &ctx, single, &label, payload);
+            self.heap.from_main = false;
             // (made earlier in the same model call: held by the model's own code)
             let model_held = self.cx.model_depth > 0 && self.cx.model_born.get(&oid) == Some(&self.cx.model_epoch);
             if self.cx.model_depth > 0 {

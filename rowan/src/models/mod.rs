@@ -101,6 +101,7 @@ impl Registry {
         r(&["builtins.getattr"], m_getattr);
         r(&["builtins.setattr"], m_setattr);
         r(&["random.shuffle"], m_shuffle);
+        r(&["random.choice", "secrets.choice", "random.sample", "random.choices"], m_random_pick);
         r(&["reprlib.repr"], m_reprlib_repr);
         r(&["operator.setitem"], m_op_setitem);
         r(&["builtins.object.__setattr__"], m_object_setattr);
@@ -121,7 +122,7 @@ impl Registry {
                 "builtins.print",
                 "builtins.id", "builtins.hash",
                 "builtins.format", "builtins.input", "builtins.issubclass", "builtins.hex",
-                "builtins.chr", "builtins.ord", "builtins.open", "builtins.divmod", "builtins.pow",
+                "builtins.chr", "builtins.ord", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
             ],
             noeffect,
@@ -416,6 +417,12 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let code = |v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
     if !c.qual.starts_with("builtins.") && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
         return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
+    }
+    // (it may run the dunders of the program's instances it is given: `os.fspath(p)`, `logging`'s
+    // `%s`; a builtin's are run by `builtin_dunder`; `inspect.isclass` & co. look at types only)
+    if !["builtins.", "inspect.is", "typing.", "abc."].iter().any(|p| c.qual.starts_with(p)) {
+        let vals: Vec<Value> = c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).chain(c.star_kwargs.iter()).cloned().collect();
+        an.library_dunders(&vals, st, &c.node);
     }
     // `print(…, file=buf)` writes into a StringIO; other writers (`json.dump(x, buf)`) make its
     // text unknown

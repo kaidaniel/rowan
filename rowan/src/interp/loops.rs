@@ -762,30 +762,32 @@ impl Analyzer {
         if !body_s.reachable {
             return;
         }
-        let mut srcs: Vec<SourceId> = Vec::new();
         // (the element, and the items it holds two levels down: the group of a `groupby` pair
         // iterated in its turn reads each of its rows once per element too)
-        let mut objs: Vec<ObjId> = elem.pts.iter().collect();
-        let mut level: Vec<ObjId> = objs.clone();
+        let mut objs: rustc_hash::FxHashSet<ObjId> = elem.pts.iter().collect();
+        let mut level: Vec<ObjId> = objs.iter().copied().collect();
         for _ in 0..2 {
             let mut next: Vec<ObjId> = Vec::new();
             for oid in level {
                 if matches!(self.heap.kind(oid), Kind::List | Kind::Tuple) {
                     state.slots.each(&oid, &mut |sk, v| {
                         if matches!(sk.0, Ns::Elem | Ns::Pos) {
-                            next.extend(v.pts.iter());
+                            next.extend(v.pts.iter().filter(|o| !objs.contains(o)));
                         }
                     });
                 }
             }
-            next.retain(|o| !objs.contains(o));
+            next.sort_unstable();
+            next.dedup();
             objs.extend(next.iter().copied());
             level = next;
         }
+        let mut srcs: Vec<SourceId> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<SourceId> = rustc_hash::FxHashSet::default();
         for oid in objs {
             for ns in [Ns::Item, Ns::Attr] {
                 for (src, _) in state.row(oid, ns).sources.iter() {
-                    if !source_is_data(src) && !srcs.contains(&src) {
+                    if !source_is_data(src) && seen.insert(src) {
                         srcs.push(src);
                     }
                 }

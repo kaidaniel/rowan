@@ -299,6 +299,110 @@ pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
+// ------------------------------------------------------------------ files
+
+const FILE_KIND: &str = "stdobj.file";
+
+/// `open(file, mode="r", …)` / `io.open`: a file object (`open_file`).
+pub fn open_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let file = c.arg(0, Some("file")).unwrap_or_default();
+    // (a program's object as the file: its `__fspath__` may run)
+    an.library_dunders(std::slice::from_ref(&file), st, &c.node);
+    open_file(an, st, &c.node, &file, c.arg(1, Some("mode")))
+}
+
+/// A file object of `mode` (None: "r"): what it reads is a str, or bytes in a binary mode
+/// (either when the mode is not known); what the file holds is not known. Opening may raise
+/// (OSError; a mode or argument of a wrong kind: ValueError, TypeError).
+pub fn open_file(an: &mut Analyzer, st: &mut State, node: &Node, file: &Value, mode: Option<Value>) -> Value {
+    let mode_text = match &mode {
+        None => Some("r".to_string()),
+        Some(m) => m.kv.as_lit().filter(|_| m.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string()),
+    };
+    let ty = match &mode_text {
+        Some(m) if m.contains('b') => "bytes",
+        Some(_) => "str",
+        None => "",
+    };
+    for exc in ["OSError", "ValueError", "TypeError"] {
+        an.may_raise_here(exc, st);
+    }
+    let name = match (ty, mode_text.as_deref()) {
+        ("str", _) => "TextIOWrapper",
+        ("bytes", Some(m)) if m.contains(['w', 'a', 'x', '+']) => "BufferedWriter",
+        ("bytes", _) => "BufferedReader",
+        _ => "IOBase",
+    };
+    let p = Payload::Method(FILE_KIND.into(), Value::lit_str(ty));
+    let oid = an.alloc_at(Kind::Namespace, node, st, &format!("{}@L{}", name, node.line), p.clone(), Some(Row::new()), Ns::Attr, None, Some("open"));
+    an.heap.obj_mut(oid).payload = p;
+    let mut row = Row::new();
+    for (k, v) in [("name", file.clone()), ("mode", mode.unwrap_or_else(|| Value::lit_str("r")))] {
+        st.set_slot(oid, Ns::Attr, key_str_lit(k), v, true);
+        row = row.store(key_str_lit(k), true);
+    }
+    st.set_row(oid, Ns::Attr, row);
+    Value::obj(oid)
+}
+
+/// What a file object reads: `Some("str")`, `Some("bytes")`, `Some("")` (either); None: not a
+/// file object.
+pub fn file_type(an: &Analyzer, o: ObjId) -> Option<&'static str> {
+    if an.heap.kind(o) != Kind::Namespace {
+        return None;
+    }
+    match &an.heap.obj(o).payload {
+        Payload::Method(q, t) if q == FILE_KIND => Some(match t.kv.as_lit().and_then(intern::key_as_str).as_deref() {
+            Some("str") => "str",
+            Some("bytes") => "bytes",
+            _ => "",
+        }),
+        _ => None,
+    }
+}
+
+/// What a read of the file objects among `v` gives: a str / bytes not known (an unknown of no
+/// type when that is not known).
+pub fn file_text(an: &Analyzer, v: &Value, what: &str) -> Value {
+    let tys: Vec<&str> = v.pts.iter().filter_map(|o| file_type(an, o)).collect();
+    match tys.first() {
+        Some(t) if !t.is_empty() && tys.iter().all(|u| u == t) => Value::data(&crate::domain::typed_label(t, what)),
+        _ => Value::data(what),
+    }
+}
+
+/// `stdobj.file.<m>`: reads give text not known, of its type; writes change only the file.
+fn m_file(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &Value) -> Value {
+    let int = || Value::data(&crate::domain::typed_label("int", ""));
+    match name {
+        "read" | "readline" => {
+            an.may_raise_here("OSError", st);
+            file_text(an, recv, name)
+        }
+        "readlines" => {
+            an.may_raise_here("OSError", st);
+            let line = file_text(an, recv, "line");
+            an.alloc_positional(Kind::List, &c.node, None, Value::new(), line.kv, st)
+        }
+        "__next__" => {
+            an.may_raise_here("StopIteration", st);
+            file_text(an, recv, "line")
+        }
+        "__iter__" | "__enter__" => recv.clone(),
+        "write" | "seek" | "tell" | "fileno" | "truncate" => {
+            an.may_raise_here("OSError", st);
+            an.may_raise_here("TypeError", st);
+            int()
+        }
+        "writelines" | "close" | "flush" | "__exit__" => {
+            an.may_raise_here("OSError", st);
+            an.none_v.clone()
+        }
+        "readable" | "writable" | "seekable" | "isatty" | "closed" => Value::data(&crate::domain::typed_label("bool", "")),
+        _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
+    }
+}
+
 /// `csv.writer(f, …)` / `csv.DictWriter(f, fieldnames, restval="", extrasaction="raise", …)`.
 pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let dict = c.qual.ends_with("DictWriter");
@@ -357,6 +461,11 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if q.starts_with("stdobj.template.") {
         return crate::models::stdfuncs::m_template(an, st, c);
+    }
+    if q.starts_with("stdobj.file.") {
+        let name = q.rsplit('.').next().unwrap_or("").to_string();
+        let recv = c.recv.clone().unwrap_or_default();
+        return m_file(an, st, c, &name, &recv);
     }
     if q.starts_with("stdobj.exitstack.") {
         let name = q.rsplit('.').next().unwrap_or("").to_string();
@@ -559,8 +668,8 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return csv_list(an, vals, &c.node, st, "csvrows", true);
         }
     }
-    // unknown rows: lists of strings
-    let e = Value::data(&format!("csv field@L{}", c.line));
+    // unknown rows: lists of str
+    let e = Value::data(&crate::domain::typed_label("str", &format!("csv field@L{}", c.line)));
     let row = csv_list(an, vec![], &c.node, st, "csvrow", false);
     if let Some(o) = row.single() {
         st.set_slot(o, Ns::Elem, intern::STAR, e.clone(), true);
@@ -654,7 +763,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, Some(false), None);
     an.heap.obj_mut(rid).iter_elem = true;
     for k in row.present.iter() {
-        let v = if Some(k) == rk { Value::data("csv rest") } else { Value::data(&format!("csv field@L{}", c.line)) };
+        let v = if Some(k) == rk { Value::data("csv rest") } else { Value::data(&crate::domain::typed_label("str", &format!("csv field@L{}", c.line))) };
         st.set_slot(rid, Ns::Item, k, v, false);
     }
     let ctx = an.frame().ctx.clone();
@@ -833,6 +942,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
 
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["io.StringIO"], stringio_new);
+    r(&["builtins.open", "io.open"], open_new);
     r(&["contextlib.redirect_stdout", "contextlib.redirect_stderr"], redirect_new);
     r(&["contextlib.ExitStack"], exitstack_new);
     r(&["contextlib.closing", "contextlib.nullcontext"], closing_new);

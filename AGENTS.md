@@ -15,7 +15,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
-  *merged* object (stores only join). Garbage collection at returns, loop and try exits drops
+  *merged* object (stores only join); past 256 objects a site's summary (calls the main file's own code makes: 16 more, `MAIN_CLONES`). Garbage collection at returns, loop and try exits drops
   the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches
   (side tables' young targets: a remembered set by age, `Heap::push_copy_roots`).
   An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a
@@ -50,7 +50,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; to library functions that only read, given no code: nothing, `read_only_library`; a dict, list or set changed
-  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: those keys, any if not named, not `likely`, `Flags::removes`), a local aliasing what it is bound to; a function argument its code only stores in a global dict, under a literal key or its own `__name__`, or returns: put there and in the result, not walked, `Flags::kept`; one only read: not walked; class attributes by name, rebound
+  in place or unpacked (`{**d}`): its items; a new container of its items (`dict(d)`, `list(xs)`: `Level::Copy`) changed in place changes none of them, `d["k"]` is its part under k (`Level::Part`: that slot alone); one its code may remove items of, `del d[k]`, `pop`: those keys, any if not named, not `likely`, `Flags::removes`), a local aliasing what it is bound to; a function argument its code only keeps where the program reads it back (a dict a global, class, module or the receiver holds, under a literal key or its own `__name__`, `setdefault` too; a global list, `append`; through a helper that does; the result): put there, not walked, `Flags::kept`, `KeptPlace`; one only read: not walked; class attributes by name, rebound
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
@@ -62,16 +62,17 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
     cannot change); the program's functions among it may run (`follow_code`: their code's closure, in rounds that resume one walk; a class
     attribute's flags applied again as they grow). A walk from the same
-    values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything; its
+    values (by any unknown code) redoes only what changed (`Havoc`'s memo); the dunders of the program's instances it meets that may change
+    something run as code that does not (`changing_dunders`; a skipped call follows their classes). They return an unknown and may raise anything; its
     items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
-    the program's functions; several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
+    the program's functions (given its instances, their changing dunders may run: `library_dunders`; `random.choice` / `sample` give back the items); several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
     per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
     sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
-    (`"a" if c else [1]`) run on each part (`split_mixed`); None beside them raises where Python rejects it (operators with literals or builtin containers, calls, subscripts, attributes, `len`).
+    (`"a" if c else [1]`) run on each part (`split_mixed`); `"%s" % obj` runs `__str__` (`%r`: `__repr__`); None beside them raises where Python rejects it (operators with literals or builtin containers, calls, subscripts, attributes, `len`).
   * **Entry points, general runs:** functions the main run does not call (also those only entry
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
@@ -97,7 +98,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   several functions a value picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that see the `Heap`, their
   `models::Tables` and the interpreter's public methods) compute CPython's result on known values (str / bytes, formatting,
-  json, re, datetime, decimal, sqlite, csv…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
+  json, re, datetime, decimal, sqlite, csv, files: `open()` reads str / bytes, a path of unknown text, a Counter's counts…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
   selection holds its columns, its `drop(columns=…)` the others), pydantic / FastAPI validation and routing, and torch / numpy shapes
   (dims as polynomials; an undecided condition is a requirement and then a fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop, entry runs left out (`cut`); the budget bounds the work.
@@ -182,8 +183,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 * **Models allocating several objects at one node** must give each its own context.
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
 * **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row (and a list no length).
-* **Generator yields** use `alloc_raw` for per-yield states. **Stdlib objects** (`stdobj.<kind>`): Attr slots, `m_stdobj`.
-* **Attributes resolved by class** (`class_resolves`): class, model and `__getattr__` objects have more than their rows show.
+* **Generator yields** use `alloc_raw` for per-yield states. **Stdlib objects** (`stdobj.<kind>`): Attr slots, `m_stdobj`. **Attributes resolved by class** (`class_resolves`): class, model and `__getattr__` objects have more than their rows show.
 
 ## Measured (release build, Apple M-series)
 
@@ -191,7 +191,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.9 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~0.7 / ~4.2 / ~4.6 s; 0.27 / 0.21 / 0.20 / 0.35 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~1.0 / ~4.2 / ~4.6 s; 0.27 / 0.22 / 0.20 / 0.35 GB |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.42 / 0.47 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps

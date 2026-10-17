@@ -344,18 +344,65 @@ pub fn m_path_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let t = pathlib_norm(&ps);
             new_path(an, st, &c.node, &t, &cls, "new")
         }
+        // (a text not known: a path all the same; an object's `__fspath__` may run, and an
+        // argument of another type raises TypeError)
         None => {
-            Value::data("path")
+            an.library_dunders(&c.args, st, &c.node);
+            if !c.args.iter().all(|a| str_or_path(an, a)) {
+                an.may_raise_here("TypeError", st);
+            }
+            unknown_path(an, st, &c.node, &cls, "new")
         }
     }
+}
+
+/// A path whose text is not known (a str): its properties and pure methods are of their types.
+fn unknown_path(an: &mut Analyzer, st: &mut State, node: &Node, cls: &str, ctx: &str) -> Value {
+    let p = Payload::Method(PATH_KIND.into(), str_value());
+    let oid = an.alloc_at(Kind::Namespace, node, st, &format!("{}(?)", cls), p.clone(), Some(Row::new()), Ns::Attr, None, Some(&format!("path:{}:?", ctx)));
+    an.heap.obj_mut(oid).payload = p;
+    st.set_row(oid, Ns::Attr, Row::new());
+    an.m.path_classes.insert(oid, cls.to_string());
+    Value::obj(oid)
+}
+
+/// Is `v` a str or a path object (what a path is made of)?
+fn str_or_path(an: &Analyzer, v: &Value) -> bool {
+    let str_kv = match &v.kv {
+        KeyVal::Bot => !v.pts.is_empty(),
+        KeyVal::Data(l) => crate::domain::label_type(&intern::str_get(*l)) == Some("str"),
+        KeyVal::Lit(_) | KeyVal::Lits(_) => crate::domain::kv_literals(&v.kv).iter().all(|k| intern::key_as_str(k).is_some()),
+        _ => false,
+    };
+    str_kv && v.pts.iter().all(|o| is_path(an, o))
+}
+
+fn str_value() -> Value {
+    Value::data(&crate::domain::typed_label("str", ""))
+}
+
+fn bool_value() -> Value {
+    Value::data(&crate::domain::typed_label("bool", ""))
 }
 
 pub const PATH_PROPS: &[&str] = &["name", "stem", "suffix", "suffixes", "parent", "parents", "parts", "anchor", "root", "drive"];
 
 /// A path property (`p.name`, `p.parent`, …).
 pub fn path_attr(an: &mut Analyzer, st: &mut State, o: u32, name: &str, node: &Node) -> Option<Value> {
-    let t = path_text(an, o)?;
     let cls = path_class(an, o);
+    let Some(t) = path_text(an, o) else {
+        // (a text not known: of their types)
+        return Some(match name {
+            "parent" => unknown_path(an, st, node, &cls, "parent"),
+            "parents" => {
+                let e = unknown_path(an, st, node, &cls, "parents");
+                an.alloc_positional(Kind::Tuple, node, None, e, KeyVal::Bot, st)
+            }
+            "suffixes" => an.alloc_positional(Kind::List, node, None, Value::new(), str_value().kv, st),
+            "parts" => an.alloc_positional(Kind::Tuple, node, None, Value::new(), str_value().kv, st),
+            _ => str_value(),
+        });
+    };
     let nm = name_of(&t);
     Some(match name {
         "name" => Value::lit_str(&nm),
@@ -396,17 +443,26 @@ pub fn path_div(an: &mut Analyzer, st: &mut State, a: &Value, b: &Value, node: &
             let t = pathlib_norm(&[x, y]);
             Some(new_path(an, st, node, &t, &cls, "div"))
         }
-        _ => Some(Value::data("path")),
+        _ => {
+            // (a path object's `/` with a str or path: a path; with anything else TypeError)
+            let other = if ap.is_some() { b } else { a };
+            if !str_or_path(an, other) {
+                an.library_dunders(std::slice::from_ref(other), st, node);
+                an.may_raise_here("TypeError", st);
+            }
+            Some(unknown_path(an, st, node, &cls, "div"))
+        }
     }
 }
 
 /// A path object's methods (`stdobj.path.NAME`).
 pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let r = path_method(an, st, c);
-    // (a file's text is a str, its bytes bytes, whatever the path)
+    // (a file's text is a str, its bytes bytes, whatever the path; whether it exists a bool)
     let ty = match c.qual.rsplit('.').next() {
         Some("read_text") => "str",
         Some("read_bytes") => "bytes",
+        Some("exists" | "is_file" | "is_dir" | "is_symlink" | "is_mount") => "bool",
         _ => return r,
     };
     for o in r.pts.iter() {
@@ -424,8 +480,25 @@ pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(o) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("path") };
-    let Some(t) = path_text(an, o) else { return Value::data("path") };
     let cls = path_class(an, o);
+    let Some(t) = path_text(an, o) else {
+        // (a text not known: the pure methods' results of their types, a path's a path;
+        // the file system's methods are unknown calls)
+        return match name.as_str() {
+            "with_suffix" | "with_name" | "with_stem" | "joinpath" | "relative_to" => {
+                an.may_raise_here("ValueError", st);
+                unknown_path(an, st, &c.node, &cls, &name)
+            }
+            "is_absolute" | "is_relative_to" | "match" | "full_match" | "is_reserved" => bool_value(),
+            "as_posix" | "__str__" | "__fspath__" => str_value(),
+            "as_uri" => {
+                an.may_raise_here("ValueError", st);
+                str_value()
+            }
+            "open" => crate::models::csvio::open_file(an, st, &c.node, &Value::obj(o), c.arg(0, Some("mode"))),
+            _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
+        };
+    };
     let args: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     let Some(args) = args else {
         return Value::data("path");
@@ -478,6 +551,7 @@ fn path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "is_absolute" => Value::lit(intern::key_bool(t.starts_with('/'))),
         "as_posix" | "__str__" | "__fspath__" => Value::lit_str(&t),
         "as_uri" if t.starts_with('/') => Value::lit_str(&format!("file://{}", t)),
+        "open" => crate::models::csvio::open_file(an, st, &c.node, &Value::obj(o), c.arg(0, Some("mode"))),
         "match" | "full_match" => Value::data("bool"),
         // the file system
         _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
