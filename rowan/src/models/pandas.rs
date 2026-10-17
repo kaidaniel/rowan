@@ -1,4 +1,11 @@
-//! pandas models (DataFrame hooks used by the interpreter and the `DataFrame.*` methods).
+//! pandas: a DataFrame is a record whose item keys are its columns (`Kind::Frame`), a Series
+//! one whose keys are its index labels. Construction, projection, column stores, drops,
+//! renames, `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes compute the
+//! columns a frame has; readers (`read_csv`, …) give frames open through their input, so the
+//! columns the code reads become the input's schema. The literals a frame's index labels and
+//! columns may (and surely) hold, and its number of rows, are kept in its `Meta` slots
+//! (`labels`, `vals`, `nrows`). The interpreter calls the hooks here for item,
+//! attribute and `.loc` access on frames (`frame_getitem`, `frame_setattr`, `loc_get`, …).
 
 use indexmap::IndexMap;
 
