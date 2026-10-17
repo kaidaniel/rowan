@@ -733,6 +733,12 @@ fn legend(text: &str) -> Vec<String> {
     add(values.contains("**?"), "**?", "other keys / attributes / columns may exist");
     add(values.contains(" | "), "a | b", "one of these, depending on the path");
     add(values.contains('…'), "…", "not shown");
+    // (containers of unknown length or keys, in typing notation: `list[x]` is not a list of one x)
+    let typing = |ty: &str| values.match_indices(&format!("{}[", ty)).any(|(i, _)| !values[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.'));
+    add(typing("list"), "list[x]", "a list of any length whose items are x");
+    add(typing("set"), "set[x]", "a set of any size whose items are x");
+    add(typing("tuple") && values.contains(", ...]"), "tuple[x, ...]", "a tuple of any length whose items are x");
+    add(typing("dict"), "dict[k, v]", "a dict of any size whose keys are k and values v");
     out
 }
 

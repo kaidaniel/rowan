@@ -45,6 +45,11 @@ const NOTATION = [
   [(t) => / \| |(^|\n)\s*\| /.test(t), "a | b", "either a or b (depending on the path or the call)"],
   [(t) => /\bTensor\[\*\]/.test(t), "Tensor[*]", "a tensor of unknown number of dimensions"],
   [(t) => /\[\*\]/.test(t.replace(/\bTensor\[\*\]/g, "")), "[*]", "any element"],
+  // (containers of unknown length or keys, in typing notation: `list[x]` is not a list of one x)
+  [(t) => /(^|[^\w.])list\[/.test(t), "list[x]", "a list of any length whose items are `x`"],
+  [(t) => /(^|[^\w.])set\[/.test(t), "set[x]", "a set of any size whose items are `x`"],
+  [(t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t), "tuple[x, ...]", "a tuple of any length whose items are `x`"],
+  [(t) => /(^|[^\w.])dict\[/.test(t), "dict[k, v]", "a dict of any size whose keys are `k` and values `v`"],
   [(t) => t.includes("…"), "…", "not shown"],
   [(t) => t.includes(" (only if `"), "(only if x)", "needed only on calls where `x` holds of the arguments as passed"],
 ];
@@ -53,7 +58,8 @@ const NOTATION = [
  * Values are printed as Python with a few additions (see NOTATION): `?` an unknown value;
  * `{"a": 1, "b"?: ?, "c"~: ?, **?}` a dict with "a" always, "b" on some paths, "c" unless
  * unknown code removed it, and possibly other keys; `Name(a=1, **?)` an object; `list[X]` a
- * list of unknown length; `…` what the printer left out; `<Match>` an object by its type.
+ * list of unknown length (`set[X]`, `tuple[X, ...]`, `dict[K, V]` likewise, each with its Note);
+ * `…` what the printer left out; `<Match>` an object by its type.
  */
 const VALUE_WIDTH = 60;
 const CLOSE_OF = { "{": "}", "[": "]", "(": ")" };

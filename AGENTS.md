@@ -111,7 +111,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`; no per-function budgets)
   or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
-  a general run's `x: int` is an int, not a subclass overriding int's operators). `getattr` by a name not known reads every attribute
+  a general run's `x: int` is an int, not a subclass overriding int's operators; an unknown the program gives a dataclass's, NamedTuple's or TypedDict's field annotated `str` / `Optional[int]` is one, `field_as_annotated`, `float` only validated: an int passes; a pydantic field's validated unknown is of its type). `getattr` by a name not known reads every attribute
   of the program's objects, quietly (known in part, an f-string's or a name a template makes, `"_on_%s" % m` also through a local: those whose names fit, `Payload::Affix`, `template_affixes`; a container's, or past a wide
   read: one method per call site, unknown code on them when called); `exec`, `setattr` with unknown names on a class, metaclasses and
   monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
@@ -131,7 +131,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 
@@ -180,7 +180,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 
 ## Implementation rules that are easy to break
 
-* **Models allocating several objects at one node** must give each its own context.
+* **Models allocating several objects at one node** must give each its own context (calls: `Node::sub`, a field's factory: `factory_site`).
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
 * **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row (and a list no length).
 * **Generator yields** use `alloc_raw` for per-yield states. **Stdlib objects** (`stdobj.<kind>`): Attr slots, `m_stdobj`. **Attributes resolved by class** (`class_resolves`): class, model and `__getattr__` objects have more than their rows show.
