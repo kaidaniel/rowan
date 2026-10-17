@@ -7,9 +7,9 @@ use rustc_hash::FxHashSet;
 
 use super::{site_string, Analyzer, Payload};
 use crate::domain::{Ns, ObjId, Row};
-use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, KeyId};
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
 impl Analyzer {

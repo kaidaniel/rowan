@@ -24,12 +24,18 @@ use crate::state::{Kind, State};
 /// onto one context-free summary object.
 pub const MAX_CLONES: usize = 256;
 
+/// What a view object (`Kind::View`) shows of the object it views.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewKind {
+    /// `d.keys()`
     Keys,
+    /// `d.values()`
     Values,
+    /// `d.items()`
     Items,
+    /// a frame's rows (`df.iterrows()`): (index, row) pairs
     Rows,
+    /// the elements of the objects it views (a slice of an unknown sequence)
     Elems,
     /// `obj.__dict__`: the instance's attributes as a dict
     Attrs,
@@ -38,6 +44,7 @@ pub enum ViewKind {
 }
 
 impl ViewKind {
+    /// The view's name (`keys`, `values`, …).
     pub fn name(self) -> &'static str {
         match self {
             ViewKind::Keys => "keys",
@@ -49,6 +56,7 @@ impl ViewKind {
             ViewKind::Proxy => "proxy",
         }
     }
+    /// The view `d.keys()`, `d.values()` or `d.items()` makes, by the method's name.
     pub fn from_name(n: &str) -> ViewKind {
         match n {
             "keys" => ViewKind::Keys,
@@ -60,25 +68,41 @@ impl ViewKind {
     }
 }
 
+/// What an object is besides its keys: flow-insensitive, fixed when it is made (or made again).
 #[derive(Clone, Debug)]
 pub enum Payload {
     None,
+    /// a module
     Module(Rc<ModuleInfo>),
+    /// a function or lambda of the program
     Func(Rc<FuncInfo>),
+    /// a class of the program
     Class(Rc<ClassInfo>),
-    /// instance: its class
+    /// an instance: its class
     Cls(ObjId),
-    /// external qualname / response tag
+    /// a library object's qualified name (`builtins.len`); a response's tag
     Str(String),
+    /// a library method (its qualified name, `dict.get`) bound to a receiver
     Method(String, Value),
+    /// a method of the program (its function) bound to a receiver
     Bound(ObjId, Value),
+    /// `super()`: the class it starts after and the receiver
     Super(ObjId, Value),
+    /// a view of the objects of `Value`
     View(ViewKind, Value),
+    /// `zip(a, b)` (more than two: nested pairs)
     Zip(Value, Value),
+    /// `enumerate(it, start)` (the start when known)
     Enumerate(Value, Option<i64>),
+    /// a (key, value) pair of `items()`, `zip`, `enumerate`
     Pair(Value, Value),
+    /// `functools.partial(f, *args, **kwargs)`
     Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
+    /// a pandas groupby: the frames grouped, the key columns (when known), `as_index`, and the
+    /// columns selected (`gb["a"]`; whether as one column)
     Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
+    /// a pandas accessor or indexer (`.loc`, `.iloc`, `.str`, `.dt`, …) by name, of a frame or
+    /// series
     Locidx(String, ObjId),
     /// `range(start, stop, step)` with known bounds
     Range(i64, i64, i64),
@@ -92,6 +116,7 @@ impl Payload {
     }
 }
 
+/// The syntax a function object was made from.
 #[derive(Clone, Copy, Debug)]
 pub enum FuncNode {
     Def(&'static ast::StmtFunctionDef),
@@ -99,6 +124,7 @@ pub enum FuncNode {
 }
 
 impl FuncNode {
+    /// Its parameters (a lambda may have none).
     pub(in crate::interp) fn params(&self) -> Option<&'static ast::Parameters> {
         match self {
             FuncNode::Def(f) => Some(&f.parameters),
@@ -111,12 +137,14 @@ impl FuncNode {
             FuncNode::Lambda(l) => frontend::node(*l),
         }
     }
+    /// Its address: the identity of the function's code (all closures of one `def` share it).
     pub(in crate::interp) fn addr(&self) -> usize {
         match self {
             FuncNode::Def(f) => *f as *const _ as usize,
             FuncNode::Lambda(l) => *l as *const _ as usize,
         }
     }
+    /// A `def`'s statements (a lambda's body is an expression: none).
     pub(in crate::interp) fn body(&self) -> &'static [ast::Stmt] {
         match self {
             FuncNode::Def(f) => &f.body,
@@ -125,12 +153,16 @@ impl FuncNode {
     }
 }
 
+/// A function object of the program (`Payload::Func`): what its `def` made. The flags are set
+/// by its decorators after it is made (`apply_decorators`).
 #[derive(Debug)]
 pub struct FuncInfo {
     pub node: FuncNode,
     pub name: String,
+    /// its qualified name (`Conn.__init__`; classes marked `class ` inside, `py_qualname`)
     pub qualname: String,
     pub module: ObjId,
+    /// its scope in its module's `Scopes`
     pub scope: usize,
     /// free name -> cell oid
     pub closure: IndexMap<StrId, ObjId>,
@@ -155,6 +187,7 @@ impl FuncInfo {
     }
 }
 
+/// A class object of the program (`Payload::Class`): what its `class` statement made.
 #[derive(Debug)]
 pub struct ClassInfo {
     pub name: String,
@@ -163,45 +196,57 @@ pub struct ClassInfo {
     pub module: ObjId,
     /// inherits from something we do not see
     pub open_base: bool,
+    /// a dataclass's (NamedTuple's, pydantic model's, …) fields with their defaults, once known
     pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
     /// what its direct library bases make of it (`dict`, `TypedDict`, `NamedTuple`, pydantic's
     /// `BaseModel`, `nn.Module`, …)
     pub lib: crate::models::ClassBase,
     /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
-    pub pyd_dataclass: std::cell::Cell<bool>,
+    pub pyd_dataclass: Cell<bool>,
     /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
-    pub dc_frozen: std::cell::Cell<bool>,
-    pub dc_kw_only: std::cell::Cell<bool>,
+    pub dc_frozen: Cell<bool>,
+    pub dc_kw_only: Cell<bool>,
     /// `@dataclass(order=True)`: instances of the class compare their fields as tuples
-    pub dc_order: std::cell::Cell<bool>,
+    pub dc_order: Cell<bool>,
+    /// the attributes its body annotates `Any` / `object` (computed on first use)
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
 }
 
 impl ClassInfo {
+    /// Does it have generated fields (a dataclass and the like)?
     pub fn has_fields(&self) -> bool {
         self.dataclass_fields.borrow().is_some()
     }
+    /// Its generated fields (none if it has none).
     pub fn fields(&self) -> Vec<(String, Option<&'static ast::Expr>)> {
         self.dataclass_fields.borrow().clone().unwrap_or_default()
     }
 }
 
+/// A module object (`Payload::Module`): its name, file, parsed tree and scopes.
 #[derive(Debug)]
 pub struct ModuleInfo {
+    /// the dotted name it was imported as
     pub name: String,
     pub path: Option<String>,
     /// the dotted package the module belongs to (its own name for an `__init__.py`), the
     /// base of its relative imports
     pub pkg: String,
+    /// its index in the frontend's registry
     pub idx: u32,
     pub tree: &'static ast::ModModule,
     pub scopes: Scopes,
 }
 
+/// What an Enum class's bases make of its members (`models::enums`).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct EnumKind {
+    /// mixed with `str` or `int` (`StrEnum`, `IntEnum`, `class M(str, Enum)`): a member equals
+    /// and hashes as its value
     pub mixed: bool,
+    /// `str(member)` is its value's (`StrEnum`, `IntEnum`, `ReprEnum`), not `Cls.NAME`
     pub repr_value: bool,
+    /// a `Flag` / `IntFlag`: members combine with `|`
     pub flag: bool,
     /// str-based (`auto()` is the lower-cased name in a StrEnum)
     pub is_str: bool,
@@ -213,15 +258,19 @@ impl EnumKind {
     }
 }
 
+/// One abstract object: identified by (kind, allocation site, context); see the module doc.
 #[derive(Debug)]
 pub struct Obj {
     pub id: ObjId,
     pub kind: Kind,
-    /// site, context and label are shared strings (one allocation per distinct string: many
-    /// objects have the same context or label)
+    /// where it was made (`L5:3-12`, a model's site); site, context and label are shared
+    /// strings (one allocation per distinct string: many objects have the same context or label)
     pub site: std::sync::Arc<str>,
+    /// the allocation context: the call chain it was made in (`Frame::ctx`)
     pub ctx: std::sync::Arc<str>,
+    /// it stands for one runtime object: stores into it are strong
     pub single: bool,
+    /// a name for people and the report (`dict@L4`, `Conn@L12`, `result of f(x)`)
     pub label: std::sync::Arc<str>,
     pub payload: Payload,
     /// an element record a model or an iteration made (a frame's row, a csv row, an input's
@@ -423,6 +472,7 @@ impl Heap {
             _ => None,
         }
     }
+    /// A library object's qualified name ("" for others).
     pub fn external_qual(&self, oid: ObjId) -> String {
         match &self.obj(oid).payload {
             Payload::Str(q) => q.clone(),
@@ -464,6 +514,7 @@ impl Heap {
         Some(p).filter(|p| *p > 0)
     }
 
+    /// The list's length on this path is `v` (None: not known), every position known.
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
         st.set_lens(o, (v, v.unwrap_or(0), 0));
     }

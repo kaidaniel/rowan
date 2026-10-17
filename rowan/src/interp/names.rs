@@ -12,6 +12,7 @@ use crate::domain::{Ns, ObjId};
 use crate::intern::{self, KeyId, StrId};
 use crate::state::Kind;
 
+/// The report's names (see the module doc).
 #[derive(Default)]
 pub struct Names {
     /// unknown objects named in the program's own terms
@@ -29,11 +30,13 @@ pub struct Names {
 }
 
 impl Names {
+    /// Object `oid` is printed as `sym` inside function `scope` (0: everywhere).
     pub fn set(&mut self, oid: ObjId, sym: String, scope: u32) {
         self.symbols.insert(oid, sym);
         self.scopes.insert(oid, scope);
     }
 
+    /// Has the object a symbol?
     pub fn has(&self, oid: ObjId) -> bool {
         self.symbols.contains_key(&oid)
     }
@@ -48,7 +51,7 @@ impl Names {
         self.scopes.get(&oid).copied().unwrap_or(0)
     }
 
-    /// The symbol an object is printed by where the printer is now (`report::in_scope`): a
+    /// The symbol an object is printed by where the printer is now (`render::in_scope`): a
     /// symbol uses the names of its function, module-level ones are visible everywhere.
     pub fn visible(&self, oid: ObjId) -> Option<&String> {
         let s = self.scope(oid);

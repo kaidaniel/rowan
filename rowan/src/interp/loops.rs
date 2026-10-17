@@ -4,18 +4,18 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{ObjId, KeyVal, Ns, Row, Value};
-use crate::frontend::{self};
+use crate::domain::{KeyVal, Ns, ObjId, Row, Value};
+use crate::frontend;
 use crate::intern::{self, s};
 use crate::state::{Kind, State};
 use crate::syntax::{collect_assigned, contains_jump, is_constant};
 
+use super::iter::{Elem, Iteration};
+use super::stmts::{add_facts, cond_facts_for};
 use super::{Analyzer, LoopCtx, UNROLL_MAX};
 
 /// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
 pub const LOOP_MAX_ITER: usize = 40;
-use super::iter::Elem;
-use super::stmts::{add_facts, cond_facts_for};
 
 impl Analyzer {
     pub(super) fn stmt_while(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
@@ -250,44 +250,10 @@ impl Analyzer {
                 self.exhaust(&itv, state);
             }
         }
-        // unrolled: `continue` rejoins at the next iteration, `break` at the exit; a closed dict
-        // with some keys only maybe there: a maybe one runs on one path and is skipped on the other
-        let unrolled = match &it.ordered_items() {
-            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
-            None => self.maybe_dict_items(&itv, state).map(|items| (items, None)),
-            _ => None,
-        };
-        if let Some((items, cursor)) = unrolled {
-            let breaks = self.unroll_for(f, &items, cursor, state);
-            if !f.orelse.is_empty() && state.reachable {
-                self.exec_block(&f.orelse, state);
-            }
-            // (a one-shot iterator a `break` may leave: run to the end, used up)
-            if cursor.is_some() && state.reachable {
-                self.exhaust(&itv, state);
-            }
-            join_breaks(state, breaks);
+        if self.for_unrolled(f, &itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
             return;
         }
-        // a list of unknown length whose first items are known on every path: those
-        // iterations are unrolled, the loop runs on from there (any later item)
-        let mut prefix_breaks: Option<State> = None;
-        let mut prefixed = false;
-        if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
-            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
-                if let Some(p) = self.heap.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
-                    let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
-                    prefixed = true;
-                    prefix_breaks = self.unroll_for(f, &items, None, state);
-                    if !state.reachable {
-                        if let Some(b) = prefix_breaks.take() {
-                            state.replace_with(b);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
+        let Some((prefixed, prefix_breaks)) = self.for_known_prefix(f, &itv, &it, once, state) else { return };
         // (a loop that may break off: where the iterator stands after it is not known)
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
@@ -320,6 +286,54 @@ impl Analyzer {
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
+    }
+
+    /// A `for` over known items, unrolled: each iteration straight-line code, `continue`
+    /// rejoining at the next one and `break` at the exit; over a closed dict with some keys only
+    /// maybe there, a maybe one runs on one path and is skipped on the other. `cursor`: a
+    /// one-shot iterator a `break` may leave, and where it stood. False: not unrolled.
+    fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, state: &mut State) -> bool {
+        let unrolled = match &it.ordered_items() {
+            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
+            None => self.maybe_dict_items(itv, state).map(|items| (items, None)),
+            _ => None,
+        };
+        let Some((items, cursor)) = unrolled else { return false };
+        let breaks = self.unroll_for(f, &items, cursor, state);
+        if !f.orelse.is_empty() && state.reachable {
+            self.exec_block(&f.orelse, state);
+        }
+        // (a one-shot iterator a `break` may leave: run to the end, used up)
+        if cursor.is_some() && state.reachable {
+            self.exhaust(itv, state);
+        }
+        join_breaks(state, breaks);
+        true
+    }
+
+    /// A `for` over a list of unknown length whose first items are known on every path: those
+    /// iterations are unrolled, and the loop runs on from there (any later item). Whether it
+    /// did, and the states at its `break`s; None when no path goes on after them (the state is
+    /// the breaks' then).
+    fn for_known_prefix(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, once: Option<ObjId>, state: &mut State) -> Option<(bool, Option<State>)> {
+        let mut prefix_breaks: Option<State> = None;
+        let mut prefixed = false;
+        if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
+                if let Some(p) = self.heap.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
+                    let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
+                    prefixed = true;
+                    prefix_breaks = self.unroll_for(f, &items, None, state);
+                    if !state.reachable {
+                        if let Some(b) = prefix_breaks.take() {
+                            state.replace_with(b);
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+        Some((prefixed, prefix_breaks))
     }
 
     /// An instance of a class of the program with `__iter__` and `__next__` whose `__iter__`

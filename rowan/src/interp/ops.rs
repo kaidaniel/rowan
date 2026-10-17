@@ -5,9 +5,9 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use crate::domain::{kv_join, KeyVal, Ns, ObjSet, Value, DATA};
-use crate::source::{FnKind, RenameFn};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
+use crate::source::{FnKind, RenameFn};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload};

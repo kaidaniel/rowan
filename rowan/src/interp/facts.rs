@@ -8,11 +8,11 @@
 use serde_json::{json, Value as J};
 
 use crate::domain::{Ns, ObjId, Row, Tier};
-use crate::source::source_is_data;
 use crate::intern;
-use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
-use crate::interp::render::{is_internal_key, join_alternatives};
 use crate::interp::Analyzer;
+use crate::interp::render::{is_internal_key, join_alternatives};
+use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
+use crate::source::source_is_data;
 use crate::state::Kind;
 
 /// The `--facts` document for the editor: per (line, name) the value as text, the names it

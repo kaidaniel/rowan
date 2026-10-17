@@ -90,6 +90,7 @@ impl Analyzer {
         self.heap.class_info_opt(c).map(|_| c)
     }
 
+    /// Does `o`'s class (one of the program's) define or inherit method `m`?
     pub(super) fn has_user_method(&self, o: u32, m: &str) -> bool {
         self.user_class_of(o).is_some_and(|c| self.class_lookup(c, m).is_some())
     }
@@ -109,6 +110,10 @@ impl Analyzer {
     }
 
     // ---------------------------------------------------------- attributes
+    /// A read `obj.name`: per receiver when one runs code for it (a property, a descriptor,
+    /// `__getattr__`), else on each object by its kind — an instance (`load_instance_attr`), a
+    /// class, a module, an unknown (`load_unknown_attr`), a library object (its method or
+    /// attribute model) — with a verdict where a record may lack the name.
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
         if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
             return v;
@@ -478,6 +483,8 @@ impl Analyzer {
         }
     }
 
+    /// The library method `qual` (`dict.get`) bound to `recv`: one object per method and
+    /// receiver.
     pub fn method_value(&mut self, qual: &str, recv: &Value) -> Value {
         // (a receiver of many objects is keyed by a hash of their ids, not by the list)
         let ids: String = if recv.pts.len() > 32 {
@@ -563,6 +570,9 @@ impl Analyzer {
         self.class_values(&defs, nk, state)
     }
 
+    /// What reading a class attribute `cv` through instance `oid` gives: a descriptor's `__get__`
+    /// result, a method bound to the instance (a property run, a classmethod bound to the class,
+    /// a staticmethod as it is), else the value.
     pub(super) fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, name: &str, node: &Node, state: &mut State) -> Value {
         let mut outs: Vec<Value> = Vec::new();
         // a descriptor object in the class (its class has `__get__`): what `__get__` returns
@@ -649,6 +659,9 @@ impl Analyzer {
         Some(out)
     }
 
+    /// A read of attribute `name` of an instance of the program's classes: a library base's
+    /// attribute, `__getattr__`, the instance's own slot, else the class's (`bound_outs`), with
+    /// the verdict of its row (a class attribute is there for every instance).
     pub(in crate::interp) fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
         if let Some(v) = self.instance_library_attr(oid, name, nk, node, state, guarded) {
@@ -840,7 +853,7 @@ impl Analyzer {
         None
     }
 
-    /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
+    /// A value declared dynamically typed (`Any`): accesses on it are not checkable.
     pub(in crate::interp) fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
         if !state.has_row(oid, Ns::Item) {
@@ -896,6 +909,7 @@ impl Analyzer {
         if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
     }
 
+    /// An unknown object's row on this path; none: anything (`top`).
     pub(in crate::interp) fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if state.has_row(oid, ns) {
             state.row(oid, ns)
@@ -904,6 +918,9 @@ impl Analyzer {
         }
     }
 
+    /// A read of attribute `name` of an object rowan cannot see: a dict or str method name
+    /// gives that method (bound to it), another method name an unknown method; else what its
+    /// row holds (a placeholder for an input's attribute).
     pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
         // (its class, as `type(x)`: calling it does not give it the object, so not a method of it)
         if name == "__class__" {
@@ -948,6 +965,9 @@ impl Analyzer {
         self.method_value(&format!("unknown.{}", name), &Value::obj(oid))
     }
 
+    /// A store `obj.name = v`: per receiver when one runs code for it (`__setattr__`, a
+    /// property's setter, a descriptor's `__set__`), else into each object's attributes (a frozen
+    /// dataclass raises; `__slots__` limit the names).
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
         let split = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, true), state, &mut |an, o, st| {
             an.store_attr(o, name, v, node, st);

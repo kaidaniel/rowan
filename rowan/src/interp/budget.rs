@@ -28,6 +28,7 @@ impl Clock {
     }
 }
 
+/// The analysis's work bounds and counters (see the module doc).
 #[derive(Default)]
 pub struct Budget {
     /// statements run per function code (`FuncNode::addr`: every closure object made from one
@@ -79,6 +80,7 @@ impl Budget {
         std::rc::Rc::new(self.spent.clone())
     }
 
+    /// The budgets spent as at a `snapshot`.
     pub fn restore(&mut self, spent: &FxHashMap<usize, usize>) {
         self.spent = spent.clone();
     }
@@ -103,6 +105,7 @@ impl Budget {
         self.started.elapsed().as_secs_f64()
     }
 
+    /// Milliseconds since the analysis (or the run on demand) started.
     pub fn elapsed_ms(&self) -> u128 {
         self.started.elapsed().as_millis()
     }

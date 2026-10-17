@@ -9,9 +9,9 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Value, DATA};
-use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 use crate::syntax::is_generator;
 

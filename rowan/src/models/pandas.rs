@@ -3,11 +3,11 @@
 use indexmap::IndexMap;
 
 use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, KeyVal, KeysOf, Ns, ObjSet, Row, RowData, Tier, Value, DATA};
-use crate::source::{FnKind, RenameFn, Source, SourceKind, Step};
 use crate::frontend::Node;
+use crate::intern::{self, key_str_lit, KeyId, KeySet, EMPTY_LENS};
 use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
-use crate::intern::{self, key_str_lit, KeyId, KeySet, EMPTY_LENS};
+use crate::source::{FnKind, RenameFn, Source, SourceKind, Step};
 use crate::state::{Kind, State};
 
 use super::{noeffect, Model};

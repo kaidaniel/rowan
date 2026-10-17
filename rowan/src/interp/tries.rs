@@ -21,6 +21,7 @@ use crate::syntax::{collect_assigned, contains_jump, contains_return, dotted_las
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
 pub type ExcNames = (std::rc::Rc<Vec<String>>, bool);
+/// A raise a try recorded: its class (None: not known), the state there, the exception object.
 pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
@@ -84,15 +85,13 @@ impl TryExit {
     }
 }
 
+/// A running loop: the states at its `break`s and `continue`s so far, joined.
 #[derive(Default)]
 pub struct LoopCtx {
     pub breaks: Option<State>,
     pub continues: Option<State>,
 }
 
-/// The exception names a handler set catches, with the known subclasses of each
-/// (`except ValueError` catches pydantic's `ValidationError`, `except LookupError` a
-/// `KeyError`).
 /// An `except` clause: the classes it names (None: a bare `except`), the name it binds, its
 /// body (a `with` that swallows, `suppress(E)`: one that does nothing).
 pub struct Handler {
@@ -112,7 +111,6 @@ impl Handler {
         }
     }
 }
-
 
 /// What runs on the way out of a try statement: its finally block, or for a with statement its
 /// managers' `__exit__`.
@@ -423,6 +421,7 @@ impl Analyzer {
         }
     }
 
+    /// A `try` statement (`stmt_try_parts` with its handlers and finally block).
     pub(super) fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
         let fin = std::rc::Rc::new(Finally::Block(&t.finalbody));
         let handlers = t.handlers.iter().map(|h| {
@@ -449,6 +448,10 @@ impl Analyzer {
         }
     }
 
+    /// The try itself: the body runs in a try context recording its raises; raises no handler
+    /// surely catches go on (through the finally); each handler runs from those it may catch;
+    /// the ways out (the body's end and `else`, each handler's end) are joined, then the
+    /// finally runs on each way out.
     pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         // (a handler for a class catches its subclasses too)
         let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());

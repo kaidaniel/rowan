@@ -4,9 +4,9 @@
 use indexmap::IndexMap;
 
 use crate::domain::{ObjId, classify, join_rows, join_values, Classification, KeyVal, Ns, ObjSet, Row, Tier, Value, DATA};
-use crate::source::{lens_apply, Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
+use crate::source::{lens_apply, Source, SourceKind};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload, ViewKind, PATH_DEPTH, WIDE_READ};
@@ -43,6 +43,10 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
 }
 
 impl Analyzer {
+    /// A read `obj[key]` (`ns` Item; Attr for a model's attribute read through here): each part
+    /// on its own (literals beside objects), a `__getitem__` of the program per receiver, else
+    /// `load_item_inner` with the read's exception class and modes set. `report`: verdicts
+    /// (false: a model's own read, which raises nothing).
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         if let Some(r) = self.split_mixed(&[obj], state, &mut |an, vs, st| an.load_item(&vs[0], ns, key, node, st, report)) {
             return r;
@@ -74,6 +78,9 @@ impl Analyzer {
         v
     }
 
+    /// The read on each object `obj` may be (`item_of`): a record's key (`load_record`), a
+    /// sequence's position, an unknown's placeholder, … joined; a requirement one of several
+    /// receivers records is only sometimes needed.
     pub(super) fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
         let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown)) && !obj.pts.is_empty() {
@@ -458,6 +465,10 @@ impl Analyzer {
         false
     }
 
+    /// The read of `key` from one record's row in `ns`: a verdict per literal key (guarded or
+    /// not), the requirements on the inputs that may provide it, the value under it (a
+    /// placeholder for what an open row holds); a key of an object's keys (`KeysOf`); a key not
+    /// known (any value; it may raise).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         // (a load a `try` handler guards: its exception still fires when the key is missing, so
@@ -833,6 +844,9 @@ impl Analyzer {
         Value::with_kv(key.pts.clone(), crate::domain::kv_join(&key.kv, &DATA))
     }
 
+    /// A store `obj[key] = v`: a `__setitem__` of the program per receiver, else per object a
+    /// list's position, a frame's column, a record's key (`store_key`), strong into a single
+    /// object.
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__setitem__"), state, &mut |an, o, st| {
@@ -924,6 +938,11 @@ impl Analyzer {
         }
     }
 
+    /// Stores `v` under key `kv` of record `oid`: a literal key into the row and slot; several
+    /// literals weakly; one of another object's keys (`for k in d: out[k] = …`) copies those
+    /// keys (definite when the loop covers them all); a key not known opens the row through a
+    /// `store` data source (the value in the `*` slot and any key's). Into the shared unknown
+    /// object, the value escapes to unknown code.
     pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
         // a store into what unknown code holds (the shared unknown object): the value goes to
         // unknown code, as if given to it; the shared object stays "anything"
@@ -1067,6 +1086,8 @@ impl Analyzer {
         self.delete_item(obj, Ns::Item, key, node, state, true);
     }
 
+    /// `del obj[key]`: a `__delitem__` of the program per receiver, else per object its verdict
+    /// (a missing key raises) and the key removed (strongly from a single object).
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__delitem__"), state, &mut |an, o, st| {

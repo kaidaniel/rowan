@@ -5,9 +5,9 @@
 use ruff_python_ast as ast;
 
 use crate::domain::{kv_join, kv_map, KeyVal, Ns, Value, DATA};
-use crate::source::RenameFn;
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
+use crate::source::RenameFn;
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload, ViewKind};

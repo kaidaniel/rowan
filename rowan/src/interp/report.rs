@@ -9,10 +9,10 @@ use indexmap::IndexMap;
 use serde_json::{json, Value as J};
 
 use crate::domain::{Ns, ObjId, Row, Tier};
-use crate::source::{source_is_data, source_label, SourceId};
 use crate::intern::{self, key_repr, KeyId, STAR};
 use crate::interp::render::{is_internal_key, render_value};
 use crate::interp::{Analyzer, Verdict};
+use crate::source::{source_is_data, source_label, SourceId};
 use crate::state::{Kind, State};
 
 pub use super::facts::facts_json;

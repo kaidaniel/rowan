@@ -19,7 +19,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, KeySet, StrId, STAR};
 use crate::state::{Kind, State};
 
-/// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
+/// A generator's suspension point: the yield node, the `yield from` item, the unrolled loop
 /// positions
 pub type YieldKey = (usize, usize, Vec<usize>);
 
@@ -893,6 +893,8 @@ impl Analyzer {
         }
     }
 
+    /// `v` is used up (`list(gen)`, a `for` to its end): a lazy generator runs, an iterator's
+    /// cursor goes to its end, a generator's effects are all given.
     pub fn exhaust(&mut self, v: &Value, state: &mut State) {
         self.consume_lazy(v, true, state);
         if let Some(o) = v.single() {

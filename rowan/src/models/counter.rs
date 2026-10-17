@@ -7,10 +7,10 @@
 use indexmap::IndexMap;
 
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Value};
-use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, KeyId};
 use crate::interp::{Analyzer, Call, Payload};
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
 /// Counter methods (attribute loads on a Counter route here; the rest is the dict model).

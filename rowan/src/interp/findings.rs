@@ -17,20 +17,26 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
 
+/// The verdict of one access (a read, `del` or `pop` of a key) on one object, in one call
+/// chain; `report::dedupe` combines those of one access.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Verdict {
     pub line: u32,
     pub col: u32,
     pub key: KeyId,
     pub tier: Tier,
+    /// the object's label (`dict@L4`)
     pub obj: String,
     /// call sites (lines) active when the access ran
     pub chain: Chain,
+    /// why, in words (`is only set on some paths`)
     pub note: String,
+    /// the inputs that may provide the key
     pub providers: Vec<crate::source::SourceId>,
     /// unknown code that may have added or removed the key (its call sites)
     pub mutators: Vec<String>,
     pub ns: Ns,
+    /// the access as written (`row["id"]`)
     pub text: String,
     pub oid: ObjId,
     /// module the access is in (empty = main file)
@@ -40,6 +46,7 @@ pub struct Verdict {
 }
 
 impl Verdict {
+    /// What makes two verdicts the same record (`Findings::add`).
     pub(in crate::interp) fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
         (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
     }
@@ -56,12 +63,12 @@ pub struct Fact {
     /// when there are some: those exist in the program's runs)
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     pub general_rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
-    /// the values (`report::render_value`) the general run recorded, distinct texts
+    /// the values (`render::render_value`) the general run recorded, distinct texts
     pub general: Vec<String>,
     /// the values the program's calls recorded, distinct texts, each with the lines of the
     /// calls (of the function the line is in) that gave it
     pub calls: Vec<(String, Vec<u32>)>,
-    /// the symbols the texts mention, with what is known about each (`report::value_legend`)
+    /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
@@ -143,6 +150,7 @@ fn join_opt(a: &Option<Row>, b: &Option<Row>) -> Option<Row> {
     }
 }
 
+/// A `#@row` / `#@value` check of the golden harness: a name's row and value at a line.
 pub struct RowCheck {
     /// the module's path relative to the main file's directory ("" for the main file)
     pub file: String,
@@ -156,13 +164,19 @@ pub struct RowCheck {
     /// made where the function runs for any call (`in_general_run`), and in a
     /// requirement-only run (whose lines checks of the program's calls do not count)
     pub general: bool,
+    /// made in a requirement-only run
     pub quiet: bool,
 }
 
+/// A name's value as the golden harness checks it (`#@value NAME: exactly= | unknown |
+/// includes=`).
 #[derive(Debug, Clone, Default)]
 pub struct ValueInfo {
+    /// its literals
     pub lits: Vec<KeyId>,
+    /// it may be something not known
     pub unknown: bool,
+    /// its objects, by label
     pub objects: Vec<String>,
     /// the types of its unknown parts known to have one (`int(?)`), and whether some has none
     pub types: Vec<&'static str>,
@@ -216,6 +230,7 @@ impl Findings {
         self.facts_on || self.general_checks
     }
 
+    /// The verdicts recorded, in order.
     pub(in crate::interp) fn verdicts(&self) -> &[Verdict] {
         &self.verdicts
     }
@@ -241,6 +256,7 @@ impl Findings {
         }
     }
 
+    /// The report's notes, in order.
     pub(in crate::interp) fn notes(&self) -> &[String] {
         &self.notes
     }
@@ -258,6 +274,9 @@ impl Findings {
 }
 
 impl Analyzer {
+    /// Records the verdict `cls` of an access of `key` on `oid` at `node` (unless quiet, or a
+    /// `map`): weakened to possibly when the receiver may also be a scalar or the call is one of
+    /// several a value picks; under the running call chain, with the guard mode.
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
         self.gens.read(oid, Some((ns, key)));
         if matches!(cls.tier, Tier::Map) || self.findings.quiet || self.findings.quiet_records {
@@ -319,6 +338,7 @@ impl Analyzer {
         self.mode.verdict_guarded = saved;
     }
 
+    /// A node's text on one line (an access as the report writes it).
     pub(in crate::interp) fn node_text(&self, node: &Node) -> String {
         if node.addr == 0 {
             return String::new();
@@ -338,6 +358,9 @@ impl Analyzer {
         }
     }
 
+    /// Records a hover fact: the value of `name` at `node` of the main module (read or written),
+    /// as text, with the rows of its objects; into the general run's values or the program's
+    /// calls'.
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.findings.facts_on || node.addr == 0 {
             return;

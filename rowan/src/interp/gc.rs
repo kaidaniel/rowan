@@ -425,6 +425,7 @@ impl Analyzer {
 
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
+    /// The mark at the loop's start (None: not in a function's call); `loop_gc_end` collects.
     pub(super) fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
         if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
@@ -432,6 +433,7 @@ impl Analyzer {
         Some((self.heap.serial(), state.copy()))
     }
 
+    /// The collection at the loop's exit, of what was made since `loop_gc_begin`'s mark.
     pub(super) fn loop_gc_end(&mut self, g: Option<(u64, State)>, state: &mut State) {
         let Some((mark, pre)) = g else { return };
         if !state.reachable {

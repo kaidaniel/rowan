@@ -15,6 +15,7 @@ use crate::domain::{ObjId, Row, Value};
 use crate::intern::{KeyId, StrId};
 use crate::state::{Kind, State};
 
+/// What code a frame runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrameKind {
     Module,
@@ -22,25 +23,38 @@ pub enum FrameKind {
     Class,
 }
 
+/// One running frame: a module's code, a function's call, a class body. Names live in the
+/// `State` (`env`); the frame says how to look them up and how to allocate.
 #[derive(Debug)]
 pub struct Frame {
     pub kind: FrameKind,
+    /// its scope in its module's `Scopes` (which names are locals, cells, globals)
     pub scope: usize,
+    /// the module whose globals it reads
     pub module: ObjId,
+    /// the allocation context of the objects it makes: the call sites of the running calls
+    /// (`Analyzer::callee_site`, `receiver_ctx`)
     pub ctx: String,
+    /// it runs once per runtime call here (no loop or several-receiver call around it): its
+    /// allocations are single objects
     pub single: bool,
     /// `single` ignoring loops: with the recency abstraction an allocation inside a loop is
     /// a strong "recent" object when this holds
     pub single_nl: bool,
+    /// the function it runs (None at module level and in a class body)
     pub func: Option<ObjId>,
     /// the function's code (`FuncNode::addr`), whose statements count against its budget
     pub code: usize,
+    /// its cells and the closure's: name → cell object
     pub cells: IndexMap<StrId, ObjId>,
+    /// a class body's class
     pub class_oid: Option<ObjId>,
     /// the variables of the running comprehensions (innermost last): their values are in the
     /// state's names, the enclosing ones' put back when the comprehension ends
     pub comp_names: Vec<Vec<StrId>>,
+    /// loops it is inside of
     pub loop_depth: u32,
+    /// the qualified name of what it runs (nested functions' qualified names start with it)
     pub label: String,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
     pub unroll: Vec<usize>,
@@ -49,7 +63,7 @@ pub struct Frame {
     pub pre_call: Option<PreCall>,
 }
 
-/// (see `Frame::pre_call`)
+/// The start of a call: the heap's serial then and the state before it (`Frame::pre_call`).
 #[derive(Clone)]
 pub struct PreCall(pub u64, pub std::rc::Rc<State>);
 
@@ -60,6 +74,7 @@ impl std::fmt::Debug for PreCall {
 }
 
 impl Frame {
+    /// A frame with no function, cells or class.
     pub fn new(kind: FrameKind, scope: usize, module: ObjId, ctx: &str, single: bool, label: &str) -> Frame {
         Frame {
             kind,
@@ -81,6 +96,7 @@ impl Frame {
     }
 }
 
+/// The context the running code is in (see the module doc).
 #[derive(Default)]
 pub struct Context {
     /// the running frames (innermost last)

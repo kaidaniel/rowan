@@ -35,10 +35,10 @@ use ruff_python_ast as ast;
 use rustc_hash::FxHashMap;
 
 use crate::domain::{join_values, kv_join, KeyVal, Ns, Row, RowData, Value, DATA};
-use crate::source::{FnKind, RenameFn, Source, SourceKind};
+use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
 use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
-use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
+use crate::source::{FnKind, RenameFn, Source, SourceKind};
 use crate::state::{Kind, State};
 
 pub type Model = fn(&mut Analyzer, &mut State, &Call) -> Value;

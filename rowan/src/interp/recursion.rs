@@ -11,16 +11,16 @@ use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, FuncInfo, FuncNode};
+use crate::domain::{KeyVal, ObjId, Value};
+use crate::frontend::Node;
+use crate::intern::{self, s, StrId};
+use crate::state::{Footprint, State};
 
 /// Running activations of one function past which a call with other literal arguments joins
 /// one of them (`activation_for`).
 pub const MAX_ACTIVE: usize = 4;
 /// Rounds an activation runs again until its result and state are stable; then widened.
 pub const REC_MAX_ITER: usize = 8;
-use crate::domain::{KeyVal, ObjId, Value};
-use crate::frontend::Node;
-use crate::intern::{self, s, StrId};
-use crate::state::{Footprint, State};
 
 /// An activation: (function, call site; `entry:` for an entry run, `|…` for literal arguments).
 pub type ActKey = (ObjId, String);
@@ -122,7 +122,7 @@ impl Analyzer {
     /// round).
     pub(super) fn recursive_call(&mut self, key: &ActKey, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State) -> Value {
         self.recursion.hit.insert(key.clone());
-        // widen the entry arguments with the ones of this recursive call (§6.3)
+        // widen the entry arguments with the ones of this recursive call
         if let Some((e_self, e_args, e_kwargs)) = self.recursion.entry.get(key).cloned() {
             let n_self = match (&e_self, &self_v) {
                 (Some(a), Some(b)) => Some(a.join(b)),

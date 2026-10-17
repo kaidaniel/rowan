@@ -14,16 +14,18 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{debug_enabled, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
 use crate::domain::{Ns, ObjId, Row, Value};
-use crate::source::{Source, SourceKind};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
 type Reqs = crate::layered::TwoLevel<crate::source::SourceId, KeyId, crate::domain::ReqInfo>;
 
+/// The entry runs' state: which functions had one, the instances their methods run on, where
+/// runs for any call start, and the runs on demand (see the module doc).
 #[derive(Default)]
 pub struct Entries {
     /// on demand: the state every function's run starts from (`on_demand`)
@@ -102,12 +104,15 @@ struct ModuleEnd {
     cut: bool,
 }
 
-
 /// On demand, a method of a class with more subclasses than this runs for any call on an
 /// instance of the class made by its `__init__`, or of a subclass with any attributes
 /// (`entry_receiver`).
 const MANY_SUBCLASSES: usize = 64;
+
 impl Analyzer {
+    /// Analyses the program: the main module runs (its calls run their callees), then, unless
+    /// `--no-entry`, the entry runs start from the module's end after any of the program's code
+    /// ran (`after_any_code`). The final state is kept for the report.
     pub fn run(&mut self) {
         let mut state = State::new();
         let main = self.program.main_module;
@@ -129,6 +134,7 @@ impl Analyzer {
         self.findings.final_state = Some(state);
     }
 
+    /// Runs a module's code in a module frame of its own (the main module, an import).
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
         let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
@@ -304,8 +310,10 @@ impl Analyzer {
         true
     }
 
-    /// Entry-point rule (§6.4): functions never called get analysed with open parameters, from
-    /// `base` (instances for them are made there); the requirements they find go to `state`.
+    /// The entry runs: functions never called get analysed with open parameters, from `base`
+    /// (instances for them are made there), in rounds over the functions made so far; then the
+    /// requirement-only runs of the functions the program calls; then the facts-only general
+    /// runs. The requirements they find go to `state`.
     pub(super) fn analyse_uncalled(&mut self, base: &mut State, state: &mut State) {
         self.entry.called = (self.heap.len() as ObjId, self.entry.analysed.clone());
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
@@ -347,6 +355,9 @@ impl Analyzer {
         }
     }
 
+    /// The entry runs of the functions `from..n` that need one in this pass (`quiet_pass`: the
+    /// requirement-only runs of called functions; else the runs with verdicts of uncalled ones,
+    /// torch modules' functions, FastAPI handlers and functions their budget refused).
     pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, base: &mut State, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
             if self.budget.over_hard_deadline() {
@@ -727,7 +738,7 @@ impl Analyzer {
         None
     }
 
-    /// A declared row for an annotated entry-point parameter (§6.6).
+    /// A declared row for an annotated entry-point parameter.
     /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
         self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), "", Ns::Item, vec![])
@@ -767,6 +778,10 @@ impl Analyzer {
         }
     }
 
+    /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
+    /// tensor or module, an instance of a class of the program (a dataclass's or TypedDict's
+    /// with its declared fields and nothing else; another's made as its `__init__` makes it),
+    /// an open DataFrame; None when the annotation names none of those.
     pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
