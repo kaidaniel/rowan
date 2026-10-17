@@ -430,9 +430,15 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   assert(h.includes("```python\nidx = {") && !h.includes("✓"), h);
 }
 
+// ---- a parameter annotated with a dataclass: its fields (its bases' too) as annotated
+const z618 = path.join(root, "tests", "cases", "z618_annotated_field_classes.py");
+const z618src = fs.readFileSync(z618, "utf8").split("\n");
+const hIt = hover(indexResult(facts(z618)), z618src, z618src.findIndex((l) => l.startsWith("def describe(")) + 1, "it");
+for (const part of ["ident=int(?)", "label=str(?)", "note=None | str(?)", "tags=list[str(?)]"]) assert(hIt.includes(part), hIt);
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
-  a01, z, g, kinds,
+  a01, z, g, kinds, z618,
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"),
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py"),
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),

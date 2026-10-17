@@ -168,7 +168,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
         // (unnamed here: of its type when it has one, `int(?)`)
         Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match (an.heap.ann.get(&o), an.heap.obj(o).ty) {
-            (Some(a), _) => crate::interp::entry::annotation_text(a),
+            (Some((a, _)), _) => crate::interp::annotations::annotation_text(a),
             (None, Some(t)) => format!("{}(?)", t),
             (None, None) => "?".into(),
         }),

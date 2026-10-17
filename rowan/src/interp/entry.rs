@@ -12,14 +12,14 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::annotations::{builtin_annotation, container_annotation};
 use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, FuncInfo, FuncNode, Payload, debug_enabled};
-use crate::domain::{Ns, ObjId, ReqInfo, Row, RowData, Value};
+use crate::domain::{Ns, ObjId, ReqInfo, Row, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
+use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::scopes as scopemod;
 use crate::source::{source_label, Source, SourceId, SourceKind};
 use crate::state::{Kind, State};
-use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
 type Reqs = crate::layered::TwoLevel<SourceId, KeyId, ReqInfo>;
@@ -682,64 +682,6 @@ impl Analyzer {
         }
     }
 
-    /// Strip `Optional[X]`, `list[X]`, `"X"`, `X | None` down to the inner expression.
-    /// The class-bearing part of an annotation: wrappers that keep the value's class are
-    /// unwrapped (`Optional`, `Annotated`, `Final`, `ClassVar`, `Required`, a union with `None`
-    /// and one other member); a container (`list[Foo]`, `dict[str, Foo]`) is the container
-    /// itself, not its element class; a union of several classes has none.
-    pub fn strip_annotation(ann: &'static ast::Expr) -> Option<&'static ast::Expr> {
-        let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
-        let mut node = ann;
-        for _ in 0..16 {
-            match node {
-                ast::Expr::StringLiteral(sl) => {
-                    let txt = sl.value.to_str().to_string();
-                    node = frontend::parse_expression(&txt)?;
-                }
-                ast::Expr::Subscript(sub) => {
-                    let elts: Vec<&'static ast::Expr> = match &*sub.slice {
-                        ast::Expr::Tuple(t) => t.elts.iter().collect(),
-                        e => vec![e],
-                    };
-                    match dotted_last(&sub.value).as_str() {
-                        "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => node = elts.first()?,
-                        "Union" => {
-                            let rest: Vec<&'static ast::Expr> = elts.into_iter().filter(|e| !is_none(e)).collect();
-                            if rest.len() != 1 {
-                                return None;
-                            }
-                            node = rest.first()?;
-                        }
-                        // (a container: its own class; the old rule took the element's)
-                        _ => return Some(&sub.value),
-                    }
-                }
-                ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr => {
-                    // (`A | B | None`: flattened)
-                    let mut parts: Vec<&'static ast::Expr> = Vec::new();
-                    let mut stack: Vec<&'static ast::Expr> = vec![node];
-                    while let Some(e) = stack.pop() {
-                        match e {
-                            ast::Expr::BinOp(b2) if b2.op == ast::Operator::BitOr => {
-                                stack.push(&b2.right);
-                                stack.push(&b2.left);
-                            }
-                            e => parts.push(e),
-                        }
-                    }
-                    let rest: Vec<&'static ast::Expr> = parts.into_iter().filter(|e| !is_none(e)).collect();
-                    if rest.len() != 1 {
-                        return None;
-                    }
-                    node = rest.first()?;
-                }
-                _ => return Some(node),
-            }
-        }
-        None
-    }
-
-    /// A declared row for an annotated entry-point parameter.
     /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
         self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id))
@@ -765,7 +707,7 @@ impl Analyzer {
                     Some((t, none)) => {
                         self.heap.obj_mut(o).ty = Some(t);
                         if let Some(c) = ann.and_then(container_annotation) {
-                            self.heap.ann.insert(o, c);
+                            self.heap.ann.insert(o, (c, fi.module));
                         }
                         if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
                     }
@@ -777,79 +719,6 @@ impl Analyzer {
             Some(d) if !(self.entry.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false)) => d.join(&given),
             _ => given,
         }
-    }
-
-    /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
-    /// tensor or module, an instance of a class of the program (a dataclass's or TypedDict's
-    /// with its declared fields and nothing else; another's made as its `__init__` makes it),
-    /// an open DataFrame; None when the annotation names none of those.
-    pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
-        let node = Self::strip_annotation(ann)?;
-        if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
-            return Some(v);
-        }
-        let mut v = self.eval(node, state);
-        // (a class imported only for type checkers)
-        if let ast::Expr::Name(n) = node {
-            if !v.pts.iter().any(|o| self.heap.kind(o) == Kind::Class) {
-                v = self.type_only_name(n.id.as_str(), state).unwrap_or(v);
-            }
-        }
-        for oid in v.pts.iter() {
-            let o = self.heap.kind(oid);
-            if o == Kind::Class {
-                let ci = self.heap.class_info(oid);
-                if ci.has_fields() {
-                    let mut fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
-                    let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
-                    // a TypedDict's `total=False` / `NotRequired` keys may be absent
-                    let mut declared = Row::closed_with(fields.clone());
-                    if ci.lib.typed_dict {
-                        if let Some((req, opt)) = crate::models::dataclasses::typed_dict_keys(self, oid) {
-                            fields = req.union(&opt);
-                            declared = Row::from_data(RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
-                        }
-                    }
-                    let inst = self.alloc(
-                        Kind::Instance,
-                        &format!("param:{}.{}:{}#{}", fi.qualname, pname, ci.name, oid),
-                        state,
-                        &format!("{} param", ci.name),
-                        Payload::Cls(oid),
-                        Some(declared),
-                        ns,
-                        Some(true),
-                        Some(&format!("entry:{}", fi.qualname)),
-                    );
-                    for f in fields.iter() {
-                        state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
-                    }
-                    if ci.lib.typed_dict {
-                        let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
-                        self.m.td_param_src.insert(inst, src);
-                    }
-                    return Some(Value::obj(inst));
-                }
-                // (None: a caller's instance, made otherwise)
-                return self.fresh_instance(oid, state, &format!("entry:{}.{}", fi.qualname, pname)).map(Value::obj);
-            }
-            if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
-                let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
-                let fid = self.alloc(
-                    Kind::Frame,
-                    &format!("param:{}.{}", fi.qualname, pname),
-                    state,
-                    "frame param",
-                    Payload::None,
-                    Some(Row::with_source(src)),
-                    Ns::Item,
-                    Some(true),
-                    Some(&format!("entry:{}", fi.qualname)),
-                );
-                return Some(Value::obj(fid));
-            }
-        }
-        None
     }
 
     /// An instance of `cls_oid` as its `__init__` makes it (None: no path of it completes;
@@ -999,80 +868,6 @@ enum Run {
     Quiet,
     FactsOnly,
     OnDemand,
-}
-
-/// The builtin type an annotation names (`int`, `"str"`, `list[int]`, `Optional[str]`, `int |
-/// None`), and whether it allows None: a type whose instances a run for any call may take its
-/// parameter to be (`float` is left out: an int may be given for it).
-pub(in crate::interp) fn builtin_annotation(ann: &ast::Expr) -> Option<(&'static str, bool)> {
-    const TYPES: [(&str, &str); 14] = [("bool", "bool"), ("bytes", "bytes"), ("int", "int"), ("str", "str"), ("list", "list"), ("dict", "dict"), ("set", "set"), ("tuple", "tuple"), ("frozenset", "frozenset"), ("List", "list"), ("Dict", "dict"), ("Set", "set"), ("Tuple", "tuple"), ("FrozenSet", "frozenset")];
-    let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
-    let named = |e: &ast::Expr| TYPES.iter().find(|(n, _)| *n == dotted_last(e)).map(|(_, t)| *t);
-    match ann {
-        ast::Expr::Name(_) | ast::Expr::Attribute(_) => named(ann).map(|t| (t, false)),
-        ast::Expr::StringLiteral(sl) => frontend::parse_expression(sl.value.to_str()).and_then(builtin_annotation),
-        // (`list[int]`: a list; `Optional[str]`: a str or None)
-        ast::Expr::Subscript(sub) if dotted_last(&sub.value) == "Optional" => builtin_annotation(&sub.slice).map(|(t, _)| (t, true)),
-        ast::Expr::Subscript(sub) => named(&sub.value).filter(|t| !matches!(*t, "bool" | "bytes" | "int" | "str")).map(|t| (t, false)),
-        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && (is_none(&b.left) || is_none(&b.right)) => {
-            builtin_annotation(if is_none(&b.right) { &b.left } else { &b.right }).map(|(t, _)| (t, true))
-        }
-        _ => None,
-    }
-}
-
-/// The annotation of a builtin container a value follows (`list[dict[str, int]]`; quotes,
-/// `Optional` and `| None` stripped); None for a bare type or anything else.
-pub(in crate::interp) fn container_annotation(ann: &'static ast::Expr) -> Option<&'static ast::Expr> {
-    let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
-    match ann {
-        ast::Expr::StringLiteral(sl) => frontend::parse_expression(sl.value.to_str()).and_then(container_annotation),
-        ast::Expr::Subscript(sub) if dotted_last(&sub.value) == "Optional" => container_annotation(&sub.slice),
-        ast::Expr::Subscript(_) => builtin_annotation(ann).map(|_| ann),
-        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && (is_none(&b.left) || is_none(&b.right)) => container_annotation(if is_none(&b.right) { &b.left } else { &b.right }),
-        _ => None,
-    }
-}
-
-/// The annotation of a part of a value annotated `ann` (`container_annotation`): of a list's or
-/// set's element, a dict's value, a tuple's position `k`.
-pub(in crate::interp) fn part_annotation(ann: &'static ast::Expr, k: KeyId) -> Option<&'static ast::Expr> {
-    let ast::Expr::Subscript(sub) = ann else { return None };
-    let args: Vec<&'static ast::Expr> = match &*sub.slice {
-        ast::Expr::Tuple(t) => t.elts.iter().collect(),
-        e => vec![e],
-    };
-    match (builtin_annotation(ann)?.0, args.as_slice()) {
-        ("list" | "set" | "frozenset", [e]) => Some(e),
-        // (any key's value and an element share one unknown, `d[*]`: typed only when both are
-        // of one type)
-        ("dict", [kt, vt]) if k == intern::STAR => (annotation_text(kt) == annotation_text(vt)).then_some(*vt),
-        ("dict", [_, vt]) => Some(vt),
-        ("tuple", [e, ast::Expr::EllipsisLiteral(_)]) => Some(e),
-        ("tuple", ts) => intern::key_as_int(k).and_then(|i| ts.get(usize::try_from(i).ok()?).copied()),
-        _ => None,
-    }
-}
-
-/// For people: the type an annotation gives, unknowns of builtin types marked (`list[dict[str(?),
-/// int(?)]]`; anything else `?`); a part that may be None says so, the whole does not (the
-/// value it is shown for has the None).
-pub(in crate::interp) fn annotation_text(ann: &'static ast::Expr) -> String {
-    fn text(ann: &'static ast::Expr, top: bool) -> String {
-        let Some((t, none)) = builtin_annotation(ann) else { return "?".into() };
-        let s = match container_annotation(ann) {
-            Some(ast::Expr::Subscript(sub)) => {
-                let args: Vec<String> = match &*sub.slice {
-                    ast::Expr::Tuple(tu) => tu.elts.iter().map(|e| if e.is_ellipsis_literal_expr() { "...".into() } else { text(e, false) }).collect(),
-                    e => vec![text(e, false)],
-                };
-                format!("{}[{}]", t, args.join(", "))
-            }
-            _ => format!("{}(?)", t),
-        };
-        if none && !top { format!("{} | None", s) } else { s }
-    }
-    text(ann, true)
 }
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of
