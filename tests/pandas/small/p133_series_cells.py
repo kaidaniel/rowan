@@ -11,27 +11,21 @@ import pandas as pd
 df = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
 
 c1 = df.at[1, "b"]
-#@value c1: exactly={"x","y"}
-#@todo value c1: exactly={"y"}  (the cell at label 1)
+#@value c1: exactly={"y"}
 c2 = df.loc[0, "b"]
-#@value c2: exactly={"x","y"}
-#@todo value c2: exactly={"x"}  (the cell at label 0)
+#@value c2: exactly={"x"}
 c3 = df.loc[0, "a"]
 #@value c3: unknown
 c4 = df.iat[0, 1]
-#@value c4: includes={"x"}
-#@todo value c4: exactly={"x"}  (column 1 is "b")
+#@value c4: exactly={"x"}
 s = df["b"]
 s0 = s[0]
-#@value s0: exactly={"x","y"}
-#@todo value s0: exactly={"x"}  (the cell at label 0)
+#@value s0: exactly={"x"}
 s1 = s.iloc[1]
-#@value s1: exactly={"x","y"}
-#@todo value s1: exactly={"y"}  (the cell at position 1)
+#@value s1: exactly={"y"}
 r = df.iloc[0]
 rb = r["b"]
-#@value rb: exactly={"x","y"}
-#@todo value rb: exactly={"x"}  (row 0)
+#@value rb: exactly={"x"}
 ra = r["a"]
 #@value ra: unknown
 for _, row in df.iterrows():

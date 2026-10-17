@@ -10,18 +10,17 @@ import pandas as pd
 
 df = pd.DataFrame({"i": [1, 2.5], "n": [1, None], "s": ["a", None], "o": [1, "a"], "b": [True, None]})
 i0 = f"{list(df['i'])[0]}"
-#@value i0: exactly={"1.0","2.5"}
-#@todo value i0: exactly={"1.0"}  (the first value)
+#@value i0: exactly={"1.0"}
 n0 = f"{list(df['n'])[0]}"
-#@value n0: exactly={"1.0","nan"}
+#@value n0: exactly={"1.0"}
 s1 = f"{list(df['s'])[1]}"
-#@value s1: exactly={"a","nan"}
+#@value s1: exactly={"nan"}
 o0 = list(df["o"])[0]
-#@value o0: exactly={1,"a"}
+#@value o0: exactly={1}
 b1 = list(df["b"])[1]
-#@value b1: exactly={True,None}
+#@value b1: exactly={None}
 r0 = f"{df.to_dict('records')[0]['i']}"
 #@value r0: exactly={"1.0","2.5"}
 recs = pd.DataFrame([{"i": 1}, {"i": 2.5}])
 q0 = f"{list(recs['i'])[0]}"
-#@value q0: exactly={"1.0","2.5"}
+#@value q0: exactly={"1.0"}

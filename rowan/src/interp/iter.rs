@@ -258,9 +258,9 @@ impl Analyzer {
 
     /// A pandas Series: its values (not its labels, as a dict's keys).
     fn iter_series(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
-        let (n, e) = crate::models::pandas::series_values(state, oid, node.line);
-        match (n, acc.items.as_mut()) {
-            (Some(n), Some(its)) => its.extend(std::iter::repeat_n(e.clone(), n)),
+        let (items, e) = crate::models::pandas::series_values(state, oid, node.line);
+        match (items, acc.items.as_mut()) {
+            (Some(items), Some(its)) => its.extend(items),
             _ => acc.items = None,
         }
         acc.elems.push(e);
