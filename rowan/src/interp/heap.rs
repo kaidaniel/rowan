@@ -429,8 +429,10 @@ impl Heap {
             _ => String::new(),
         }
     }
-    pub fn is_record_like(&self, oid: ObjId) -> bool {
-        self.kind(oid).is_record_like()
+    /// Is the object a record (it has keys: a dict, frame, instance, unknown, module, class,
+    /// namespace)?
+    pub fn is_record(&self, oid: ObjId) -> bool {
+        self.kind(oid).is_record()
     }
 
     // ------------------------------------------------------------ lengths

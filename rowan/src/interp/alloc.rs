@@ -139,7 +139,7 @@ impl Analyzer {
         }
         // born here: its length is unknown until the code making it says
         state.set_lens(oid, (None, 0, 0));
-        if kind.is_record() || kind == Kind::Frame {
+        if kind.is_record() {
             let fresh = row.unwrap_or_default();
             if state.has_row(oid, ns) && !obj_single {
                 let j = state.row(oid, ns).join(&fresh);

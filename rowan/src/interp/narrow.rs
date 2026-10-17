@@ -703,7 +703,7 @@ impl Analyzer {
                 }
             }
         }
-        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
+        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
@@ -906,7 +906,7 @@ impl Analyzer {
     }
 
     pub(in crate::interp) fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
-        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
+        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
             let row = state.row(oid, ns);
@@ -931,7 +931,7 @@ impl Analyzer {
                 if row.definite.contains(k) {
                     state.reachable = false;
                 }
-                state.set_row_narrowed(oid, ns, row.narrow_out(k));
+                state.set_row_narrowed(oid, ns, row.delete(k, true));
             }
         }
     }

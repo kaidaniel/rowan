@@ -68,7 +68,7 @@ impl Analyzer {
     }
 
     pub fn record_objects(&self, v: &Value) -> Vec<u32> {
-        v.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect()
+        v.pts.iter().filter(|o| self.heap.is_record(*o)).collect()
     }
 
     pub fn require_providers(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State) {

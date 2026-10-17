@@ -1,4 +1,11 @@
-//! Abstract objects and the flow-sensitive analysis state (port of `rowan/state.py`).
+//! The flow-sensitive analysis state: one `State` is what one point on one path knows — the
+//! running frame's names, and per object its rows, slots, elements and lengths, the
+//! requirements recorded so far, the tests passed and the tensor facts. Its maps are
+//! persistent (`layered.rs`): a copy is O(1), a join costs what two states differ in.
+//!
+//! Also the object kinds (`Kind`), and the per-thread object marks the state's writes consult:
+//! merged objects (stores only join), the shared unknown object (no store changes it) and
+//! loop views (`link_view`: a change of one object of a family may be a change of the others).
 
 use std::sync::Arc;
 
@@ -9,37 +16,57 @@ use crate::domain::{kv_join, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
 use crate::intern::{IdSet, KeyId, SourceId, StrId, STAR};
 use crate::layered::{LayerMap, TwoLevel};
 
+/// What an abstract object is; its payload (`interp::Payload`) holds the rest.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Kind {
     Dict,
+    /// a pandas DataFrame (its columns are its item keys)
     Frame,
+    /// an instance of one of the program's classes
     Instance,
+    /// an object rowan cannot see the class of (an input, a library call's result)
     Unknown,
     Module,
     Class,
+    /// an object of attributes only (`types.SimpleNamespace`, `argparse.Namespace`, …)
     Namespace,
     List,
     Tuple,
     Set,
+    /// a function or lambda of the program
     Function,
+    /// a method of the program bound to its receiver
     Bound,
+    /// a library method bound to its receiver (`d.get`, `s.upper`)
     Method,
+    /// a library function, class or object, by qualified name
     External,
+    /// a closure cell
     Cell,
+    /// a live view of another object (`d.keys()`, `obj.__dict__`, a mapping proxy)
     View,
     Zip,
     Enumerate,
+    /// a (key, value) pair of `zip` / `enumerate` / `items()`
     Pair,
+    /// `functools.partial`
     Partial,
+    /// a pandas `groupby`
     Groupby,
+    /// a pandas `.loc` / `.iloc` indexer
     Locidx,
+    /// a `super()` object
     Super,
+    /// an HTTP response (FastAPI's test client)
     Response,
+    /// a pandas Series
     Series,
+    /// an argparse parser
     Parser,
 }
 
 impl Kind {
+    /// The kind's name (in object labels and the JSON).
     pub fn name(self) -> &'static str {
         match self {
             Kind::Dict => "dict",
@@ -70,40 +97,51 @@ impl Kind {
             Kind::Parser => "parser",
         }
     }
+    /// Does it have keys (a row: items or attributes)?
     pub fn is_record(self) -> bool {
         matches!(self, Kind::Dict | Kind::Frame | Kind::Instance | Kind::Unknown | Kind::Module | Kind::Class | Kind::Namespace)
     }
+    /// Is it a list, tuple or set?
     pub fn is_container(self) -> bool {
         matches!(self, Kind::List | Kind::Tuple | Kind::Set)
     }
-    /// RECORD_KINDS or frame (the common "record-like" test of the prototype)
-    pub fn is_record_like(self) -> bool {
-        self.is_record() || self == Kind::Frame
-    }
 }
 
+/// A slot of an object: a key in a namespace.
 pub type SlotKey = (Ns, KeyId);
 
-/// Mutable analysis state at one program point.
+/// A list's or tuple's length on a path: the length when known; the number of leading
+/// positions known (all of them when the length is known; after appends of unknown count, the
+/// length before them); and the lengths it may have after a join of known ones (a bit per
+/// length 0..15; 0: no such knowledge).
+pub type LenFact = (Option<usize>, usize, u16);
+
+/// What one point on one path knows (see the module doc). Copies are cheap; a branch copies
+/// the state, runs each side, and joins the two.
 #[derive(Clone)]
 pub struct State {
-    /// current frame's plain locals (small; copied eagerly)
+    /// the running frame's local names (small; copied eagerly)
     pub env: IndexMap<StrId, Value>,
     /// path-sensitive facts about attribute chains (`isinstance(a.b, C)` → `a.b` on this path)
     pub narrowed: FxHashMap<StrId, Value>,
+    /// per (object, namespace) its keys (`Row`)
     pub rows: LayerMap<(ObjId, Ns), Row>,
-    /// (oid) -> {(ns, key) -> Value}; key '*' = stored under a non-literal key
+    /// per object, the value under each (namespace, key); key `*` (`STAR`): stored under a key
+    /// not known, or an element at no known position
     pub slots: TwoLevel<ObjId, SlotKey, Value>,
-    /// literal element keys of containers
+    /// the scalars among a container's elements (its objects are in the `Elem` slot)
     pub elems: LayerMap<ObjId, KeyVal>,
-    /// lists / tuples: (the length when known on this path, the number of leading positions
-    /// known: all of them when the length is known); written at birth, so a key on one side
-    /// only of a join is an object born there
-    pub lens: LayerMap<ObjId, (Option<usize>, usize, u16)>,
-    /// Source -> {key term -> ReqInfo}
+    /// lists / tuples: their lengths (`LenFact`); written at birth, so a key on one side only
+    /// of a join is an object born there
+    pub lens: LayerMap<ObjId, LenFact>,
+    /// per input, the requirement on each key term read from it
     pub reqs: TwoLevel<SourceId, KeyId, ReqInfo>,
+    /// what the running function returned so far (joined over its `return`s)
     pub ret: Option<Value>,
+    /// false: no run gets here (after a `return` or `raise`, or a test that cannot hold)
     pub reachable: bool,
+    /// the heap at the running function's `return`s so far (`record_exit`), which the caller
+    /// joins in
     pub exits: Option<Arc<State>>,
     /// what a test that was joined over said about rows (see `CondFact`)
     pub facts: Arc<Vec<Arc<CondFact>>>,
@@ -193,6 +231,7 @@ impl State {
         }
     }
 
+    /// Does the object `n` is bound to have `k` (`add_name_key`)?
     pub fn name_has_key(&self, n: StrId, k: KeyId) -> bool {
         self.name_keys.contains(&(n, k))
     }
@@ -233,6 +272,7 @@ impl State {
         }
     }
 
+    /// The state no run reaches.
     pub fn bottom() -> State {
         let mut s = State::new();
         s.reachable = false;
@@ -326,6 +366,7 @@ impl State {
         }));
     }
 
+    /// A list's elements changed: its last element (and its possible lengths) are not known.
     pub fn clear_last(&mut self, oid: ObjId) {
         // (an element changed: the length alternatives of the last join no longer hold either)
         if let Some((None, p, m)) = self.lens.get(&oid) {
@@ -339,6 +380,7 @@ impl State {
         self.drop_sym_len(oid);
     }
 
+    /// `v` was appended to the list: its last element (`lst[-1]`).
     pub fn set_last(&mut self, oid: ObjId, v: Value) {
         let mut l: Vec<(ObjId, Value)> = self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect();
         l.push((oid, v));
@@ -346,22 +388,25 @@ impl State {
     }
 
     /// A list's length on this path (positions, alternatives): any write of it goes through here.
-    pub fn set_lens(&mut self, oid: ObjId, v: (Option<usize>, usize, u16)) {
+    pub fn set_lens(&mut self, oid: ObjId, v: LenFact) {
         self.lens.insert(oid, v);
         self.drop_sym_len(oid);
     }
 
+    /// The list's length is not known any more.
     pub fn forget_len(&mut self, oid: &ObjId) {
         self.lens.remove(oid);
         self.drop_sym_len(*oid);
     }
 
+    /// The list's length is no longer a tensor dim.
     pub fn drop_sym_len(&mut self, oid: ObjId) {
         if self.sym_lens.iter().any(|(o, _)| *o == oid) {
             self.sym_lens = Arc::new(self.sym_lens.iter().filter(|(o, _)| *o != oid).copied().collect());
         }
     }
 
+    /// The list's length is the tensor dim `label` (`sym_lens`).
     pub fn set_sym_len(&mut self, oid: ObjId, label: StrId) {
         let mut l: Vec<(ObjId, StrId)> = self.sym_lens.iter().filter(|(o, _)| *o != oid).copied().collect();
         l.push((oid, label));
@@ -373,15 +418,21 @@ impl State {
         self.sym_lens.iter().find(|(o, _)| *o == oid).map(|(_, l)| *l)
     }
 
+    /// The list's last element when known (`set_last`).
     pub fn last_of(&self, oid: ObjId) -> Option<Value> {
         self.lasts.iter().find(|(o, _)| *o == oid).map(|(_, v)| v.clone())
     }
 
+    /// This state becomes `o`.
     pub fn replace_with(&mut self, o: State) {
         *self = o;
     }
 
     // -- lattice -----------------------------------------------------------
+    /// The state on either of two paths: names, rows, slots, elements and lengths joined
+    /// pointwise (the persistent maps skip what the two share), requirements one side lacks
+    /// demoted to sometimes, the facts and tests both still hold. An unreachable side gives
+    /// only its returns.
     pub fn join(&mut self, o: &mut State) -> State {
         let ret = match (&self.ret, &o.ret) {
             (None, r) | (r, None) => r.clone(),
@@ -468,7 +519,7 @@ impl State {
     }
 
     /// The join at a loop head: like `join`, but a requirement recorded only in the loop body
-    /// stays "always" (per element of the iteration; spec: in-loop demands are not conditional).
+    /// stays "always" (it is read per element of the iteration, not on some paths only).
     pub fn join_loop(&mut self, o: &mut State) -> State {
         let mut s = self.join(o);
         if self.reachable && o.reachable {
@@ -576,6 +627,7 @@ impl State {
         Footprint { rows: self.rows.diff_keys(&base.rows), slots: self.slots.diff_keys(&base.slots), elems: self.elems.diff_keys(&base.elems) }
     }
 
+    /// Do the two states say the same (a fixpoint's test)? Pointer-equal subtrees are skipped.
     pub fn same(&self, o: &State) -> bool {
         self.reachable == o.reachable
             && self.env == o.env
@@ -596,6 +648,8 @@ impl State {
     }
 
     // -- accessors ---------------------------------------------------------
+    /// The object's row on this path; none known: the empty closed row (the shared unknown
+    /// object: anything).
     pub fn row(&self, oid: ObjId, ns: Ns) -> Row {
         if let Some(r) = self.rows.get(&(oid, ns)) {
             return r;
@@ -610,6 +664,8 @@ impl State {
         self.rows.contains_key(&(oid, ns)) || (is_any(oid) && matches!(ns, Ns::Item | Ns::Attr))
     }
 
+    /// The program changed the object's row to `row` (the other objects of its family, `link_view`,
+    /// join it).
     pub fn set_row(&mut self, oid: ObjId, ns: Ns, row: Row) {
         self.mirror_row(oid, ns, &row);
         self.set_row_narrowed(oid, ns, row);
@@ -663,6 +719,7 @@ impl State {
         }
     }
 
+    /// The value under the key (the empty value when there is none).
     pub fn slot(&self, oid: ObjId, ns: Ns, key: KeyId) -> Value {
         self.slots.get(&oid, &(ns, key)).unwrap_or_default()
     }
@@ -675,6 +732,8 @@ impl State {
         self.slots.contains(&oid, &(ns, key))
     }
 
+    /// The program stored `v` under the key: replacing what is there when `strong` (and the object
+    /// is not merged), else joined with it.
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
         // (a value stored into a loop's item or the records it is one of: maybe into the others)
         for m in family(oid) {
@@ -704,6 +763,7 @@ impl State {
         }
     }
 
+    /// Removes the value under the key, giving it back.
     pub fn pop_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId) -> Option<Value> {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
@@ -711,6 +771,7 @@ impl State {
         self.slots.remove(&oid, &(ns, key))
     }
 
+    /// The join of every value in one namespace of the object.
     pub fn all_slots(&self, oid: ObjId, ns: Ns) -> Value {
         let mut acc = Value::new();
         for ((n, _k), v) in self.slots.for_key(&oid) {
@@ -721,6 +782,7 @@ impl State {
         acc
     }
 
+    /// The keys with a value in one namespace of the object (not `*`).
     pub fn slot_keys(&self, oid: ObjId, ns: Ns) -> Vec<KeyId> {
         self.slots.for_key(&oid).into_iter().filter(|((n, k), _)| *n == ns && *k != STAR).map(|((_, k), _)| k).collect()
     }
@@ -751,10 +813,12 @@ impl State {
         self.drop_sym_len(oid);
     }
 
+    /// Forget the object's slots.
     pub fn drop_obj(&mut self, oid: ObjId) {
         self.slots.drop_key(&oid);
     }
 
+    /// Forget the object's slots in one namespace.
     pub fn drop_obj_ns(&mut self, oid: ObjId, ns: Ns) {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
@@ -762,6 +826,10 @@ impl State {
         self.slots.drop_where(&oid, |(n, _)| *n == ns);
     }
 
+    /// A read on this path needs key `term` of input `src` (`always`, under the tests of its
+    /// function's parameters the path passed), with the other inputs that could give it
+    /// (`alternatives`), the unknown code that could have added it (`caveats`) and the input's
+    /// other keys that would do (`alt_keys`).
     pub fn require(&mut self, src: SourceId, term: KeyId, alternatives: IdSet<SourceId>, caveats: IdSet<StrId>, alt_keys: IdSet<KeyId>) {
         let info = ReqInfo {
             always: true,
@@ -789,11 +857,14 @@ impl State {
         IdSet::from_iter(self.path.iter().filter(|(o, t)| site.starts_with(&*crate::intern::str_get(*o)) && !own(*t)).map(|(_, t)| *t))
     }
 
+    /// `require` with no alternatives.
     pub fn require_simple(&mut self, src: SourceId, term: KeyId) {
         self.require(src, term, IdSet::new(), IdSet::new(), IdSet::new());
     }
 }
 
+/// The keys of the maps a callee changed or created (`State::footprint`): what joining its
+/// result into the caller's state needs to look at (`join_heap_fp`).
 #[derive(Clone, Debug, Default)]
 pub struct Footprint {
     pub rows: Vec<(ObjId, Ns)>,
@@ -817,6 +888,8 @@ fn join_unbound(a: &State, b: &State) -> Arc<Vec<StrId>> {
     Arc::new(out)
 }
 
+/// Names on either of two paths: a name bound on one only keeps that side's value (`unbound`
+/// records that it may be unbound).
 pub fn join_env(a: &IndexMap<StrId, Value>, b: &IndexMap<StrId, Value>) -> IndexMap<StrId, Value> {
     let mut out = a.clone();
     for (k, v) in b.iter() {
@@ -835,87 +908,6 @@ pub fn join_env(a: &IndexMap<StrId, Value>, b: &IndexMap<StrId, Value>) -> Index
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{Source, SourceKind};
-    use crate::intern::{key_str_lit, s};
-
-    #[test]
-    fn reqs_survive_return_in_branch() {
-        let src1 = Source::new("param f.x", SourceKind::Param);
-        let src2 = Source::new("param g.a", SourceKind::Param);
-        let mut state = State::new();
-        state.require_simple(src1, key_str_lit("k1"));
-        let mut st = state.copy();
-        let mut then_s = st.copy();
-        let mut else_s = st.copy();
-        then_s.require_simple(src2, key_str_lit("objs"));
-        then_s.record_exit();
-        then_s.reachable = false;
-        let mut j = then_s.join(&mut else_s);
-        assert!(j.reachable);
-        let ex = j.exits.take().unwrap();
-        let mut exs = ex.copy();
-        let fin = j.join(&mut exs);
-        let d = fin.reqs.inner(&src2).expect("source lost");
-        assert!(d.contains_key(&key_str_lit("objs")), "key lost");
-        assert!(!d[&key_str_lit("objs")].always);
-    }
-}
-
-#[cfg(test)]
-mod tests2 {
-    use super::*;
-    use crate::domain::{Source, SourceKind};
-    use crate::intern::{key_str_lit, s};
-
-    /// A sequence of `if cond: return` statements, one of which records a requirement.
-    fn branch_return(st: &mut State, req: Option<(crate::intern::SourceId, &str, &str)>) {
-        let mut then_s = st.copy();
-        let mut else_s = st.copy();
-        if let Some((src, k, site)) = req {
-            then_s.require_simple(src, key_str_lit(k));
-        }
-        then_s.record_exit();
-        then_s.reachable = false;
-        let j = then_s.join(&mut else_s);
-        st.replace_with(j);
-    }
-
-    #[test]
-    fn merged_reset_between_analyses() {
-        mark_merged(7);
-        assert!(is_merged(7));
-        reset_thread_state();
-        assert!(!is_merged(7));
-    }
-
-    #[test]
-    fn reqs_survive_many_returns() {
-        let src1 = Source::new("param f.x", SourceKind::Param);
-        let src2 = Source::new("param g.a", SourceKind::Param);
-        let mut state = State::new();
-        state.require_simple(src1, key_str_lit("k1"));
-        let mut st = state.copy();
-        st.require_simple(src2, key_str_lit("chain"));
-        branch_return(&mut st, None);
-        branch_return(&mut st, None);
-        branch_return(&mut st, None);
-        branch_return(&mut st, Some((src2, "objs", "L21")));
-        branch_return(&mut st, None);
-        branch_return(&mut st, None);
-        st.require_simple(src2, key_str_lit("ns"));
-        let ex = st.exits.take().unwrap();
-        let mut exs = ex.copy();
-        let fin = st.join(&mut exs);
-        let d = fin.reqs.inner(&src2).expect("source lost");
-        let mut ks: Vec<String> = d.keys().map(|k| crate::intern::key_repr(*k)).collect();
-        ks.sort();
-        assert_eq!(ks, vec!["'chain'", "'ns'", "'objs'"]);
-    }
-}
-
 /// Lists whose last element is known on both paths (the join of the two values).
 fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc<Vec<(ObjId, Value)>> {
     if Arc::ptr_eq(a, b) || (a.is_empty() && b.is_empty()) {
@@ -924,12 +916,36 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
     Arc::new(a.iter().filter_map(|(o, v)| b.iter().find(|(p, _)| p == o).map(|(_, w)| (*o, v.join(w)))).collect())
 }
 
-/// Lengths at a join: the length when equal, the shorter known prefix.
-/// (requirements on a nested source a path lacks entirely: that path never read the parent's
-/// value, so the requirement still holds wherever it was read)
+/// Lengths join to the one both sides have, else to unknown with the shorter known prefix and
+/// the possible lengths (a bit per length 0..15, 0: no information) when both sides know theirs.
+pub fn join_len(a: &LenFact, b: &LenFact) -> LenFact {
+    let pa = a.0.unwrap_or(a.1);
+    let pb = b.0.unwrap_or(b.1);
+    if a.0.is_some() && a.0 == b.0 {
+        return (a.0, pa.min(pb), 0);
+    }
+    let mask = |x: &LenFact| -> u16 {
+        match x.0 {
+            Some(n) if n < 16 => 1u16 << n,
+            Some(_) => 0,
+            None => x.2,
+        }
+    };
+    let (ma, mb) = (mask(a), mask(b));
+    let m = if ma != 0 && mb != 0 { ma | mb } else { 0 };
+    (None, pa.min(pb), m)
+}
+
+/// Requirements on a source to keep as they are at a join whose other side lacks the source:
+/// a nested source's (that path never read the parent's value, so the requirement still holds
+/// wherever it was read).
 fn nested_keep(s: &crate::domain::SourceId) -> bool {
     crate::domain::source_is_nested(*s)
 }
+
+// ---------------------------------------------------------------------------
+// per-thread object marks (reset for each analysis)
+// ---------------------------------------------------------------------------
 
 thread_local! {
     static MERGED: std::cell::RefCell<rustc_hash::FxHashSet<ObjId>> = std::cell::RefCell::new(rustc_hash::FxHashSet::default());
@@ -944,15 +960,22 @@ pub fn mark_merged(oid: ObjId) {
     });
 }
 
+/// Does `oid` stand for several runtime objects (`mark_merged`)?
+pub fn is_merged(oid: ObjId) -> bool {
+    MERGED.with(|m| m.borrow().contains(&oid))
+}
+
 thread_local! {
     /// the shared unknown object (`interp::any_object`): no store changes it
     static ANY: std::cell::Cell<ObjId> = const { std::cell::Cell::new(ObjId::MAX) };
 }
 
+/// `oid` is the shared unknown object (`interp::any_object`).
 pub fn set_any(oid: ObjId) {
     ANY.with(|a| a.set(oid));
 }
 
+/// Is `oid` the shared unknown object?
 pub fn is_any(oid: ObjId) -> bool {
     ANY.with(|a| a.get() == oid)
 }
@@ -1014,10 +1037,6 @@ pub fn view_hits() -> u64 {
     VIEW_HITS.with(|c| c.get())
 }
 
-pub fn is_merged(oid: ObjId) -> bool {
-    MERGED.with(|m| m.borrow().contains(&oid))
-}
-
 /// A new analysis on this thread (`rowan serve` runs every request on one): object ids start
 /// again, so the merged set and the cost counters do too.
 pub fn reset_thread_state() {
@@ -1030,26 +1049,6 @@ pub fn reset_thread_state() {
     crate::models::shape::reset();
 }
 
-/// Lengths join to the one both sides have, else to unknown with the shorter known prefix and
-/// the possible lengths (a bit per length 0..15, 0: no information) when both sides know theirs.
-pub fn join_len(a: &(Option<usize>, usize, u16), b: &(Option<usize>, usize, u16)) -> (Option<usize>, usize, u16) {
-    let pa = a.0.unwrap_or(a.1);
-    let pb = b.0.unwrap_or(b.1);
-    if a.0.is_some() && a.0 == b.0 {
-        return (a.0, pa.min(pb), 0);
-    }
-    let mask = |x: &(Option<usize>, usize, u16)| -> u16 {
-        match x.0 {
-            Some(n) if n < 16 => 1u16 << n,
-            Some(_) => 0,
-            None => x.2,
-        }
-    };
-    let (ma, mb) = (mask(a), mask(b));
-    let m = if ma != 0 && mb != 0 { ma | mb } else { 0 };
-    (None, pa.min(pb), m)
-}
-
 thread_local! {
     /// footprint entries visited by `join_heap_fp` (a deterministic cost measure: golden
     /// `#@visits <= N`, with the liveness walks' visits)
@@ -1059,4 +1058,77 @@ thread_local! {
 /// Footprint entries visited by `join_heap_fp` so far.
 pub fn fp_visits() -> usize {
     FP_VISITS.with(|c| c.get())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Source, SourceKind};
+    use crate::intern::key_str_lit;
+
+    #[test]
+    fn reqs_survive_return_in_branch() {
+        let src1 = Source::new("param f.x", SourceKind::Param);
+        let src2 = Source::new("param g.a", SourceKind::Param);
+        let mut state = State::new();
+        state.require_simple(src1, key_str_lit("k1"));
+        let mut st = state.copy();
+        let mut then_s = st.copy();
+        let mut else_s = st.copy();
+        then_s.require_simple(src2, key_str_lit("objs"));
+        then_s.record_exit();
+        then_s.reachable = false;
+        let mut j = then_s.join(&mut else_s);
+        assert!(j.reachable);
+        let ex = j.exits.take().unwrap();
+        let mut exs = ex.copy();
+        let fin = j.join(&mut exs);
+        let d = fin.reqs.inner(&src2).expect("source lost");
+        assert!(d.contains_key(&key_str_lit("objs")), "key lost");
+        assert!(!d[&key_str_lit("objs")].always);
+    }
+    /// A sequence of `if cond: return` statements, one of which records a requirement.
+    fn branch_return(st: &mut State, req: Option<(crate::intern::SourceId, &str)>) {
+        let mut then_s = st.copy();
+        let mut else_s = st.copy();
+        if let Some((src, k)) = req {
+            then_s.require_simple(src, key_str_lit(k));
+        }
+        then_s.record_exit();
+        then_s.reachable = false;
+        let j = then_s.join(&mut else_s);
+        st.replace_with(j);
+    }
+
+    #[test]
+    fn merged_reset_between_analyses() {
+        mark_merged(7);
+        assert!(is_merged(7));
+        reset_thread_state();
+        assert!(!is_merged(7));
+    }
+
+    #[test]
+    fn reqs_survive_many_returns() {
+        let src1 = Source::new("param f.x", SourceKind::Param);
+        let src2 = Source::new("param g.a", SourceKind::Param);
+        let mut state = State::new();
+        state.require_simple(src1, key_str_lit("k1"));
+        let mut st = state.copy();
+        st.require_simple(src2, key_str_lit("chain"));
+        branch_return(&mut st, None);
+        branch_return(&mut st, None);
+        branch_return(&mut st, None);
+        branch_return(&mut st, Some((src2, "objs")));
+        branch_return(&mut st, None);
+        branch_return(&mut st, None);
+        st.require_simple(src2, key_str_lit("ns"));
+        let ex = st.exits.take().unwrap();
+        let mut exs = ex.copy();
+        let fin = st.join(&mut exs);
+        let d = fin.reqs.inner(&src2).expect("source lost");
+        let mut ks: Vec<String> = d.keys().map(|k| crate::intern::key_repr(*k)).collect();
+        ks.sort();
+        assert_eq!(ks, vec!["'chain'", "'ns'", "'objs'"]);
+    }
 }

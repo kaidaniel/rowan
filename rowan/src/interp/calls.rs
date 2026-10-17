@@ -795,7 +795,7 @@ impl Analyzer {
             self.heap.obj_mut(gid).iterator = true;
             ret = Value::obj(gid);
         }
-        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
+        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
         self.findings.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.recursion.end(&key);

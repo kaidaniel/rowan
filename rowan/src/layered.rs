@@ -477,6 +477,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         LayerMap { root }
     }
 
+    /// Do the two maps hold the same entries? (Shared subtrees are not visited.)
     pub fn same(&self, o: &LayerMap<K, V>) -> bool {
         diff(self.root.as_ref(), o.root.as_ref(), &mut |_| false)
     }
@@ -613,7 +614,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         Self::default()
     }
 
-
+    /// The subtree of `key`'s entries.
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
     }
@@ -692,12 +693,14 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         self.m.remove(&Pair(key.clone(), ik.clone()))
     }
 
+    /// Removes every inner entry of `key`.
     pub fn drop_key(&mut self, key: &K) {
         if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64())) {
             self.m.root = rest;
         }
     }
 
+    /// Removes the inner entries of `key` that `pred` picks (and its marker).
     pub fn drop_where(&mut self, key: &K, mut pred: impl FnMut(&IK) -> bool) {
         let mut gone: Vec<IK> = Vec::new();
         if let Some(t) = self.sub(key) {
@@ -712,6 +715,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         }
     }
 
+    /// Entries on one side only are kept; those on both combined with `f` (unless equal).
     pub fn join(&self, o: &Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {
         TwoLevel { m: self.m.join(&o.m, f) }
     }
@@ -739,10 +743,12 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         TwoLevel { m: a.merge_with(b, &mut g) }
     }
 
+    /// Do the two maps hold the same entries?
     pub fn same(&self, o: &Self) -> bool {
         self.m.same(&o.m)
     }
 
+    /// The (outer, inner) keys whose value differs between `self` and `base`.
     pub fn diff_keys(&self, base: &Self) -> Vec<(K, IK)> {
         self.diff_upto(base, usize::MAX).unwrap_or_default()
     }
@@ -759,6 +765,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         }
     }
 
+    /// `diff_keys`, or None once more than `limit` keys differ.
     pub fn diff_upto(&self, base: &Self, limit: usize) -> Option<Vec<(K, IK)>> {
         Some(self.m.diff_upto(&base.m, limit)?.into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect())
     }

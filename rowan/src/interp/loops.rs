@@ -544,7 +544,7 @@ impl Analyzer {
             // (rows the body changed; for a summary, only then the walk)
             let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && row_at(*ns) != exit_s.row(oid, *ns)).collect();
             let held = |an: &Analyzer| list.is_some_and(|l| an.held_only_by(oid, l, target, exit_s));
-            if !rows.is_empty() && self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
+            if !rows.is_empty() && self.heap.is_record(oid) && (self.heap.obj(oid).single || held(self)) {
                 for ns in rows {
                     exit_s.set_row_narrowed(oid, ns, row_at(ns));
                 }

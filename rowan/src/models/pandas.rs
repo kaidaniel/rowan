@@ -4838,7 +4838,7 @@ fn set_axis(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return new_frame(an, st, c, closed_ordered(&seq), None, None);
             }
             if let Some(ks) = an.lit_keys(&l, st) {
-                return new_frame(an, st, c, row.project(&ks), None, None);
+                return new_frame(an, st, c, Row::closed_with(ks.clone()), None, None);
             }
             return new_frame(an, st, c, Row::with_source(Source::new(&format!("set_axis@L{}", c.line), SourceKind::Call)), None, None);
         }
@@ -5171,7 +5171,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
             return;
         }
         if let Some(ks) = an.lit_keys(v, state) {
-            state.set_row(oid, Ns::Item, row.project(&ks));
+            state.set_row(oid, Ns::Item, Row::closed_with(ks.clone()));
             return;
         }
         let mut kv: Option<KeyVal> = if v.pts.is_empty() { Some(v.kv.clone()) } else { None };

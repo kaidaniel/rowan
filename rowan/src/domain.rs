@@ -1,5 +1,14 @@
-//! Abstract domains: `KeyVal`, `Lens`, `Source`, `Row`,
-//! `ReqInfo`, `Value`, `classify`.  Port of `rowan/domain.py` over interned ids.
+//! The abstract domains, over interned ids (`intern.rs`):
+//!
+//! * `Value`: what a name or slot may hold, a set of objects plus a scalar part (`KeyVal`: a
+//!   literal, up to `MAX_LITS` literals, the keys of some objects, or a labelled unknown).
+//! * `Row`: what is known of the keys of one object in one namespace on one path (present ⊇
+//!   likely ⊇ definite, absent, the open inputs and unknown calls that may add keys), with its
+//!   transfers (store, delete, copy, rename, unknown code) and its join.
+//! * `Source` and `Lens`: an input a row is open through, and how the program renamed or
+//!   removed the input's keys on the way (`lens_provides` maps a key back to the input's).
+//! * `classify`: the verdict (`Tier`) of reading a key from a row.
+//! * `ReqInfo`: a requirement a read records on an input's key.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -13,21 +22,31 @@ use crate::intern::{
     IdSet, KeyId, KeySet, LensId, StrId, EMPTY_LENS,
 };
 
+/// Literals a `KeyVal` holds at most; a join with more is an unknown.
 pub const MAX_LITS: usize = 64;
+/// Lenses a row keeps per source; past that the source is kept without one (`cap_sources`).
 pub const MAX_LENSES: usize = 6;
+/// Call sites a verdict's chain keeps (`chain_extend`).
 pub const MAX_CHAIN: usize = 6;
 
+/// An object, by its index in the `Heap`.
 pub type ObjId = u32;
 pub type ObjSet = IdSet<ObjId>;
-/// entry-row id: oid * 2 + (1 if attr)
 
+/// The namespace of an object's keys: a row and its slots are per (object, namespace).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Ns {
+    /// a mapping's items (`d["k"]`), a frame's columns
     Item,
+    /// attributes (`o.k`)
     Attr,
+    /// the value of a closure cell
     Cell,
+    /// a sequence's positions (`xs[0]`)
     Pos,
+    /// the items of a list, set or iterator at no known position (the `STAR` key)
     Elem,
+    /// facts a model keeps on an object (a frame's index, a generator's progress, …)
     Meta,
     /// a variable (verdicts only: a read of a name bound on some paths only)
     Name,
@@ -57,6 +76,8 @@ impl fmt::Display for Ns {
 // lens steps
 // ---------------------------------------------------------------------------
 
+/// A str function applied to every key of a record (`{k.upper(): v for k, v in d.items()}`,
+/// `df.add_prefix("x_")`): a lens step that renames keys.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FnKind {
     Upper,
@@ -100,6 +121,8 @@ impl FnKind {
     }
 }
 
+/// A key-renaming function with its argument (the affix of `Prefix` / `Suffix`, the pair of
+/// `Replace`, the separator of `Join`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct RenameFn {
     pub fn_: FnKind,
@@ -142,6 +165,7 @@ impl RenameFn {
         }
     }
 
+    /// The key `k` becomes (`k` itself where the function does not apply to it).
     pub fn apply(&self, k: KeyId) -> KeyId {
         if self.fn_ == FnKind::Join {
             let sep = self.arg_str();
@@ -176,6 +200,8 @@ impl RenameFn {
         intern::key_str_lit(&out)
     }
 
+    /// The keys that become `k` (empty: none can); a key not computable back is an *inverse
+    /// term* (`intern::key_inv`: "the key whose upper() is k").
     pub fn inverse(&self, k: KeyId) -> KeySet {
         let sk = key_as_str(k);
         let name = self.fn_.name();
@@ -271,6 +297,8 @@ pub fn py_title(s: &str) -> String {
     out
 }
 
+/// One step of a lens: keys removed, keys renamed one by one, or every key renamed by a
+/// function.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Step {
     Kill(KeySet),
@@ -315,6 +343,8 @@ impl fmt::Display for Step {
     }
 }
 
+/// How the keys of an input reached a record (its steps in order): a row open through a source
+/// with a lens may hold `k` when the input holds a key the lens maps to `k`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Lens {
     pub steps: Vec<Step>,
@@ -373,6 +403,7 @@ pub fn lens_apply(l: LensId, k: KeyId) -> Option<KeyId> {
     lens_apply_steps(&intern::lens_get(l).steps, k)
 }
 
+/// `lens_apply` on the steps of a lens.
 pub fn lens_apply_steps(steps: &[Step], mut k: KeyId) -> Option<KeyId> {
     for step in steps {
         match step {
@@ -387,10 +418,12 @@ pub fn lens_apply_steps(steps: &[Step], mut k: KeyId) -> Option<KeyId> {
     Some(k)
 }
 
+/// A lens for people: `·upper·∖{"a"}`.
 pub fn lens_str(l: LensId) -> String {
     with_lens(l, |lens| lens.steps.iter().map(|s| format!("·{}", s)).collect::<String>())
 }
 
+/// `a` then `b`.
 pub fn lens_concat(a: LensId, b: LensId) -> LensId {
     if a == EMPTY_LENS {
         return b;
@@ -403,11 +436,13 @@ pub fn lens_concat(a: LensId, b: LensId) -> LensId {
     intern::lens(la.concat(&lb))
 }
 
+/// `a` then the step `s`.
 pub fn lens_push(a: LensId, s: Step) -> LensId {
     let la = lens_get(a);
     intern::lens(la.with_step(s))
 }
 
+/// `l` then the removal of `k` (joined into a last removal step).
 pub fn lens_add_kill(l: LensId, k: KeyId) -> LensId {
     let mut lens = lens_get(l);
     if let Some(Step::Kill(ks)) = lens.steps.last() {
@@ -424,17 +459,29 @@ pub fn lens_add_kill(l: LensId, k: KeyId) -> LensId {
 // sources
 // ---------------------------------------------------------------------------
 
+/// What kind of input a source is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum SourceKind {
+    /// an input the program reads from outside (`os.environ`, `sys.argv`, a request)
     External,
+    /// the result of a library call (`json.loads(…)`, `pd.read_csv(…)`)
     Call,
+    /// a parameter of a function run with open parameters (`param F.x`)
     Param,
+    /// a global name with no binding rowan sees, not a builtin (one a star import of a library
+    /// or `exec` may define)
     Name,
+    /// keys computed from data (a mapping built from unknown keys): reads are `map` verdicts,
+    /// not requirements
     Data,
+    /// an instance with attributes rowan may not see: of a class with a base it does not see,
+    /// or a receiver of a run for any call
     Class,
 }
 
-/// A reason an object may have keys we do not see.
+/// A reason an object may have keys rowan does not see: an input, named by where it comes
+/// from (`site`), and the keys below it the object was read through (`path`:
+/// `json.loads@L3['db']`). Interned: rows hold `SourceId`s.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Source {
     pub site: Arc<str>,
@@ -446,12 +493,14 @@ impl Source {
     pub fn new(site: &str, kind: SourceKind) -> SourceId {
         intern::source(Source { site: Arc::from(site), kind, path: Vec::new() })
     }
+    /// `site['k1']['k2']`.
     pub fn label(&self) -> String {
         let p: String = self.path.iter().map(|k| format!("[{}]", key_repr(*k))).collect();
         format!("{}{}", self.site, p)
     }
 }
 
+/// The source of what `s` holds under key `k`.
 pub fn source_extend(s: SourceId, k: KeyId) -> SourceId {
     let mut src = source_get(s);
     src.path.push(k);
@@ -469,6 +518,7 @@ pub fn source_depth(s: SourceId) -> usize {
     with_source(s, |src| src.path.len())
 }
 
+/// Is `s` keys computed from data (`SourceKind::Data`), not an input?
 pub fn source_is_data(s: SourceId) -> bool {
     with_source(s, |src| src.kind == SourceKind::Data)
 }
@@ -481,8 +531,6 @@ pub fn source_label(s: SourceId) -> String {
 // Row
 // ---------------------------------------------------------------------------
 
-/// Insertion orders of two joined rows: equal, or one a prefix of the other (the longer
-/// one; the extra keys are not definite then), else unknown.
 /// The insertion order of two paths' rows: the longer when the other's is a prefix of it and
 /// the other has none of the keys it adds (else it holds them at another place: `b, a` on one
 /// path, `a` before `b` but not in its order on the other).
@@ -497,18 +545,28 @@ fn join_order(a: &RowData, b: &RowData) -> Arc<[KeyId]> {
     }
 }
 
+/// The inputs a row is open through, each with the lens its keys came through.
 pub type SrcSet = IdSet<(SourceId, LensId)>;
 pub type StrSet = IdSet<StrId>;
 
+/// The key-set facts of a `Row` (see there).
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct RowData {
+    /// keys that may be there (on some path)
     pub present: KeySet,
+    /// keys there on every path
     pub definite: KeySet,
+    /// keys there unless unknown code removed them (⊇ definite)
     pub likely: KeySet,
+    /// keys removed on every path
     pub absent: KeySet,
+    /// keys removed unless unknown code put them back (⊇ absent)
     pub absent_likely: KeySet,
+    /// the inputs it is open through: it may hold any key they provide
     pub sources: SrcSet,
+    /// the unknown calls that may have added or removed keys (named by their call sites)
     pub mutators: StrSet,
+    /// anything at all (an object of unknown origin): reads are `unknown`
     pub top: bool,
     /// insertion order of the keys stored strongly (a dict iterates in this order); it
     /// describes the row only when it holds exactly the present keys (`ordered_keys`)
@@ -517,8 +575,11 @@ pub struct RowData {
     pub stored: KeySet,
 }
 
-/// Provision facts for one (object, namespace) at one program point; immutable, shared,
-/// hash cached.  See `domain.py` for the meaning of the fields.
+/// What one path knows of the keys of one (object, namespace): `present` ⊇ `likely` ⊇
+/// `definite`, `absent`, and what may add keys rowan does not see (`sources`: inputs;
+/// `mutators`: unknown calls). A row with neither is *closed*: it has exactly its present keys.
+/// Immutable and shared (an `Arc`), its hash cached: every transfer makes a new row, and equal
+/// rows compare by pointer first.
 #[derive(Clone)]
 pub struct Row {
     inner: Arc<RowInner>,
@@ -566,6 +627,7 @@ pub fn row_joins() -> usize {
     ROW_JOINS.with(|c| c.get())
 }
 
+/// Restarts the count of row joins (a new analysis).
 pub fn reset_row_joins() {
     ROW_JOINS.with(|c| c.set(0));
 }
@@ -577,20 +639,24 @@ impl Default for Row {
 }
 
 impl Row {
+    /// The row of these facts.
     pub fn from_data(data: RowData) -> Row {
         let mut h = FxHasher::default();
         data.hash(&mut h);
         Row { inner: Arc::new(RowInner { data, hash: h.finish() }) }
     }
 
+    /// The empty closed row (no keys).
     pub fn new() -> Row {
         Row::default()
     }
 
+    /// A copy of the facts, to change into a new row.
     pub fn data(&self) -> RowData {
         self.inner.data.clone()
     }
 
+    /// An open row of no known keys: whatever these inputs hold.
     pub fn with_sources(sources: SrcSet) -> Row {
         Row::from_data(RowData { sources, ..Default::default() })
     }
@@ -605,14 +671,17 @@ impl Row {
         Arc::ptr_eq(&self.inner, &o.inner)
     }
 
+    /// The row of an object of unknown origin: any key, reads are `unknown`.
     pub fn top() -> Row {
         Row::from_data(RowData { top: true, ..Default::default() })
     }
 
+    /// A closed row of exactly these keys.
     pub fn closed_with(keys: KeySet) -> Row {
         Row::from_data(RowData { present: keys.clone(), definite: keys.clone(), likely: keys, ..Default::default() })
     }
 
+    /// May it hold keys rowan does not see (an input, unknown code, or anything)?
     pub fn open(&self) -> bool {
         !self.sources.is_empty() || !self.mutators.is_empty() || self.top
     }
@@ -622,6 +691,7 @@ impl Row {
         !self.sources.is_empty() || self.top
     }
 
+    /// It holds exactly its present keys.
     pub fn closed(&self) -> bool {
         !self.open()
     }
@@ -631,6 +701,7 @@ impl Row {
         self.absent.contains(k) || (self.closed() && !self.present.contains(k))
     }
 
+    /// Open through keys computed from data (`SourceKind::Data`).
     pub fn is_map(&self) -> bool {
         self.sources.iter().any(|(s, _)| source_is_data(s))
     }
@@ -652,6 +723,9 @@ impl Row {
     }
 
     // -- lattice -----------------------------------------------------------
+    /// The row on either of two paths: keys present on either, definite (likely) on both,
+    /// absent on both (a closed row lacks every key it does not have), every input and
+    /// unknown call of either.
     pub fn join(&self, o: &Row) -> Row {
         if self == o {
             return self.clone();
@@ -711,7 +785,9 @@ impl Row {
         }
     }
 
-    // -- transfers (§4.1) --------------------------------------------------
+    // -- transfers ----------------------------------------------------------
+    /// The row after `k` is stored: present; definite too when the store is strong (into a
+    /// single object, not one of several).
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         // (a key there on some paths only, stored: where it is in the order depends on the path;
@@ -743,6 +819,8 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row after `k` is deleted: absent (and removed from what the inputs provide) when
+    /// strong; else only no longer definite.
     pub fn delete(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         if strong {
@@ -763,12 +841,15 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row after keys not known, from `src`, are stored (`d[unknown] = v`): open through it.
     pub fn data_store(&self, src: SourceId) -> Row {
         let mut d = self.data();
         d.sources = cap_sources(d.sources.insert((src, EMPTY_LENS)));
         Row::from_data(d)
     }
 
+    /// The row after every key went through `step` (a rename, `df.rename(columns=…)`, `{k.upper():
+    /// v …}`); the inputs' lenses get the step too.
     pub fn rename(&self, step: &Step) -> Row {
         let f = |ks: &KeySet| ks.map(|k| step.apply(k));
         let push = |l: LensId| lens_push(l, step.clone());
@@ -786,10 +867,6 @@ impl Row {
             order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
             stored: f(&self.stored),
         })
-    }
-
-    pub fn project(&self, keys: &KeySet) -> Row {
-        Row::closed_with(keys.clone())
     }
 
     /// self ∪= chain(o ∖ kill).  strong: definite keys of o are definitely copied.
@@ -841,6 +918,8 @@ impl Row {
         })
     }
 
+    /// The row after unknown code (named by `site`) may have stored or removed any key:
+    /// definite keys become likely, absent ones likely absent, and the row is open.
     pub fn mutate(&self, site: StrId) -> Row {
         // (mutated already, by this site or by one of those no longer named: nothing changes)
         if self.definite.is_empty() && self.absent.is_empty() && (self.mutators.contains(site) || self.mutators.contains(intern::MORE)) {
@@ -873,6 +952,8 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row where a test found `k` (`if "k" in d`, a read that succeeded): there, as a
+    /// store makes it, but not counted as stored and the insertion order unchanged.
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
         // (the key was there: the program did not store it, nor last: the order stays)
         let mut d = self.store(k, strong).data();
@@ -881,10 +962,6 @@ impl Row {
         }
         d.order = self.order.clone();
         Row::from_data(d)
-    }
-
-    pub fn narrow_out(&self, k: KeyId) -> Row {
-        self.delete(k, true)
     }
 
 }
@@ -976,6 +1053,8 @@ fn cap_mutators(ms: StrSet) -> StrSet {
     StrSet::from_vec(v)
 }
 
+/// A source with more than `MAX_LENSES` lenses keeps none (it may provide any of its keys
+/// under their own names).
 fn cap_sources(ss: SrcSet) -> SrcSet {
     // (sorted by source: its lenses are consecutive)
     let mut by: Vec<(SourceId, Vec<LensId>)> = Vec::new();
@@ -999,7 +1078,8 @@ fn cap_sources(ss: SrcSet) -> SrcSet {
     SrcSet::from_vec(out)
 }
 
-pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
+/// The join of many rows (the empty row for none).
+pub fn join_rows(rows: impl IntoIterator<Item = Row>) -> Row {
     // (equal rows once — the objects of one site often share theirs — then pairwise in a
     // balanced tree: a left fold over thousands re-unioned an ever larger accumulator)
     let mut seen: rustc_hash::FxHashSet<Row> = rustc_hash::FxHashSet::default();
@@ -1025,6 +1105,7 @@ pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
 // call chains (reporting contexts)
 // ---------------------------------------------------------------------------
 
+/// The call sites (lines) through which an access was reached, outermost first (`via L5→L9`).
 pub type Chain = Vec<u32>;
 
 /// Canonical call chain: a call site repeated in direct recursion is kept once and the
@@ -1043,23 +1124,36 @@ pub fn chain_extend(chain: &[u32], more: &[u32]) -> Chain {
 }
 
 // ---------------------------------------------------------------------------
-// verdict classification (§10)
+// verdict classification
 // ---------------------------------------------------------------------------
 
+/// The verdict of a read, `del` or `pop` of a key on one object. `Proven`, `Possibly`,
+/// `Missing` and `Input` hold for every run; `Likely` / `LikelyMissing` assume unknown code
+/// removed (added) nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Tier {
+    /// there on every path (✓)
     Proven,
+    /// there unless unknown code removed it (✓~)
     Likely,
+    /// a key of a mapping built from data: not decided, and not a requirement
     Map,
+    /// there if an input provides it: a requirement on the input
     Input,
+    /// set on some paths only (⚠)
     Possibly,
+    /// a key computed from data read from a closed record: may not be one of its keys (⚠)
     DataKey,
+    /// missing unless unknown code added it (⚠~)
     LikelyMissing,
+    /// missing on every path (✗)
     Missing,
+    /// nothing is known of the object
     Unknown,
 }
 
 impl Tier {
+    /// The order of severity (the worst of several objects' tiers is the access's).
     pub fn rank(self) -> u8 {
         match self {
             Tier::Proven => 0,
@@ -1073,6 +1167,7 @@ impl Tier {
             Tier::Unknown => 8,
         }
     }
+    /// The tier's name in the JSON and the golden directives.
     pub fn name(self) -> &'static str {
         match self {
             Tier::Proven => "proven",
@@ -1086,6 +1181,7 @@ impl Tier {
             Tier::Unknown => "unknown",
         }
     }
+    /// The mark the text report shows.
     pub fn symbol(self) -> &'static str {
         match self {
             Tier::Proven => "✓",
@@ -1101,6 +1197,8 @@ impl Tier {
     }
 }
 
+/// A key's verdict on one row: the tier, the inputs that may provide the key, why (`note`),
+/// and the unknown code the verdict assumes did nothing.
 #[derive(Clone, Debug)]
 pub struct Classification {
     pub tier: Tier,
@@ -1126,6 +1224,10 @@ impl Classification {
 /// The note of a key proven only because the code read or tested it before.
 pub const FOUND_BEFORE: &str = "found before";
 
+/// The verdict of reading `k` from `row`, in order: definite (proven), absent (missing),
+/// likely, unknown origin, closed (possibly / missing), provided by an input (input), keys
+/// from data (map), present on some paths (possibly), changed by unknown code (likely
+/// missing), else missing.
 pub fn classify(row: &Row, k: KeyId) -> Classification {
     if row.definite.contains(k) {
         // (a key of an open record the program never stored: a read or a test found it)
@@ -1170,9 +1272,11 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
 }
 
 // ---------------------------------------------------------------------------
-// key values (§2)
+// key values
 // ---------------------------------------------------------------------------
 
+/// A scalar that is one of the keys of some objects (`for k in d`), except `exclude`, through
+/// the lens `chain` (`k.upper()`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct KeysOf {
     pub objs: ObjSet,
@@ -1192,20 +1296,29 @@ impl KeysOf {
 /// `KeysOf::exhaustive_depth` of a sequence's elements that are every key (`list(d)`).
 pub const ALL_KEYS: i32 = -2;
 
+/// The scalar part of a `Value`: what it may be besides objects.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyVal {
+    /// one literal (a str, number, bool, None, bytes, tuple of literals, …)
     Lit(KeyId),
+    /// one of these literals (at most `MAX_LITS`)
     Lits(KeySet),
+    /// one of the keys of some objects
     KeysOf(KeysOf),
-    /// site label ("" = plain DATA)
+    /// an unknown, named by its label ("" = unnamed): where it comes from (`row["id"]`), a
+    /// tensor shape, a builtin type (`typed_label`)
     Data(StrId),
+    /// nothing: the value is only its objects (or no value at all)
     Bot,
 }
 
+/// An unnamed unknown.
 pub const DATA: KeyVal = KeyVal::Data(intern::EMPTY_STR);
+/// No scalar.
 pub const BOT: KeyVal = KeyVal::Bot;
 
 impl KeyVal {
+    /// An unknown named `site` ("" for none).
     pub fn data(site: &str) -> KeyVal {
         if site.is_empty() {
             DATA
@@ -1213,6 +1326,7 @@ impl KeyVal {
             KeyVal::Data(intern::s(site))
         }
     }
+    /// One of these literals (`Lit` for one).
     pub fn lits(ks: KeySet) -> KeyVal {
         if ks.len() == 1 {
             KeyVal::Lit(ks.first().unwrap())
@@ -1328,6 +1442,9 @@ fn untyped(label: StrId) -> KeyVal {
     if name == &*l { DATA } else { KeyVal::data(name) }
 }
 
+/// The scalar on either of two paths: literals union (past `MAX_LITS`, an unknown); the keys
+/// of more objects; two unknowns an unknown (of their type, or a joined tensor shape); an
+/// unknown and literals the unknown (typed only when the literals are of its type).
 pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     if a == b {
         return a.clone();
@@ -1416,6 +1533,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     DATA
 }
 
+/// The literals a scalar may be (empty when it is not literals).
 pub fn kv_literals(kv: &KeyVal) -> KeySet {
     match kv {
         KeyVal::Lit(k) => KeySet::one(*k),
@@ -1428,6 +1546,8 @@ pub fn kv_literals(kv: &KeyVal) -> KeySet {
 /// triples each round).
 pub const TEXT_MAX: usize = 1 << 16;
 
+/// A str function applied to the scalar: literals computed, keys of objects through one more
+/// lens step; past `TEXT_MAX` a str not known.
 pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
     if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX) {
         return KeyVal::data(&typed_label("str", ""));
@@ -1502,11 +1622,13 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 }
 
 // ---------------------------------------------------------------------------
-// requirements (§9)
+// requirements
 // ---------------------------------------------------------------------------
 
+/// A requirement a read records on one key of an input (per path, in `State::reqs`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
+    /// read on every path (else: sometimes)
     pub always: bool,
     /// other sources that could satisfy the same access
     pub alternatives: IdSet<SourceId>,
@@ -1522,6 +1644,7 @@ pub struct ReqInfo {
 }
 
 impl ReqInfo {
+    /// The requirement on either of two paths that both read the key.
     pub fn join(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always && o.always,
@@ -1556,6 +1679,7 @@ impl ReqInfo {
             self.sometimes()
         }
     }
+    /// The same requirement, needed on some paths only.
     pub fn sometimes(&self) -> ReqInfo {
         ReqInfo { always: false, ..self.clone() }
     }
@@ -1565,6 +1689,9 @@ impl ReqInfo {
 // values
 // ---------------------------------------------------------------------------
 
+/// What a name, slot or expression may hold: one of the objects `pts` (points-to), or a
+/// scalar described by `kv`. The empty value (no objects, `Bot`) is what an unreachable path
+/// or a missing slot holds.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Value {
     pub pts: ObjSet,
@@ -1589,12 +1716,14 @@ impl Value {
     pub fn new() -> Value {
         Value::default()
     }
+    /// The value on either of two paths.
     pub fn join(&self, o: &Value) -> Value {
         if self == o {
             return self.clone();
         }
         Value { pts: self.pts.union(&o.pts), kv: kv_join(&self.kv, &o.kv) }
     }
+    /// No objects and no scalar.
     pub fn empty(&self) -> bool {
         self.pts.is_empty() && self.kv.is_bot()
     }
@@ -1619,6 +1748,7 @@ impl Value {
     pub fn kv_only(kv: KeyVal) -> Value {
         Value { pts: ObjSet::new(), kv }
     }
+    /// The one object it is (no scalar besides).
     pub fn single(&self) -> Option<ObjId> {
         if self.pts.len() == 1 && self.kv.is_bot() {
             self.pts.first()
@@ -1628,6 +1758,7 @@ impl Value {
     }
 }
 
+/// The join of many values (the empty value for none).
 pub fn join_values(vals: impl IntoIterator<Item = Value>) -> Value {
     // (the objects in one sort: pairwise unions of many large sets are quadratic)
     let mut ids: Vec<ObjId> = Vec::new();
