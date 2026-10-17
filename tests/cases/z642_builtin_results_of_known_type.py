@@ -2,7 +2,7 @@
 `range` with bounds not known (or of more than 64 items), `enumerate`'s index, `os.environ`'s
 values, what `input()`, `time.time()`, `random.random()` / `randint`, `math`'s functions, `sum` of
 ints and a list's `count` return, and what follows from them (`input().split(",")` is a list of
-str, `x == "y"` of a str is a bool). They were `?`.
+str, `x == "y"` of a str a bool, `x[:1]` a str). They were `?`.
 
 Expectations were written from the program text before running the engine."""
 import math
@@ -36,3 +36,4 @@ fl = math.floor(root)                   #@value fl: types={int}
 nan = math.isnan(root)                  #@value nan: types={bool}
 total = sum(len(p) for p in parts)      #@value total: types={int}
 cnt = parts.count("a")                  #@value cnt: types={int}
+initial = first[:1]                     #@value initial: types={str}

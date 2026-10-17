@@ -1,7 +1,7 @@
 """A dict's keys put there under keys of a builtin type are of that type: a word count's keys are
 `str(?)` (`for k in counts`, `counts.items()`, `sorted(counts)`) and the dict is
-`dict[str(?), int(?)]`. Keys that may come from elsewhere (an input, unknown code, keys of
-another type) leave them untyped. They were `?`.
+`dict[str(?), int(?)]`, also through `setdefault`. Keys that may come from elsewhere (an input,
+unknown code, keys of another type) leave them untyped. They were `?`.
 
 Expectations were written from the program text before running the engine."""
 import json
@@ -33,3 +33,8 @@ for w in words:
     loaded[w] = 2
 for k5 in loaded:
     kl = k5                                 #@value kl: untyped
+groups = {}
+for w in words:
+    groups.setdefault(w[0], []).append(w)
+for k6 in groups:
+    kg = k6                                 #@value kg: types={str}
