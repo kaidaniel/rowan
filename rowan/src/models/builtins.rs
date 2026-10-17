@@ -2262,7 +2262,7 @@ pub(super) fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     // (None, a number: no length; beside objects, `may_type_error` says it may raise)
-    if v.pts.is_empty() && v.kv.is_literal() && !v.kv.may_have_items() {
+    if v.pts.is_empty() && v.kv.is_literal() && !v.kv.may_have_items() && !crate::domain::kv_literals(&v.kv).is_empty() {
         an.raise_here("TypeError", st);
         return Value::new();
     }

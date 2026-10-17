@@ -53,7 +53,7 @@ impl Analyzer {
         }
         // (None, a number: not subscriptable; None beside objects: may be)
         if ns == Ns::Item && report && obj.kv.is_literal() {
-            if obj.pts.is_empty() && !obj.kv.may_have_items() {
+            if obj.pts.is_empty() && !obj.kv.may_have_items() && !kv_literals(&obj.kv).is_empty() {
                 self.raise_here("TypeError", state);
                 return Value::new();
             }

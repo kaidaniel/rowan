@@ -80,7 +80,8 @@ impl Analyzer {
         }
         let a = Args::new(&args, &kwargs, &star_args, &star_kwargs);
         // (None, a number, a str… is not callable: TypeError)
-        if fv.kv.is_literal() && kv_literals(&fv.kv).iter().all(|k| !intern::with_key(k, |k| matches!(k, intern::Key::Member(..) | intern::Key::Inv(..)))) {
+        let lits = kv_literals(&fv.kv);
+        if !lits.is_empty() && lits.iter().all(|k| !intern::with_key(k, |k| matches!(k, intern::Key::Member(..) | intern::Key::Inv(..)))) {
             self.may_raise_here("TypeError", state);
             if fv.pts.is_empty() {
                 state.reachable = false;
