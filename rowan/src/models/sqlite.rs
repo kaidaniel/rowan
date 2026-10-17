@@ -1651,8 +1651,7 @@ fn row_value(an: &mut Analyzer, st: &mut State, node: &Node, factory: &Value, cu
         return tuple;
     }
     // a user row factory: called with the cursor and the tuple (each row its own context)
-    let mut nd = *node;
-    nd.col = node.col.wrapping_add(3_000_000 + i as u32);
+    let nd = node.sub(3_000_000 + i as u32);
     an.call_value(factory, &nd, None, st, Some(vec![Value::obj(cur), tuple]))
 }
 

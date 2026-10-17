@@ -27,6 +27,7 @@ pub struct DcSpec {
 pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], star_args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
     let ci = an.heap.class_info(cls);
     let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
+    let validated = crate::models::pydantic::is_validated(an, cls);
     let mut initvars: Vec<Value> = Vec::new();
     // `*seq` arguments: a sequence of known length gives positional arguments in order; past
     // one of unknown length every further positional field may come from it (its element)
@@ -136,6 +137,8 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
                 initvars.push(v);
                 continue;
             }
+            // (an unknown given for a field is what its annotation says)
+            let v = an.field_as_annotated(cls, fname, v, validated, state);
             let r = state.row(inst, ns).store(fk, true);
             state.set_row(inst, ns, r);
             state.set_slot(inst, ns, fk, v, true);
@@ -236,9 +239,9 @@ fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node,
             for kw in c.arguments.keywords.iter() {
                 let Some(arg) = &kw.arg else { continue };
                 match arg.id.as_str() {
-                    "default_factory" => {
+                    "default_factory" | "factory" => {
                         let f = an.eval(&kw.value, state);
-                        return an.call_value(&f, node, None, state, Some(vec![]));
+                        return an.call_value(&f, &factory_site(node, &kw.value), None, state, Some(vec![]));
                     }
                     "default" => return an.eval(&kw.value, state),
                     _ => {}
@@ -246,8 +249,22 @@ fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node,
             }
             return Value::data("field");
         }
+        // attrs' `Factory(f)` as a default
+        if crate::syntax::dotted_last(&c.func) == "Factory" && c.arguments.keywords.is_empty() {
+            if let [fe] = &c.arguments.args[..] {
+                let f = an.eval(fe, state);
+                return an.call_value(&f, &factory_site(node, fe), None, state, Some(vec![]));
+            }
+        }
     }
     an.eval(d, state)
+}
+
+/// The call site of a field's default factory at a construction `node`: one per field (the
+/// factory expression's place), so two fields' factories make two objects.
+pub fn factory_site(node: &Node, factory: &ast::Expr) -> Node {
+    use ruff_text_size::Ranged;
+    node.sub(4_000_000 + u32::from(factory.range().start()))
 }
 
 /// Dataclass fields in constructor order: base classes' fields first (MRO, nearest last).
@@ -549,7 +566,18 @@ pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, a: Args, state: &mut St
     }
     let call = crate::interp::Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
     let m = an.model("builtins.dict")?;
-    Some(m(an, state, &call))
+    let v = m(an, state, &call);
+    // (an unknown given for a key is what its annotation says)
+    for o in v.pts.iter() {
+        for (name, _) in dataclass_fields_mro(an, cls) {
+            let k = key_str_lit(&name);
+            if let Some(x) = state.slot_opt(o, Ns::Item, k) {
+                let x = an.field_as_annotated(cls, &name, x, false, state);
+                state.set_slot(o, Ns::Item, k, x, an.heap.obj(o).single);
+            }
+        }
+    }
+    Some(v)
 }
 
 /// A library class's instance `inst` of `cls` made: a pydantic model (without its own

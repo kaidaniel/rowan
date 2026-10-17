@@ -270,8 +270,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if let (Some(n), Some(items)) = (n, it.items.clone()) {
                 let mut keyed: Vec<(Value, Value)> = Vec::new();
                 for (k, x) in items.iter().enumerate() {
-                    let mut nd = c.node;
-                    nd.col = c.node.col.wrapping_add(1_500_000 + k as u32);
+                    let nd = c.node.sub(1_500_000 + k as u32);
                     let kv = match &key {
                         Some(f) => an.call_value(f, &nd, None, st, Some(vec![x.clone()])),
                         None => x.clone(),
@@ -354,8 +353,7 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
         let mut keys: Vec<Value> = Vec::new();
         for (k, it) in its.iter().enumerate() {
-            let mut nd = c.node;
-            nd.col = c.node.col.wrapping_add(1_600_000 + k as u32);
+            let nd = c.node.sub(1_600_000 + k as u32);
             keys.push(match &key {
                 Some(f) => an.call_value(f, &nd, None, st, Some(vec![it.clone()])),
                 None => it.clone(),

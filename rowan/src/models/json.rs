@@ -50,9 +50,8 @@ pub(super) fn json_literal_h(an: &mut Analyzer, st: &mut State, c: &Call, j: &se
             match hook {
                 Some(h) => {
                     // (a call context per object: the hook's allocations stay distinct)
-                    let mut nd = c.node;
                     let tag = path.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 1_000_000;
-                    nd.col = c.node.col.wrapping_add(1_000_000 + tag);
+                    let nd = c.node.sub(1_000_000 + tag);
                     an.call_value(h, &nd, None, st, Some(vec![Value::obj(oid)]))
                 }
                 _ => Value::obj(oid),

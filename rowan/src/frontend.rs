@@ -70,6 +70,11 @@ impl Node {
     pub fn none() -> Node {
         Node::synthetic(0, 0)
     }
+    /// A made-up call site beside this one (its column moved by `salt`): a model calling or
+    /// allocating several times at one node gives each its own site, so its own context.
+    pub fn sub(&self, salt: u32) -> Node {
+        Node { col: self.col.wrapping_add(salt), ..*self }
+    }
 }
 
 thread_local! {

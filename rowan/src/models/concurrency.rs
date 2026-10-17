@@ -240,8 +240,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     for k in 0..n {
                         let args: Vec<Value> = iters.iter().map(|i| i.items.as_ref().unwrap()[k].clone()).collect();
                         // (each call its own context: the results stay distinct objects)
-                        let mut nd = c.node;
-                        nd.col = c.node.col.wrapping_add(2_000_000 + k as u32);
+                        let nd = c.node.sub(2_000_000 + k as u32);
                         let (v, r) = call_catching(an, &f, args, IndexMap::new(), st, &nd);
                         if r.level > 0 {
                             worst.level = worst.level.max(1);

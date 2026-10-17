@@ -285,6 +285,11 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert.strictEqual(head("opt", 12), "opt = (parameter) None | dict[str(?), list[int(?) | None]]");
   assert.strictEqual(head("t", 12), "t = (parameter) tuple[int(?), ...]");
   assert(hover(idx, src, 12, "hits").includes("- `str(?)`: a str not known statically"), hover(idx, src, 12, "hits"));
+  // (typing notation for a container of unknown length or keys: each with its legend line)
+  assert(hover(idx, src, 7, "nums").includes("- `list[x]`: a list of any length whose items are `x`"), hover(idx, src, 7, "nums"));
+  assert(hover(idx, src, 6, "sizes").includes("- `dict[k, v]`: a dict of any size whose keys are `k` and values `v`"), hover(idx, src, 6, "sizes"));
+  assert(hover(idx, src, 12, "t").includes("- `tuple[x, ...]`: a tuple of any length whose items are `x`"), hover(idx, src, 12, "t"));
+  assert(!hover(idx, src, 12, "t").includes("`list[x]`"), hover(idx, src, 12, "t"));
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
@@ -523,8 +528,22 @@ const codedLine = z619src.findIndex((l) => l.trim() === "coded = c") + 1;
 assert(hover(z619idx, z619src, codedLine, "coded").startsWith('```python\ncoded = Coded("negative", __cause__=KeyError("k"), code=400)\n```'), hover(z619idx, z619src, codedLine, "coded"));
 
 // ---- every hover of several real programs: no internal names, every mark explained
+// ---- examples/etl_report.py: dataclass instances the program builds from unknown data hold
+// what the field annotations say (`float` is not trusted: an int passes for one); a list of
+// them in typing notation, with its legend line (not a list of exactly one Summary)
+const etl = path.join(root, "examples", "etl_report.py");
+{
+  const src = fs.readFileSync(etl, "utf8").split("\n");
+  const idx = indexResult(facts(etl));
+  const s109 = hover(idx, src, 109, "s");
+  assert(s109.startsWith("```python\ns = Summary(n_orders=int(?), region=str(?), total=?)\n```"), s109);
+  const sum109 = hover(idx, src, 109, "summaries");
+  assert(sum109.startsWith("```python\nsummaries = list[Summary(n_orders=int(?), region=str(?), total=?)]\n```"), sum109);
+  assert(sum109.includes("- `list[x]`: a list of any length whose items are `x`"), sum109);
+  assert(!s109.includes("`list[x]`"), s109);
+}
 const files = [
-  a01, z, g, kinds, z618, f043, z619,
+  a01, z, g, kinds, z618, f043, z619, etl,
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"),
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py"),
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),
@@ -542,6 +561,10 @@ const USES = {
   "[*]": (t) => /\[\*\]/.test(t.replace(/Tensor\[\*\]/g, "")),
   "…": (t) => t.includes("…"),
   "(only if x)": (t) => t.includes("(only if `"),
+  "list[x]": (t) => /(^|[^\w.])list\[/.test(t),
+  "set[x]": (t) => /(^|[^\w.])set\[/.test(t),
+  "tuple[x, ...]": (t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t),
+  "dict[k, v]": (t) => /(^|[^\w.])dict\[/.test(t),
 };
 const MARKS = ["✗", "⚠~", "⚠", "◌"];
 /** How a whole program's or a function's run was cut: its Note's opening words. */
