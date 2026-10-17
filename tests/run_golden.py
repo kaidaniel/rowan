@@ -83,10 +83,15 @@ def parse_set(s: str) -> set:
         s = s[1:-1]
     # top-level commas only: tuple keys (`("y", "max")`, MultiIndex columns) and quoted
     # commas (`","`) stay whole
-    parts, depth, cur, quote = [], 0, "", None
+    parts, depth, cur, quote, esc = [], 0, "", None, False
     for ch in s:
         if quote:
-            if ch == quote and not cur.endswith("\\"):
+            # (a backslash escapes the next character: `"\\"` ends at its second quote)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == quote:
                 quote = None
         elif ch in "\"'":
             quote = ch
