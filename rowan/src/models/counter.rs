@@ -54,18 +54,41 @@ pub fn make(an: &mut Analyzer, st: &mut State, node: &Node, entries: &[(KeyId, i
     Value::obj(oid)
 }
 
-/// A Counter whose counts are not known: keys `present` (none definite unless `definite`).
-fn make_unknown(an: &mut Analyzer, st: &mut State, node: &Node, present: &[KeyId], definite: &[KeyId], open: bool, ctx: &str) -> Value {
+/// Do the keys of a row not known come only from the program's stores (`stored_keys`)?
+fn stored_only(r: &Row) -> bool {
+    r.mutators.is_empty() && !r.top && r.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.kind == SourceKind::Data && s.site.starts_with("store@L")))
+}
+
+/// A count not known: an int.
+fn count_value() -> Value {
+    Value::data(&crate::domain::typed_label("int", "count"))
+}
+
+/// The source of the keys a Counter or defaultdict gets that are not known (as a store under
+/// such a key names it: `store@L4:str` for keys of a builtin type, `State::keys_type`).
+pub fn stored_keys(line: u32, ty: Option<&str>) -> crate::source::SourceId {
+    match ty {
+        Some(t) => Source::new(&format!("store@L{}:{}", line, t), SourceKind::Data),
+        None => Source::new(&format!("store@L{}", line), SourceKind::Data),
+    }
+}
+
+/// A Counter whose counts are not known: keys `present` (none definite unless `definite`;
+/// others of type `ty`, if known, when `open`).
+#[allow(clippy::too_many_arguments)]
+fn make_unknown(an: &mut Analyzer, st: &mut State, node: &Node, present: &[KeyId], definite: &[KeyId], open: bool, ty: Option<&str>, ctx: &str) -> Value {
     let oid = an.alloc_at(Kind::Dict, node, st, &format!("Counter@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(ctx));
     let mut row = Row::new();
     for k in present {
         row = row.store(*k, definite.contains(k));
-        st.set_slot(oid, Ns::Item, *k, Value::data("count"), true);
+        st.set_slot(oid, Ns::Item, *k, count_value(), true);
     }
     if open {
-        row = row.data_store(Source::new(&format!("Counter@L{}", node.line), SourceKind::Data));
+        row = row.data_store(stored_keys(node.line, ty));
     }
-    st.set_slot(oid, Ns::Item, intern::STAR, Value::lit(intern::key_int(0)), false);
+    // (what a key not known holds: a count; a missing key reads 0)
+    let star = if open { Value::lit(intern::key_int(0)).join(&count_value()) } else { Value::lit(intern::key_int(0)) };
+    st.set_slot(oid, Ns::Item, intern::STAR, star, false);
     st.set_row(oid, Ns::Item, row);
     an.m.counters.insert(oid);
     Value::obj(oid)
@@ -108,30 +131,42 @@ fn contribution(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
     Some(out)
 }
 
-/// The keys a value may contribute (for unknown counts), and whether others may come.
-fn maybe_keys(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> (Vec<KeyId>, bool) {
+/// The keys a value may contribute (for unknown counts), whether others may come, and their
+/// builtin type when known (the items of a `list[str(?)]`).
+fn maybe_keys(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> (Vec<KeyId>, bool, Option<&'static str>) {
     let mut ks: Vec<KeyId> = Vec::new();
     let mut open = false;
+    let mut types: Vec<Option<&'static str>> = Vec::new();
     for o in v.pts.iter() {
         if an.heap.kind(o) == Kind::Dict {
             let row = st.row(o, Ns::Item);
             ks.extend(row.present.iter());
-            open |= row.open();
+            if row.open() {
+                open = true;
+                types.push(st.keys_type(std::iter::once(o), Ns::Item));
+            }
         } else {
             let it = an.iterate(&Value::obj(o), node, st);
             let e = an.elem_value(&it.elem, node, "el");
             match &e.kv {
                 kv if kv.is_literal() && e.pts.is_empty() => ks.extend(crate::domain::kv_literals(kv).iter()),
-                _ => open = true,
+                kv => {
+                    open = true;
+                    let label = kv.data_site().map(|l| intern::str_get(l));
+                    types.push(label.and_then(|l| crate::domain::label_type(&l)).filter(|_| e.pts.is_empty()));
+                }
             }
         }
     }
     if v.pts.is_empty() {
         open = true;
+        types.push(None);
     }
     ks.sort();
     ks.dedup();
-    (ks, open)
+    // (the literal keys must be of that type too)
+    let ty = types.first().copied().flatten().filter(|t| types.iter().all(|u| *u == Some(*t)) && ks.iter().all(|k| crate::domain::key_type(*k, t)));
+    (ks, open, ty)
 }
 
 /// `Counter(x)`: counted.
@@ -160,14 +195,17 @@ pub fn construct(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // counts not known: the keys that may be there
     let mut present: Vec<KeyId> = Vec::new();
     let mut open = false;
+    let mut ty = None;
     if let Some(a) = c.args.first() {
-        let (ks, o) = maybe_keys(an, st, a, &c.node);
+        let (ks, o, t) = maybe_keys(an, st, a, &c.node);
         present.extend(ks);
         open |= o;
+        ty = t;
     }
     let kw: Vec<KeyId> = c.kwargs.keys().map(|k| intern::key_str_lit(&intern::str_get(*k))).collect();
+    let ty = ty.filter(|t| kw.iter().all(|k| crate::domain::key_type(*k, t)));
     present.extend(kw.iter().copied());
-    make_unknown(an, st, &c.node, &present, &kw, open, "counter")
+    make_unknown(an, st, &c.node, &present, &kw, open, ty, "counter")
 }
 
 fn combine(op: char, a: &[(KeyId, i64)], b: &[(KeyId, i64)]) -> Vec<(KeyId, i64)> {
@@ -204,19 +242,25 @@ pub fn binop(an: &mut Analyzer, st: &mut State, op: char, a: &Value, b: &Value, 
         return Some(make(an, st, node, &combine(op, &x, &y), &format!("counterop{}", op)));
     }
     // unknown counts: the keys that may be there (a `-` / `&` result's keys are a's)
-    let (ka, oa) = maybe_keys(an, st, a, node);
-    let (kb, ob) = maybe_keys(an, st, b, node);
-    let (present, open) = match op {
-        '-' | '&' => (ka, oa),
+    let (ka, oa, ta) = maybe_keys(an, st, a, node);
+    let (kb, ob, tb) = maybe_keys(an, st, b, node);
+    let (present, open, ty) = match op {
+        '-' | '&' => (ka, oa, ta),
         _ => {
             let mut k = ka;
             k.extend(kb);
             k.sort();
             k.dedup();
-            (k, oa || ob)
+            let ty = match (oa, ob) {
+                (true, true) => ta.filter(|_| ta == tb),
+                (true, false) => ta.filter(|t| k.iter().all(|x| crate::domain::key_type(*x, t))),
+                (false, true) => tb.filter(|t| k.iter().all(|x| crate::domain::key_type(*x, t))),
+                _ => None,
+            };
+            (k, oa || ob, ty)
         }
     };
-    Some(make_unknown(an, st, node, &present, &[], open, &format!("counterop{}", op)))
+    Some(make_unknown(an, st, node, &present, &[], open, ty, &format!("counterop{}", op)))
 }
 
 /// Unary `+c` / `-c`: the positive counts (of c / of -c).
@@ -228,8 +272,8 @@ pub fn unary(an: &mut Analyzer, st: &mut State, neg: bool, v: &Value, node: &Nod
             Some(make(an, st, node, &r, if neg { "counterneg" } else { "counterpos" }))
         }
         None => {
-            let (k, open) = maybe_keys(an, st, v, node);
-            Some(make_unknown(an, st, node, &k, &[], open, "counterpos"))
+            let (k, open, ty) = maybe_keys(an, st, v, node);
+            Some(make_unknown(an, st, node, &k, &[], open, ty, "counterpos"))
         }
     }
 }
@@ -253,10 +297,9 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
                 }
                 None => {
-                    let row = st.row(oid, Ns::Item);
-                    let kv = if row.open() { crate::domain::DATA } else { KeyVal::lits(row.present.clone()) };
-                    let t = an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::kv_only(kv), Value::data("count")]), Value::new(), crate::domain::DATA, st);
-                    an.alloc_positional(Kind::List, &c.node, None, t, crate::domain::DATA, st)
+                    let kv = unknown_keys(oid, st);
+                    let t = an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::kv_only(kv), count_value()]), Value::new(), crate::domain::DATA, st);
+                    an.alloc_positional(Kind::List, &c.node, None, t, KeyVal::Bot, st)
                 }
             }
         }
@@ -270,14 +313,13 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if items.len() <= crate::interp::UNROLL_MAX {
                     an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
                 } else {
-                    let ks = intern::KeySet::from_iter(cs.iter().map(|x| x.0));
-                    an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(KeyVal::lits(ks)), crate::domain::DATA, st)
+                    let ks = KeyVal::lits(intern::KeySet::from_iter(cs.iter().map(|x| x.0)));
+                    an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(ks.clone()), ks, st)
                 }
             }
             None => {
-                let row = st.row(oid, Ns::Item);
-                let kv = if row.open() { crate::domain::DATA } else { KeyVal::lits(row.present.clone()) };
-                an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(kv), crate::domain::DATA, st)
+                let kv = unknown_keys(oid, st);
+                an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(kv.clone()), kv, st)
             }
         },
         "copy" => match counts(an, oid, st) {
@@ -329,24 +371,24 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let mut row = st.row(oid, Ns::Item);
                     let present: Vec<KeyId> = row.present.iter().collect();
                     for k in present {
-                        st.set_slot(oid, Ns::Item, k, Value::data("count"), strong);
+                        st.set_slot(oid, Ns::Item, k, count_value(), strong);
                     }
                     match add {
                         Some(add) => {
                             for (k, _) in add {
                                 row = row.store(k, strong);
-                                st.set_slot(oid, Ns::Item, k, Value::data("count"), strong);
+                                st.set_slot(oid, Ns::Item, k, count_value(), strong);
                             }
                         }
                         None => {
                             for a in c.args.iter() {
-                                let (ks, open) = maybe_keys(an, st, a, &c.node);
+                                let (ks, open, ty) = maybe_keys(an, st, a, &c.node);
                                 for k in ks {
                                     row = row.store(k, false);
-                                    st.set_slot(oid, Ns::Item, k, Value::data("count"), false);
+                                    st.set_slot(oid, Ns::Item, k, count_value(), false);
                                 }
                                 if open {
-                                    row = row.data_store(Source::new(&format!("Counter.{}@L{}", name, c.line), SourceKind::Data));
+                                    row = row.data_store(stored_keys(c.line, ty));
                                 }
                             }
                         }
@@ -360,6 +402,18 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let _ = join_values(Vec::<Value>::new());
             Value::data("counter")
         }
+    }
+}
+
+/// Any key of a Counter whose counts are not known: one of its keys, or of their type.
+fn unknown_keys(oid: ObjId, st: &State) -> KeyVal {
+    let row = st.row(oid, Ns::Item);
+    if !row.open() {
+        return KeyVal::lits(row.present.clone());
+    }
+    match st.keys_type(std::iter::once(oid), Ns::Item) {
+        Some(t) => KeyVal::data(&crate::domain::typed_label(t, "")),
+        None => crate::domain::DATA,
     }
 }
 
@@ -548,7 +602,9 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
                 // (a key the closed row surely lacks: no earlier value to keep; in an
                 // open one a key not known may be there already, with any value)
                 let absent = r.closed() && !r.present.contains(k);
-                let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", an.heap.obj(oid).label))) } else { dflt };
+                // (what a key not known holds: the program's stores put it, `STAR`; else anything)
+                let earlier = if stored_only(&r) { state.slot(oid, ns, intern::STAR) } else { Value::data(&format!("{}[*]", an.heap.obj(oid).label)) };
+                let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&earlier) } else { dflt };
                 r = r.store(k, strong);
                 state.set_slot(oid, ns, k, dflt, absent);
             }
@@ -572,10 +628,10 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
         // an unknown key: some key gets the factory's value
         if let Some(f) = an.m.dd_factories.get(&oid).cloned() {
             let dflt = an.call_value(&f, node, None, state, Some(vec![]));
-            state.set_slot(oid, ns, intern::STAR, Value::with_kv(dflt.pts, crate::domain::DATA), false);
+            state.set_slot(oid, ns, intern::STAR, dflt, false);
         }
-        let src = Source::new(&an.heap.obj(oid).label, SourceKind::Data);
-        state.set_row(oid, ns, row.data_store(src));
+        let ty = key.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))).filter(|_| key.pts.is_empty());
+        state.set_row(oid, ns, row.data_store(stored_keys(node.line, ty)));
     }
     counter_restore
 }
