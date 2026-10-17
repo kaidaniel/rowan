@@ -33,10 +33,16 @@ down what you chose and why.
 10. **Modular, readable code.** One concern per component and file, narrow interfaces,
     functions short enough to read at once. Report `Analyzer`'s field count, engine
     functions over 100 lines and the largest engine file before and after.
+11. **Installed packages analysable.** Make analysing site-packages possible (`--follow`;
+    measured by `bench/sitepackages.py`): above all the plain code a company installs from its
+    own packages (business logic, not a framework), which today is unknown code and costs
+    the hovers of everything it returns. Libraries and frameworks may stay unknown where
+    following them costs too much.
 
 **Small programs first.** Never trade speed, or more than a little precision, on the smaller
 programs (stdlib12k, email, rich, click, golden-sized code) for the large ones (pip, timm,
-sktime, functional). A real soundness fix may cost them some speed.
+sktime, functional), nor on either for analysing installed packages (objective 11). A real
+soundness fix may cost them some speed.
 
 **Imprecision is a trade-off,** never "accepted": call a gap "known" or "known to be hard",
 name its cost, and list it under Remaining.
