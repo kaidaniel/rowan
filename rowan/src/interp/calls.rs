@@ -1,20 +1,26 @@
-//! Calls: dispatch, unknown calls, construction, user functions, bindings (port of the
-//! "calls" section of `rowan/interp.py`).
+//! Calls: `call_value` evaluates the arguments and dispatches on what the callee may be — the
+//! program's functions and methods (`call_user`: the body runs at the call site, in a context of
+//! the innermost call sites, within its function's budget), classes (`construct`: `__new__`,
+//! the instance, `__init__`), library functions and methods (`call_external`, a model or an
+//! unknown call), and several of these at once (`several_callees`: alternatives, one state
+//! each). Also the frames calls run in and how arguments bind to parameters.
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_values, Ns, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
-use crate::state::{Kind, State};
-use crate::domain::ObjId;
+use crate::source::{Source, SourceKind};
+use crate::state::{Kind, NAME_KEY_DROPS, State};
+use crate::syntax::is_generator;
 
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_CLONES};
-
+use super::{Analyzer, Args, Call, Frame, FrameKind, FuncInfo, FuncNode, MAX_CLONES, Payload};
 
 impl Analyzer {
     // ---------------------------------------------------------------- calls
+    /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
+    /// generators among them run (`force_gen`), then each callee `fv` may be called.
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
         let mut args: Vec<Value> = Vec::new();
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
@@ -72,28 +78,29 @@ impl Analyzer {
         for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user) {
             self.force_gen(a, state, !bulk);
         }
+        let a = Args::new(&args, &kwargs, &star_args, &star_kwargs);
         if fv.pts.is_empty() {
-            return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.unknown_call("?", None, a, state, node);
         }
         let targets: Vec<u32> = fv.pts.to_vec();
         if targets.len() == 1 {
-            return self.call_one(targets[0], &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
+            return self.call_one(targets[0], a, state, node, call_ast);
         }
         // (past the hard deadline: one unknown call for all of them)
         if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
-            return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.unknown_call("?", None, a, state, node);
         }
         let (unknown, targets) = self.unknown_callees(targets, call_ast);
         if targets.is_empty() {
             let (q, recv) = unknown.expect("several unknown callees");
-            return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.unknown_call(&q, Some(&recv), a, state, node);
         }
         if unknown.is_none() && targets.len() > 1 && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
-            if let Some(r) = self.skipped_on_demand(&targets, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast) {
+            if let Some(r) = self.skipped_on_demand(&targets, a, state, node, call_ast) {
                 return r;
             }
         }
-        self.several_callees(targets, unknown, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast)
+        self.several_callees(targets, unknown, a, state, node, call_ast)
     }
 
     /// Several callees (functions, methods, classes; `unknown`: unknown code among them, one
@@ -101,8 +108,7 @@ impl Analyzer {
     /// together, those out of their budget one call that does not run (`budget_skipped`), and
     /// once none runs any more (on demand past the work its run may do, past the deadline)
     /// the rest one such call.
-    #[allow(clippy::too_many_arguments)]
-    fn several_callees(&mut self, targets: Vec<ObjId>, unknown: Option<(String, Value)>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    fn several_callees(&mut self, targets: Vec<ObjId>, unknown: Option<(String, Value)>, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let (groups, targets) = self.receiver_groups(targets);
         let (skipped, groups, targets) = self.budget_skipped(groups, targets);
         // (several functions a value picks — a method of each of several receivers is the
@@ -128,20 +134,20 @@ impl Analyzer {
                 if rest.len() > 1 && rest[0] == i {
                     let fns: Vec<(ObjId, Option<Value>)> = rest.iter().filter_map(|j| callee(an, *j)).collect();
                     rest_skipped = rest;
-                    return an.skipped_calls(&fns, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                    return an.skipped_calls(&fns, a, st, node, call_ast);
                 }
             }
             if let Some(&oid) = targets.get(i) {
-                return an.call_picked(oid, &picked, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                return an.call_picked(oid, &picked, a, st, node, call_ast);
             }
             if let Some((f, recv, _)) = groups.get(i - n) {
-                return an.call_user(*f, Some(recv.clone()), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), st, node, false);
+                return an.call_user(*f, Some(recv.clone()), a, st, node, false);
             }
             if i - n - m < k {
-                return an.skipped_calls(&skipped, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                return an.skipped_calls(&skipped, a, st, node, call_ast);
             }
             let (q, recv) = unknown.as_ref().expect("an unknown callee");
-            an.unknown_call(q, Some(recv), args, kwargs, star_args, star_kwargs, st, node)
+            an.unknown_call(q, Some(recv), a, st, node)
         })
     }
 
@@ -150,8 +156,7 @@ impl Analyzer {
     /// only its `__init__` makes (`plain_init`) gives its instance, made here, as that
     /// `__init__`'s receiver — `cls(**params)` for any of a thousand classes. None: a callee
     /// is none of those.
-    #[allow(clippy::too_many_arguments)]
-    fn skipped_on_demand(&mut self, targets: &[ObjId], args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Option<Value> {
+    fn skipped_on_demand(&mut self, targets: &[ObjId], a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Option<Value> {
         let callees: Vec<(Option<ObjId>, Option<Value>, bool)> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
             (Kind::Function, Payload::Func(_)) => Some((Some(o), None, false)),
             (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((Some(*f), Some(r.clone()), false)),
@@ -172,7 +177,7 @@ impl Analyzer {
             };
             fns.extend(f.map(|f| (f, r)));
         }
-        let r = if fns.is_empty() { Value::new() } else { self.skipped_calls(&fns, args, kwargs, star_args, star_kwargs, state, node, call_ast) };
+        let r = if fns.is_empty() { Value::new() } else { self.skipped_calls(&fns, a, state, node, call_ast) };
         Some(if made.pts.is_empty() || funcs { r.join(&made) } else { made })
     }
 
@@ -194,7 +199,7 @@ impl Analyzer {
                 None
             }
             _ => {
-                let q = match call_ast.and_then(|c| super::chain_text(&c.func)) {
+                let q = match call_ast.and_then(|c| crate::syntax::chain_text(&c.func)) {
                     Some(text) => format!("call of {}", text),
                     None => format!("call of {}", self.heap.obj(unknown[0]).label),
                 };
@@ -277,8 +282,7 @@ impl Analyzer {
 
     /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
     /// value picks among functions).
-    #[allow(clippy::too_many_arguments)]
-    fn call_picked(&mut self, oid: ObjId, picked: &Option<String>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], st: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    fn call_picked(&mut self, oid: ObjId, picked: &Option<String>, a: Args, st: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         // (a groupby method of one of several groupby objects: its results are its own)
         let own = matches!(&self.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.heap.kind(g) == Kind::Groupby));
         let saved = if own { self.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { self.cx.alloc_extra.clone() };
@@ -290,7 +294,7 @@ impl Analyzer {
             };
             self.cx.picked.push((call.clone(), name));
         }
-        let r = self.call_one(oid, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+        let r = self.call_one(oid, a, st, node, call_ast);
         if picked.is_some() {
             self.cx.picked.pop();
         }
@@ -324,12 +328,16 @@ impl Analyzer {
     }
 
     /// Several definitions of one method (conditional ones) on one receiver.
-    #[allow(clippy::too_many_arguments)]
-    fn call_alternatives(&mut self, fns: &[u32], recv: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
-        self.alternatives(fns.len(), false, state, &mut |an, i, st| an.call_user(fns[i], Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), st, node, false))
+    fn call_alternatives(&mut self, fns: &[u32], recv: u32, a: Args, state: &mut State, node: &Node) -> Value {
+        self.alternatives(fns.len(), false, state, &mut |an, i, st| an.call_user(fns[i], Some(Value::obj(recv)), a, st, node, false))
     }
 
-    pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    /// A call of one callee object: a torch layer or module (its `forward`), a function (a
+    /// class's unbound method takes its receiver from the arguments; a classmethod the class), a
+    /// bound method, a class, a library function or method, `functools.partial`, an instance
+    /// (its `__call__`), or unknown code.
+    pub fn call_one(&mut self, oid: u32, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let kind = self.heap.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
         if matches!(kind, Kind::Namespace | Kind::List) && crate::models::torch::t_layer_type(self, oid).is_some() {
@@ -340,9 +348,9 @@ impl Analyzer {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
-                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
+                        let f = self.heap.class_attr(m, "forward");
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
-                        let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node);
+                        let r = self.call_alternatives(&fns, oid, a, state, node);
                         return crate::models::torch::t_forward_hooks(self, oid, args, r, state, node);
                     }
                 }
@@ -354,66 +362,66 @@ impl Analyzer {
                 let fi = self.heap.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
                     // unbound method called with explicit self: Base.method(self, ...)
-                    return self.call_user(oid, Some(args[0].clone()), args[1..].to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);
+                    return self.call_user(oid, Some(args[0].clone()), Args::new(&args[1..], &kwargs, &star_args, &star_kwargs), state, node, false);
                 }
                 if fi.is_classmethod.get() {
                     if let Some(cls) = fi.cls {
                         // `Cls.make(...)`: the class is the first argument
-                        return self.call_user(oid, Some(Value::obj(cls)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);
+                        return self.call_user(oid, Some(Value::obj(cls)), a, state, node, false);
                     }
                 }
-                self.call_user(oid, None, args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false)
+                self.call_user(oid, None, a, state, node, false)
             }
             Kind::Bound => {
                 let Payload::Bound(f, self_v) = self.heap.obj(oid).payload.clone() else { return Value::new() };
-                self.call_user(f, Some(self_v), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false)
+                self.call_user(f, Some(self_v), a, state, node, false)
             }
-            Kind::Class => self.construct(oid, args, kwargs, star_args, star_kwargs, state, node),
+            Kind::Class => self.construct(oid, a, state, node),
             Kind::External => {
                 let qual = self.heap.external_qual(oid);
-                if let Some(v) = crate::models::builtin_dunder(self, &qual, args, kwargs, star_args, star_kwargs, state, node) {
+                if let Some(v) = crate::models::builtin_dunder(self, &qual, a, state, node) {
                     return v;
                 }
-                let r = self.call_external(&qual, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                let r = self.call_external(&qual, a, state, node, call_ast);
                 if call_ast.is_some() {
                     crate::models::may_type_error(self, &qual, args, kwargs, &r, state);
                 }
                 r
             }
-            Kind::Method => self.call_method_object(oid, args, kwargs, star_args, star_kwargs, state, node, call_ast),
+            Kind::Method => self.call_method_object(oid, a, state, node, call_ast),
             Kind::Unknown => {
                 let q = format!("call of {}", self.heap.obj(oid).label);
-                self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
+                self.unknown_call(&q, Some(&Value::obj(oid)), a, state, node)
             }
             Kind::Partial => {
                 let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-                crate::models::partial_call(self, state, &call)
+                crate::models::stdlib::partial_call(self, state, &call)
             }
             Kind::Instance => {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__call__") {
-                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__call__"))).cloned().unwrap_or_default();
+                        let f = self.heap.class_attr(m, "__call__");
                         if f.pts.is_empty() {
                             return Value::new();
                         }
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
-                        return self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node);
+                        return self.call_alternatives(&fns, oid, a, state, node);
                     }
                 }
                 let q = format!("call of {}", self.heap.obj(oid).label);
-                self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
+                self.unknown_call(&q, Some(&Value::obj(oid)), a, state, node)
             }
             _ => {
                 let q = format!("call of {}", self.heap.obj(oid).label);
-                self.unknown_call(&q, None, args, kwargs, star_args, star_kwargs, state, node)
+                self.unknown_call(&q, None, a, state, node)
             }
         }
     }
 
     /// A call of a library method value (`dict.get` bound to its receiver): its model (a str
     /// method on known text: exactly), else unknown code; over several groupby objects, once each.
-    #[allow(clippy::too_many_arguments)]
-    fn call_method_object(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    fn call_method_object(&mut self, oid: u32, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let Payload::Method(qual, recv) = self.heap.obj(oid).payload.clone() else { return Value::new() };
         // several groupby objects (`groupby` over one of several columns): the model runs
         // once per object, each making its own results
@@ -422,15 +430,15 @@ impl Analyzer {
             return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
                 let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
                 let saved = an.cx.alloc_extra.replace(format!("gb{}", gs[i]));
-                let r = an.call_one(mo, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                let r = an.call_one(mo, a, st, node, call_ast);
                 an.cx.alloc_extra = saved;
                 r
             });
         }
         let mut args = args.to_vec();
         if qual.starts_with("dict.") || qual.starts_with("set.") {
-            if let Some(a) = args.first_mut() {
-                *a = self.keyify(a);
+            if let Some(first) = args.first_mut() {
+                *first = self.keyify(first);
             }
         }
         let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
@@ -438,11 +446,11 @@ impl Analyzer {
         let r = match (pure, self.program.models.lookup(&qual)) {
             (Some(v), _) => v,
             (None, Some(m)) => self.run_model(m, state, &call),
-            (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
+            (None, None) => return self.unknown_call(&qual, Some(&recv), Args::new(&call.args, kwargs, star_args, star_kwargs), state, node),
         };
         // (a str method of a str: what it returns is known by the method)
         let r = match self.value_type(&recv) {
-            Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::str_method_type(&qual, t), false),
+            Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::builtins::str_method_type(&qual, t), false),
             _ => r,
         };
         if call_ast.is_some() {
@@ -457,12 +465,12 @@ impl Analyzer {
     }
 
     /// A call of a library function or class (a model, or unknown code).
-    #[allow(clippy::too_many_arguments)]
-    pub fn call_external(&mut self, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    pub fn call_external(&mut self, qual: &str, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let qual = qual.to_string();
         let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
         if let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) {
-            return self.as_type(v, crate::models::result_type(self, &qual, args), false);
+            return self.as_type(v, crate::models::builtins::result_type(self, &qual, args), false);
         }
         // a builtin exception class: an exception object with its args
         if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
@@ -482,9 +490,9 @@ impl Analyzer {
         }
         if let Some(m) = self.program.models.lookup(&qual) {
             let r = self.run_model(m, state, &call);
-            return self.as_type(r, crate::models::result_type(self, &qual, args), false);
+            return self.as_type(r, crate::models::builtins::result_type(self, &qual, args), false);
         }
-        let r = self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node);
+        let r = self.unknown_call(&qual, None, a, state, node);
         // (`input()`: a str all the same)
         if qual == "builtins.input" {
             for o in r.pts.iter() {
@@ -528,7 +536,11 @@ impl Analyzer {
         r
     }
 
-    pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+    /// A call of a class of the program: an Enum lookup, a TypedDict, a `__new__` of its own
+    /// (then `__init__` on what it returns), a library base's construction, or a fresh instance
+    /// and its `__init__` (an exception's args when a builtin exception class is its base).
+    pub fn construct(&mut self, cls: u32, a: Args, state: &mut State, node: &Node) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         if crate::models::dataclasses::abstract_unimplemented(self, cls) {
             self.raise_here("TypeError", state);
             return Value::new();
@@ -538,28 +550,28 @@ impl Analyzer {
             return crate::models::enums::enum_lookup(self, cls, &ms, a, node, state);
         }
         // a TypedDict class makes a plain dict
-        if let Some(v) = crate::models::dataclasses::typed_dict_construct(self, cls, args, kwargs, star_args, star_kwargs, state, node) {
+        if let Some(v) = crate::models::dataclasses::typed_dict_construct(self, cls, a, state, node) {
             return v;
         }
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
         if let Some(owner) = self.class_lookup(cls, "__new__") {
-            let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
+            let fv = self.heap.class_attr(owner, "__new__");
             let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect();
             if !fns.is_empty() {
                 let mut nargs = vec![Value::obj(cls)];
                 nargs.extend(args.iter().cloned());
                 let mut out = Value::new();
                 for f in fns {
-                    let r = self.call_user(f, None, nargs.clone(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);
+                    let r = self.call_user(f, None, Args::new(&nargs, &kwargs, &star_args, &star_kwargs), state, node, false);
                     out = out.join(&r);
                 }
                 if let Some(init) = self.class_lookup(cls, "__init__") {
-                    let iv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+                    let iv = self.heap.class_attr(init, "__init__");
                     let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).is_some_and(|c| self.heap.mro(c).contains(&cls))).collect();
                     for inst in insts {
                         for f in iv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
-                            self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);
+                            self.call_user(f, Some(Value::obj(inst)), a, state, node, false);
                         }
                     }
                 }
@@ -568,15 +580,15 @@ impl Analyzer {
         }
         let inst = self.alloc_instance(cls, node, state);
         // library classes: TypedDict, pydantic models, dict subclasses, dataclasses
-        if let Some(v) = crate::models::dataclasses::construct_library(self, cls, inst, args, kwargs, star_args, star_kwargs, state, node) {
+        if let Some(v) = crate::models::dataclasses::construct_library(self, cls, inst, a, state, node) {
             return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
-            let fv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            let fv = self.heap.class_attr(init, "__init__");
             self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
-                    self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);
+                    self.call_user(f, Some(Value::obj(inst)), a, state, node, false);
                 }
             }
             self.cx.fresh_init.remove(&inst);
@@ -609,8 +621,8 @@ impl Analyzer {
         let ci = self.heap.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
-        // not collapse onto one instance (prototype: same site, last class wins); by the class
-        // object, as two classes may share a name (`type(name, bases, ns)` per choice of bases)
+        // not collapse onto one instance; by the class object, as two classes may share a name
+        // (`type(name, bases, ns)` per choice of bases)
         let site = format!("{}:{}", super::site_string(node), cls);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.lib.typed_dict {
@@ -665,15 +677,19 @@ impl Analyzer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
+    /// A call of the program's function `foid` (`self_v`: a method's receiver; `entry`: its
+    /// entry run). Unknown code instead past the work a run on demand may do, past the deadline,
+    /// or past its budget (`skipped_call`); a generator function's call makes a lazy generator
+    /// (its body runs when consumed); else its body runs here (`call_user_inner`).
+    pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, entry: bool) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // (its run for any call starts from the heap here too)
         self.note_call(foid, self_v.as_ref(), state);
         // (on demand, past the work a function's run may do, its callees' calls are unknown)
         if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
-            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         // past the hard deadline a user function is unknown code (its result unknown, its
         // arguments possibly changed, it may raise): the run ends in bounded time
@@ -681,7 +697,7 @@ impl Analyzer {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
-            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         // a generator's body runs when it is consumed (`force_gen`), not here
         let lazy = !entry
@@ -692,36 +708,40 @@ impl Analyzer {
             && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.cx.frames.len())
             && matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
         if lazy {
-            return self.make_lazy_gen(foid, self_v, args, kwargs, state, node);
+            return self.make_lazy_gen(foid, self_v, args.to_vec(), kwargs.clone(), state, node);
         }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.cx.model_depth, 0);
-        // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
+        // (the receiver, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.budget.hard_cut;
-        let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
+        let recv = self_v.clone();
         // (facts of keys stored through names are the caller's names': a callee's names are its
         // own; what it deletes or gives unknown code voids the caller's)
         let names = std::mem::take(&mut state.name_keys);
-        let drops = crate::state::NAME_KEY_DROPS.with(|c| c.get());
-        let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, entry);
-        state.name_keys = if crate::state::NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
+        let drops = NAME_KEY_DROPS.with(|c| c.get());
+        let r = self.call_user_inner(foid, self_v, a, state, node, entry);
+        state.name_keys = if NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
-            let (sv, a, kw, sa, skw) = keep;
-            return self.skipped_call(foid, &q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
+            return self.skipped_call(foid, &q, recv.as_ref(), a, state, node);
         }
         r
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
+    /// The body run of a call: singledispatch picks its implementation; a call of a running
+    /// activation takes its partial result (`recursive_call`); one past its budget is unknown
+    /// code. Else the callee's frame is pushed (its allocation context: receiver and call site),
+    /// the arguments bound, the body run to its recursion fixpoint (`run_rounds`), and its result
+    /// (a generator's object for a generator) recorded as a summary.
+    fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, entry: bool) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let forced = self.gens.force_at.take();
         // a singledispatch function: the implementation for the first argument's type
         if self.m.sdispatch.contains_key(&foid) && self.m.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
-            return crate::models::singledispatch::sdispatch_call(self, foid, self_v, args, kwargs, star_kwargs, state, node, entry);
+            return crate::models::singledispatch::sdispatch_call(self, foid, self_v, args.to_vec(), kwargs.clone(), star_kwargs.to_vec(), state, node, entry);
         }
         if !state.narrowed.is_empty() {
             state.narrowed.clear();
@@ -733,7 +753,7 @@ impl Analyzer {
             None => self.callee_site(node),
         };
         self.entry.analysed.insert(foid);
-        let key = self.activation_key(foid, &site, entry, &args, &kwargs, &star_args, &star_kwargs);
+        let key = self.activation_key(foid, &site, entry, a);
         if self.recursion.is_active(&key) {
             return self.recursive_call(&key, &self_v, &args, &kwargs, state);
         }
@@ -744,12 +764,12 @@ impl Analyzer {
             let q = fi.qualname.clone();
             self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
             self.budget.out.insert(foid);
-            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         if super::debug_enabled() {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
         }
-        // context for allocations inside the callee (§3)
+        // context for allocations inside the callee
         let ctx = match forced {
             Some((_, ctx)) => ctx,
             None => self.receiver_ctx(&self_v, &site),
@@ -766,14 +786,14 @@ impl Analyzer {
         // (objects made from here on, by birth: a run again of code makes them anew)
         let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
-        self.recursion.begin(&key, (self_v.clone(), args.clone(), kwargs.clone()), pre_rc.clone(), born_mark);
+        self.recursion.begin(&key, (self_v.clone(), args.to_vec(), kwargs.clone()), pre_rc.clone(), born_mark);
         if gen_id.is_none() {
             if let Some(fr) = self.cx.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(self.heap.serial(), pre_rc));
             }
         }
         let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len());
-        self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
+        self.bind_params(&fi, &self_v, a, state, node);
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
         if let Some(gid) = gen_id {
             self.gen_activation_end(gid, gen_cm, &mut st, &pre_bind, born_mark);
@@ -796,7 +816,7 @@ impl Analyzer {
             self.heap.obj_mut(gid).iterator = true;
             ret = Value::obj(gid);
         }
-        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
+        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
         self.findings.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.recursion.end(&key);
@@ -820,6 +840,8 @@ impl Analyzer {
         Caller { env, unbound: std::mem::take(&mut state.unbound), path, ret: state.ret.take(), exits: state.exits.take() }
     }
 
+    /// The caller's part of the state back after the callee's run (`take_caller`); the callee's
+    /// returns go, its exits replace the caller's when the caller had some.
     fn give_back(&mut self, c: Caller, state: &mut State) {
         self.cx.env_stack.pop();
         state.env = c.env;
@@ -854,6 +876,8 @@ impl Analyzer {
         new_fr
     }
 
+    /// `f` runs in a frame of method `foid` with `self_v` and `args` bound, in the caller's
+    /// allocation context (narrowing through a `__contains__` that is `return x in y`).
     pub(in crate::interp) fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let fi = self.heap.func_info(foid);
         let ctx = self.frame().ctx.clone();
@@ -867,7 +891,7 @@ impl Analyzer {
         self.cx.env_stack.push(saved_env.clone());
         self.cx.frames.push(new_fr);
         let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
-        self.bind_params(&fi, &Some(self_v), &args, &IndexMap::new(), &[], &[], state, &fake);
+        self.bind_params(&fi, &Some(self_v), Args::pos(&args), state, &fake);
         f(self, state);
         self.cx.frames.pop();
         self.cx.env_stack.pop();
@@ -875,9 +899,10 @@ impl Analyzer {
         state.unbound = saved_unbound;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::interp) fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) {
-        let bound = self.compute_bindings(fi, self_v, args, kwargs, star_args, star_kwargs, state, node);
+    /// Binds a call's arguments to the parameters of `fi` in the running frame (and records the
+    /// parameters' hover facts at the `def`).
+    pub(in crate::interp) fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, a: Args, state: &mut State, node: &Node) {
+        let bound = self.compute_bindings(fi, self_v, a, state, node);
         self.record_param_facts(fi, &bound, state);
         for (name, v) in bound {
             self.store_name(name, v, state);
@@ -885,8 +910,8 @@ impl Analyzer {
     }
 
     /// Parameter name -> argument value (allocating the *args tuple / **kwargs dict in `state`).
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::interp) fn compute_bindings(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> IndexMap<StrId, Value> {
+    pub(in crate::interp) fn compute_bindings(&mut self, fi: &FuncInfo, self_v: &Option<Value>, a: Args, state: &mut State, node: &Node) -> IndexMap<StrId, Value> {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let mut bound: IndexMap<StrId, Value> = IndexMap::new();
         let Some(a) = fi.node.params() else {
             return bound;
@@ -958,12 +983,12 @@ impl Analyzer {
                 if used_kw.contains(name) {
                     continue;
                 }
-                let nk = intern::key(intern::Key::Str(intern::str_get(*name)));
+                let nk = intern::key_of_str(*name);
                 row = row.store(nk, true);
                 state.set_slot(did, Ns::Item, nk, v.clone(), true);
             }
             state.set_row(did, Ns::Item, row);
-            let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key(intern::Key::Str(intern::str_get(*n)))));
+            let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key_of_str(*n)));
             for sk in star_kwargs {
                 self.copy_into(did, Ns::Item, sk, state, true, &kill);
             }
@@ -976,7 +1001,7 @@ impl Analyzer {
     /// default (joined with it when the key is only possibly there); a required one only
     /// `**kw` supplies is read from it (a requirement on an input).
     fn unbound_param_value(&mut self, fi: &FuncInfo, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
-        let nk = intern::key(intern::Key::Str(intern::str_get(name)));
+        let nk = intern::key_of_str(name);
         let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
         let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
         if let (Some(d), false) = (fi.defaults.get(&name), kw_present) {
@@ -1008,8 +1033,7 @@ impl Analyzer {
     }
 }
 
-
-/// (see `Analyzer::take_caller`)
+/// The caller's part of the state a callee's run takes out (`Analyzer::take_caller`).
 struct Caller {
     env: IndexMap<StrId, Value>,
     unbound: std::sync::Arc<Vec<StrId>>,

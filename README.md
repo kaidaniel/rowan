@@ -1,147 +1,118 @@
 # rowan
 
 > [!WARNING]
-> **rowan is experimental.** It is extensively tested (about a thousand example programs,
-> checked against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been
-> used in practice on real code bases. On large programs (thousands of lines and up) it may time out or crash.
+> **rowan is experimental.** It is extensively tested (about 1,300 example programs, checked
+> against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been used in
+> practice on real code bases. On large programs (thousands of lines and up) it may be slow or
+> crash.
 
 ![rowan logo](rowan_icon_256.png)
 
-**In VS Code:** [rowan on the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan).
+**rowan shows you what your Python program does without running it.** Install
+[rowan from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan)
+and hover over any name in a Python file:
 
-**rowan runs your Python program without running it.** It interprets the program abstractly:
-every name holds a *set of possible values* (literals, dicts, lists, instances, functions,
-tensors, DataFrames, … or `?` for something it cannot know), every branch is taken, every
-function is analysed for every way it is called. From that it tells you:
+* **what it holds**, written as Python: literals, dicts with their keys, lists, instances,
+  DataFrames with their columns, tensors with their shapes, or `?` for what rowan cannot know;
+* **what the code needs of it**: the keys, columns and attributes a function reads of its
+  parameters and of its inputs (JSON, CSV, environment variables, requests), i.e. the schema
+  the code assumes;
+* **what each of your calls gives it**, and which call breaks a function;
+* for PyTorch and numpy: **the shape of every tensor**, in the function's own terms.
 
-* **what each variable holds**, in notation that reads like Python;
-* **which accesses can fail**: a key or attribute that is definitely, possibly or likely missing;
-* **what your program requires of its inputs**: the keys of the JSON, CSV columns, environment
-  variables, request bodies and parameters it reads, i.e. the schema the code assumes;
-* for PyTorch and numpy: **the shape of every tensor**, and the shape errors.
+Accesses that may fail (a key set on some paths only, a typo, a column a merge renamed, a tensor
+of the wrong shape) are underlined as problems.
 
-It knows the standard library, pydantic, FastAPI, pandas, PyTorch and numpy well enough to
-compute exact results on known data, and stays sound where it can't: an unknown value is `?`,
-never a guess. The engine is written in Rust and analyses a few thousand lines in well under a
-second.
+rowan follows every branch and every call of your program, and also analyses each function for
+any call of it. It knows the standard library, pandas, pydantic, FastAPI, PyTorch and numpy well
+enough to compute exact results on known data, and stays honest where it can't: an unknown value
+is `?`, never a guess.
 
 ## Examples
 
-Each block is a complete program followed by rowan's report for it (trimmed to the relevant
-lines). Run `rowan FILE.py` to get the same.
+Each example is a complete file; the hovers and problems below are what rowan shows for it.
 
-### Keys that may be missing, and typos
+### Dicts: what a function needs, and which call breaks it
 
 ```python
-import sys
-
 def make_user(row, admin=False):
     user = {"id": row["id"], "name": row["name"].strip().title()}
     if admin:
         user["role"] = "admin"
+        user["since"] = row["since"]
     return user
 
-u = make_user({"id": 7, "name": "  ada lovelace "}, admin=len(sys.argv) > 1)
-before = dict(u)
-greeting = f"Hello, {u['name']}!"
-role = u["role"]          # only set on some paths
-email = u["emial"]        # a typo
+
+ada = make_user({"id": 1, "name": "  ada lovelace ", "since": 1843}, admin=True)
+bob = make_user({"id": 2, "name": "bob"}, admin=True)
+eve = make_user({"id": 3, "name": "eve"})
 ```
 
-```
-== accesses that may fail ==
-  L14   ⚠  u["role"]   key "role" is only set on some paths
-  L15   ✗  u["emial"]  key "emial" is never set
+Hovering `row`:
 
-== what each function needs from its arguments ==
-  make_user  always:    row["id"], row["name"]
+> ```python
+> row = (parameter)
+> ```
+>
+> **Requirements**
+> - `row["id"]`
+> - `row["name"]`
+> - `row["since"]` (only if `admin`)
+>
+> **In Calls**
+> - `{"id": 1, "name": "  ada lovelace ", "since": 1843}` on line 9.
+> - `{"id": 2, "name": "bob"}` on line 10: ✗ `row["since"]`
+> - `{"id": 3, "name": "eve"}` on line 11.
+>
+> **Notes**
+> - `(only if x)`: needed only on calls where `x` holds of the arguments as passed
+> - ✗: fails on every path
 
-== what functions return ==
-  make_user returns {"id": …, "name": …, "role"?: …}
+`row["since"]` on line 5 is underlined: *key "since" is never set (via L10)*. Hovering `ada`
+shows the value computed exactly, string methods included:
 
-== module-level variables at the end ==
-  before = {"id": 7, "name": "Ada Lovelace", "role"?: "admin"}
-  greeting = "Hello, Ada Lovelace!"
-```
-
-`"role"?` means *on some paths only*. The string methods and the f-string are evaluated
-exactly. `make_user` also gets a contract of its own: whoever calls it must pass a `row` with
-`id` and `name`. A read under a test of another argument says which (had the branch read
-`row["since"]`, the contract would add `only if admin: row["since"]`).
+> ```python
+> ada = {
+>   "id": 1,
+>   "name": "Ada Lovelace",
+>   "role": "admin",
+>   "since": 1843
+> }
+> ```
+>
+> **Allocation Sites**
+> - created on line 2
 
 ### The schema your code assumes
 
 ```python
-import json, os
+import json
+import os
 
-DEFAULTS = {"retries": 3, "timeout": 10.0}
 
 def load_config():
-    cfg = {**DEFAULTS, **json.loads(os.environ["APP_CONFIG"])}
+    cfg = json.loads(os.environ["APP_CONFIG"])
     db = cfg["database"]
     url = f"postgres://{db['user']}@{db['host']}:{db.get('port', 5432)}/{db['name']}"
     if cfg.get("debug"):
         print("tracing", cfg["trace_level"])
-    return url, cfg["retries"]
+    return url
 ```
 
-```
-== what the code reads from its inputs ==
-  json.loads(…) (line 8)  always:    ["database"]["host"], ["database"]["name"], ["database"]["user"]
-                          sometimes: ["trace_level"]
-  os.environ              always:    ["APP_CONFIG"]
-```
+Hovering `cfg` on line 6:
 
-Nested requirements are tracked to where the data came from. `.get` reads require nothing,
-and a read behind a condition is `sometimes`. `retries` comes out as `?`, not `3`, because the
-JSON may override it.
+> ```python
+> cfg = json.loads(os.environ["APP_CONFIG"])
+> ```
+>
+> **Requirements**
+> - `cfg["database"]["host"]`
+> - `cfg["database"]["name"]`
+> - `cfg["database"]["user"]`
+> - `cfg["trace_level"]` on some paths
 
-### FastAPI and pydantic, through the test client
-
-```python
-from typing import Literal
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
-from pydantic import BaseModel, Field
-
-app = FastAPI()
-ORDERS = {}
-
-class OrderIn(BaseModel):
-    item: str
-    qty: int = Field(gt=0)
-    size: Literal["S", "M", "L"] = "M"
-
-@app.post("/orders/{oid}")
-def create(oid: int, order: OrderIn):
-    if oid in ORDERS:
-        raise HTTPException(status_code=409, detail="exists")
-    ORDERS[oid] = order
-    return {"id": oid, "item": order.item, "total": order.qty * 2.5}
-
-client = TestClient(app)
-ok = client.post("/orders/1", json={"item": "tea", "qty": "4"})
-dup = client.post("/orders/1", json={"item": "tea", "qty": 1})
-bad = client.post("/orders/2", json={"item": "tea", "qty": 0, "size": "XL"})
-ok_body, ok_code = ok.json(), ok.status_code
-dup_code, bad_code = dup.status_code, bad.status_code
-```
-
-```
-  ok_body = {"id": 1, "item": "tea", "total": 10.0}
-  ok_code = 200
-  dup_code = 409
-  bad_code = 422
-  ORDERS = {1: OrderIn(item="tea", qty=4, size="M")}
-
-== what each function needs from its arguments ==
-  create  always:    order["item"], order["qty"]
-```
-
-Requests go through routing, parameter binding, pydantic validation (`"4"` is coerced to `4`,
-`qty=0` breaks `gt=0`, `"XL"` is not a `Literal` option) and the handler. The response is what
-the client would read back. The handler itself is also analysed for *any* request: its body
-must carry `item` and `qty`.
+Nested reads are traced back to where the data came from; `.get` reads require nothing, and a
+read behind a condition is needed on some paths only.
 
 ### pandas: columns through merges and groupbys
 
@@ -159,37 +130,53 @@ joined = orders.merge(customers, on="customer")
 by_region = joined.groupby("region_x", as_index=False)["amount"].sum()
 oops = joined["region"]
 
+
 def monthly(path):
     df = pd.read_csv(path, parse_dates=["ts"])
     df["month"] = df["ts"].dt.month
     return df.groupby(["month", "category"])["price"].mean().reset_index()
 ```
 
-```
-== accesses that may fail ==
-  L13   ✗  joined["region"]  key "region" was removed or renamed on every path to here
+Hovering `joined`:
 
-== what the code reads from its inputs ==
-  read_csv(…) (line 17)  always:    ["category"], ["price"], ["ts"]
+> ```python
+> joined = DataFrame[
+>   "amount",
+>   "customer",
+>   "order_id",
+>   "region_x",
+>   "region_y",
+>   "tier"
+> ]
+> ```
+>
+> **Allocation Sites**
+> - never has key "region" here
 
-== what functions return ==
-  monthly returns DataFrame["category", "month", "price"]
+so `joined["region"]` is underlined: *column "region" was removed or renamed on every path to
+here*. Hovering `by_region` shows `by_region = DataFrame["amount", "region_x"]`. `monthly` is
+never called, yet hovering
+its `df` on line 16 gives the columns the CSV file must have:
 
-== module-level variables at the end ==
-  by_region = DataFrame["amount", "region_x"]
-  joined = DataFrame["amount", "customer", "order_id", "region_x", "region_y", "tier"]
-```
+> ```python
+> df = DataFrame[**?]
+> ```
+>
+> **Requirements**
+> - `df["category"]`
+> - `df["price"]`
+> - `df["ts"]`
+>
+> **Notes**
+> - `**?`: other keys may exist
 
-The merge suffixed the clashing `region` column on both sides, so `joined["region"]` can't
-work. `monthly` is never called, so rowan analyses it with an unknown file: you get the
-columns it needs and the columns it returns.
-
-### PyTorch: shapes, symbolically
+### PyTorch: shapes in the function's own terms
 
 ```python
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class Attention(nn.Module):
     def __init__(self, n_embd, n_head):
@@ -203,34 +190,103 @@ class Attention(nn.Module):
         q, k, v = self.qkv(x).split(C, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         att = F.softmax(q @ k.transpose(-2, -1), dim=-1)
-        y = (att @ v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)).transpose(1, 2)
-        return self.proj(y.reshape(B, T, C))
+        y = (att @ v).transpose(1, 2).reshape(B, T, C)
+        return self.proj(y)
+
 
 attn = Attention(64, 4)
 out = attn(torch.randn(2, 10, 64))
 bad = attn(torch.randn(2, 10, 32))
 ```
 
-```
-== tensor shapes ==
-  L15    ✗  shape mismatch: Linear(64 -> 192) given last dim 32  via L25
-  L14       needs x.dim() == 3
-  L15       needs x.shape[2] == n_embd
+Hovering `att`:
 
-== module-level variables at the end ==
-  out = Tensor[2, 10, 64]
+> ```python
+> att = Tensor[B, self.n_head, T, T]
+> ```
+>
+> **In Calls**
+> - `Tensor[2, 4, 10, 10]` on line 25.
+>
+> **Notes**
+> - `B`: `x.shape[0]`
+> - `T`: `x.shape[1]`
+
+Hovering `x`:
+
+> ```python
+> x = (parameter)
+> ```
+>
+> **Requirements**
+> - `x.dim() == 3`
+> - `x.shape[2] == n_embd`
+>
+> **In Calls**
+> - `Tensor[2, 10, 64]` on line 25.
+> - `Tensor[2, 10, 32]` on line 26: ✗ (Linear(64 -> 192) given last dim 32)
+>
+> **Notes**
+> - ✗: fails on every path
+
+Line 15 is underlined: *shape mismatch: Linear(64 -> 192) given last dim 32 (via L26)*.
+
+### FastAPI and pydantic, through the test client
+
+```python
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
+
+app = FastAPI()
+ORDERS = {}
+
+
+class OrderIn(BaseModel):
+    item: str
+    qty: int = Field(gt=0)
+    size: Literal["S", "M", "L"] = "M"
+
+
+@app.post("/orders/{oid}")
+def create(oid: int, order: OrderIn):
+    if oid in ORDERS:
+        raise HTTPException(status_code=409, detail="exists")
+    ORDERS[oid] = order
+    return {"id": oid, "item": order.item, "total": order.qty * 2.5}
+
+
+client = TestClient(app)
+ok = client.post("/orders/1", json={"item": "tea", "qty": "4"})
+dup = client.post("/orders/1", json={"item": "tea", "qty": 1})
+bad = client.post("/orders/2", json={"item": "tea", "qty": 0, "size": "XL"})
+ok_body, ok_code = ok.json(), ok.status_code
+dup_code, bad_code = dup.status_code, bad.status_code
 ```
 
-Inside `forward` (what the editor hover shows) every tensor has a shape in the function's own
-terms: `q` is `Tensor[B, self.n_head, T, n_embd // self.n_head]`, `att` is
-`Tensor[B, self.n_head, T, T]`. An undecided condition becomes a *requirement* (`x` must be 3-D,
-its last dim `n_embd`); a decided one that fails is a shape error, at the call that triggers it.
+Hovering the names on the last two lines:
+
+```python
+ok_body = {"id": 1, "item": "tea", "total": 10.0}
+ok_code = 200
+dup_code = 409
+bad_code = 422
+```
+
+Requests go through routing, parameter conversion, pydantic validation (`"4"` becomes `4`,
+`qty=0` breaks `gt=0`, `"XL"` is not one of the `Literal`'s values) and the handler.
 
 ### Exact values from the standard library
 
 ```python
-import datetime, json, re, sqlite3
+import datetime
+import json
+import re
+import sqlite3
 
 LOG = """2024-03-01T10:00 INFO user=ann amount=12.5
 2024-03-01T11:30 WARN user=bo amount=7
@@ -249,108 +305,88 @@ label = first.strftime("%A %d %B, %H:%M")
 summary = json.dumps({"users": per_user, "since": label}, sort_keys=True)
 ```
 
+Hovering `per_user`, `first` and `label`:
+
+```python
+per_user = {"ann": 32.5, "bo": 7.0}
+first = datetime.datetime(2024, 3, 1, 10, 0)
+label = "Friday 01 March, 10:00"
 ```
-  rows = [("2024-03-01T10:00", "INFO", "ann", "12.5"), ("2024-03-01T11:30", "WARN", "bo", "7"), ("2024-03-02T09:15", "INFO", "ann", "20")]
-  per_user = {"ann": 32.5, "bo": 7.0}
-  label = "Friday 01 March, 10:00"
-  summary = "{\"since\": \"Friday 01 March, 10:00\", \"users\": {\"ann\": 32.5, \"bo\": 7.0}}"
-```
 
-A regex engine, an in-memory SQL simulation, `datetime` and `json` all produce the values
-CPython would. With a log read from outside, the same lines come out as `?`: rowan never
-guesses a value it can't compute.
+The regular expressions, the SQL, `datetime` and `json` compute what CPython would. With a log
+read from a file instead, the same names show `?`: rowan never guesses a value it can't compute.
 
-## Reading the report
+## Reading a hover
 
-The report has a section for each of: the accesses that may fail, tensor shapes, what the
-code reads from its inputs, what each function needs from its arguments, what functions
-return, the module's variables at the end, and the limits of the analysis (calls into code
-rowan cannot see). It ends with a legend of the marks it uses:
+A hover starts with `name = value`, written as Python (a parameter: `name = (parameter)`, with its
+type or default when known), followed by up to four sections:
 
-| mark | meaning |
+* **Requirements**: what the code reads of a parameter for any call of its function
+  (`row["id"]`, `row["since"]` *(only if `admin`)*, `x.dim() == 3`), or of an input read on that
+  line (`cfg = json.loads(…)`); *on some paths* when a read is behind a condition;
+* **In Calls**: what each of your program's own calls gives (or passes, for a parameter), with
+  the reads that fail for it (`✗ row["since"]`);
+* **Allocation Sites**: where its objects were made, and keys they never have there;
+* **Notes**: what each mark and notation used above means; last, when the analysis was cut
+  short or ran function by function.
+
+| in values | means |
+| --- | --- |
+| `?` | a value rowan cannot know (it depends on input, or on code rowan cannot see) |
+| `int(?)` | an int whose value is not known |
+| `a \| b` | one of these, depending on the path or the call |
+| `"k"?: v` | a key present on some paths only |
+| `"k"~: v` | present unless code rowan cannot see removed it |
+| `**?` | other keys or attributes may exist |
+| `list[X]` | a list of any length whose elements are like `X` |
+| `DataFrame["a", "b"]` | a DataFrame's columns |
+| `Tensor[B, T, 4*C]` | a tensor's shape (named dims are explained in the Notes) |
+| `…` | not shown |
+
+| marks | means |
 | --- | --- |
 | `✗` | fails on every path that reaches it |
-| `⚠` | fails on some paths (a key set on some paths only, or missing from some of the objects a name may hold) |
+| `⚠` | fails on some paths |
 | `⚠~` | fails unless code rowan cannot see sets the key first |
-| `via L5→L9` | the calls (by line) through which the access was reached |
-| `always` / `sometimes` | a key read on every path / on some paths only |
 
-In values, `?` is something unknown; `a | b` is one of several values; `"k"?:` is a key present
-on some paths only (`"k"~:` unless code rowan cannot see removed it); `**?` means other keys
-may exist; `list[X]` is any number of elements like `X`; `DataFrame["a", "b"]` a frame's
-columns; `<Match>` an object shown by its type; `Tensor[B, T, 4*C]` a tensor shape; `…` what
-is not shown. Inside a function, unknowns are named by where they come from (`row["id"]`,
-`x.shape[0]`, `json.loads(text)`). Accesses that always succeed are only counted, and so are
-those that succeed unless code rowan cannot see removed the key. `--json` has every finding.
-
-## Building and running
-
-You need a Rust toolchain (stable, from [rustup](https://rustup.rs)). Python is not needed to
-run rowan; it never executes your program.
-
-```
-cd rowan
-cargo build --release                       # → rowan/target/release/rowan
-cargo install --path .                      # optional: puts `rowan` on your PATH (~/.cargo/bin)
-```
-
-```
-rowan prog.py                 # text report: failing accesses, what inputs and arguments need, results, values
-rowan prog.py --json          # JSON lines (verdicts, schemas, summaries)
-rowan prog.py --facts         # per-name facts, as the editor integration uses them
-rowan serve                   # a long-running server speaking JSON lines over stdio
-```
-
-Imports of local modules and packages are followed. Installed packages are modelled
-(pandas, pydantic, …) or unknown, unless you ask for their source with `--follow PKG`.
-Other options: `--no-entry` (don't analyse uncalled functions with unknown arguments),
-`--search-path DIR`, `--site-packages DIR`, `--value-depth N`, `--no-rows`, `--no-summaries`.
-
-**VS Code.** Install [rowan from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan)
-(the engine is bundled for macOS, Linux and Windows): hover over a name to see `name = value` as
-Python (inside a function: for any call — the program's own, and any once the module has run,
-after any of its functions —, its parameters as annotated; a parameter: `name = (parameter)`, with
-its type or default when known, `(parameter) 4 | int(?)`), then **Requirements** (what the code
-reads of a parameter, for any call of its function — `row["id"]`, `row["since"] (only if admin)`,
-tensor shapes it needs —, or of an input read on that line, `cfg = json.loads(text)`), **In Calls**
-(what each of the program's own calls gives or passes: `3 on line 5.`, with the reads that fail for
-it, `✗ row["since"]`), **Allocation Sites** (where its objects were made, keys they never have) and
-**Notes** (what each name, mark and notation used above means; last, whether the analysis was cut
-at its deadline or ran on demand); accesses that may fail are diagnostics. Its source is in `vscode-rowan/`; the
-`.vsix` packages of each version are attached to the
+Files are analysed when opened or saved, or with **Rowan: Analyse current file**. When a whole
+file takes longer than a second, rowan answers each function when you first hover in it (usually
+well under a second), and says so in the status bar. The extension bundles rowan for macOS,
+Linux and Windows; the `.vsix` packages of each version are attached to the
 [GitHub releases](https://github.com/kaidaniel/rowan/releases).
 
-## What rowan models
+## What rowan knows
 
-* **Standard library**, exact on known values: builtins; str / bytes / dict / list / set
-  methods and formatting; `collections`, `itertools`, `functools`, `operator`, `heapq`,
-  `bisect`; dataclasses, enum, NamedTuple, TypedDict; `re`, `string.Template`, `textwrap`,
-  `shlex`, `html`, `base64`, `urllib.parse`; `json`, `csv`, `configparser`, `sqlite3` (in-memory
-  SQL); `math`, `statistics`, `decimal`, `fractions`, `datetime`; `os.environ`, `os.path`,
-  `pathlib`, `argparse`, `contextlib`, `threading` / `concurrent.futures`, `copy`, `logging`.
-* **pandas:** a frame's columns through construction, projection, stores, drops and renames,
-  `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes. Readers give open
-  frames whose columns become a schema.
-* **pydantic** (v2 and v1 spellings): fields and aliases, lax validation, nested models,
+* **Python and its standard library**, exact on known values: builtins; str / bytes / dict /
+  list / set methods and formatting; `collections`, `itertools`, `functools`, `operator`,
+  `heapq`, `bisect`; dataclasses, enum, NamedTuple, TypedDict; `re`, `string.Template`,
+  `textwrap`, `shlex`, `html`, `base64`, `urllib.parse`; `json`, `csv`, `configparser`,
+  `sqlite3` (in-memory SQL); `math`, `statistics`, `decimal`, `fractions`, `datetime`;
+  `os.environ`, `os.path`, `pathlib`, `argparse`, `contextlib`, `threading` /
+  `concurrent.futures`, `copy`, `logging`.
+* **pandas:** a DataFrame's columns through construction, selection, stores, drops and renames,
+  `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes. Files read with
+  `read_csv` and friends have whatever columns the code reads.
+* **pydantic** (v2 and v1 spellings): fields and aliases, validation, nested models,
   validators, dumps and their options, `ValidationError.errors()`, `BaseSettings`.
 * **FastAPI:** routes, parameters converted by annotation, dependencies, middlewares,
   exception handlers, `response_model`, and what `TestClient` reads back.
 * **PyTorch and numpy:** symbolic shapes through creation, broadcasting, `matmul` / `einsum`,
-  shape ops, reductions, indexing and `nn` layers. dtype and device are not modelled.
+  shape operations, reductions, indexing and `nn` layers. dtype and device are not tracked.
 
-Anything else from an installed package is an unknown call: it may change what it is given.
+Your own modules are followed through their imports. Anything else from an installed package is
+taken to be able to do anything to what it is given.
 
-## What is sound
+## What you can rely on
 
-`proven`, `possibly` and `missing`, and the values and key sets shown, hold for every run,
-relative to the models and to annotations (an entry point's `x: Foo` is taken to be a `Foo`).
-`exec` / `eval` of non-literal code, `setattr` / `getattr` with unknown names, metaclasses and
-monkey-patching are unknown or ignored. The `likely` readings (`✓~`, `⚠~`) assume unknown code
-removed no keys, and say so. A run cut by a deadline is still sound, but less precise.
+What a hover or problem states holds for every run of your program: a value shown, a key shown
+as always there, a read marked `✗` or `⚠`. This assumes rowan's knowledge of the libraries
+above is right, and that annotations are true (a function analysed for any call takes
+`x: Foo` to be a `Foo`). `exec` / `eval` of code built at run time, `setattr` / `getattr` with
+names not known, metaclasses and monkey-patching are not followed. Readings marked `~` assume
+that code rowan cannot see removed nothing, and say so. An analysis cut short is still right,
+only less precise.
 
 ## More
 
-* `AGENTS.md`: how the engine works, and notes for working on it (tests, conventions,
-  debugging).
-* `tests/` has about a thousand example programs, each annotated with what rowan must infer
-  and checked against real Python, pandas, pydantic, FastAPI and PyTorch runs.
+Working on rowan itself: [`AGENTS.md`](AGENTS.md) and [`rowan/README.md`](rowan/README.md).

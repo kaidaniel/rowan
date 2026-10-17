@@ -7,14 +7,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use indexmap::IndexMap;
 
-use crate::domain::{Ns, ObjId, Value};
+use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::Node;
 use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
 use crate::state::{Kind, State};
 
 use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Slot};
-use super::{Analyzer, FuncInfo, Payload};
+use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
 pub const CLOSURE_CACHE: usize = 1 << 21;
@@ -360,7 +360,7 @@ impl Analyzer {
             _ => None,
         };
         let mut out = Vec::new();
-        for st in f.body.iter().take_while(|st| !super::stmts::contains_return(std::slice::from_ref(*st)) && !super::is_generator(std::slice::from_ref(*st))) {
+        for st in f.body.iter().take_while(|st| !crate::syntax::contains_return(std::slice::from_ref(*st)) && !crate::syntax::is_generator(std::slice::from_ref(*st))) {
             match st {
                 Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
                 Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),
@@ -485,8 +485,8 @@ impl Analyzer {
     /// A call of user code whose body does not run (past its budget, cut at the deadline): an
     /// unknown call that may also change what the code reaches beyond its arguments (the globals
     /// and cells it, and the code it can call, reads where they may change).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+    pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what
         // the call reaches otherwise reaches the receiver too (`Havoc::guard`); one of several
@@ -514,7 +514,7 @@ impl Analyzer {
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
         let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
-        let r = self.unknown_call(q, self_v, &args, &kwargs, star_args, star_kwargs, state, node);
+        let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
@@ -575,15 +575,14 @@ impl Analyzer {
     /// and every receiver whole, that may also change what all their code reaches. It covers
     /// each one's `skipped_call` (which leaves out what a function only reads, and walks a
     /// receiver by the names its code uses); a method returning its receiver gives it back.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn skipped_calls(&mut self, fns: &[(ObjId, Option<Value>)], args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+    pub(super) fn skipped_calls(&mut self, fns: &[(ObjId, Option<Value>)], a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         for (f, r) in fns {
             self.note_call(*f, r.as_ref(), state);
         }
         self.gens.force_at = None;
-        let recv = crate::domain::join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
-        let text = call_ast.and_then(|c| super::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
-        let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), args, kwargs, star_args, star_kwargs, state, node);
+        let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
+        let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
+        let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots: Vec<ObjId> = fns.iter().map(|(f, _)| *f).collect();
@@ -592,7 +591,7 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         self.flag_may_raise(state);
         let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
-        crate::domain::join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
+        join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
     }
 
     /// The arguments of a call of `foid` that does not run, as what its code may change of
@@ -845,7 +844,7 @@ impl Analyzer {
         let fi = self.heap.func_info(f);
         let Some(ps) = fi.node.params() else { return Flags::CHANGE };
         if let super::FuncNode::Def(d) = fi.node {
-            if d.is_async || super::is_generator(&d.body) {
+            if d.is_async || crate::syntax::is_generator(&d.body) {
                 return Flags::CHANGE;
             }
         }
@@ -946,7 +945,7 @@ impl Analyzer {
             super::FuncNode::Def(d) => {
                 let (n, handler) = (s(&fi.name), handlers.contains(&fi.node.addr()));
                 let callers = handler || names.called.contains(&n) && !names.decorated.contains(&n);
-                fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !super::is_generator(&d.body) && callers && !names.values.contains(&n)
+                fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !crate::syntax::is_generator(&d.body) && callers && !names.values.contains(&n)
             }
             super::FuncNode::Lambda(_) => false,
         };

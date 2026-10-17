@@ -8,12 +8,14 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{join_values, KeyVal, Ns, Row, Value, DATA};
 use crate::frontend::Node;
-use crate::interp::{Analyzer, Call, Payload};
 use crate::intern::{self, key_str_lit, KeyId, KeySet};
+use crate::interp::{Analyzer, Call, Payload};
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
+/// A table of the simulated database: its columns, its rows when known.
 #[derive(Clone, Debug)]
 pub struct Table {
     pub cols: Vec<(String, String)>,
@@ -24,6 +26,7 @@ pub struct Table {
     pub pk: Option<usize>,
 }
 
+/// A connection's simulated database.
 #[derive(Clone, Debug, Default)]
 pub struct Db {
     /// an in-memory database: every table is the program's

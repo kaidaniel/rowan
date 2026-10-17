@@ -5,12 +5,12 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{ObjId, classify, join_values, Classification, KeyVal, Ns, Row, Tier, Value};
+use crate::domain::{classify, join_values, kv_exclude, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, KeyId};
-use crate::state::{Kind, State};
+use crate::intern::{self, key_none, key_str_lit, KeyId};
+use crate::state::{mark_merged, Kind, State};
 
-use super::{is_scalar_method, Analyzer, Payload, ViewKind, DICT_METHOD_NAMES, STR_METHOD_NAMES};
+use super::{Analyzer, Args, DICT_METHOD_NAMES, Payload, STR_METHOD_NAMES, ViewKind, is_scalar_method};
 use super::access::OBJECT_ATTRS;
 
 impl Analyzer {
@@ -90,6 +90,7 @@ impl Analyzer {
         self.heap.class_info_opt(c).map(|_| c)
     }
 
+    /// Does `o`'s class (one of the program's) define or inherit method `m`?
     pub(super) fn has_user_method(&self, o: u32, m: &str) -> bool {
         self.user_class_of(o).is_some_and(|c| self.class_lookup(c, m).is_some())
     }
@@ -103,12 +104,16 @@ impl Analyzer {
             return true;
         }
         let Some(dc) = self.class_lookup(c, name) else { return false };
-        let cv = self.heap.cls_slots.get(&(dc, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
+        let cv = self.heap.class_attr(dc, name);
         let runs = cv.pts.iter().any(|f| (self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) || (self.heap.kind(f) == Kind::Instance && self.heap.instance_class(f).is_some_and(|fc| self.class_lookup(fc, if store { "__set__" } else { "__get__" }).is_some())));
         runs
     }
 
     // ---------------------------------------------------------- attributes
+    /// A read `obj.name`: per receiver when one runs code for it (a property, a descriptor,
+    /// `__getattr__`), else on each object by its kind — an instance (`load_instance_attr`), a
+    /// class, a module, an unknown (`load_unknown_attr`), a library object (its method or
+    /// attribute model) — with a verdict where a record may lack the name.
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
         if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
             return v;
@@ -153,8 +158,8 @@ impl Analyzer {
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, report && guarded, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.heap.class_info_opt(oid).is_some() => {
-                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
-                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                    let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Class if crate::models::record_class_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
@@ -173,8 +178,8 @@ impl Analyzer {
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.heap.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
                 Kind::Function if name == "__annotations__" && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
-                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
-                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                    let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
                 // a singledispatch function's register
@@ -201,9 +206,9 @@ impl Analyzer {
         }
         self.mode.recv_scalar = saved_scalar;
         self.end_wide_read(saved_wide, state);
-        acc = acc.join(&crate::domain::join_values(parts));
+        acc = acc.join(&join_values(parts));
         if obj.pts.is_empty() {
-            return crate::models::scalar_attr(self, obj, name, report, state);
+            return crate::models::builtins::scalar_attr(self, obj, name, report, state);
         }
         acc.join(&self.mixed_literals_attr(obj, name, state))
     }
@@ -213,8 +218,8 @@ impl Analyzer {
         if !self.mixed(obj) {
             return Value::new();
         }
-        let lits = Value::kv_only(crate::domain::kv_exclude(&obj.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT));
-        crate::models::scalar_attr(self, &lits, name, false, state)
+        let lits = Value::kv_only(kv_exclude(&obj.kv, &crate::intern::KeySet::one(key_none())).unwrap_or(BOT));
+        crate::models::builtins::scalar_attr(self, &lits, name, false, state)
     }
 
     /// A deque's `maxlen` and methods.
@@ -296,11 +301,11 @@ impl Analyzer {
         if let Some((_, site)) = self.mode.wide_read.clone().filter(|_| self.in_wide_read()) {
             let ctx = self.frame().ctx.clone();
             let o = self.heap.alloc_raw(Kind::Unknown, &format!("ext@{}:{}", site, name), &ctx, false, &format!("?.{}", name), Payload::None);
-            crate::state::mark_merged(o);
+            mark_merged(o);
             return Value::obj(o);
         }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
-        if let Some(v) = crate::models::generated_class(self, state, &q) {
+        if let Some(v) = crate::models::stdlib::generated_class(self, state, &q) {
             return v;
         }
         if let Some(v) = crate::models::external_constant(self, &q) {
@@ -478,6 +483,8 @@ impl Analyzer {
         }
     }
 
+    /// The library method `qual` (`dict.get`) bound to `recv`: one object per method and
+    /// receiver.
     pub fn method_value(&mut self, qual: &str, recv: &Value) -> Value {
         // (a receiver of many objects is keyed by a hash of their ids, not by the list)
         let ids: String = if recv.pts.len() > 32 {
@@ -563,6 +570,9 @@ impl Analyzer {
         self.class_values(&defs, nk, state)
     }
 
+    /// What reading a class attribute `cv` through instance `oid` gives: a descriptor's `__get__`
+    /// result, a method bound to the instance (a property run, a classmethod bound to the class,
+    /// a staticmethod as it is), else the value.
     pub(super) fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, name: &str, node: &Node, state: &mut State) -> Value {
         let mut outs: Vec<Value> = Vec::new();
         // a descriptor object in the class (its class has `__get__`): what `__get__` returns
@@ -579,7 +589,7 @@ impl Analyzer {
             if self.heap.kind(f) == Kind::Function {
                 let fi = self.heap.func_info(f);
                 if fi.is_property.get() {
-                    let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, false);
+                    let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[]), state, node, false);
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
                         let strong = self.heap.obj(oid).single;
@@ -611,6 +621,7 @@ impl Analyzer {
         join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
     }
 
+    /// An attribute read's verdict, guarded or not.
     fn attr_verdict(&mut self, node: &Node, nk: KeyId, cls: &Classification, oid: u32, guarded: bool) {
         if guarded {
             self.verdict_guarded(node, nk, cls, oid, Ns::Attr);
@@ -649,6 +660,9 @@ impl Analyzer {
         Some(out)
     }
 
+    /// A read of attribute `name` of an instance of the program's classes: a library base's
+    /// attribute, `__getattr__`, the instance's own slot, else the class's (`bound_outs`), with
+    /// the verdict of its row (a class attribute is there for every instance).
     pub(in crate::interp) fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
         if let Some(v) = self.instance_library_attr(oid, name, nk, node, state, guarded) {
@@ -840,7 +854,7 @@ impl Analyzer {
         None
     }
 
-    /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
+    /// A value declared dynamically typed (`Any`): accesses on it are not checkable.
     pub(in crate::interp) fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
         if !state.has_row(oid, Ns::Item) {
@@ -896,6 +910,7 @@ impl Analyzer {
         if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
     }
 
+    /// An unknown object's row on this path; none: anything (`top`).
     pub(in crate::interp) fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if state.has_row(oid, ns) {
             state.row(oid, ns)
@@ -904,6 +919,9 @@ impl Analyzer {
         }
     }
 
+    /// A read of attribute `name` of an object rowan cannot see: a dict or str method name
+    /// gives that method (bound to it), another method name an unknown method; else what its
+    /// row holds (a placeholder for an input's attribute).
     pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
         // (its class, as `type(x)`: calling it does not give it the object, so not a method of it)
         if name == "__class__" {
@@ -921,7 +939,7 @@ impl Analyzer {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             // (a parameter annotated `str`: a str, its methods' results known by type)
             let recv = match self.heap.obj(oid).ty {
-                Some(t @ ("str" | "bytes")) => Value::data(&crate::domain::typed_label(t, "")),
+                Some(t @ ("str" | "bytes")) => Value::data(&typed_label(t, "")),
                 _ => Value::data(&format!("L{}", node.line)),
             };
             return self.method_value(&q, &recv);
@@ -948,6 +966,9 @@ impl Analyzer {
         self.method_value(&format!("unknown.{}", name), &Value::obj(oid))
     }
 
+    /// A store `obj.name = v`: per receiver when one runs code for it (`__setattr__`, a
+    /// property's setter, a descriptor's `__set__`), else into each object's attributes (a frozen
+    /// dataclass raises; `__slots__` limit the names).
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
         let split = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, true), state, &mut |an, o, st| {
             an.store_attr(o, name, v, node, st);
@@ -1033,7 +1054,7 @@ impl Analyzer {
         if let Some(cls) = cls_of {
             if let Some(defc) = self.class_lookup(cls, name) {
                 if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
-                    self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                    self.call_user(setter, Some(Value::obj(oid)), Args::pos(&[v.clone()]), state, node, false);
                     return true;
                 }
                 // a property without a setter: the assignment raises

@@ -5,6 +5,8 @@
 //! two maps share, so they cost what the maps differ in, whatever their history. `TwoLevel`
 //! adds a copy-on-write inner map per key (object slots, source requirements).
 
+use crate::domain::Ns;
+use crate::intern::{KeyId, SourceId};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -21,13 +23,13 @@ impl PKey for u32 {
     }
 }
 
-impl PKey for (u32, crate::domain::Ns) {
+impl PKey for (u32, Ns) {
     fn key64(&self) -> u64 {
         ((self.0 as u64) << 3) | self.1 as u64
     }
 }
 
-impl PKey for crate::intern::SourceId {
+impl PKey for SourceId {
     fn key64(&self) -> u64 {
         self.0 as u64
     }
@@ -477,6 +479,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         LayerMap { root }
     }
 
+    /// Do the two maps hold the same entries? (Shared subtrees are not visited.)
     pub fn same(&self, o: &LayerMap<K, V>) -> bool {
         diff(self.root.as_ref(), o.root.as_ref(), &mut |_| false)
     }
@@ -518,23 +521,23 @@ impl IKey for u32 {
     }
 }
 
-impl IKey for crate::intern::KeyId {
+impl IKey for KeyId {
     fn key32(&self) -> u32 {
         debug_assert!(self.0 < SENTINEL, "key id past 2^29");
         self.0
     }
     fn from32(x: u32) -> Self {
-        crate::intern::KeyId(x)
+        KeyId(x)
     }
 }
 
-impl IKey for (crate::domain::Ns, crate::intern::KeyId) {
+impl IKey for (Ns, KeyId) {
     fn key32(&self) -> u32 {
         debug_assert!(self.1 .0 < SENTINEL, "key id past 2^29");
         ((self.0 as u32) << 29) | self.1 .0
     }
     fn from32(x: u32) -> Self {
-        (crate::domain::Ns::Item, crate::intern::KeyId(x))
+        (crate::domain::Ns::Item, KeyId(x))
     }
 }
 
@@ -613,7 +616,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         Self::default()
     }
 
-
+    /// The subtree of `key`'s entries.
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
     }
@@ -692,12 +695,14 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         self.m.remove(&Pair(key.clone(), ik.clone()))
     }
 
+    /// Removes every inner entry of `key`.
     pub fn drop_key(&mut self, key: &K) {
         if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64())) {
             self.m.root = rest;
         }
     }
 
+    /// Removes the inner entries of `key` that `pred` picks (and its marker).
     pub fn drop_where(&mut self, key: &K, mut pred: impl FnMut(&IK) -> bool) {
         let mut gone: Vec<IK> = Vec::new();
         if let Some(t) = self.sub(key) {
@@ -712,6 +717,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         }
     }
 
+    /// Entries on one side only are kept; those on both combined with `f` (unless equal).
     pub fn join(&self, o: &Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {
         TwoLevel { m: self.m.join(&o.m, f) }
     }
@@ -739,10 +745,12 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         TwoLevel { m: a.merge_with(b, &mut g) }
     }
 
+    /// Do the two maps hold the same entries?
     pub fn same(&self, o: &Self) -> bool {
         self.m.same(&o.m)
     }
 
+    /// The (outer, inner) keys whose value differs between `self` and `base`.
     pub fn diff_keys(&self, base: &Self) -> Vec<(K, IK)> {
         self.diff_upto(base, usize::MAX).unwrap_or_default()
     }
@@ -759,6 +767,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         }
     }
 
+    /// `diff_keys`, or None once more than `limit` keys differ.
     pub fn diff_upto(&self, base: &Self, limit: usize) -> Option<Vec<(K, IK)>> {
         Some(self.m.diff_upto(&base.m, limit)?.into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect())
     }

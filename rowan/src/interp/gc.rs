@@ -6,10 +6,10 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, Payload};
-use crate::domain::{KeyVal, KeysOf, Ns, ObjId, Value};
+use crate::domain::{kv_join, KeyVal, KeysOf, Ns, ObjId, Value};
 use super::FrameKind;
 use crate::intern::{KeyId, StrId};
-use crate::state::{Kind, State};
+use crate::state::{view_of, Kind, State};
 
 impl Analyzer {
     /// May the program still hold `oid` on this path? Every allocation records the object's
@@ -87,7 +87,7 @@ impl Analyzer {
         }
         // (a loop's item is one of the records its summary stands for: the summary's facts
         // take its changes)
-        work.extend(crate::state::view_of(o));
+        work.extend(view_of(o));
         match &self.heap.obj(o).payload {
             Payload::Func(fi) => work.extend(fi.closure.values().copied()),
             Payload::Cls(c) => work.push(*c),
@@ -227,7 +227,7 @@ impl Analyzer {
         // block's `nn.Sequential` its layers)
         let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in recs {
-            if let Some(s) = crate::state::view_of(*r) {
+            if let Some(s) = view_of(*r) {
                 back.forget_len(r);
                 map.insert(*r, s);
                 continue;
@@ -323,7 +323,7 @@ impl Analyzer {
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         // (a loop's item is not found again by a path: garbage when nothing holds it)
-        let input_part = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Unknown) && crate::state::view_of(o).is_none();
+        let input_part = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Unknown) && view_of(o).is_none();
         work.extend(fresh.iter().copied().filter(|o| input_part(self, *o)));
         // (older objects reach young ones only through those roots: a young one was made
         // since, so whatever refers to it was written since; only young ones expand)
@@ -425,6 +425,7 @@ impl Analyzer {
 
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
+    /// The mark at the loop's start (None: not in a function's call); `loop_gc_end` collects.
     pub(super) fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
         if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
@@ -432,6 +433,7 @@ impl Analyzer {
         Some((self.heap.serial(), state.copy()))
     }
 
+    /// The collection at the loop's exit, of what was made since `loop_gc_begin`'s mark.
     pub(super) fn loop_gc_end(&mut self, g: Option<(u64, State)>, state: &mut State) {
         let Some((mark, pre)) = g else { return };
         if !state.reachable {
@@ -523,7 +525,7 @@ fn fold_recent_facts(back: &mut State, map: &FxHashMap<ObjId, ObjId>, keep_pos: 
         if let Some(kv) = back.elems.get(&r) {
             let kv = rename_value(&Value::kv_only(kv.clone()), map).map(|v| v.kv).unwrap_or(kv);
             let nv = match back.elems.get(&sid) {
-                Some(cur) => crate::domain::kv_join(&cur, &kv),
+                Some(cur) => kv_join(&cur, &kv),
                 None => kv,
             };
             back.elems.insert(sid, nv);

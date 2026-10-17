@@ -7,26 +7,35 @@
 //! path without a length for an object does not know it. Allocation *policy* (contexts, strong / recent /
 //! variant / merged objects) is `Analyzer::alloc` (`interp/alloc.rs`); this is the table.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use rustc_hash::FxHashMap;
+use ruff_python_ast as ast;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{ClassInfo, FuncInfo, ModuleInfo};
 use crate::domain::{KeyVal, Ns, ObjId, Value};
+use crate::frontend::{self, Node};
 use crate::intern::{self, KeyId, KeySet, StrId};
-use crate::state::{Kind, State};
+use crate::scopes::Scopes;
+use crate::state::{mark_merged, Kind, State};
 
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
 /// onto one context-free summary object.
 pub const MAX_CLONES: usize = 256;
 
+/// What a view object (`Kind::View`) shows of the object it views.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewKind {
+    /// `d.keys()`
     Keys,
+    /// `d.values()`
     Values,
+    /// `d.items()`
     Items,
+    /// a frame's rows (`df.iterrows()`): (index, row) pairs
     Rows,
+    /// the elements of the objects it views (a slice of an unknown sequence)
     Elems,
     /// `obj.__dict__`: the instance's attributes as a dict
     Attrs,
@@ -35,6 +44,7 @@ pub enum ViewKind {
 }
 
 impl ViewKind {
+    /// The view's name (`keys`, `values`, …).
     pub fn name(self) -> &'static str {
         match self {
             ViewKind::Keys => "keys",
@@ -46,6 +56,7 @@ impl ViewKind {
             ViewKind::Proxy => "proxy",
         }
     }
+    /// The view `d.keys()`, `d.values()` or `d.items()` makes, by the method's name.
     pub fn from_name(n: &str) -> ViewKind {
         match n {
             "keys" => ViewKind::Keys,
@@ -57,25 +68,41 @@ impl ViewKind {
     }
 }
 
+/// What an object is besides its keys: flow-insensitive, fixed when it is made (or made again).
 #[derive(Clone, Debug)]
 pub enum Payload {
     None,
+    /// a module
     Module(Rc<ModuleInfo>),
+    /// a function or lambda of the program
     Func(Rc<FuncInfo>),
+    /// a class of the program
     Class(Rc<ClassInfo>),
-    /// instance: its class
+    /// an instance: its class
     Cls(ObjId),
-    /// external qualname / response tag
+    /// a library object's qualified name (`builtins.len`); a response's tag
     Str(String),
+    /// a library method (its qualified name, `dict.get`) bound to a receiver
     Method(String, Value),
+    /// a method of the program (its function) bound to a receiver
     Bound(ObjId, Value),
+    /// `super()`: the class it starts after and the receiver
     Super(ObjId, Value),
+    /// a view of the objects of `Value`
     View(ViewKind, Value),
+    /// `zip(a, b)` (more than two: nested pairs)
     Zip(Value, Value),
+    /// `enumerate(it, start)` (the start when known)
     Enumerate(Value, Option<i64>),
+    /// a (key, value) pair of `items()`, `zip`, `enumerate`
     Pair(Value, Value),
+    /// `functools.partial(f, *args, **kwargs)`
     Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
+    /// a pandas groupby: the frames grouped, the key columns (when known), `as_index`, and the
+    /// columns selected (`gb["a"]`; whether as one column)
     Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
+    /// a pandas accessor or indexer (`.loc`, `.iloc`, `.str`, `.dt`, …) by name, of a frame or
+    /// series
     Locidx(String, ObjId),
     /// `range(start, stop, step)` with known bounds
     Range(i64, i64, i64),
@@ -89,15 +116,161 @@ impl Payload {
     }
 }
 
+/// The syntax a function object was made from.
+#[derive(Clone, Copy, Debug)]
+pub enum FuncNode {
+    Def(&'static ast::StmtFunctionDef),
+    Lambda(&'static ast::ExprLambda),
+}
+
+impl FuncNode {
+    /// Its parameters (a lambda may have none).
+    pub(in crate::interp) fn params(&self) -> Option<&'static ast::Parameters> {
+        match self {
+            FuncNode::Def(f) => Some(&f.parameters),
+            FuncNode::Lambda(l) => l.parameters.as_deref(),
+        }
+    }
+    pub(in crate::interp) fn node(&self) -> Node {
+        match self {
+            FuncNode::Def(f) => frontend::node(*f),
+            FuncNode::Lambda(l) => frontend::node(*l),
+        }
+    }
+    /// Its address: the identity of the function's code (all closures of one `def` share it).
+    pub(in crate::interp) fn addr(&self) -> usize {
+        match self {
+            FuncNode::Def(f) => *f as *const _ as usize,
+            FuncNode::Lambda(l) => *l as *const _ as usize,
+        }
+    }
+    /// A `def`'s statements (a lambda's body is an expression: none).
+    pub(in crate::interp) fn body(&self) -> &'static [ast::Stmt] {
+        match self {
+            FuncNode::Def(f) => &f.body,
+            FuncNode::Lambda(_) => &[],
+        }
+    }
+}
+
+/// A function object of the program (`Payload::Func`): what its `def` made. The flags are set
+/// by its decorators after it is made (`apply_decorators`).
+#[derive(Debug)]
+pub struct FuncInfo {
+    pub node: FuncNode,
+    pub name: String,
+    /// its qualified name (`Conn.__init__`; classes marked `class ` inside, `py_qualname`)
+    pub qualname: String,
+    pub module: ObjId,
+    /// its scope in its module's `Scopes`
+    pub scope: usize,
+    /// free name -> cell oid
+    pub closure: IndexMap<StrId, ObjId>,
+    pub defaults: IndexMap<StrId, Value>,
+    /// defining class oid
+    pub cls: Option<ObjId>,
+    pub is_property: Cell<bool>,
+    pub is_static: Cell<bool>,
+    pub is_classmethod: Cell<bool>,
+    /// decorated with `contextlib.contextmanager`
+    pub is_contextmanager: Cell<bool>,
+    /// `functools.cached_property`: the first access stores the value on the instance
+    pub is_cached: Cell<bool>,
+    /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
+    pub is_memo: Cell<bool>,
+}
+
+impl FuncInfo {
+    /// The qualified name as Python spells it (no `class ` markers): `Conn.__init__`.
+    pub fn py_qualname(&self) -> String {
+        self.qualname.replace("class ", "")
+    }
+}
+
+/// A class object of the program (`Payload::Class`): what its `class` statement made.
+#[derive(Debug)]
+pub struct ClassInfo {
+    pub name: String,
+    pub node: &'static ast::StmtClassDef,
+    pub bases: Vec<ObjId>,
+    pub module: ObjId,
+    /// inherits from something we do not see
+    pub open_base: bool,
+    /// a dataclass's (NamedTuple's, pydantic model's, …) fields with their defaults, once known
+    pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
+    /// what its direct library bases make of it (`dict`, `TypedDict`, `NamedTuple`, pydantic's
+    /// `BaseModel`, `nn.Module`, …)
+    pub lib: crate::models::ClassBase,
+    /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
+    pub pyd_dataclass: Cell<bool>,
+    /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
+    pub dc_frozen: Cell<bool>,
+    pub dc_kw_only: Cell<bool>,
+    /// `@dataclass(order=True)`: instances of the class compare their fields as tuples
+    pub dc_order: Cell<bool>,
+    /// the attributes its body annotates `Any` / `object` (computed on first use)
+    pub any_fields: RefCell<Option<FxHashSet<String>>>,
+}
+
+impl ClassInfo {
+    /// Does it have generated fields (a dataclass and the like)?
+    pub fn has_fields(&self) -> bool {
+        self.dataclass_fields.borrow().is_some()
+    }
+    /// Its generated fields (none if it has none).
+    pub fn fields(&self) -> Vec<(String, Option<&'static ast::Expr>)> {
+        self.dataclass_fields.borrow().clone().unwrap_or_default()
+    }
+}
+
+/// A module object (`Payload::Module`): its name, file, parsed tree and scopes.
+#[derive(Debug)]
+pub struct ModuleInfo {
+    /// the dotted name it was imported as
+    pub name: String,
+    pub path: Option<String>,
+    /// the dotted package the module belongs to (its own name for an `__init__.py`), the
+    /// base of its relative imports
+    pub pkg: String,
+    /// its index in the frontend's registry
+    pub idx: u32,
+    pub tree: &'static ast::ModModule,
+    pub scopes: Scopes,
+}
+
+/// What an Enum class's bases make of its members (`models::enums`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct EnumKind {
+    /// mixed with `str` or `int` (`StrEnum`, `IntEnum`, `class M(str, Enum)`): a member equals
+    /// and hashes as its value
+    pub mixed: bool,
+    /// `str(member)` is its value's (`StrEnum`, `IntEnum`, `ReprEnum`), not `Cls.NAME`
+    pub repr_value: bool,
+    /// a `Flag` / `IntFlag`: members combine with `|`
+    pub flag: bool,
+    /// str-based (`auto()` is the lower-cased name in a StrEnum)
+    pub is_str: bool,
+}
+
+impl EnumKind {
+    pub fn join(&mut self, o: EnumKind) {
+        (self.mixed, self.repr_value, self.flag, self.is_str) = (self.mixed | o.mixed, self.repr_value | o.repr_value, self.flag | o.flag, self.is_str | o.is_str);
+    }
+}
+
+/// One abstract object: identified by (kind, allocation site, context); see the module doc.
 #[derive(Debug)]
 pub struct Obj {
     pub id: ObjId,
     pub kind: Kind,
-    /// site, context and label are shared strings (one allocation per distinct string: many
-    /// objects have the same context or label)
+    /// where it was made (`L5:3-12`, a model's site); site, context and label are shared
+    /// strings (one allocation per distinct string: many objects have the same context or label)
     pub site: std::sync::Arc<str>,
+    /// the allocation context: the call chain it was made in (`Frame::ctx`)
     pub ctx: std::sync::Arc<str>,
+    /// it stands for one runtime object: stores into it are strong
     pub single: bool,
+    /// a name for people and the report (`dict@L4`, `Conn@L12`, `result of f(x)`)
     pub label: std::sync::Arc<str>,
     pub payload: Payload,
     /// an element record a model or an iteration made (a frame's row, a csv row, an input's
@@ -143,7 +316,7 @@ pub struct Heap {
     /// keys standing for objects
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
-    pub cls_slots: FxHashMap<(ObjId, crate::domain::Ns, KeyId), Value>,
+    pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
     /// class attributes the program stores after the class is made (`Cls.x = 1`): those a
     /// path may lack (`class_lookup_on_path`)
     pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
@@ -233,7 +406,7 @@ impl Heap {
         if n >= MAX_CLONES && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             let o = self.alloc_raw(kind, site, "", false, label, payload);
-            crate::state::mark_merged(o);
+            mark_merged(o);
             return o;
         }
         self.site_clones.insert(site.to_string(), n + 1);
@@ -299,14 +472,17 @@ impl Heap {
             _ => None,
         }
     }
+    /// A library object's qualified name ("" for others).
     pub fn external_qual(&self, oid: ObjId) -> String {
         match &self.obj(oid).payload {
             Payload::Str(q) => q.clone(),
             _ => String::new(),
         }
     }
-    pub fn is_record_like(&self, oid: ObjId) -> bool {
-        self.kind(oid).is_record_like()
+    /// Is the object a record (it has keys: a dict, frame, instance, unknown, module, class,
+    /// namespace)?
+    pub fn is_record(&self, oid: ObjId) -> bool {
+        self.kind(oid).is_record()
     }
 
     // ------------------------------------------------------------ lengths
@@ -338,6 +514,7 @@ impl Heap {
         Some(p).filter(|p| *p > 0)
     }
 
+    /// The list's length on this path is `v` (None: not known), every position known.
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
         st.set_lens(o, (v, v.unwrap_or(0), 0));
     }
@@ -386,6 +563,12 @@ impl Heap {
     }
 
     // ------------------------------------------------------------ classes
+    /// What class `owner` holds under attribute `name` (flow-insensitive, `cls_slots`; the
+    /// empty value when nothing).
+    pub fn class_attr(&self, owner: ObjId, name: &str) -> Value {
+        self.cls_slots.get(&(owner, Ns::Attr, intern::key_str_lit(name))).cloned().unwrap_or_default()
+    }
+
     /// Breadth-first linearisation of the user classes above `cls` (when C3 fails).
     pub fn mro_bfs(&self, cls: u32) -> Vec<u32> {
         let mut seen: Vec<u32> = Vec::new();
@@ -407,6 +590,7 @@ impl Heap {
 
     /// The C3 method resolution order of a user class (user classes only).
     pub fn mro(&self, cls: u32) -> Vec<u32> {
+        /// C3 linearisation (None: inconsistent bases, or deeper than 64).
         fn c3(an: &Heap, cls: u32, depth: usize) -> Option<Vec<u32>> {
             if depth > 64 {
                 return None;

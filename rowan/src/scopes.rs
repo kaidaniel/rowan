@@ -1,39 +1,48 @@
-//! Lexical scope analysis (port of `rowan/scopes.py`): which names of a function are
-//! locals, cells (captured by nested functions), free, or globals.
+//! Lexical scope analysis, from a module's text before it runs: which names of each function
+//! (and lambda, class body, module) are locals, cells (captured by nested functions), free
+//! (a nested function's names of an enclosing one) or globals, as CPython's compiler decides.
+//! The interpreter looks a name up in the scope of the running frame (`Frame::scope`).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ruff_python_ast as ast;
 use ruff_python_ast::visitor::source_order::{self, SourceOrderVisitor};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What code a scope belongs to (a lambda's is a function's).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ScopeKind {
+    #[default]
     Module,
     Function,
     Class,
 }
 
+/// The names of one scope (by `Scopes` index).
 #[derive(Debug, Default)]
 pub struct Scope {
     pub kind: ScopeKind,
+    /// the enclosing scope (None for the module and detached scopes)
     pub parent: Option<usize>,
+    /// names the code binds (assignments, parameters, imports, `def`, `class`, `except … as`,
+    /// patterns, walrus targets)
     pub locals: FxHashSet<String>,
+    /// names declared `global`
     pub globals_decl: FxHashSet<String>,
+    /// names declared `nonlocal`
     pub nonlocals_decl: FxHashSet<String>,
+    /// names the code reads
     pub uses: FxHashSet<String>,
+    /// the scopes nested in it
     pub children: Vec<usize>,
+    /// names of an enclosing function the code (or a function nested in it) reads
     pub free: FxHashSet<String>,
+    /// locals a nested function reads (they live in cells)
     pub cells: FxHashSet<String>,
     /// binding occurrences per name (one inside a loop counts twice)
     pub binds: FxHashMap<String, u32>,
 }
 
-impl Default for ScopeKind {
-    fn default() -> Self {
-        ScopeKind::Module
-    }
-}
-
 impl Scope {
+    /// Is `name` a local of this scope (bound here, not declared global or nonlocal)?
     pub fn is_local(&self, name: &str) -> bool {
         self.locals.contains(name) && !self.globals_decl.contains(name) && !self.nonlocals_decl.contains(name)
     }
@@ -50,26 +59,26 @@ pub struct Scopes {
 }
 
 impl Scopes {
+    /// The module's own scope.
     pub fn module(&self) -> usize {
         0
     }
+    /// The scope a `def`, lambda or class statement (by its address) opens.
     pub fn of_node(&self, addr: usize) -> Option<usize> {
         self.by_node.get(&addr).copied()
     }
     pub fn get(&self, id: usize) -> &Scope {
         &self.scopes[id]
     }
-    /// A detached function scope for a node we never collected (defensive).
-    pub fn add_detached(&mut self, kind: ScopeKind) -> usize {
-        self.scopes.push(Scope { kind, parent: None, ..Default::default() });
-        self.scopes.len() - 1
-    }
 }
 
+/// A node's address: its identity (trees are leaked, `frontend.rs`).
 pub fn node_addr<T>(n: &T) -> usize {
     n as *const T as usize
 }
 
+/// The first pass: walks a module, opening a scope per function, lambda and class, and
+/// records what each binds, declares and reads.
 struct Collector<'a> {
     scopes: &'a mut Scopes,
     scope: usize,
@@ -92,6 +101,15 @@ impl<'a> Collector<'a> {
         *self.cur().binds.entry(name.clone()).or_insert(0) += w;
         self.cur().locals.insert(name);
     }
+    /// The parameters' default values, read in the enclosing scope.
+    fn visit_defaults(&mut self, params: &ast::Parameters) {
+        for p in params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()) {
+            if let Some(d) = &p.default {
+                self.visit_expr(d);
+            }
+        }
+    }
+    /// The parameters, locals of scope `inner`; their annotations are read here.
     fn visit_params(&mut self, inner: usize, params: &ast::Parameters) {
         for p in all_params(params) {
             self.scopes.scopes[inner].locals.insert(p.name.id.to_string());
@@ -102,6 +120,7 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// Every parameter, in order: positional-only, positional, keyword-only, `*args`, `**kwargs`.
 pub fn all_params(params: &ast::Parameters) -> Vec<&ast::Parameter> {
     let mut out: Vec<&ast::Parameter> = Vec::new();
     out.extend(params.posonlyargs.iter().map(|p| &p.parameter));
@@ -124,11 +143,7 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 for d in &f.decorator_list {
                     self.visit_expr(&d.expression);
                 }
-                for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
-                    if let Some(d) = &p.default {
-                        self.visit_expr(d);
-                    }
-                }
+                self.visit_defaults(&f.parameters);
                 if let Some(r) = &f.returns {
                     self.visit_expr(r);
                 }
@@ -202,11 +217,7 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
         match expr {
             ast::Expr::Lambda(l) => {
                 if let Some(params) = &l.parameters {
-                    for p in params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()) {
-                        if let Some(d) = &p.default {
-                            self.visit_expr(d);
-                        }
-                    }
+                    self.visit_defaults(params);
                 }
                 let inner = self.enter(node_addr(l), ScopeKind::Function);
                 if let Some(params) = &l.parameters {
@@ -255,6 +266,9 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     }
 }
 
+/// The second pass, innermost scopes first: a function's read of a name bound by an enclosing
+/// function makes it free here (and in the functions between) and a cell there; a name free
+/// in a child is free here too when an enclosing function binds it.
 fn resolve(scopes: &mut Scopes, id: usize) {
     let children = scopes.scopes[id].children.clone();
     for ch in &children {
@@ -308,6 +322,7 @@ fn resolve(scopes: &mut Scopes, id: usize) {
     }
 }
 
+/// The scopes of a module, and its names bound more than once (`Scopes::rebound`).
 pub fn analyse(module: &ast::ModModule) -> Scopes {
     let mut scopes = Scopes::default();
     scopes.scopes.push(Scope { kind: ScopeKind::Module, parent: None, ..Default::default() });

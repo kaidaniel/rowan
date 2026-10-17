@@ -1,5 +1,13 @@
-//! Abstract domains: `KeyVal`, `Lens`, `Source`, `Row`,
-//! `ReqInfo`, `Value`, `classify`.  Port of `rowan/domain.py` over interned ids.
+//! The abstract domains, over interned ids (`intern.rs`):
+//!
+//! * `Value`: what a name or slot may hold, a set of objects plus a scalar part (`KeyVal`: a
+//!   literal, up to `MAX_LITS` literals, the keys of some objects, or a labelled unknown).
+//! * `Row`: what is known of the keys of one object in one namespace on one path (present ⊇
+//!   likely ⊇ definite, absent, the open inputs and unknown calls that may add keys), with its
+//!   transfers (store, delete, copy, rename, unknown code) and its join. The inputs and the
+//!   lenses their keys came through are `source.rs`.
+//! * `classify`: the verdict (`Tier`) of reading a key from a row.
+//! * `ReqInfo`: a requirement a read records on an input's key.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -7,27 +15,34 @@ use std::sync::Arc;
 
 use rustc_hash::FxHasher;
 
-pub use crate::intern::SourceId;
-use crate::intern::{
-    self, key_as_str, key_is_inv, key_is_str, key_py_str, key_repr, keys_str, lens_get, source_get, with_lens, with_source,
-    IdSet, KeyId, KeySet, LensId, StrId, EMPTY_LENS,
-};
+use crate::intern::{self, key_as_int, key_is_number, key_none, key_repr, keys_str, str_get, with_key, EMPTY_LENS, IdSet, KeyId, KeySet, LensId, StrId};
+use crate::source::{lens_add_kill, lens_apply, lens_concat, lens_provides, lens_push, lens_str, source_is_data, source_label, Lens, RenameFn, SourceId, Step};
 
+/// Literals a `KeyVal` holds at most; a join with more is an unknown.
 pub const MAX_LITS: usize = 64;
+/// Lenses a row keeps per source; past that the source is kept without one (`cap_sources`).
 pub const MAX_LENSES: usize = 6;
+/// Call sites a verdict's chain keeps (`chain_extend`).
 pub const MAX_CHAIN: usize = 6;
 
+/// An object, by its index in the `Heap`.
 pub type ObjId = u32;
 pub type ObjSet = IdSet<ObjId>;
-/// entry-row id: oid * 2 + (1 if attr)
 
+/// The namespace of an object's keys: a row and its slots are per (object, namespace).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Ns {
+    /// a mapping's items (`d["k"]`), a frame's columns
     Item,
+    /// attributes (`o.k`)
     Attr,
+    /// the value of a closure cell
     Cell,
+    /// a sequence's positions (`xs[0]`)
     Pos,
+    /// the items of a list, set or iterator at no known position (the `STAR` key)
     Elem,
+    /// facts a model keeps on an object (a frame's index, a generator's progress, …)
     Meta,
     /// a variable (verdicts only: a read of a name bound on some paths only)
     Name,
@@ -54,435 +69,9 @@ impl fmt::Display for Ns {
 }
 
 // ---------------------------------------------------------------------------
-// lens steps
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum FnKind {
-    Upper,
-    Lower,
-    Strip,
-    Title,
-    Prefix,
-    Suffix,
-    Str,
-    Replace,
-    /// `sep.join(key)`: a tuple key's parts (a string's characters) joined by the arg
-    Join,
-}
-
-impl FnKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            FnKind::Upper => "upper",
-            FnKind::Lower => "lower",
-            FnKind::Strip => "strip",
-            FnKind::Title => "title",
-            FnKind::Prefix => "prefix",
-            FnKind::Suffix => "suffix",
-            FnKind::Str => "str",
-            FnKind::Replace => "replace",
-            FnKind::Join => "join",
-        }
-    }
-    pub fn from_name(n: &str) -> Option<FnKind> {
-        Some(match n {
-            "upper" => FnKind::Upper,
-            "lower" => FnKind::Lower,
-            "strip" => FnKind::Strip,
-            "title" => FnKind::Title,
-            "prefix" => FnKind::Prefix,
-            "suffix" => FnKind::Suffix,
-            "str" => FnKind::Str,
-            "replace" => FnKind::Replace,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RenameFn {
-    pub fn_: FnKind,
-    /// prefix/suffix: the affix key; replace: a 2-tuple key (a, b)
-    pub arg: Option<KeyId>,
-}
-
-impl RenameFn {
-    pub fn new(fn_: FnKind) -> Self {
-        RenameFn { fn_, arg: None }
-    }
-    pub fn with_arg(fn_: FnKind, arg: KeyId) -> Self {
-        RenameFn { fn_, arg: Some(arg) }
-    }
-
-    fn arg_str(&self) -> String {
-        self.arg.map(key_py_str).unwrap_or_default()
-    }
-
-    fn replace_pair(&self) -> Option<(String, String)> {
-        let a = self.arg?;
-        intern::with_key(a, |k| match k {
-            intern::Key::Tuple(items) if items.len() == 2 => Some((key_py_str(items[0]), key_py_str(items[1]))),
-            _ => None,
-        })
-    }
-
-    /// About how long `apply`'s text is (in bytes) for `k`, without computing it.
-    pub fn out_len(&self, k: KeyId) -> usize {
-        let Some(s) = key_as_str(k) else { return 0 };
-        match self.fn_ {
-            FnKind::Replace => match self.replace_pair() {
-                Some((a, b)) if a.is_empty() => s.len() + (s.chars().count() + 1) * b.len(),
-                Some((a, b)) => s.len() + s.matches(&*a).count() * b.len(),
-                None => s.len(),
-            },
-            FnKind::Prefix | FnKind::Suffix => s.len() + self.arg_str().len(),
-            FnKind::Join => s.len() * (1 + self.arg_str().len()),
-            _ => s.len() * 4,
-        }
-    }
-
-    pub fn apply(&self, k: KeyId) -> KeyId {
-        if self.fn_ == FnKind::Join {
-            let sep = self.arg_str();
-            let parts: Option<Vec<String>> = intern::with_key(k, |kk| match kk {
-                intern::Key::Tuple(items) => Some(items.clone()),
-                _ => None,
-            })
-            .and_then(|items| items.into_iter().map(|x| key_as_str(x).map(|s| s.to_string())).collect())
-            .or_else(|| key_as_str(k).map(|s| s.chars().map(|c| c.to_string()).collect()));
-            return match parts {
-                Some(p) => intern::key_str_lit(&p.join(&sep)),
-                None => k,
-            };
-        }
-        if self.fn_ == FnKind::Str {
-            return if key_is_str(k) { k } else { intern::key_str_lit(&key_py_str(k)) };
-        }
-        let Some(s) = key_as_str(k) else { return k };
-        let out: String = match self.fn_ {
-            FnKind::Upper => s.to_uppercase(),
-            FnKind::Lower => s.to_lowercase(),
-            FnKind::Strip => s.trim().to_string(),
-            FnKind::Title => py_title(&s),
-            FnKind::Prefix => format!("{}{}", self.arg_str(), s),
-            FnKind::Suffix => format!("{}{}", s, self.arg_str()),
-            FnKind::Replace => match self.replace_pair() {
-                Some((a, b)) => s.replace(&a, &b),
-                None => return k,
-            },
-            FnKind::Str | FnKind::Join => unreachable!(),
-        };
-        intern::key_str_lit(&out)
-    }
-
-    pub fn inverse(&self, k: KeyId) -> KeySet {
-        let sk = key_as_str(k);
-        let name = self.fn_.name();
-        match self.fn_ {
-            FnKind::Prefix => {
-                let p = self.arg_str();
-                match sk {
-                    Some(s) if s.starts_with(p.as_str()) => KeySet::one(intern::key_str_lit(&s[p.len()..])),
-                    _ => KeySet::new(),
-                }
-            }
-            FnKind::Suffix => {
-                let suf = self.arg_str();
-                match sk {
-                    Some(s) if !suf.is_empty() && s.ends_with(suf.as_str()) => {
-                        KeySet::one(intern::key_str_lit(&s[..s.len() - suf.len()]))
-                    }
-                    _ => KeySet::new(),
-                }
-            }
-            FnKind::Upper | FnKind::Lower | FnKind::Title | FnKind::Strip => match sk {
-                Some(s) => {
-                    let same = match self.fn_ {
-                        FnKind::Upper => *s == *s.to_uppercase(),
-                        FnKind::Lower => *s == *s.to_lowercase(),
-                        FnKind::Title => *s == *py_title(&s),
-                        FnKind::Strip => *s == *s.trim(),
-                        _ => false,
-                    };
-                    if same {
-                        KeySet::one(intern::key_inv(name, k))
-                    } else {
-                        KeySet::new()
-                    }
-                }
-                None => KeySet::new(),
-            },
-            FnKind::Str => {
-                let mut out = vec![intern::key_inv("str", k)];
-                if let Some(s) = sk {
-                    let digits = s.trim_start_matches('-');
-                    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-                        if let Ok(i) = s.parse::<i64>() {
-                            out.push(intern::key_int(i));
-                        }
-                    }
-                }
-                KeySet::from_vec(out)
-            }
-            FnKind::Join => KeySet::one(intern::key_inv(name, k)),
-            FnKind::Replace => {
-                let Some((a, b)) = self.replace_pair() else { return KeySet::one(intern::key_inv(name, k)) };
-                let Some(s) = sk else { return KeySet::one(k) };
-                if s.contains(a.as_str()) && !b.contains(a.as_str()) {
-                    return KeySet::new();
-                }
-                if s.contains(b.as_str()) {
-                    let tag = format!("replace({},{})", intern::py_str_repr(&a), intern::py_str_repr(&b));
-                    return KeySet::from_vec(vec![k, intern::key_inv(&tag, k)]);
-                }
-                KeySet::one(k)
-            }
-        }
-    }
-}
-
-impl fmt::Display for RenameFn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.arg {
-            None => f.write_str(self.fn_.name()),
-            Some(a) => write!(f, "{}({})", self.fn_.name(), key_repr(a)),
-        }
-    }
-}
-
-/// Python's `str.title()`.
-pub fn py_title(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_cased = false;
-    for c in s.chars() {
-        if c.is_alphabetic() {
-            if prev_cased {
-                out.extend(c.to_lowercase());
-            } else {
-                out.extend(c.to_uppercase());
-            }
-            prev_cased = true;
-        } else {
-            out.push(c);
-            prev_cased = false;
-        }
-    }
-    out
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Step {
-    Kill(KeySet),
-    /// ((old, new), ...), identity elsewhere
-    RenameMap(Arc<Vec<(KeyId, KeyId)>>),
-    RenameFn(RenameFn),
-}
-
-impl Step {
-    pub fn apply(&self, k: KeyId) -> KeyId {
-        match self {
-            Step::Kill(_) => k,
-            Step::RenameMap(pairs) => pairs.iter().find(|(o, _)| *o == k).map(|(_, n)| *n).unwrap_or(k),
-            Step::RenameFn(f) => f.apply(k),
-        }
-    }
-    pub fn inverse(&self, k: KeyId) -> KeySet {
-        match self {
-            Step::Kill(_) => KeySet::one(k),
-            Step::RenameMap(pairs) => {
-                let mut out: Vec<KeyId> = pairs.iter().filter(|(_, n)| *n == k).map(|(o, _)| *o).collect();
-                if !pairs.iter().any(|(o, _)| *o == k) {
-                    out.push(k);
-                }
-                KeySet::from_vec(out)
-            }
-            Step::RenameFn(f) => f.inverse(k),
-        }
-    }
-}
-
-impl fmt::Display for Step {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Step::Kill(ks) => write!(f, "∖{}", keys_str(ks.iter())),
-            Step::RenameMap(pairs) => {
-                let parts: Vec<String> = pairs.iter().map(|(o, n)| format!("{}→{}", key_repr(*o), key_repr(*n))).collect();
-                write!(f, "rename{{{}}}", parts.join(", "))
-            }
-            Step::RenameFn(r) => write!(f, "{}", r),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
-pub struct Lens {
-    pub steps: Vec<Step>,
-}
-
-impl Lens {
-    pub fn concat(&self, o: &Lens) -> Lens {
-        let mut steps = self.steps.clone();
-        steps.extend(o.steps.iter().cloned());
-        Lens { steps }
-    }
-    pub fn with_step(&self, s: Step) -> Lens {
-        let mut steps = self.steps.clone();
-        steps.push(s);
-        Lens { steps }
-    }
-}
-
-/// Source key terms that would appear as `k` after the lens; empty = cannot.
-pub fn lens_provides(l: LensId, k: KeyId) -> KeySet {
-    if l == EMPTY_LENS {
-        return KeySet::one(k);
-    }
-    // (a copy: inverting a step may intern keys)
-    let lens = intern::lens_get(l);
-    {
-        let mut cands = vec![k];
-        for step in lens.steps.iter().rev() {
-            match step {
-                Step::Kill(keys) => cands.retain(|c| key_is_inv(*c) || !keys.contains(*c)),
-                _ => {
-                    let mut new = Vec::new();
-                    for c in cands {
-                        if key_is_inv(c) {
-                            new.push(c);
-                        } else {
-                            new.extend(step.inverse(c).iter());
-                        }
-                    }
-                    cands = new;
-                }
-            }
-            if cands.is_empty() {
-                break;
-            }
-        }
-        KeySet::from_vec(cands)
-    }
-}
-
-/// Forward image of a single source key; None if killed.
-pub fn lens_apply(l: LensId, k: KeyId) -> Option<KeyId> {
-    if l == EMPTY_LENS {
-        return Some(k);
-    }
-    lens_apply_steps(&intern::lens_get(l).steps, k)
-}
-
-pub fn lens_apply_steps(steps: &[Step], mut k: KeyId) -> Option<KeyId> {
-    for step in steps {
-        match step {
-            Step::Kill(keys) => {
-                if keys.contains(k) {
-                    return None;
-                }
-            }
-            _ => k = step.apply(k),
-        }
-    }
-    Some(k)
-}
-
-pub fn lens_str(l: LensId) -> String {
-    with_lens(l, |lens| lens.steps.iter().map(|s| format!("·{}", s)).collect::<String>())
-}
-
-pub fn lens_concat(a: LensId, b: LensId) -> LensId {
-    if a == EMPTY_LENS {
-        return b;
-    }
-    if b == EMPTY_LENS {
-        return a;
-    }
-    let la = lens_get(a);
-    let lb = lens_get(b);
-    intern::lens(la.concat(&lb))
-}
-
-pub fn lens_push(a: LensId, s: Step) -> LensId {
-    let la = lens_get(a);
-    intern::lens(la.with_step(s))
-}
-
-pub fn lens_add_kill(l: LensId, k: KeyId) -> LensId {
-    let mut lens = lens_get(l);
-    if let Some(Step::Kill(ks)) = lens.steps.last() {
-        let ks2 = ks.insert(k);
-        let n = lens.steps.len();
-        lens.steps[n - 1] = Step::Kill(ks2);
-    } else {
-        lens.steps.push(Step::Kill(KeySet::one(k)));
-    }
-    intern::lens(lens)
-}
-
-// ---------------------------------------------------------------------------
-// sources
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub enum SourceKind {
-    External,
-    Call,
-    Param,
-    Name,
-    Data,
-    Class,
-}
-
-/// A reason an object may have keys we do not see.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Source {
-    pub site: Arc<str>,
-    pub kind: SourceKind,
-    pub path: Vec<KeyId>,
-}
-
-impl Source {
-    pub fn new(site: &str, kind: SourceKind) -> SourceId {
-        intern::source(Source { site: Arc::from(site), kind, path: Vec::new() })
-    }
-    pub fn label(&self) -> String {
-        let p: String = self.path.iter().map(|k| format!("[{}]", key_repr(*k))).collect();
-        format!("{}{}", self.site, p)
-    }
-}
-
-pub fn source_extend(s: SourceId, k: KeyId) -> SourceId {
-    let mut src = source_get(s);
-    src.path.push(k);
-    intern::source(src)
-}
-
-/// A source below another's key (`json.loads@L3['db']`): its requirements hold where the
-/// parent's value was read.
-pub fn source_is_nested(s: SourceId) -> bool {
-    with_source(s, |src| !src.path.is_empty())
-}
-
-/// How many keys below its input a source is (`json.loads@L3['db']['host']`: 2).
-pub fn source_depth(s: SourceId) -> usize {
-    with_source(s, |src| src.path.len())
-}
-
-pub fn source_is_data(s: SourceId) -> bool {
-    with_source(s, |src| src.kind == SourceKind::Data)
-}
-
-pub fn source_label(s: SourceId) -> String {
-    with_source(s, |src| src.label())
-}
-
-// ---------------------------------------------------------------------------
 // Row
 // ---------------------------------------------------------------------------
 
-/// Insertion orders of two joined rows: equal, or one a prefix of the other (the longer
-/// one; the extra keys are not definite then), else unknown.
 /// The insertion order of two paths' rows: the longer when the other's is a prefix of it and
 /// the other has none of the keys it adds (else it holds them at another place: `b, a` on one
 /// path, `a` before `b` but not in its order on the other).
@@ -497,18 +86,28 @@ fn join_order(a: &RowData, b: &RowData) -> Arc<[KeyId]> {
     }
 }
 
+/// The inputs a row is open through, each with the lens its keys came through.
 pub type SrcSet = IdSet<(SourceId, LensId)>;
 pub type StrSet = IdSet<StrId>;
 
+/// The key-set facts of a `Row` (see there).
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct RowData {
+    /// keys that may be there (on some path)
     pub present: KeySet,
+    /// keys there on every path
     pub definite: KeySet,
+    /// keys there unless unknown code removed them (⊇ definite)
     pub likely: KeySet,
+    /// keys removed on every path
     pub absent: KeySet,
+    /// keys removed unless unknown code put them back (⊇ absent)
     pub absent_likely: KeySet,
+    /// the inputs it is open through: it may hold any key they provide
     pub sources: SrcSet,
+    /// the unknown calls that may have added or removed keys (named by their call sites)
     pub mutators: StrSet,
+    /// anything at all (an object of unknown origin): reads are `unknown`
     pub top: bool,
     /// insertion order of the keys stored strongly (a dict iterates in this order); it
     /// describes the row only when it holds exactly the present keys (`ordered_keys`)
@@ -517,8 +116,11 @@ pub struct RowData {
     pub stored: KeySet,
 }
 
-/// Provision facts for one (object, namespace) at one program point; immutable, shared,
-/// hash cached.  See `domain.py` for the meaning of the fields.
+/// What one path knows of the keys of one (object, namespace): `present` ⊇ `likely` ⊇
+/// `definite`, `absent`, and what may add keys rowan does not see (`sources`: inputs;
+/// `mutators`: unknown calls). A row with neither is *closed*: it has exactly its present keys.
+/// Immutable and shared (an `Arc`), its hash cached: every transfer makes a new row, and equal
+/// rows compare by pointer first.
 #[derive(Clone)]
 pub struct Row {
     inner: Arc<RowInner>,
@@ -566,6 +168,7 @@ pub fn row_joins() -> usize {
     ROW_JOINS.with(|c| c.get())
 }
 
+/// Restarts the count of row joins (a new analysis).
 pub fn reset_row_joins() {
     ROW_JOINS.with(|c| c.set(0));
 }
@@ -577,20 +180,24 @@ impl Default for Row {
 }
 
 impl Row {
+    /// The row of these facts.
     pub fn from_data(data: RowData) -> Row {
         let mut h = FxHasher::default();
         data.hash(&mut h);
         Row { inner: Arc::new(RowInner { data, hash: h.finish() }) }
     }
 
+    /// The empty closed row (no keys).
     pub fn new() -> Row {
         Row::default()
     }
 
+    /// A copy of the facts, to change into a new row.
     pub fn data(&self) -> RowData {
         self.inner.data.clone()
     }
 
+    /// An open row of no known keys: whatever these inputs hold.
     pub fn with_sources(sources: SrcSet) -> Row {
         Row::from_data(RowData { sources, ..Default::default() })
     }
@@ -605,14 +212,17 @@ impl Row {
         Arc::ptr_eq(&self.inner, &o.inner)
     }
 
+    /// The row of an object of unknown origin: any key, reads are `unknown`.
     pub fn top() -> Row {
         Row::from_data(RowData { top: true, ..Default::default() })
     }
 
+    /// A closed row of exactly these keys.
     pub fn closed_with(keys: KeySet) -> Row {
         Row::from_data(RowData { present: keys.clone(), definite: keys.clone(), likely: keys, ..Default::default() })
     }
 
+    /// May it hold keys rowan does not see (an input, unknown code, or anything)?
     pub fn open(&self) -> bool {
         !self.sources.is_empty() || !self.mutators.is_empty() || self.top
     }
@@ -622,6 +232,7 @@ impl Row {
         !self.sources.is_empty() || self.top
     }
 
+    /// It holds exactly its present keys.
     pub fn closed(&self) -> bool {
         !self.open()
     }
@@ -631,6 +242,7 @@ impl Row {
         self.absent.contains(k) || (self.closed() && !self.present.contains(k))
     }
 
+    /// Open through keys computed from data (`SourceKind::Data`).
     pub fn is_map(&self) -> bool {
         self.sources.iter().any(|(s, _)| source_is_data(s))
     }
@@ -652,6 +264,9 @@ impl Row {
     }
 
     // -- lattice -----------------------------------------------------------
+    /// The row on either of two paths: keys present on either, definite (likely) on both,
+    /// absent on both (a closed row lacks every key it does not have), every input and
+    /// unknown call of either.
     pub fn join(&self, o: &Row) -> Row {
         if self == o {
             return self.clone();
@@ -711,7 +326,9 @@ impl Row {
         }
     }
 
-    // -- transfers (§4.1) --------------------------------------------------
+    // -- transfers ----------------------------------------------------------
+    /// The row after `k` is stored: present; definite too when the store is strong (into a
+    /// single object, not one of several).
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         // (a key there on some paths only, stored: where it is in the order depends on the path;
@@ -743,6 +360,8 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row after `k` is deleted: absent (and removed from what the inputs provide) when
+    /// strong; else only no longer definite.
     pub fn delete(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         if strong {
@@ -763,12 +382,15 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row after keys not known, from `src`, are stored (`d[unknown] = v`): open through it.
     pub fn data_store(&self, src: SourceId) -> Row {
         let mut d = self.data();
         d.sources = cap_sources(d.sources.insert((src, EMPTY_LENS)));
         Row::from_data(d)
     }
 
+    /// The row after every key went through `step` (a rename, `df.rename(columns=…)`, `{k.upper():
+    /// v …}`); the inputs' lenses get the step too.
     pub fn rename(&self, step: &Step) -> Row {
         let f = |ks: &KeySet| ks.map(|k| step.apply(k));
         let push = |l: LensId| lens_push(l, step.clone());
@@ -786,10 +408,6 @@ impl Row {
             order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
             stored: f(&self.stored),
         })
-    }
-
-    pub fn project(&self, keys: &KeySet) -> Row {
-        Row::closed_with(keys.clone())
     }
 
     /// self ∪= chain(o ∖ kill).  strong: definite keys of o are definitely copied.
@@ -841,6 +459,8 @@ impl Row {
         })
     }
 
+    /// The row after unknown code (named by `site`) may have stored or removed any key:
+    /// definite keys become likely, absent ones likely absent, and the row is open.
     pub fn mutate(&self, site: StrId) -> Row {
         // (mutated already, by this site or by one of those no longer named: nothing changes)
         if self.definite.is_empty() && self.absent.is_empty() && (self.mutators.contains(site) || self.mutators.contains(intern::MORE)) {
@@ -873,6 +493,8 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// The row where a test found `k` (`if "k" in d`, a read that succeeded): there, as a
+    /// store makes it, but not counted as stored and the insertion order unchanged.
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
         // (the key was there: the program did not store it, nor last: the order stays)
         let mut d = self.store(k, strong).data();
@@ -881,10 +503,6 @@ impl Row {
         }
         d.order = self.order.clone();
         Row::from_data(d)
-    }
-
-    pub fn narrow_out(&self, k: KeyId) -> Row {
-        self.delete(k, true)
     }
 
 }
@@ -976,6 +594,8 @@ fn cap_mutators(ms: StrSet) -> StrSet {
     StrSet::from_vec(v)
 }
 
+/// A source with more than `MAX_LENSES` lenses keeps none (it may provide any of its keys
+/// under their own names).
 fn cap_sources(ss: SrcSet) -> SrcSet {
     // (sorted by source: its lenses are consecutive)
     let mut by: Vec<(SourceId, Vec<LensId>)> = Vec::new();
@@ -999,7 +619,8 @@ fn cap_sources(ss: SrcSet) -> SrcSet {
     SrcSet::from_vec(out)
 }
 
-pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
+/// The join of many rows (the empty row for none).
+pub fn join_rows(rows: impl IntoIterator<Item = Row>) -> Row {
     // (equal rows once — the objects of one site often share theirs — then pairwise in a
     // balanced tree: a left fold over thousands re-unioned an ever larger accumulator)
     let mut seen: rustc_hash::FxHashSet<Row> = rustc_hash::FxHashSet::default();
@@ -1025,6 +646,7 @@ pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
 // call chains (reporting contexts)
 // ---------------------------------------------------------------------------
 
+/// The call sites (lines) through which an access was reached, outermost first (`via L5→L9`).
 pub type Chain = Vec<u32>;
 
 /// Canonical call chain: a call site repeated in direct recursion is kept once and the
@@ -1043,23 +665,36 @@ pub fn chain_extend(chain: &[u32], more: &[u32]) -> Chain {
 }
 
 // ---------------------------------------------------------------------------
-// verdict classification (§10)
+// verdict classification
 // ---------------------------------------------------------------------------
 
+/// The verdict of a read, `del` or `pop` of a key on one object. `Proven`, `Possibly`,
+/// `Missing` and `Input` hold for every run; `Likely` / `LikelyMissing` assume unknown code
+/// removed (added) nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Tier {
+    /// there on every path (✓)
     Proven,
+    /// there unless unknown code removed it (✓~)
     Likely,
+    /// a key of a mapping built from data: not decided, and not a requirement
     Map,
+    /// there if an input provides it: a requirement on the input
     Input,
+    /// set on some paths only (⚠)
     Possibly,
+    /// a key computed from data read from a closed record: may not be one of its keys (⚠)
     DataKey,
+    /// missing unless unknown code added it (⚠~)
     LikelyMissing,
+    /// missing on every path (✗)
     Missing,
+    /// nothing is known of the object
     Unknown,
 }
 
 impl Tier {
+    /// The order of severity (the worst of several objects' tiers is the access's).
     pub fn rank(self) -> u8 {
         match self {
             Tier::Proven => 0,
@@ -1073,6 +708,7 @@ impl Tier {
             Tier::Unknown => 8,
         }
     }
+    /// The tier's name in the JSON and the golden directives.
     pub fn name(self) -> &'static str {
         match self {
             Tier::Proven => "proven",
@@ -1086,6 +722,7 @@ impl Tier {
             Tier::Unknown => "unknown",
         }
     }
+    /// The mark the text report shows.
     pub fn symbol(self) -> &'static str {
         match self {
             Tier::Proven => "✓",
@@ -1101,6 +738,8 @@ impl Tier {
     }
 }
 
+/// A key's verdict on one row: the tier, the inputs that may provide the key, why (`note`),
+/// and the unknown code the verdict assumes did nothing.
 #[derive(Clone, Debug)]
 pub struct Classification {
     pub tier: Tier,
@@ -1126,6 +765,10 @@ impl Classification {
 /// The note of a key proven only because the code read or tested it before.
 pub const FOUND_BEFORE: &str = "found before";
 
+/// The verdict of reading `k` from `row`, in order: definite (proven), absent (missing),
+/// likely, unknown origin, closed (possibly / missing), provided by an input (input), keys
+/// from data (map), present on some paths (possibly), changed by unknown code (likely
+/// missing), else missing.
 pub fn classify(row: &Row, k: KeyId) -> Classification {
     if row.definite.contains(k) {
         // (a key of an open record the program never stored: a read or a test found it)
@@ -1170,9 +813,11 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
 }
 
 // ---------------------------------------------------------------------------
-// key values (§2)
+// key values
 // ---------------------------------------------------------------------------
 
+/// A scalar that is one of the keys of some objects (`for k in d`), except `exclude`, through
+/// the lens `chain` (`k.upper()`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct KeysOf {
     pub objs: ObjSet,
@@ -1192,20 +837,29 @@ impl KeysOf {
 /// `KeysOf::exhaustive_depth` of a sequence's elements that are every key (`list(d)`).
 pub const ALL_KEYS: i32 = -2;
 
+/// The scalar part of a `Value`: what it may be besides objects.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyVal {
+    /// one literal (a str, number, bool, None, bytes, tuple of literals, …)
     Lit(KeyId),
+    /// one of these literals (at most `MAX_LITS`)
     Lits(KeySet),
+    /// one of the keys of some objects
     KeysOf(KeysOf),
-    /// site label ("" = plain DATA)
+    /// an unknown, named by its label ("" = unnamed): where it comes from (`row["id"]`), a
+    /// tensor shape, a builtin type (`typed_label`)
     Data(StrId),
+    /// nothing: the value is only its objects (or no value at all)
     Bot,
 }
 
+/// An unnamed unknown.
 pub const DATA: KeyVal = KeyVal::Data(intern::EMPTY_STR);
+/// No scalar.
 pub const BOT: KeyVal = KeyVal::Bot;
 
 impl KeyVal {
+    /// An unknown named `site` ("" for none).
     pub fn data(site: &str) -> KeyVal {
         if site.is_empty() {
             DATA
@@ -1213,6 +867,7 @@ impl KeyVal {
             KeyVal::Data(intern::s(site))
         }
     }
+    /// One of these literals (`Lit` for one).
     pub fn lits(ks: KeySet) -> KeyVal {
         if ks.len() == 1 {
             KeyVal::Lit(ks.first().unwrap())
@@ -1308,7 +963,7 @@ pub fn label_name(label: &str) -> &str {
 
 /// The builtin type of a literal key (`int` for a bool too: an int it is), None for others.
 pub fn key_type(k: KeyId, ty: &str) -> bool {
-    crate::intern::with_key(k, |kk| match kk {
+    with_key(k, |kk| match kk {
         crate::intern::Key::Str(_) => ty == "str",
         crate::intern::Key::Int(_) => ty == "int",
         crate::intern::Key::Bool(_) => ty == "bool" || ty == "int",
@@ -1320,7 +975,7 @@ pub fn key_type(k: KeyId, ty: &str) -> bool {
 
 /// A typed label's type dropped (the value may be of another type now), its name kept.
 fn untyped(label: StrId) -> KeyVal {
-    let l = crate::intern::str_get(label);
+    let l = str_get(label);
     if label_type(&l).is_none() {
         return KeyVal::Data(label);
     }
@@ -1328,6 +983,9 @@ fn untyped(label: StrId) -> KeyVal {
     if name == &*l { DATA } else { KeyVal::data(name) }
 }
 
+/// The scalar on either of two paths: literals union (past `MAX_LITS`, an unknown); the keys
+/// of more objects; two unknowns an unknown (of their type, or a joined tensor shape); an
+/// unknown and literals the unknown (typed only when the literals are of its type).
 pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     if a == b {
         return a.clone();
@@ -1352,7 +1010,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
         }
     }
     if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
-        let (lx, ly) = (crate::intern::str_get(*x), crate::intern::str_get(*y));
+        let (lx, ly) = (str_get(*x), str_get(*y));
         if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
         }
@@ -1366,22 +1024,22 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     // possible); a tensor joined with a number: rank 0 possible
     for (d, l) in [(a, b), (b, a)] {
         if let (KeyVal::Data(x), true) = (d, l.is_literal()) {
-            let t = crate::intern::str_get(*x);
+            let t = str_get(*x);
             if crate::models::shape::parse_dim_label(&t).is_some() {
                 let lits = kv_literals(l);
                 // (a dim or None, or a str: no dim)
-                if !lits.iter().all(crate::intern::key_is_number) {
+                if !lits.iter().all(key_is_number) {
                     return DATA;
                 }
-                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
+                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| key_as_int(k) == Some(n))).unwrap_or(false);
                 return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
             }
             if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(&t).unwrap_or(&t)) {
                 // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
                 // or anything else: an unknown (the literal stays possible)
                 let lits = kv_literals(l);
-                let none = crate::intern::key_none();
-                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| crate::intern::key_is_number(*k));
+                let none = key_none();
+                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| key_is_number(*k));
                 if !rest.is_empty() {
                     return DATA;
                 }
@@ -1403,7 +1061,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     // an unknown joined with literals: the unknown, of its type if they are of it too
     for (d, l) in [(a, b), (b, a)] {
         if let KeyVal::Data(x) = d {
-            let t = crate::intern::str_get(*x);
+            let t = str_get(*x);
             // (a label that says what the text is — a JSON or pickle text of known parts, a CSV
             // text of known header — is no longer that)
             if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
@@ -1416,6 +1074,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     DATA
 }
 
+/// The literals a scalar may be (empty when it is not literals).
 pub fn kv_literals(kv: &KeyVal) -> KeySet {
     match kv {
         KeyVal::Lit(k) => KeySet::one(*k),
@@ -1428,6 +1087,8 @@ pub fn kv_literals(kv: &KeyVal) -> KeySet {
 /// triples each round).
 pub const TEXT_MAX: usize = 1 << 16;
 
+/// A str function applied to the scalar: literals computed, keys of objects through one more
+/// lens step; past `TEXT_MAX` a str not known.
 pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
     if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX) {
         return KeyVal::data(&typed_label("str", ""));
@@ -1468,8 +1129,8 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             Some(KeyVal::KeysOf(ko2))
         }
         // a tensor or None, not None: the tensor
-        KeyVal::Data(l) if keys.contains(crate::intern::key_none()) => {
-            let t = crate::intern::str_get(*l);
+        KeyVal::Data(l) if keys.contains(key_none()) => {
+            let t = str_get(*l);
             Some(crate::models::shape::strip_optional(&t).map(KeyVal::data).unwrap_or_else(|| kv.clone()))
         }
         _ => Some(kv.clone()),
@@ -1502,11 +1163,13 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 }
 
 // ---------------------------------------------------------------------------
-// requirements (§9)
+// requirements
 // ---------------------------------------------------------------------------
 
+/// A requirement a read records on one key of an input (per path, in `State::reqs`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
+    /// read on every path (else: sometimes)
     pub always: bool,
     /// other sources that could satisfy the same access
     pub alternatives: IdSet<SourceId>,
@@ -1522,6 +1185,7 @@ pub struct ReqInfo {
 }
 
 impl ReqInfo {
+    /// The requirement on either of two paths that both read the key.
     pub fn join(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always && o.always,
@@ -1556,6 +1220,7 @@ impl ReqInfo {
             self.sometimes()
         }
     }
+    /// The same requirement, needed on some paths only.
     pub fn sometimes(&self) -> ReqInfo {
         ReqInfo { always: false, ..self.clone() }
     }
@@ -1565,6 +1230,9 @@ impl ReqInfo {
 // values
 // ---------------------------------------------------------------------------
 
+/// What a name, slot or expression may hold: one of the objects `pts` (points-to), or a
+/// scalar described by `kv`. The empty value (no objects, `Bot`) is what an unreachable path
+/// or a missing slot holds.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Value {
     pub pts: ObjSet,
@@ -1589,12 +1257,14 @@ impl Value {
     pub fn new() -> Value {
         Value::default()
     }
+    /// The value on either of two paths.
     pub fn join(&self, o: &Value) -> Value {
         if self == o {
             return self.clone();
         }
         Value { pts: self.pts.union(&o.pts), kv: kv_join(&self.kv, &o.kv) }
     }
+    /// No objects and no scalar.
     pub fn empty(&self) -> bool {
         self.pts.is_empty() && self.kv.is_bot()
     }
@@ -1619,6 +1289,7 @@ impl Value {
     pub fn kv_only(kv: KeyVal) -> Value {
         Value { pts: ObjSet::new(), kv }
     }
+    /// The one object it is (no scalar besides).
     pub fn single(&self) -> Option<ObjId> {
         if self.pts.len() == 1 && self.kv.is_bot() {
             self.pts.first()
@@ -1628,6 +1299,7 @@ impl Value {
     }
 }
 
+/// The join of many values (the empty value for none).
 pub fn join_values(vals: impl IntoIterator<Item = Value>) -> Value {
     // (the objects in one sort: pairwise unions of many large sets are quadratic)
     let mut ids: Vec<ObjId> = Vec::new();

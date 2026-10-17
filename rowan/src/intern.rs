@@ -1,7 +1,10 @@
-//! Global interners for keys, sources, lenses and small strings (every set the
-//! analysis manipulates is a sorted vector of `u32` ids, so joins are merges and comparisons are memcmp).
+//! Interners for keys (`Key`: the Python values usable as dict keys, which are also rowan's
+//! literals), sources, lenses and small strings, and `IdSet`, the sorted set of ids every
+//! key set, object set and source set is. With values as `u32` ids, joins are merges of
+//! sorted vectors and comparisons are memcmp.
 //!
-//! Interners are thread-local: the analysis of one program runs on one thread.
+//! Interners are thread-local: the analysis of one program runs on one thread, and ids are
+//! meaningful only on it.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -9,13 +12,14 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::domain::{Lens, Source};
+use crate::source::{Lens, Source};
 
 // ---------------------------------------------------------------------------
 // keys
 // ---------------------------------------------------------------------------
 
-/// A Python value usable as a dict key, plus the symbolic inverse-image term `Inv`.
+/// A Python value usable as a dict key: rowan's literals (a `KeyVal::Lit` is one), plus the
+/// symbolic inverse-image term `Inv`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Str(Arc<str>),
@@ -43,18 +47,23 @@ pub enum Key {
     Chrono(u8, i64, i32),
 }
 
+/// An interned `Key`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct KeyId(pub u32);
 
+/// An interned string: names, sites, labels, mutators.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct StrId(pub u32);
 
+/// An interned `domain::Source`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct SourceId(pub u32);
 
+/// An interned `domain::Lens`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct LensId(pub u32);
 
+/// One interner: the values in id order, and the id of each.
 struct Table<T> {
     items: Vec<T>,
     index: FxHashMap<T, u32>,
@@ -113,16 +122,25 @@ impl Interners {
     }
 }
 
+/// The key of the `Elem` slot (`"*"`): what a list, set or iterator holds at no known position.
 pub const STAR: KeyId = KeyId(0);
 pub const EMPTY_STR: StrId = StrId(0);
 /// The mutator standing for the ones a row no longer names (`domain::cap_mutators`).
 pub const MORE: StrId = StrId(1);
+/// The lens of no steps: an input's keys as they are.
 pub const EMPTY_LENS: LensId = LensId(0);
 
+/// The id of a key.
 pub fn key(k: Key) -> KeyId {
     INTERN.with(|i| KeyId(i.borrow_mut().keys.intern(k)))
 }
 
+/// The str key whose text is the string `id` (a name as a record's key: `x` → `"x"`).
+pub fn key_of_str(id: StrId) -> KeyId {
+    key_str_lit(&str_get(id))
+}
+
+/// The key of a str literal.
 pub fn key_str_lit(s: &str) -> KeyId {
     if let Some(k) = INTERN.with(|i| i.borrow().str_keys.get(s).copied()) {
         return KeyId(k);
@@ -157,6 +175,7 @@ pub fn key_int(i: i64) -> KeyId {
     key(Key::Int(i))
 }
 
+/// A copy of the key (`with_key` reads it in place).
 pub fn key_get(id: KeyId) -> Key {
     INTERN.with(|i| i.borrow().keys.get(id.0).clone())
 }
@@ -177,6 +196,7 @@ pub fn key_as_str(id: KeyId) -> Option<Arc<str>> {
     })
 }
 
+/// The int of an int key (a bool's too: an int it is).
 pub fn key_as_int(id: KeyId) -> Option<i64> {
     with_key(id, |k| match k {
         Key::Int(i) => Some(*i),
@@ -189,14 +209,18 @@ pub fn key_is_number(id: KeyId) -> bool {
     with_key(id, |k| matches!(k, Key::Int(_) | Key::Float(_)))
 }
 
+/// Is it an inverse-image term (`Key::Inv`), not a key the program can hold?
 pub fn key_is_inv(id: KeyId) -> bool {
     with_key(id, |k| matches!(k, Key::Inv(..)))
 }
 
+/// The term "the key x with `fn_name`(x) == k" (`domain::RenameFn::inverse`).
 pub fn key_inv(fn_name: &str, k: KeyId) -> KeyId {
     key(Key::Inv(Arc::from(fn_name), k))
 }
 
+/// The key of the Enum member `qual` (`Color.RED`), with the value it equals if its enum mixes
+/// in str or int.
 pub fn key_member(qual: &str, value: Option<KeyId>) -> KeyId {
     key(Key::Member(Arc::from(qual), value))
 }
@@ -229,13 +253,14 @@ pub fn key_tuple(items: Vec<KeyId>) -> KeyId {
     key(Key::Tuple(items))
 }
 
+/// The key of a frozenset of these keys.
 pub fn key_frozen(mut items: Vec<KeyId>) -> KeyId {
     items.sort();
     items.dedup();
     key(Key::Frozen(items))
 }
 
-/// Python's `str(k)` for the key (used where the prototype formats a key into a string).
+/// Python's `str(k)` for the key.
 pub fn key_py_str(id: KeyId) -> String {
     with_key(id, |k| match k {
         Key::Str(s) => s.to_string(),
@@ -245,7 +270,7 @@ pub fn key_py_str(id: KeyId) -> String {
     })
 }
 
-/// Python's `repr(k)` (`key_str` in the prototype).
+/// Python's `repr(k)`.
 pub fn key_repr(id: KeyId) -> String {
     with_key(id, key_repr_inner)
 }
@@ -297,6 +322,7 @@ fn key_repr_inner(k: &Key) -> String {
     }
 }
 
+/// Python's `repr` of a str (single quotes unless the text has one and no double quote).
 pub fn py_str_repr(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);
@@ -319,17 +345,19 @@ pub fn py_str_repr(s: &str) -> String {
     out
 }
 
+/// Python's `repr` of a float (the shortest text that reads back as it).
 pub fn py_float_repr(f: f64) -> String {
     crate::models::pyvalues::float_repr(f)
 }
 
-/// Sort key for `sorted(keys, key=str)`: the repr.
+/// The keys sorted by their repr (a stable order for people: ids depend on interning order).
 pub fn sorted_by_str(keys: impl IntoIterator<Item = KeyId>) -> Vec<KeyId> {
     let mut v: Vec<(String, KeyId)> = keys.into_iter().map(|k| (key_repr(k), k)).collect();
     v.sort();
     v.into_iter().map(|(_, k)| k).collect()
 }
 
+/// `{'a', 'b'}`: the keys' reprs, sorted.
 pub fn keys_str(keys: impl IntoIterator<Item = KeyId>) -> String {
     let mut items: Vec<String> = keys.into_iter().map(key_repr).collect();
     items.sort();
@@ -340,6 +368,7 @@ pub fn keys_str(keys: impl IntoIterator<Item = KeyId>) -> String {
 // strings (sites, mutators, names)
 // ---------------------------------------------------------------------------
 
+/// The id of a string.
 pub fn s(st: &str) -> StrId {
     if let Some(n) = INTERN.with(|i| i.borrow().strs.index.get(st).copied()) {
         return StrId(n);
@@ -347,6 +376,7 @@ pub fn s(st: &str) -> StrId {
     INTERN.with(|i| StrId(i.borrow_mut().strs.intern(Arc::from(st))))
 }
 
+/// The string of an id.
 pub fn str_get(id: StrId) -> Arc<str> {
     INTERN.with(|i| i.borrow().strs.get(id.0).clone())
 }
@@ -361,6 +391,7 @@ impl fmt::Display for StrId {
 // sources / lenses
 // ---------------------------------------------------------------------------
 
+/// The id of a source.
 pub fn source(src: Source) -> SourceId {
     INTERN.with(|i| SourceId(i.borrow_mut().sources.intern(src)))
 }
@@ -373,6 +404,7 @@ pub fn with_source<R>(id: SourceId, f: impl FnOnce(&Source) -> R) -> R {
     INTERN.with(|i| f(i.borrow().sources.get(id.0)))
 }
 
+/// The id of a lens.
 pub fn lens(l: Lens) -> LensId {
     if l.steps.is_empty() {
         return EMPTY_LENS;
@@ -591,4 +623,5 @@ impl<T: Copy + Ord> From<Vec<T>> for IdSet<T> {
     }
 }
 
+/// A set of keys.
 pub type KeySet = IdSet<KeyId>;

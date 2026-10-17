@@ -93,7 +93,7 @@ fn builtin_exc_names_uncached(name: &str) -> (Vec<String>, bool) {
 /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
 pub fn exception_object(an: &mut Analyzer, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
     let t = an.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
-    let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
+    let row = Row::with_source(crate::source::Source::new(cls_name, crate::source::SourceKind::Data));
     let oid = an.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
     let strong = an.heap.obj(oid).single;
     an.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);

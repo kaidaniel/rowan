@@ -12,7 +12,7 @@
 use ruff_python_ast::{self as ast, Expr, Stmt};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::intern::{s, StrId};
+use crate::intern::{key_as_str, s, KeyId, StrId};
 
 /// Where a value comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -34,10 +34,13 @@ pub enum Origin {
 /// The value an origin gives, or something it holds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Level {
+    /// the value itself
     Own,
+    /// something it holds (its items, its attributes' values)
     Held,
 }
 
+/// Where a value comes from: an origin, and whether it is that value or something it holds.
 pub type Src = (Origin, Level);
 
 /// A callee by the name the code calls it: `f(…)` (f, None), `m.f(…)` (m, Some(f)).
@@ -95,10 +98,6 @@ impl Flags {
             Level::Own => Flags { rebinds: false, ..*self },
             Level::Held => Flags { held: self.changes || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
         }
-    }
-
-    pub fn any(&self) -> bool {
-        self.changes || self.held || self.held2 || self.iterated || self.called || self.rebinds || self.methods || self.edits
     }
 
     pub fn join(&mut self, o: &Flags) {
@@ -207,10 +206,11 @@ pub struct RecvUse {
 pub struct Like(Vec<Result<String, Option<String>>>);
 
 impl Like {
-    pub fn matches(&self, k: crate::intern::KeyId) -> bool {
+    /// Could the template make the name `k` (it starts and ends as the template's literal ends)?
+    pub fn matches(&self, k: KeyId) -> bool {
         let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
         let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
-        crate::intern::key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
+        key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
     }
 
     /// The one name it makes when each hole is a name `bind` knows the text of.
@@ -280,6 +280,7 @@ pub struct Flow<'a> {
 }
 
 impl<'a> Flow<'a> {
+    /// A scan of code whose own names `locals` picks, `me` its receiver's name, in package `pkg`.
     pub fn new(locals: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
         Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
     }
@@ -288,7 +289,7 @@ impl<'a> Flow<'a> {
     /// statement binds the same name).
     pub fn scan(mut self, params: &[StrId], first: Option<StrId>, body: &'static [Stmt], lambda: Option<&'static Expr>) -> CodeUses {
         self.first = first;
-        for st in super::access::walk_stmts(body) {
+        for st in crate::syntax::walk_stmts(body) {
             match st {
                 Stmt::Import(i) => {
                     for a in &i.names {
@@ -393,6 +394,7 @@ impl<'a> Flow<'a> {
     }
 
     // ------------------------------------------------------------- bindings
+    /// The local names target `t` binds from `e` (`held`: from what `e` holds).
     fn bind_target(&self, t: &'static Expr, e: &'static Expr, held: bool, binds: &mut Vec<(StrId, &'static Expr, bool)>) {
         match t {
             Expr::Name(n) if self.local(n.id.as_str()) => binds.push((s(n.id.as_str()), e, held)),
@@ -490,6 +492,7 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// What a use at `pos` does to the origins of the values `srcs`.
     fn mark(&mut self, srcs: &[Src], pos: Pos) {
         for (o, l) in srcs {
             let f = self.flags.entry(*o).or_default();
@@ -531,6 +534,7 @@ impl<'a> Flow<'a> {
     }
 
     // ------------------------------------------------------------- uses
+    /// The uses an expression makes, used itself at `pos`.
     fn expr(&mut self, e: &'static Expr, pos: Pos) {
         if !matches!(pos, Pos::Read | Pos::Bind) {
             let srcs = self.srcs(e);
@@ -720,6 +724,8 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// A call's uses: its callee by name, its arguments given to it (to a method of a value, a
+    /// library function, the program's function by name: `Pass`).
     fn call(&mut self, c: &'static ast::ExprCall) {
         let args: Vec<&'static Expr> = c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value)).collect();
         match &*c.func {
@@ -875,6 +881,7 @@ impl<'a> Flow<'a> {
         matches!((e, self.me), (Expr::Name(n), Some(me)) if n.id.as_str() == me && self.alias.get(&s(me)).is_some_and(|v| v.len() == 1))
     }
 
+    /// Does target `t` bind local names only?
     fn all_local(&self, t: &Expr) -> bool {
         match t {
             Expr::Name(n) => self.local(n.id.as_str()),
@@ -936,6 +943,7 @@ impl<'a> Flow<'a> {
         b.iter().for_each(|st| self.stmt(st));
     }
 
+    /// A statement's uses.
     fn stmt(&mut self, st: &'static Stmt) {
         match st {
             Stmt::Expr(x) => self.expr(&x.value, Pos::Read),
@@ -1140,6 +1148,7 @@ pub struct NameUses {
 }
 
 impl NameUses {
+    /// Adds the names these statements call and use.
     pub fn scan(&mut self, body: &'static [Stmt]) {
         body.iter().for_each(|st| ast::visitor::Visitor::visit_stmt(self, st));
     }

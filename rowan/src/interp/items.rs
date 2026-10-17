@@ -3,12 +3,13 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{ObjId, classify, join_rows, join_values, lens_apply, Classification, KeyVal, Ns, ObjSet, Row, Source, SourceKind, Tier, Value, DATA};
+use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, DATA, KeyVal, KeysOf, Ns, ObjId, ObjSet, ReqInfo, Row, RowData, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
-use crate::state::{Kind, State};
+use crate::source::{lens_apply, source_depth, source_extend, source_is_data, Source, SourceId, SourceKind};
+use crate::state::{mark_merged, view_of, Kind, State};
 
-use super::{Analyzer, Payload, ViewKind, PATH_DEPTH, WIDE_READ};
+use super::{Analyzer, Args, PATH_DEPTH, Payload, ViewKind, WIDE_READ};
 
 /// An item read `obj[key]` (an attribute read when `ns` is `Attr`): what each receiver's part
 /// of it needs.
@@ -42,6 +43,10 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
 }
 
 impl Analyzer {
+    /// A read `obj[key]` (`ns` Item; Attr for a model's attribute read through here): each part
+    /// on its own (literals beside objects), a `__getitem__` of the program per receiver, else
+    /// `load_item_inner` with the read's exception class and modes set. `report`: verdicts
+    /// (false: a model's own read, which raises nothing).
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         if let Some(r) = self.split_mixed(&[obj], state, &mut |an, vs, st| an.load_item(&vs[0], ns, key, node, st, report)) {
             return r;
@@ -73,6 +78,9 @@ impl Analyzer {
         v
     }
 
+    /// The read on each object `obj` may be (`item_of`): a record's key (`load_record`), a
+    /// sequence's position, an unknown's placeholder, … joined; a requirement one of several
+    /// receivers records is only sometimes needed.
     pub(super) fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
         let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown)) && !obj.pts.is_empty() {
@@ -125,7 +133,7 @@ impl Analyzer {
         for oid in obj.pts.iter() {
             // (one that surely lacks the key fails the read: runs that go on took another)
             let fails = several && self.heap.kind(oid).is_record() && key.pts.is_empty() && {
-                let (row, ks) = (state.row(oid, ns), crate::domain::kv_literals(&key.kv));
+                let (row, ks) = (state.row(oid, ns), kv_literals(&key.kv));
                 !ks.is_empty() && ks.iter().all(|k| classify(&row, k).tier == Tier::Missing)
             };
             if let Some(b) = &base {
@@ -140,7 +148,7 @@ impl Analyzer {
             needs_of_one(&base, &outs, state);
         }
         let line_data = rd.line_data;
-        acc = crate::domain::join_values(parts);
+        acc = join_values(parts);
         // (a part that is no object: what an unknown, a mapping's key or a str / tuple literal
         // holds is not known here; None or a number only fails the read)
         if obj.pts.is_empty() || obj.kv.may_have_items() {
@@ -286,7 +294,7 @@ impl Analyzer {
                 for b in bases.iter() {
                     out.push(self.load_record(b, Ns::Item, &Value::data("index"), rd.node, state, rd.guarded, rd.single_target, rd.try_guard));
                 }
-                crate::domain::join_values(out)
+                join_values(out)
             }
         }
     }
@@ -414,10 +422,10 @@ impl Analyzer {
         let cls = self.heap.instance_class(oid);
         if let Some(cls) = cls {
             if let Some(m) = self.class_lookup(cls, "__getitem__") {
-                let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
+                let fv = self.heap.class_attr(m, "__getitem__");
                 for f in fv.pts.iter() {
                     if self.heap.kind(f) == Kind::Function {
-                        let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                        let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
                         parts.push(r);
                     }
                 }
@@ -457,7 +465,10 @@ impl Analyzer {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// The read of `key` from one record's row in `ns`: a verdict per literal key (guarded or
+    /// not), the requirements on the inputs that may provide it, the value under it (a
+    /// placeholder for what an open row holds); a key of an object's keys (`KeysOf`); a key not
+    /// known (any value; it may raise).
     pub(super) fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         // (a load a `try` handler guards: its exception still fires when the key is missing, so
         // the key is required of the input all the same — the runtime oracle's rule)
@@ -468,7 +479,7 @@ impl Analyzer {
         v
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// `load_record` with the handler's catching mode set.
     pub(super) fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.heap.kind(oid);
         let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { self.read_row(oid, ns, state) };
@@ -477,7 +488,7 @@ impl Analyzer {
         let kv = &key.kv;
         if kv.is_literal() {
             let mut acc = Value::new();
-            let ks = crate::domain::kv_literals(kv);
+            let ks = kv_literals(kv);
             let is_lit = matches!(kv, KeyVal::Lit(_));
             for k in intern::sorted_by_str(ks.iter()) {
                 let cls = classify(&row, k);
@@ -514,7 +525,7 @@ impl Analyzer {
         let mut v = self.all_values(oid, ns, state);
         // (a closed record: the unknown key is one of its keys — one of their values; a map the
         // program filled under data keys: its values are all in its slots)
-        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src));
         if (row.closed() || own_map) && !row.top {
             return v;
         }
@@ -665,7 +676,7 @@ impl Analyzer {
         let star = state.slot(oid, ns, STAR);
         // (a map only the program filled, under keys it computed: a key it has holds one
         // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
-        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src));
         let from_map = own_map && v.empty() && !star.empty();
         if from_map {
             v = star;
@@ -688,7 +699,7 @@ impl Analyzer {
     /// A read by a key that is one of another object's keys: possibly missing where that
     /// object's keys are not all this one's; any of the values.
     #[allow(clippy::too_many_arguments)]
-    fn keys_of_key_read(&mut self, oid: ObjId, ns: Ns, ko: &crate::domain::KeysOf, row: &Row, node: &Node, state: &mut State, guarded: bool) -> Value {
+    fn keys_of_key_read(&mut self, oid: ObjId, ns: Ns, ko: &KeysOf, row: &Row, node: &Node, state: &mut State, guarded: bool) -> Value {
         let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
         if !guarded && srcrow.closed() && row.closed() {
             let mut missing: Vec<KeyId> = Vec::new();
@@ -724,7 +735,7 @@ impl Analyzer {
         for group in pending.chunk_by(|a, b| a.0 == b.0) {
             let pid = group[0].0;
             let old = state.has_row(pid, Ns::Item).then(|| state.row(pid, Ns::Item));
-            let r = crate::domain::join_rows(old.into_iter().chain(group.iter().map(|(_, r)| r.clone())));
+            let r = join_rows(old.into_iter().chain(group.iter().map(|(_, r)| r.clone())));
             state.set_row_narrowed(pid, Ns::Item, r.clone());
             state.set_row_narrowed(pid, Ns::Attr, r);
         }
@@ -744,7 +755,7 @@ impl Analyzer {
             // (one placeholder of the read for every object it reads: weak, its row the join)
             let ctx = self.frame().ctx.clone();
             let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path@{}:{}:{}", site, ns, intern::key_repr(k)), &ctx, false, &format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k)), Payload::None);
-            crate::state::mark_merged(pid);
+            mark_merged(pid);
             self.fill_placeholder(pid, oid, ns, k, row, false, state);
             return Value::obj(pid);
         }
@@ -752,7 +763,7 @@ impl Analyzer {
         // the content under an unknown key stands for many values: stores on it are weak
         let single = k != STAR;
         // (a loop's item holds there what the records it is one of hold: their placeholder)
-        let base = crate::state::view_of(oid).unwrap_or(oid);
+        let base = view_of(oid).unwrap_or(oid);
         // (a shallow copy holds the original's values: under a key neither stored since, the
         // same part of the input — which the original holds there too while it has no other)
         let root = self.shallow_copy_root(base);
@@ -771,7 +782,6 @@ impl Analyzer {
     /// The placeholder `pid` for what `oid` holds under `k` (`elem`: the element a loop takes,
     /// also of an input's own data): named after its parent, a level deeper, its rows open
     /// through the parent's inputs at `k`.
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn fill_placeholder(&mut self, pid: ObjId, oid: ObjId, ns: Ns, k: KeyId, row: &Row, elem: bool, state: &mut State) {
         if let Some(sym) = self.names.access(&self.heap, oid, ns, k).filter(|_| !self.names.has(pid)) {
             let scope = self.names.scope(oid);
@@ -798,7 +808,7 @@ impl Analyzer {
         // (an input's parts below PATH_DEPTH + 1 keys are nothing more of it: data copied out of
         // a placeholder and read again, as a recursion over unknown values does, made paths
         // without end — `args['*'][0][0][0]…` — in contracts no one can read)
-        let srcs = row.sources.filter(|(src, _)| (elem || !crate::domain::source_is_data(src)) && crate::domain::source_depth(src) <= PATH_DEPTH as usize).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
+        let srcs = row.sources.filter(|(src, _)| (elem || !source_is_data(src)) && source_depth(src) <= PATH_DEPTH as usize).map(|(src, _)| (source_extend(src, k), intern::EMPTY_LENS));
         // (the parent's value was read on this path: its requirements are known here, none so
         // far — a path without the entry never read it)
         for (cs, _) in srcs.iter() {
@@ -807,7 +817,7 @@ impl Analyzer {
         let r = if srcs.is_empty() && row.mutators.is_empty() {
             Row::top()
         } else {
-            Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
+            Row::from_data(RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
         };
         // (a placeholder of several objects' parts: what each holds there, joined when the
         // read ends)
@@ -829,9 +839,12 @@ impl Analyzer {
         if key.pts.is_empty() {
             return key;
         }
-        Value::with_kv(key.pts.clone(), crate::domain::kv_join(&key.kv, &DATA))
+        Value::with_kv(key.pts.clone(), kv_join(&key.kv, &DATA))
     }
 
+    /// A store `obj[key] = v`: a `__setitem__` of the program per receiver, else per object a
+    /// list's position, a frame's column, a record's key (`store_key`), strong into a single
+    /// object.
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__setitem__"), state, &mut |an, o, st| {
@@ -907,10 +920,10 @@ impl Analyzer {
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.heap.instance_class(oid) {
                         if let Some(m) = self.class_lookup(cls, "__setitem__") {
-                            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__setitem__"))).cloned().unwrap_or_default();
+                            let fv = self.heap.class_attr(m, "__setitem__");
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
-                                    self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                                    self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone(), v.clone()]), state, node, false);
                                 }
                             }
                             continue;
@@ -923,6 +936,11 @@ impl Analyzer {
         }
     }
 
+    /// Stores `v` under key `kv` of record `oid`: a literal key into the row and slot; several
+    /// literals weakly; one of another object's keys (`for k in d: out[k] = …`) copies those
+    /// keys (definite when the loop covers them all); a key not known opens the row through a
+    /// `store` data source (the value in the `*` slot and any key's). Into the shared unknown
+    /// object, the value escapes to unknown code.
     pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
         // a store into what unknown code holds (the shared unknown object): the value goes to
         // unknown code, as if given to it; the shared object stays "anything"
@@ -1066,6 +1084,8 @@ impl Analyzer {
         self.delete_item(obj, Ns::Item, key, node, state, true);
     }
 
+    /// `del obj[key]`: a `__delitem__` of the program per receiver, else per object its verdict
+    /// (a missing key raises) and the key removed (strongly from a single object).
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__delitem__"), state, &mut |an, o, st| {
@@ -1101,10 +1121,10 @@ impl Analyzer {
             if kind == Kind::Instance && ns == Ns::Item {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__delitem__") {
-                        let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__delitem__"))).cloned().unwrap_or_default();
+                        let fv = self.heap.class_attr(m, "__delitem__");
                         for f in fv.pts.iter() {
                             if self.heap.kind(f) == Kind::Function {
-                                self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                                self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
                             }
                         }
                         continue;
@@ -1116,7 +1136,7 @@ impl Analyzer {
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_));
             let mut raise: Option<(bool, KeyId)> = None;
-            for k in intern::sorted_by_str(crate::domain::kv_literals(&key.kv).iter()) {
+            for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
                 let cls = classify(&row, k);
                 if report && !self.is_guarded(ns) {
                     self.verdict(node, k, &cls, oid, ns, None, None);
@@ -1164,15 +1184,108 @@ impl Analyzer {
             state.set_row(oid, ns, row);
         }
     }
+
+    /// The join of every value in one namespace of the object.
+    pub fn all_values(&self, oid: u32, ns: Ns, state: &State) -> Value {
+        state.all_slots(oid, ns)
+    }
+
+    /// The values a record holds, including what its unknown keys hold (a parameter's dict,
+    /// an open record: its content under an unknown key).
+    pub(in crate::interp) fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
+        let v = state.all_slots(oid, Ns::Item);
+        let row = state.row(oid, Ns::Item);
+        // (keys stored under unknown names keep their values in the `*` slot: only content
+        // from outside — a parameter, an input, unknown code — is not there)
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !source_is_data(src));
+        if row.open() && outside {
+            return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
+        }
+        v
+    }
+
+    /// A copy of object `oid` made at `node` (`copy.copy`, `dict(d)`, `deepcopy` when `deep`:
+    /// what it holds copied too, `seen` keeping shared parts shared): a tuple is its own copy;
+    /// the copy's site names the first original, so copies of copies in a loop share a site.
+    pub fn copy_object(&mut self, oid: u32, node: &Node, state: &mut State, deep: bool, seen: &mut IndexMap<u32, u32>) -> u32 {
+        if let Some(&n) = seen.get(&oid) {
+            return n;
+        }
+        let o_kind = self.heap.kind(oid);
+        // a tuple is its own copy (`copy.copy`), and its own deep copy when nothing in it is
+        // copied (CPython returns the same object)
+        if o_kind == Kind::Tuple && (!deep || state.slots_of(oid).iter().all(|(_, v)| v.pts.iter().all(|x| !matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)))) {
+            seen.insert(oid, oid);
+            return oid;
+        }
+        let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
+        let tag = if deep { "deep" } else { "copy" };
+        // (the original's id in the site: a deep copy's nested copies are distinct objects; a
+        // copy of a copy, made here or elsewhere, counts as a copy of the first original — else
+        // copies of copies in a loop make new sites every round)
+        let prefix = format!("{}:{}:", tag, self.site_of(node));
+        // (a copy renamed since, `#recent`: its site still names its original)
+        let site = &self.heap.obj(oid).site;
+        let site_root = (site.starts_with("copy:") || site.starts_with("deep:")).then(|| site.split('#').next().and_then(|s| s.rsplit(':').next()).and_then(|r| r.parse::<u32>().ok())).flatten();
+        let root = match (self.heap.copy_root.get(&oid), site_root) {
+            (Some(&r), _) => r,
+            (_, Some(r)) if (r as usize) < self.heap.len() => self.heap.copy_root.get(&r).copied().unwrap_or(r),
+            _ => oid,
+        };
+        // (a copy of a copy made elsewhere is named by the first original: `copy of X@L5`)
+        let mut base: &str = &self.heap.obj(root).label;
+        while let Some(rest) = base.strip_prefix("copy of ").or_else(|| base.strip_prefix("deep of ")) {
+            base = rest.rsplit_once("@L").filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map(|(b, _)| b).unwrap_or(rest);
+        }
+        let label = format!("{} of {}@L{}", tag, base, node.line);
+        let payload = self.heap.obj(oid).payload.clone();
+        let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
+        self.heap.copy_root.insert(nid, root);
+        seen.insert(oid, nid);
+        let ll = self.heap.llen(oid, state);
+        self.heap.set_llen(nid, state, ll);
+        let nsingle = self.heap.obj(nid).single;
+        for ns in [Ns::Item, Ns::Attr] {
+            if state.has_row(oid, ns) {
+                let prev = state.rows.get(&(nid, ns));
+                let r = match prev {
+                    Some(p) if !nsingle => p.join(&state.row(oid, ns)),
+                    _ => state.row(oid, ns),
+                };
+                state.set_row(nid, ns, r);
+            }
+        }
+        if let Some(e) = state.elems.get(&oid) {
+            state.elems.insert(nid, e);
+        }
+        for ((ns, k), mut v) in state.slots_of(oid) {
+            if deep && seen.len() < 64 {
+                let mut newp: Vec<u32> = Vec::new();
+                for x in v.pts.iter() {
+                    if matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance) {
+                        newp.push(self.copy_object(x, node, state, true, seen));
+                    } else {
+                        newp.push(x);
+                    }
+                }
+                v = Value::with_kv(ObjSet::from_vec(newp), v.kv);
+            }
+            state.set_slot(nid, ns, k, v, true);
+        }
+        nid
+    }
 }
 
 /// A read on one of several objects (`outs`: the requirements after each one's part, from
 /// `base`, and whether runs may take it): all are made, but one not made on every part runs
 /// may take is needed only sometimes, unless it was before or is an element's.
-type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+type Reqs = crate::layered::TwoLevel<SourceId, KeyId, ReqInfo>;
+/// After a read on each of several receivers (`outs`: per receiver, whether a run goes on with
+/// it, and the requirements after it): a requirement is `always` only when every receiver
+/// that goes on read it always.
 fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
     let mut reqs = base.clone();
-    let mut changed: Vec<(crate::domain::SourceId, KeyId)> = Vec::new();
+    let mut changed: Vec<(SourceId, KeyId)> = Vec::new();
     for (_, out) in outs {
         reqs.copy_changes(out, base);
         changed.extend(out.diff_keys(base));

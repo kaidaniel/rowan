@@ -21,6 +21,7 @@ use crate::models::Registry;
 use crate::scopes as scopemod;
 use crate::state::{Kind, State};
 
+/// The program being analysed (see the module doc).
 #[derive(Default)]
 pub struct Program {
     /// the main file, as given
@@ -28,11 +29,13 @@ pub struct Program {
     /// the main module's frontend index
     pub main_idx: u32,
     pub main_module: ObjId,
+    /// where imports are looked for: the main file's directory, its package root, `--search-path`
     pub search_paths: Vec<String>,
     /// installed packages to follow into site-packages (top-level names; `*` for all)
     pub follow: Vec<String>,
     /// site-packages directories searched for followed packages
     pub site_paths: Vec<String>,
+    /// run the functions the program does not call (`--no-entry`: not)
     pub analyse_entry_points: bool,
     /// the library models, by qualified name
     pub models: Registry,

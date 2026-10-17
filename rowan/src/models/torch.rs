@@ -16,6 +16,7 @@ use crate::state::{Kind, State};
 
 pub const SIZE_PREFIX: &str = "\u{1}S";
 
+/// A tensor-shape requirement or a definite mismatch, for the report and the hovers.
 #[derive(Clone, Debug)]
 pub struct ShapeNote {
     /// the module (frontend index) and line of the operation
@@ -366,7 +367,7 @@ pub fn t_param(an: &mut Analyzer, ann: &'static ruff_python_ast::Expr, fi: &crat
         ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
         _ => return None,
     };
-    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::domain::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::source::SourceKind::Param, state, &format!("param {}", pname));
     if is_str {
         if let Some(sy) = t_sym_of_obj(an, poid) {
             an.m.t_strs.insert(sy);
@@ -839,6 +840,7 @@ pub fn t_locate(an: &mut Analyzer, s: &Shape, i: i64, node: &Node, st: &mut Stat
     }
 }
 
+/// A dim's place in a `Shape`: counted from the front or from the back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pos {
     /// index in the prefix
@@ -903,16 +905,10 @@ fn kw<'a>(c: &'a Call, name: &str) -> Option<&'a Value> {
 }
 
 
-#[allow(dead_code)]
-fn unused(_: StrId, _: KeyId, _: IndexMap<u8, u8>, _: Vec<Value>) {
-    let _ = join_values(vec![]);
-    let _ = STAR;
-}
-
 /// An unknown known to be a number: a dim, a number the shape model made, an index of
 /// `enumerate` (`ENUM_INDEX`).
 pub fn is_number_label(l: &str) -> bool {
-    l.starts_with(sh::DIM_PREFIX) || l == sh::NUM_LABEL || l == crate::interp::funcs::ENUM_INDEX
+    l.starts_with(sh::DIM_PREFIX) || l == sh::NUM_LABEL || l == crate::interp::iter::ENUM_INDEX
 }
 
 // ---------------------------------------------------------------------------
@@ -5105,7 +5101,7 @@ fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option
             row = row.with_order(ns.clone());
         }
         None => {
-            row = crate::domain::Row::with_source(crate::domain::Source::new(&format!("genfromtxt@L{}", c.line), crate::domain::SourceKind::External));
+            row = crate::domain::Row::with_source(crate::source::Source::new(&format!("genfromtxt@L{}", c.line), crate::source::SourceKind::External));
             st.set_slot(oid, Ns::Item, intern::STAR, tensor_value(elem_shape.clone()), false);
         }
     }
@@ -5146,7 +5142,7 @@ pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
     // (the functions that change what they are given in place: a Python list shuffled)
     if matches!(q, "random.shuffle" | "copyto" | "put" | "place" | "putmask" | "fill_diagonal") {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     if !an.m.torch_on {
         return Value::data(&format!("L{}", c.line));

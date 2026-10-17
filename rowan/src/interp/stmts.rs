@@ -4,15 +4,17 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{Ns, Row, Value};
+use crate::domain::{classify, kv_literals, Ns, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
-use crate::state::{Kind, State};
+use crate::state::{CondFact, Kind, State};
+use crate::syntax::{collect_assigned, contains_jump};
 
-use super::{Finally, Handler, contains_jump, Analyzer, FuncNode, Payload};
+use super::{Finally, Handler, Analyzer, FuncNode, Payload};
 
 impl Analyzer {
-
+    /// Runs statements in order, until the path ends (`after_stmt`: the hover facts and row
+    /// checks of each).
     pub fn exec_block(&mut self, stmts: &'static [ast::Stmt], state: &mut State) {
         for st in stmts {
             if !state.reachable {
@@ -23,6 +25,8 @@ impl Analyzer {
         }
     }
 
+    /// Runs one statement, charged to the running function's budget (past the deadline a
+    /// function body stops: `cut_body`).
     pub(in crate::interp) fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.budget.charge(self.cx.frames.last().map(|f| f.code).unwrap_or(0));
         if self.cut_body(state) {
@@ -37,6 +41,7 @@ impl Analyzer {
         }
     }
 
+    /// A statement, by its kind.
     fn exec_stmt_inner(&mut self, node: &'static ast::Stmt, state: &mut State) {
         match node {
             ast::Stmt::Expr(e) => {
@@ -491,7 +496,7 @@ impl Analyzer {
                     ast::Singleton::True => intern::key_bool(true),
                     ast::Singleton::False => intern::key_bool(false),
                 };
-                let lits = crate::domain::kv_literals(&subj.kv);
+                let lits = kv_literals(&subj.kv);
                 if subj.pts.is_empty() && subj.kv.is_literal() && !lits.is_empty() {
                     if lits.len() == 1 {
                         return Some(lits.contains(want));
@@ -532,8 +537,8 @@ impl Analyzer {
     /// `case 1` / `case Color.RED`: equal to the value.
     fn match_value(&mut self, v: &'static ast::PatternMatchValue, subj: &Value, state: &mut State) -> Option<bool> {
         let pv = self.eval(&v.value, state);
-        let a = crate::domain::kv_literals(&subj.kv);
-        let b = crate::domain::kv_literals(&pv.kv);
+        let a = kv_literals(&subj.kv);
+        let b = kv_literals(&pv.kv);
         if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
             let k = b.iter().next().unwrap();
             if a.len() == 1 {
@@ -602,6 +607,7 @@ impl Analyzer {
         result
     }
 
+    /// `del` of each target: an item, an attribute or a name.
     fn stmt_delete(&mut self, d: &'static ast::StmtDelete, state: &mut State) {
         for t in &d.targets {
             match t {
@@ -624,13 +630,16 @@ impl Analyzer {
         }
     }
 
+    /// An `if` statement: the test splits the state; both branches run and join (with the facts
+    /// a pure test leaves, `CondFact`). `if TYPE_CHECKING:` notes its imports for annotations;
+    /// the main module's `__main__` block runs no calls when set up for runs on demand.
     fn stmt_if(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], state: &mut State) {
         if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
             self.note_type_only_imports(body);
         }
         // (setting the module code up for runs on demand: the calls of the main module's
         // `if __name__ == "__main__":` block — a script's work, often a demo — run no body)
-        if self.entry.main_block_unrun && !self.budget.skip_calls && self.cx.frames.len() == 1 && is_main_test(test) {
+        if self.entry.main_block_unrun && !self.budget.skip_calls && self.cx.frames.len() == 1 && crate::syntax::is_main_test(test) {
             self.budget.skip_calls = true;
             self.stmt_if(test, body, rest, state);
             self.budget.skip_calls = false;
@@ -688,12 +697,12 @@ impl Analyzer {
                     j.rows.insert(*k, joined.clone());
                 }
             }
-            let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
+            let mut all: Vec<std::sync::Arc<CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
             all.extend(kept);
             j.facts = std::sync::Arc::new(all);
         }
         if then_s.reachable && else_s.reachable && conditional {
-            let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
+            let mut new: Vec<std::sync::Arc<CondFact>> = Vec::new();
             let mut assigned: Vec<intern::StrId> = Vec::new();
             for st in body.iter() {
                 collect_assigned(st, &mut assigned);
@@ -749,7 +758,7 @@ impl Analyzer {
         }
         for o in recs {
             let row = pre.row(o, Ns::Item);
-            let cls = crate::domain::classify(&row, k);
+            let cls = classify(&row, k);
             if cls.tier == crate::domain::Tier::Input {
                 for st in [&mut *then_s, &mut *else_s] {
                     if st.reachable {
@@ -783,7 +792,7 @@ impl Analyzer {
         if text.is_empty() {
             return None;
         }
-        let names: Vec<intern::StrId> = super::names_in(inner).iter().map(|n| s(n)).collect();
+        let names: Vec<intern::StrId> = crate::syntax::names_in(inner).iter().map(|n| s(n)).collect();
         Some((s(&format!("{}@{}", text, self.frame().func.unwrap_or(0))), pos, names))
     }
 
@@ -811,7 +820,7 @@ impl Analyzer {
         if let Some(v) = st.env.get(&n) {
             return Some(v.clone());
         }
-        st.slot_opt(self.frame().module, Ns::Attr, intern::key(intern::Key::Str(intern::str_get(n))))
+        st.slot_opt(self.frame().module, Ns::Attr, intern::key_of_str(n))
     }
 
     /// A name's value for a fact's dependencies: its binding, else the (fixed) unknown object
@@ -852,32 +861,11 @@ impl Analyzer {
 
 }
 
-/// A `return` somewhere in these statements (not inside nested functions or classes).
-pub(super) fn contains_return(body: &[ast::Stmt]) -> bool {
-    body.iter().any(|s| match s {
-        ast::Stmt::Return(_) => true,
-        ast::Stmt::If(i) => contains_return(&i.body) || i.elif_else_clauses.iter().any(|c| contains_return(&c.body)),
-        ast::Stmt::For(f) => contains_return(&f.body) || contains_return(&f.orelse),
-        ast::Stmt::While(w) => contains_return(&w.body) || contains_return(&w.orelse),
-        ast::Stmt::With(w) => contains_return(&w.body),
-        ast::Stmt::Try(t) => {
-            contains_return(&t.body)
-                || contains_return(&t.orelse)
-                || contains_return(&t.finalbody)
-                || t.handlers.iter().any(|h| {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    contains_return(&h.body)
-                })
-        }
-        ast::Stmt::Match(m) => m.cases.iter().any(|c| contains_return(&c.body)),
-        _ => false,
-    })
-}
 
 /// Facts of a join on test `key` (positive `pos`): the then-branch rows when it holds, the
 /// else-branch rows when not, for every row the branches leave different.
-pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value)>, then_s: &State, else_s: &State, j: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
-    let mut guards: Vec<((u32, Ns), crate::domain::Row)> = Vec::new();
+pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value)>, then_s: &State, else_s: &State, j: &State) -> Vec<std::sync::Arc<CondFact>> {
+    let mut guards: Vec<((u32, Ns), Row)> = Vec::new();
     for (_, v) in &deps {
         for o in v.pts.iter() {
             for ns in [Ns::Item, Ns::Attr] {
@@ -913,21 +901,21 @@ pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::S
         return Vec::new();
     }
     vec![
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
+        std::sync::Arc::new(CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
+        std::sync::Arc::new(CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
     ]
 }
 
 /// The facts of test `key` both branches still hold whose every row is the branch's own row
 /// on its side (put back by `apply_cond_facts`, unchanged since): the join of the two is the
 /// joined row they record, so they hold after the join too.
-fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<CondFact>> {
     let held = |st: &State, truth: bool| st.facts.iter().find(|f| f.cond == key && f.truth == truth).cloned();
     let (Some(ft), Some(fe)) = (held(then_s, pos), held(else_s, !pos)) else { return Vec::new() };
     if !std::sync::Arc::ptr_eq(&held(else_s, pos).unwrap_or_else(|| ft.clone()), &ft) || !std::sync::Arc::ptr_eq(&held(then_s, !pos).unwrap_or_else(|| fe.clone()), &fe) {
         return Vec::new();
     }
-    let put_back = |st: &State, f: &crate::state::CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
+    let put_back = |st: &State, f: &CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
     if ft.rows.len() != fe.rows.len() || !put_back(then_s, &ft) || !put_back(else_s, &fe) {
         return Vec::new();
     }
@@ -936,7 +924,7 @@ fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State
 
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
 /// testing the name later tells which branch ran.
-pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<CondFact>> {
     let truth_of = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::models::pyvalues::truthy);
     let mut out = Vec::new();
     for (name, va, vb, jv) in vals.iter() {
@@ -955,11 +943,11 @@ pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, O
 }
 
 /// Add facts to a state (keeping the most recent few).
-pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<crate::state::CondFact>>) {
+pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<CondFact>>) {
     if new.is_empty() {
         return;
     }
-    let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = st.facts.iter().cloned().collect();
+    let mut all: Vec<std::sync::Arc<CondFact>> = st.facts.iter().cloned().collect();
     all.extend(new);
     let n = all.len();
     if n > 32 {
@@ -968,35 +956,6 @@ pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<crate::state::Co
     st.facts = std::sync::Arc::new(all);
 }
 
-/// Plain names a statement (and the blocks inside it) assigns.
-pub(super) fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
-    let add = |t: &ast::Expr, out: &mut Vec<intern::StrId>| {
-        for n in super::names_in(t) {
-            let id = s(&n);
-            if !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    };
-    match st {
-        ast::Stmt::Assign(a) => a.targets.iter().for_each(|t| add(t, out)),
-        ast::Stmt::AnnAssign(a) => add(&a.target, out),
-        ast::Stmt::AugAssign(a) => add(&a.target, out),
-        ast::Stmt::If(i) => {
-            i.body.iter().for_each(|x| collect_assigned(x, out));
-            i.elif_else_clauses.iter().for_each(|c| c.body.iter().for_each(|x| collect_assigned(x, out)));
-        }
-        ast::Stmt::Try(t) => {
-            t.body.iter().chain(t.orelse.iter()).chain(t.finalbody.iter()).for_each(|x| collect_assigned(x, out));
-            for h in &t.handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = h;
-                h.body.iter().for_each(|x| collect_assigned(x, out));
-            }
-        }
-        ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
-        _ => {}
-    }
-}
 
 thread_local! {
     /// per function body: how often it tests each text (`Analyzer::tested`)
@@ -1050,12 +1009,3 @@ fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMa
     }
 }
 
-/// `__name__ == "__main__"` (either way round).
-fn is_main_test(test: &ast::Expr) -> bool {
-    let ast::Expr::Compare(c) = test else { return false };
-    let [op] = &c.ops[..] else { return false };
-    let [right] = &c.comparators[..] else { return false };
-    let name = |e: &ast::Expr| matches!(e, ast::Expr::Name(n) if n.id.as_str() == "__name__");
-    let main = |e: &ast::Expr| matches!(e, ast::Expr::StringLiteral(s) if s.value.to_str() == "__main__");
-    *op == ast::CmpOp::Eq && ((name(&c.left) && main(right)) || (main(&c.left) && name(right)))
-}

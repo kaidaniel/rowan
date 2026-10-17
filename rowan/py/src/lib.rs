@@ -18,7 +18,9 @@ fn analyse(py: Python<'_>, source: String, filename: &str, search_paths: Vec<Str
             .stack_size(1 << 30)
             .spawn(move || -> Result<String, String> {
                 let mut an = Analyzer::new(source, &filename, search_paths, entry_points, follow_imports)?;
-                an.row_check_requests = row_checks.into_iter().map(|(l, n)| (String::new(), l, n)).collect();
+                for (line, name) in row_checks {
+                    an.request_row_check((String::new(), line, name));
+                }
                 an.run();
                 Ok(serde_json::to_string(&report::golden_json(&an)).unwrap())
             })

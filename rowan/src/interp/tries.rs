@@ -11,15 +11,17 @@
 use ruff_python_ast as ast;
 use rustc_hash::FxHashSet;
 
-use super::{contains_jump, dotted_last, Analyzer, Payload};
-use super::stmts::{add_facts, collect_assigned, contains_return, name_facts};
-use crate::domain::{Ns, ObjId, Value};
+use super::{Analyzer, Payload};
+use super::stmts::{add_facts, name_facts};
+use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
-use crate::state::{Kind, State};
+use crate::state::{mark_merged, Joins, Kind, State};
+use crate::syntax::{collect_assigned, contains_jump, contains_return, dotted_last};
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
 pub type ExcNames = (std::rc::Rc<Vec<String>>, bool);
+/// A raise a try recorded: its class (None: not known), the state there, the exception object.
 pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
@@ -54,7 +56,7 @@ pub struct TryCtx {
     pub pre: State,
     pub mark: u64,
     /// the raises recorded, per class: (class, the states, the exceptions), joined when it ends
-    pub recs: Vec<(Option<ExcNames>, crate::state::Joins, Value)>,
+    pub recs: Vec<(Option<ExcNames>, Joins, Value)>,
     /// the last raise recorded, before collection (a loop of calls raising at one point adds
     /// nothing)
     pub last: Option<(State, Option<ExcNames>, Value)>,
@@ -74,7 +76,7 @@ impl TryExit {
 
     /// The exceptions raised at the recorded points.
     pub fn value(&self) -> Value {
-        crate::domain::join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
+        join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
     }
 
     /// Code that may raise anything ran (a raise of `any_exc`).
@@ -83,15 +85,13 @@ impl TryExit {
     }
 }
 
+/// A running loop: the states at its `break`s and `continue`s so far, joined.
 #[derive(Default)]
 pub struct LoopCtx {
     pub breaks: Option<State>,
     pub continues: Option<State>,
 }
 
-/// The exception names a handler set catches, with the known subclasses of each
-/// (`except ValueError` catches pydantic's `ValidationError`, `except LookupError` a
-/// `KeyError`).
 /// An `except` clause: the classes it names (None: a bare `except`), the name it binds, its
 /// body (a `with` that swallows, `suppress(E)`: one that does nothing).
 pub struct Handler {
@@ -111,7 +111,6 @@ impl Handler {
         }
     }
 }
-
 
 /// What runs on the way out of a try statement: its finally block, or for a with statement its
 /// managers' `__exit__`.
@@ -307,7 +306,7 @@ impl Analyzer {
             names.push(ci.name.clone());
             let user: Vec<String> = ci.bases.iter().filter_map(|b| self.heap.class_info_opt(*b).map(|x| x.name.clone())).collect();
             for e in ci.node.arguments.as_ref().map(|a| a.args.iter().collect::<Vec<_>>()).unwrap_or_default() {
-                let n = super::dotted_last(e);
+                let n = crate::syntax::dotted_last(e);
                 if user.contains(&n) || n == "object" {
                     continue;
                 }
@@ -341,9 +340,9 @@ impl Analyzer {
             let n = name.rsplit('.').next().unwrap_or(name);
             if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
                 let o = self.heap.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
-                crate::state::mark_merged(o);
+                mark_merged(o);
                 if !state.has_row(o, Ns::Attr) {
-                    state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::domain::Source::new(n, crate::domain::SourceKind::Data)));
+                    state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::source::Source::new(n, crate::source::SourceKind::Data)));
                 }
                 state.set_slot(o, Ns::Attr, key_str_lit("args"), Value::data("args"), false);
                 self.m.exc_objs.insert(o, n.to_string());
@@ -378,37 +377,14 @@ impl Analyzer {
     /// May the manager's class's `__exit__` return a true value (a `return` of anything but
     /// `None` / `False`)? Then it may swallow the body's exception.
     pub(super) fn exit_swallows(&mut self, v: &Value, _state: &mut State) -> bool {
-        fn may_return_true(body: &[ast::Stmt]) -> bool {
-            use ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-            struct V(bool);
-            impl<'a> SourceOrderVisitor<'a> for V {
-                fn visit_stmt(&mut self, s: &'a ast::Stmt) {
-                    match s {
-                        ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => {}
-                        ast::Stmt::Return(r) => {
-                            let falsy = match r.value.as_deref() {
-                                None | Some(ast::Expr::NoneLiteral(_)) => true,
-                                Some(ast::Expr::BooleanLiteral(b)) => !b.value,
-                                _ => false,
-                            };
-                            self.0 |= !falsy;
-                        }
-                        _ => walk_stmt(self, s),
-                    }
-                }
-            }
-            let mut v = V(false);
-            body.iter().for_each(|s| v.visit_stmt(s));
-            v.0
-        }
         for oid in v.pts.iter() {
             if self.heap.kind(oid) != Kind::Instance {
                 continue;
             }
             let Some(cls) = self.heap.instance_class(oid) else { continue };
             let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
-            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
-            if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && may_return_true(self.heap.func_info(f).node.body())) {
+            let fv = self.heap.class_attr(m, "__exit__");
+            if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
         }
@@ -445,6 +421,7 @@ impl Analyzer {
         }
     }
 
+    /// A `try` statement (`stmt_try_parts` with its handlers and finally block).
     pub(super) fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
         let fin = std::rc::Rc::new(Finally::Block(&t.finalbody));
         let handlers = t.handlers.iter().map(|h| {
@@ -471,6 +448,10 @@ impl Analyzer {
         }
     }
 
+    /// The try itself: the body runs in a try context recording its raises; raises no handler
+    /// surely catches go on (through the finally); each handler runs from those it may catch;
+    /// the ways out (the body's end and `else`, each handler's end) are joined, then the
+    /// finally runs on each way out.
     pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         // (a handler for a class catches its subclasses too)
         let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());

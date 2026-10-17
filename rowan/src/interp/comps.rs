@@ -3,13 +3,14 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, KeysOf, Ns, Value, BOT};
+use crate::domain::{BOT, DATA, KeyVal, KeysOf, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
+use crate::syntax::{is_constant, names_in};
 
-use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, ObjId, Payload, UNROLL_MAX};
+use super::iter::Elem;
+use super::{Analyzer, Payload, UNROLL_MAX};
 
 impl Analyzer {
     // comprehensions ---------------------------------------------------------
@@ -18,6 +19,8 @@ impl Analyzer {
         self.with_gen_restart(state, true, &mut |an, st| an.comp_scoped(gens, limit, st, body, own));
     }
 
+    /// Runs a comprehension's generators (`comp_gen`) with `body` per item, its variables in a
+    /// scope of their own (the enclosing names they shadow put back after), and their cells.
     pub(super) fn comp_scoped(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         let mut names: Vec<intern::StrId> = gens.iter().flat_map(|g| names_in(&g.target)).map(|n| s(&n)).collect();
         names.sort_unstable();
@@ -41,6 +44,8 @@ impl Analyzer {
         }
     }
 
+    /// Generator level `i` of a comprehension: its items unrolled when known (up to `limit`),
+    /// else a fixpoint over any item; its filters split the state; the next level, or `body`.
     pub(super) fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         if i == gens.len() {
             body(self, state);
@@ -138,7 +143,7 @@ impl Analyzer {
     /// closed dict with some keys only maybe there: one iteration per key, a maybe one joined
     /// with skipping it. False: not known.
     #[allow(clippy::too_many_arguments)]
-    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::funcs::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::iter::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
         if let Some(items) = &it.items {
             let same = self.identical_summaries(items);
             if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
@@ -215,6 +220,8 @@ impl Analyzer {
         decided
     }
 
+    /// Binds a comprehension's target to an item (each pass over any item a view of its own),
+    /// and the cells of its variables.
     pub(super) fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
         self.bind_iter_target(target, it, state);
         // (a pass standing for every item: each one an object of its own)
@@ -235,6 +242,8 @@ impl Analyzer {
         }
     }
 
+    /// A dict comprehension: a dict whose keys and values the items give (strong per item when
+    /// unrolled, else open through the keys).
     pub(super) fn expr_dictcomp(&mut self, dc: &'static ast::ExprDictComp, node: &'static ast::Expr, state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(Kind::Dict, &nd, state, &format!("dictcomp@L{}", nd.line), Payload::None, None, Ns::Item, None, None);
@@ -254,6 +263,8 @@ impl Analyzer {
         Value::obj(oid)
     }
 
+    /// A list, set or generator comprehension: a container of the items' values (positions per
+    /// unrolled item when the filters are decided, else elements of no known length).
     pub(super) fn seq_comp(&mut self, node: &'static ast::Expr, kind: Kind, elt: &'static ast::Expr, gens: &'static [ast::Comprehension], state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}comp@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
@@ -323,7 +334,7 @@ impl Analyzer {
         } else if let Some(n) = summary_n.filter(|n| *n <= 64) {
             // (known items in one pass: as many as there were, each the pass's element)
             let e = state.slot(oid, Ns::Elem, STAR);
-            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(crate::domain::DATA));
+            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA));
             state.drop_obj_ns(oid, Ns::Pos);
             for i in 0..n {
                 state.set_slot(oid, Ns::Pos, key_int(i as i64), ev.clone(), true);
@@ -336,7 +347,7 @@ impl Analyzer {
             // result has one too (one of the body's values)
             if src_nonempty {
                 let e = state.slot(oid, Ns::Elem, STAR);
-                let ekv = state.elems.get(&oid).unwrap_or(crate::domain::DATA);
+                let ekv = state.elems.get(&oid).unwrap_or(DATA);
                 if !(e.pts.is_empty() && ekv.is_bot()) {
                     state.set_slot(oid, Ns::Pos, key_int(0), Value::with_kv(e.pts, ekv), true);
                     state.set_lens(oid, (None, 1, 0));

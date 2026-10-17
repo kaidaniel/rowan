@@ -4,12 +4,13 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_exclude, kv_literals, kv_restrict, KeyVal, Ns, ObjSet, Value};
+use crate::domain::{kv_exclude, kv_literals, kv_restrict, label_type, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::state::{Kind, State};
+use crate::state::{is_merged, Kind, State};
+use crate::syntax::{chain_text, contains_call, names_in};
 
-use super::{chain_text, contains_call, names_in, Analyzer, StoreTarget};
+use super::Analyzer;
 
 enum NarrowTarget {
     Name(String),
@@ -23,6 +24,14 @@ pub struct Split {
     pub t: State,
     pub f: State,
     pub ops: Option<(Value, Value)>,
+}
+
+/// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
+#[derive(Clone)]
+pub enum StoreTarget {
+    Name(StrId),
+    Narrowed(StrId),
+    Slot(ObjId, Ns, KeyId),
 }
 
 impl Analyzer {
@@ -90,7 +99,7 @@ impl Analyzer {
             } else if stop.reachable {
                 // (what ends it here is a value of that truth: `x and y` is x only when x is
                 // falsy; a bool is that bool)
-                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || crate::domain::label_type(&intern::str_get(d)) == Some("bool"));
+                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || label_type(&intern::str_get(d)) == Some("bool"));
                 v = v.join(&if is_bool { Value::lit(intern::key_bool(!is_and)) } else { truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v) });
             }
             if stop.reachable {
@@ -183,7 +192,7 @@ impl Analyzer {
                 if truth {
                     if self.heap.prefix(o, state).is_none() {
                         let e = state.slot(o, Ns::Elem, intern::STAR);
-                        let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
+                        let ekv = state.elems.get(&o).unwrap_or(DATA);
                         state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
                         state.lens.insert(o, (None, 1, 0));
                     }
@@ -240,7 +249,7 @@ impl Analyzer {
                     let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
                     if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
                         if let Some(name) = intern::key_as_str(k) {
-                            if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
+                            if rec.pts.iter().all(|o| crate::models::builtins::builtin_has_attr(self, o, &name) == Some(!truth)) {
                                 state.reachable = false;
                             }
                         }
@@ -318,7 +327,7 @@ impl Analyzer {
                     let name = s(nm.id.as_str());
                     let cur = self.load_name(name, &Node::none(), state);
                     let Some(o) = self.traced(other_e) else { continue };
-                    let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
+                    let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !is_merged(*x)) else { continue };
                     if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
                         continue;
                     }
@@ -408,6 +417,7 @@ impl Analyzer {
         }
     }
 
+    /// `isinstance(target, cls_expr)` being `truth` narrows a name or an attribute chain.
     fn narrow_isinstance(&mut self, target: NarrowTarget, cls_expr: &'static ast::Expr, truth: bool, state: &mut State) {
         let (cur, store): (Value, StoreTarget) = match target {
             NarrowTarget::Name(name) => {
@@ -477,6 +487,8 @@ impl Analyzer {
         }
     }
 
+    /// Narrows `cur` (then written back to `store`) by `isinstance(…, cls_expr)` being `truth`:
+    /// the objects that are surely (not) instances go.
     pub(in crate::interp) fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
         let Some(cv) = self.traced(cls_expr) else { return };
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
@@ -527,12 +539,14 @@ impl Analyzer {
         }
     }
 
+    /// Is object `o` (of kind `k`) an instance of class `cls`: a Protocol by its members, the
+    /// program's class by the MRO, a library class by the object's kind (None: either).
     fn instance_of_one(&self, o: u32, k: Kind, cls: u32, st: &State) -> Option<bool> {
         if self.heap.kind(cls) == Kind::Class {
             // (a Protocol: an instance whose class defines all its members is one; one of a
             // closed hierarchy without `__getattr__` that surely lacks a member is not; anything
             // else may have them as attributes)
-            if let Some(ms) = crate::models::protocol_members(self, cls) {
+            if let Some(ms) = crate::models::builtins::protocol_members(self, cls) {
                 let ic = self.heap.instance_class(o).filter(|_| k == Kind::Instance)?;
                 if ms.iter().all(|m| self.class_lookup(ic, m).is_some()) {
                     return Some(true);
@@ -603,6 +617,7 @@ impl Analyzer {
         true
     }
 
+    /// Is the program's class `cls` `base` or derived from it (through the program's classes)?
     pub(in crate::interp) fn is_subclass(&self, cls: u32, base: u32) -> bool {
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
@@ -622,6 +637,7 @@ impl Analyzer {
         false
     }
 
+    /// `d.get(k)` being true narrows `d` to having `k`.
     fn narrow_get_truthy(&mut self, expr: &'static ast::Expr, state: &mut State) {
         if let ast::Expr::Call(c) = expr {
             if let ast::Expr::Attribute(a) = &*c.func {
@@ -659,6 +675,8 @@ impl Analyzer {
         self.narrow_member_values(left, &lv, rec_expr, &rv, member, state);
     }
 
+    /// `left in rec` (`member`) or not: narrows the record's keys and `left`'s literals (through a
+    /// `__contains__` that is `return x in y`, its `y`).
     fn narrow_member_values(&mut self, left: &'static ast::Expr, lv: &Value, rec_expr: &'static ast::Expr, rv: &Value, member: bool, state: &mut State) {
         let (lv, rv) = (lv.clone(), rv.clone());
         // user classes defining `__contains__` as `return <x> in <y>`: narrow <y> instead
@@ -666,7 +684,7 @@ impl Analyzer {
         if !insts.is_empty() && rv.pts.len() == 1 {
             if let Some(cls) = self.heap.instance_class(insts[0]) {
                 if let Some(m) = self.class_lookup(cls, "__contains__") {
-                    let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__contains__"))).cloned().unwrap_or_default();
+                    let fv = self.heap.class_attr(m, "__contains__");
                     for f in fv.pts.iter() {
                         if self.heap.kind(f) != Kind::Function {
                             continue;
@@ -694,7 +712,7 @@ impl Analyzer {
                 }
             }
         }
-        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
+        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
@@ -856,6 +874,7 @@ impl Analyzer {
         }
     }
 
+    /// Narrows name `name`'s scalar part by `name in keys` (`restrict`) or `not in`.
     pub(in crate::interp) fn narrow_kv(&mut self, name: StrId, keys: &KeySet, restrict: bool, state: &mut State) {
         if keys.is_empty() {
             return;
@@ -896,8 +915,10 @@ impl Analyzer {
         }
     }
 
+    /// Narrows the records `rec` may be by `k in rec` being `member`: the key there (a closed
+    /// record without it: the path cannot run), or not there.
     pub(in crate::interp) fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
-        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
+        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
             let row = state.row(oid, ns);
@@ -922,7 +943,7 @@ impl Analyzer {
                 if row.definite.contains(k) {
                     state.reachable = false;
                 }
-                state.set_row_narrowed(oid, ns, row.narrow_out(k));
+                state.set_row_narrowed(oid, ns, row.delete(k, true));
             }
         }
     }
@@ -971,12 +992,14 @@ fn membership_record(right: &'static ast::Expr) -> &'static ast::Expr {
     }
 }
 
+/// Is a library class one `isinstance` checks by structure, not by class (`collections.abc`,
+/// `typing` protocols, `numbers`, …): no instance surely is not one?
 pub fn is_structural_qual(q: &str) -> bool {
     q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
 }
 
 /// The keys closed records may have, all of them (None: one is open).
 fn closed_keys(recs: &[u32], state: &State) -> Option<KeySet> {
-    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+    let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
     rows.iter().all(|r| r.closed()).then(|| rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present)))
 }

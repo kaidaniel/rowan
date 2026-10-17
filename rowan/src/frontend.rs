@@ -1,6 +1,8 @@
-//! Parsing and source positions.  Parsed modules are leaked (`&'static`) for the lifetime
-//! of the process: the interpreter walks them by reference from every frame, and a thread
-//! local registry maps any node's address back to its module and position.
+//! Parsing and source positions. Modules are parsed with ruff's parser, private names
+//! mangled as CPython does (`Mangler`), and leaked (`&'static`) for the lifetime of the
+//! process: the interpreter walks them by reference from every frame, and a node's address is
+//! its identity. A thread-local registry maps any node's address back to its module, and so
+//! to its position and text (`node`, `text`).
 
 use std::cell::RefCell;
 
@@ -11,6 +13,7 @@ use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::FxHashMap;
 
+/// A parsed module's name, path, text and line index.
 pub struct ModuleSource {
     pub name: String,
     pub path: Option<String>,
@@ -18,6 +21,7 @@ pub struct ModuleSource {
     pub lines: LineIndex,
 }
 
+/// The modules parsed on this thread (by index), and the module of every node address.
 struct Registry {
     modules: Vec<ModuleSource>,
     nodes: FxHashMap<usize, u32>,
@@ -58,9 +62,11 @@ pub struct Node {
 }
 
 impl Node {
+    /// A node made up for code that has none (an entry run's call, a model's call), at a line.
     pub fn synthetic(module: u32, line: u32) -> Node {
         Node { addr: 0, module, line, end_line: line, col: 0, end_col: 0 }
     }
+    /// No node: an observation, not a read of the program.
     pub fn none() -> Node {
         Node::synthetic(0, 0)
     }
@@ -90,6 +96,8 @@ pub fn parse_time() -> std::time::Duration {
     PARSE_TIME.with(|t| t.get())
 }
 
+/// Parses module `name` (at `path`), registers its nodes and gives its index and tree; the
+/// same text at the same path again gives the same module (`PARSE_CACHE`).
 pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
     let t0 = std::time::Instant::now();
     let r = parse_uncounted(name, path, source);
@@ -97,6 +105,8 @@ pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'s
     r
 }
 
+/// `parse` without the timing: CRLF line ends normalised, the cache consulted, the tree
+/// parsed, mangled, leaked and its nodes registered.
 fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
     // (Windows line ends as `\n`: lines and columns are the same, texts over lines read alike)
     let source = if source.contains("\r\n") { source.replace("\r\n", "\n") } else { source };
@@ -119,7 +129,7 @@ fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u3
         r.modules.push(ModuleSource { name: name.to_string(), path: path.map(|p| p.to_string()), source, lines });
         (r.modules.len() - 1) as u32
     });
-    let mut v = Registrar { idx, addrs: Vec::new() };
+    let mut v = Registrar { addrs: Vec::new() };
     for s in &module.body {
         v.visit_stmt(s);
     }
@@ -142,6 +152,7 @@ fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u3
 struct Mangler(std::cell::RefCell<Vec<String>>);
 
 impl Mangler {
+    /// `__x` inside the innermost class `C` becomes `_C__x`.
     fn mangle(&self, id: &mut ast::name::Name) {
         let Some(cls) = self.0.borrow().last().cloned() else { return };
         if id.starts_with("__") && !id.ends_with("__") && !id.contains('.') && !cls.is_empty() {
@@ -201,9 +212,8 @@ impl Transformer for Mangler {
     }
 }
 
+/// Collects the addresses of every node of a parsed module (`node` locates them).
 struct Registrar {
-    #[allow(dead_code)]
-    idx: u32,
     addrs: Vec<usize>,
 }
 
@@ -239,6 +249,7 @@ fn stmt_inner_addr(s: &ast::Stmt) -> usize {
     }
 }
 
+/// Address of the payload struct inside an `Expr` (as `stmt_inner_addr`).
 fn expr_inner_addr(e: &ast::Expr) -> usize {
     use ast::Expr::*;
     match e {
@@ -329,6 +340,7 @@ impl<'a> SourceOrderVisitor<'a> for Registrar {
     }
 }
 
+/// (line, end line, column, end column) of a range in a module; lines 1-based, columns in bytes.
 fn locate(module: u32, range: TextRange) -> (u32, u32, u32, u32) {
     REG.with(|r| {
         let r = r.borrow();
@@ -362,6 +374,7 @@ pub fn node_in<T: Ranged>(module: u32, n: &T) -> Node {
     Node { addr: n as *const T as usize, module, line, end_line, col, end_col }
 }
 
+/// The module a registered node (by address) is in.
 pub fn module_of_addr(addr: usize) -> Option<u32> {
     REG.with(|r| r.borrow().nodes.get(&addr).copied())
 }
@@ -388,10 +401,12 @@ pub fn text_in<T: Ranged>(n: &T, range: ruff_text_size::TextRange) -> String {
     })
 }
 
+/// The dotted name a module was imported as (`__main__` for the analysed file).
 pub fn module_name(idx: u32) -> String {
     REG.with(|r| r.borrow().modules[idx as usize].name.clone())
 }
 
+/// The file a module was read from.
 pub fn module_path(idx: u32) -> Option<String> {
     REG.with(|r| r.borrow().modules[idx as usize].path.clone())
 }
@@ -414,6 +429,8 @@ pub fn any_send_call() -> bool {
     })
 }
 
+/// Parses one expression (a string annotation, a pandas query), leaked like a module but not
+/// registered: it has no position.
 pub fn parse_expression(source: &str) -> Option<&'static ast::Expr> {
     let parsed = ruff_python_parser::parse_expression(source).ok()?;
     let e: &'static ast::ModExpression = Box::leak(Box::new(parsed.into_syntax()));

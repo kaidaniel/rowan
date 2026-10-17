@@ -4,23 +4,25 @@
 //! any length; the program's functions among it may run (`follow_code`). Calls of the
 //! program's code past their budget are unknown calls too (`skipped_call`, `effects.rs`).
 
-use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, Heap, Payload, MAX_ARG_JOIN, NOEFFECT_METHOD_NAMES};
-use crate::domain::{join_rows, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value, DATA};
+use super::{Analyzer, Args, Heap, NOEFFECT_METHOD_NAMES, Payload};
+use crate::domain::{join_rows, kv_join, DATA, KeyVal, Ns, ObjId, Row, TYPE_NAMES, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, KeyId, KeySet, StrId};
-use crate::state::{Kind, State};
+use crate::source::{Source, SourceId, SourceKind};
+use crate::state::{set_any, Kind, SlotKey, State};
 
-/// havoc walks remembered (`Havoc::walk_from`); past this many the table starts over
+/// Records an unknown call's result joins at most (past that: an open row).
+pub const MAX_ARG_JOIN: usize = 64;
+/// Havoc walks remembered (`Havoc::walk_from`); past this many the table starts over.
 pub const HAVOC_MEMOS: usize = 1024;
 
 /// What a havoc walk met and the heap it left (`Havoc::walk_from`).
 pub struct HavocMemo {
     pub roots: Vec<ObjId>,
     pub rows: crate::layered::LayerMap<(ObjId, Ns), Row>,
-    pub slots: crate::layered::TwoLevel<ObjId, crate::state::SlotKey, Value>,
+    pub slots: crate::layered::TwoLevel<ObjId, SlotKey, Value>,
     pub elems: crate::layered::LayerMap<ObjId, KeyVal>,
     pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
     pub visited: FxHashSet<ObjId>,
@@ -52,7 +54,7 @@ pub struct Havoc {
 /// The object standing for any value unknown code may have stored: nothing known about it.
 pub fn any_object(heap: &mut Heap) -> ObjId {
     let o = heap.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
-    crate::state::set_any(o);
+    set_any(o);
     o
 }
 
@@ -216,7 +218,12 @@ impl Havoc {
 }
 
 impl Analyzer {
-    pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+    /// A call of code rowan cannot see (`qual`: its name; `recv`: a method's receiver): it may
+    /// raise; what it is given, and everything that reaches, may change (`havoc_reachable`); the
+    /// program's functions it is given may run (`follow_code`); it returns an unknown named by
+    /// the call, which may be one of the known objects it was given.
+    pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise
         // recursion over unknown values makes new objects without end)
@@ -283,7 +290,7 @@ impl Analyzer {
         // unknown callable called, `cls(x)`, is not given its own items; an `int` has none)
         let callee = recv.and_then(|r| r.single()).is_some_and(|o| qual == format!("call of {}", self.heap.obj(o).label));
         let recv_given = recv.filter(|_| !callee);
-        let scalar = |o: ObjId| self.heap.obj(o).ty.is_some_and(|t| crate::domain::TYPE_NAMES.contains(&t));
+        let scalar = |o: ObjId| self.heap.obj(o).ty.is_some_and(|t| TYPE_NAMES.contains(&t));
         let given: Vec<ObjId> = arg_recs.iter().filter(|(o, ns)| *ns == Ns::Item && !scalar(*o) && args.iter().chain(kwargs.values()).chain(recv_given).any(|v| v.pts.contains(*o))).map(|(o, _)| *o).collect();
         unknown_result_rows(state, rid, &site, site_id, &arg_recs, &given, callee);
         self.findings.note(format!("unknown call {}", site));
@@ -345,6 +352,7 @@ impl Analyzer {
         }
     }
 
+    /// The records (and namespaces) `vals` reach through slots, at most `depth` steps below them.
     pub(in crate::interp) fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
         let mut out: Vec<(u32, Ns)> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
@@ -478,7 +486,7 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
     // (an enum member's `name` and `value` cannot be set or deleted)
     let member = heap.keys.member_key.contains_key(&o);
     let fixed = |ns: Ns, k: KeyId| member && ns == Ns::Attr && intern::key_as_str(k).is_some_and(|n| matches!(&*n, "name" | "value"));
-    let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
+    let mut writes: Vec<(SlotKey, Value)> = Vec::new();
     state.slots.each(&o, &mut |sk, v| {
         work.extend(v.pts.iter());
         if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) && !fixed(sk.0, sk.1) {
@@ -507,7 +515,7 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
         state.set_slot(o, sk.0, sk.1, v, true);
     }
     let havocked = |state: &State| {
-        state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
+        state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| kv_join(&kv, &DATA) == kv)
     };
     // (for people: which unknown code may have changed a list or set, on a row of its own —
     // it has no attributes to read)
@@ -521,7 +529,7 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
     if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") && !havocked(state) {
         let e = state.slot(o, Ns::Elem, intern::STAR).join(any);
         state.set_slot(o, Ns::Elem, intern::STAR, e, false);
-        let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
+        let kv = kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
         state.elems.insert(o, kv);
         state.clear_last(o);
         heap.set_prefix(o, state, 0);
@@ -548,7 +556,7 @@ fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId
         // mapping: the result is open through the call, `consume(line["sku"])["picks"]` needs
         // nothing of `line["sku"]`. An unknown callable's result is open through the call.)
         let src = Source::new(site, SourceKind::Call);
-        let leaf = |(src, _): (crate::domain::SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
+        let leaf = |(src, _): (SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
         if callee {
             // (it may give back anything: no key of what it was given is there unless removed)
             d.likely = KeySet::new();

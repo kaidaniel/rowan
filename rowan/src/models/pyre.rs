@@ -38,6 +38,7 @@ enum Node {
     Look(bool, bool, Box<Node>, usize),
 }
 
+/// A compiled pattern: its tree, groups (and names) and flags.
 #[derive(Debug, Clone)]
 pub struct Regex {
     root: Node,
@@ -46,6 +47,7 @@ pub struct Regex {
     pub flags: u32,
 }
 
+/// The span of each group of a match (None: the group did not take part).
 pub type Spans = Vec<Option<(usize, usize)>>;
 
 struct Parser<'a> {

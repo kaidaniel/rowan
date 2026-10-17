@@ -1,4 +1,6 @@
-//! The interpreter's interface to the library models (`models/`), the report and the driver.
+//! The interpreter's interface to the library models (`models/`), the report and the driver:
+//! `Call` (everything a model is told about a call), `Args` (a call's arguments, as calls pass
+//! them on), and these methods.
 //! The components' state (`program`, `findings`, `names`, `budget`, `recursion`, `entry`,
 //! `gens`, `unwind`, `cx`, `mode`, …) is the interpreter's own (`pub(in crate::interp)`), and
 //! so are its methods unless marked `pub`. A model sees:
@@ -11,16 +13,20 @@
 //! * the interpreter's `pub` methods, which are these:
 //!   - evaluation: `eval`, `eval_key`, `exec_block`, `run_module`, `stmt_try_parts`, `load_name`,
 //!     `frame`, `frame_mut`;
+//!   - modules: `import_module`, `make_module`, `is_local_module`, `type_only_name`,
+//!     `file_of_frame`;
 //!   - reads and writes: `load_attr`, `load_item`, `store_attr`, `store_item`, `store_key`,
-//!     `delete_item`, `copy_into`, `copy_object`, `method_value`, `class_lookup`, the literal
-//!     views (`lit_keys`, `literal_mapping`, `literal_dict_items`, `maybe_dict_items`,
-//!     `known_members`, `known_positions`, `all_values`, `record_objects`) and their writers
-//!     (`set_members`, `set_positions`, `normalize_set`, `literal_set`), keys (`unkey`,
-//!     `opaque_key`, `value_key`, `rename_kv`), `path_placeholder_value`;
+//!     `delete_item`, `delete_subscript`, `copy_into`, `copy_object`, `method_value`,
+//!     `class_lookup`, `class_lookup_on_path`, the literal views (`lit_keys`, `sure_lit_keys`,
+//!     `literal_mapping`, `literal_dict_items`, `maybe_dict_items`, `known_members`,
+//!     `known_positions`, `all_values`, `record_objects`) and their writers (`set_members`,
+//!     `set_positions`, `add_elem`, `normalize_set`, `literal_set`), keys (`unkey`, `opaque_key`,
+//!     `value_key`, `rename_kv`, `hashes_keys`, `check_hashable`, `check_hashable_if`),
+//!     `path_placeholder_value`;
 //!   - operations: `binop`, `truthiness`, `truth_of`, `instance_less`, `isinstance_classes`,
-//!     `instance_of`, `hierarchy_closed`;
-//!   - iteration: `iterate`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`, `cursor_of`,
-//!     `set_cursor`, `exhaust`;
+//!     `instance_of`, `hierarchy_closed`, `value_type`, `as_type`;
+//!   - iteration: `iterate`, `iterable_part`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`,
+//!     `cursor_of`, `set_cursor`, `exhaust`, `gen_took_item`;
 //!   - calls: `call_value`, `call_one`, `call_user`, `call_external`, `unknown_call`,
 //!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
 //!     `decorator_qualname`;
@@ -30,16 +36,89 @@
 //!     `reraise_rec`, `guards`;
 //!   - verdicts and requirements: `verdict`, `verdict_guarded`, `is_guarded`,
 //!     `require_providers`, `require_providers_k`;
-//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`,
-//!     and the driver's `run`.
+//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`;
+//!   - the driver's: `new`, `run`, `was_cut`, `set_cancel`, and for runs on demand
+//!     `main_block_unrun`, `on_demand`, `general_run_at`, `general_run_of`,
+//!     `outermost_functions`.
 
 use indexmap::IndexMap;
+use ruff_python_ast as ast;
 
 use super::{Analyzer, CmHook, ExcNames, Frame, FrameKind, FuncInfo, Names};
-use crate::domain::{ObjId, Value};
+use crate::domain::{row_joins, ObjId, Value};
 use crate::frontend::Node;
-use crate::intern::{KeyId, StrId};
-use crate::state::State;
+use crate::intern::{s, KeyId, StrId};
+use crate::state::{fp_visits, State};
+
+/// A call's arguments as given: positional ones, keywords, and the values of `*xs` and `**kw`.
+#[derive(Clone, Copy)]
+pub struct Args<'a> {
+    pub pos: &'a [Value],
+    pub kw: &'a IndexMap<StrId, Value>,
+    pub star: &'a [Value],
+    pub star_kw: &'a [Value],
+}
+
+impl<'a> Args<'a> {
+    pub fn new(pos: &'a [Value], kw: &'a IndexMap<StrId, Value>, star: &'a [Value], star_kw: &'a [Value]) -> Args<'a> {
+        Args { pos, kw, star, star_kw }
+    }
+
+    /// Keyword arguments only.
+    pub fn kw(kw: &'a IndexMap<StrId, Value>) -> Args<'a> {
+        Args { pos: &[], kw, star: &[], star_kw: &[] }
+    }
+
+    /// Positional arguments only.
+    pub fn pos(pos: &'a [Value]) -> Args<'a> {
+        static NO_KEYWORDS: std::sync::LazyLock<IndexMap<StrId, Value>> = std::sync::LazyLock::new(IndexMap::new);
+        Args { pos, kw: &NO_KEYWORDS, star: &[], star_kw: &[] }
+    }
+}
+
+/// Everything a model needs about a call.
+#[derive(Clone)]
+pub struct Call {
+    /// the qualified name of what is called (`json.loads`, `dict.get`)
+    pub qual: String,
+    /// a method's receiver
+    pub recv: Option<Value>,
+    pub args: Vec<Value>,
+    pub kwargs: IndexMap<StrId, Value>,
+    /// the values of `*xs` and `**kw` arguments
+    pub star_args: Vec<Value>,
+    pub star_kwargs: Vec<Value>,
+    pub node: Node,
+    /// the call as written (None: a call the interpreter makes, a dunder, a callback)
+    pub call_ast: Option<&'static ast::ExprCall>,
+    /// `L{line}`: where the call's objects are made
+    pub site: String,
+    pub line: u32,
+}
+
+impl Call {
+    /// The call's arguments.
+    pub fn arguments(&self) -> Args<'_> {
+        Args::new(&self.args, &self.kwargs, &self.star_args, &self.star_kwargs)
+    }
+
+    /// Argument `i`, or the keyword `name`.
+    pub fn arg(&self, i: usize, name: Option<&str>) -> Option<Value> {
+        if i < self.args.len() {
+            return Some(self.args[i].clone());
+        }
+        if let Some(n) = name {
+            if let Some(v) = self.kwargs.get(&s(n)) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+    /// The keyword argument `name`.
+    pub fn kw(&self, name: &str) -> Option<Value> {
+        self.kwargs.get(&s(name)).cloned()
+    }
+}
 
 impl Analyzer {
     // ------------------------------------------------------------ the program
@@ -68,10 +147,11 @@ impl Analyzer {
         &self.program.user_classes
     }
 
-    /// The main module's object and frontend index.
+    /// The main module's object.
     pub fn main_module(&self) -> ObjId {
         self.program.main_module
     }
+    /// The main module's frontend index.
     pub fn main_idx(&self) -> u32 {
         self.program.main_idx
     }
@@ -205,29 +285,8 @@ impl Analyzer {
     /// What the running function's own code assigns to local `name` (`name = e`, `name &= e`:
     /// each `e`; not in nested functions); empty at module level.
     pub fn local_assignments(&self, name: &str) -> Vec<&'static ruff_python_ast::Expr> {
-        use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-        use ruff_python_ast::{Expr, Stmt};
-        struct V<'n>(&'n str, Vec<&'static Expr>);
-        impl SourceOrderVisitor<'static> for V<'_> {
-            fn visit_stmt(&mut self, st: &'static Stmt) {
-                let name = self.0;
-                let named = |t: &Expr| matches!(t, Expr::Name(n) if n.id.as_str() == name);
-                match st {
-                    Stmt::FunctionDef(_) | Stmt::ClassDef(_) => return,
-                    Stmt::Assign(a) if a.targets.iter().any(named) => self.1.push(&a.value),
-                    Stmt::AugAssign(a) if named(&a.target) => self.1.push(&a.value),
-                    Stmt::AnnAssign(a) if named(&a.target) => self.1.extend(a.value.as_deref()),
-                    _ => {}
-                }
-                walk_stmt(self, st);
-            }
-        }
         let Some(fi) = self.frame().func.and_then(|f| self.heap.func_info_opt(f)) else { return vec![] };
-        let mut v = V(name, Vec::new());
-        for st in fi.node.body() {
-            v.visit_stmt(st);
-        }
-        v.1
+        crate::syntax::assignments_to(fi.node.body(), name)
     }
 
     // ------------------------------------------------------------ exceptions
@@ -342,6 +401,6 @@ impl Analyzer {
 
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
-        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), crate::domain::row_joins(), self.budget.walked.get() + crate::state::fp_visits(), self.budget.walked.get(), crate::state::fp_visits(), self.havoc.visited)
+        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited)
     }
 }

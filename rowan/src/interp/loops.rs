@@ -4,16 +4,23 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{ObjId, KeyVal, Ns, Row, Value};
-use crate::frontend::{self};
+use crate::domain::{DATA, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
+use crate::frontend;
 use crate::intern::{self, s};
-use crate::state::{Kind, State};
+use crate::state::{is_any, link_view, view_hits, view_of, Kind, State};
+use crate::syntax::{collect_assigned, contains_jump, is_constant};
+use crate::source::{source_is_data, SourceId};
 
-use super::{contains_jump, is_constant, Analyzer, LoopCtx, LOOP_MAX_ITER, UNROLL_MAX};
-use super::funcs::Elem;
-use super::stmts::{add_facts, collect_assigned, cond_facts_for};
+use super::iter::{Elem, Iteration};
+use super::stmts::{add_facts, cond_facts_for};
+use super::{Analyzer, LoopCtx, UNROLL_MAX};
+
+/// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
+pub const LOOP_MAX_ITER: usize = 40;
 
 impl Analyzer {
+    /// A `while` loop: iterations whose test is decided at the head unrolled, the rest a
+    /// fixpoint (`stmt_while_loop`).
     pub(super) fn stmt_while(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         // iterations whose test is decided at the head run as straight-line code (a constant
         // test such as `while True` is decided by the body alone: not unrolled); the rest of
@@ -23,7 +30,7 @@ impl Analyzer {
         // that takes a few items sees exactly those; only outside other loops and unrolled
         // iterations, as nested unrolling multiplies: email's `_parsegen` nests such loops)
         let outermost = self.frame().loop_depth == 0 && self.frame().unroll.is_empty();
-        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.heap.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false);
+        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.heap.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::syntax::is_generator(&d.body))).unwrap_or(false);
         if !is_constant(&w.test) || gen_body {
             let mut idx = 0usize;
             loop {
@@ -86,7 +93,7 @@ impl Analyzer {
         }
         let fp = head.footprint(prev);
         for (o, ns) in fp.rows {
-            let r = head.row(o, ns).data_store(crate::domain::Source::new("loop widening", crate::domain::SourceKind::Data));
+            let r = head.row(o, ns).data_store(crate::source::Source::new("loop widening", crate::source::SourceKind::Data));
             head.set_row(o, ns, r);
         }
         for (o, sk) in fp.slots {
@@ -97,7 +104,7 @@ impl Analyzer {
         for o in fp.elems {
             let shape_elem = matches!(head.elems.get(&o), Some(KeyVal::Data(d)) if intern::str_get(d).starts_with('\u{1}'));
             if !shape_elem {
-                head.elems.insert(o, crate::domain::DATA);
+                head.elems.insert(o, DATA);
             }
         }
         for o in head.lens.diff_keys(&prev.lens) {
@@ -105,6 +112,8 @@ impl Analyzer {
         }
     }
 
+    /// A `while` loop run to its fixpoint: each round splits on the test, runs the body; the
+    /// exit is where the test is false, joined with the breaks.
     pub(super) fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let sp = an.split(&w.test, body_s.copy());
@@ -216,6 +225,9 @@ impl Analyzer {
         breaks
     }
 
+    /// A `for` loop: over a user iterator one `__next__` per round; over known items unrolled
+    /// (`for_unrolled`), over a known prefix partly so (`for_known_prefix`); else a fixpoint
+    /// over any element, the requirements on the elements' inputs read per element.
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let itv = self.iterable_part(&itv, state);
@@ -246,44 +258,10 @@ impl Analyzer {
                 self.exhaust(&itv, state);
             }
         }
-        // unrolled: `continue` rejoins at the next iteration, `break` at the exit; a closed dict
-        // with some keys only maybe there: a maybe one runs on one path and is skipped on the other
-        let unrolled = match &it.ordered_items() {
-            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
-            None => self.maybe_dict_items(&itv, state).map(|items| (items, None)),
-            _ => None,
-        };
-        if let Some((items, cursor)) = unrolled {
-            let breaks = self.unroll_for(f, &items, cursor, state);
-            if !f.orelse.is_empty() && state.reachable {
-                self.exec_block(&f.orelse, state);
-            }
-            // (a one-shot iterator a `break` may leave: run to the end, used up)
-            if cursor.is_some() && state.reachable {
-                self.exhaust(&itv, state);
-            }
-            join_breaks(state, breaks);
+        if self.for_unrolled(f, &itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
             return;
         }
-        // a list of unknown length whose first items are known on every path: those
-        // iterations are unrolled, the loop runs on from there (any later item)
-        let mut prefix_breaks: Option<State> = None;
-        let mut prefixed = false;
-        if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
-            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
-                if let Some(p) = self.heap.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
-                    let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
-                    prefixed = true;
-                    prefix_breaks = self.unroll_for(f, &items, None, state);
-                    if !state.reachable {
-                        if let Some(b) = prefix_breaks.take() {
-                            state.replace_with(b);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
+        let Some((prefixed, prefix_breaks)) = self.for_known_prefix(f, &itv, &it, once, state) else { return };
         // (a loop that may break off: where the iterator stands after it is not known)
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
@@ -293,7 +271,7 @@ impl Analyzer {
         let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             let views = an.bind_views(&f.target, body_s);
-            let hits0 = crate::state::view_hits();
+            let hits0 = view_hits();
             an.exec_block(&f.body, body_s);
             ends = an.view_ends(&views, hits0, body_s);
             // (a generator's next item is asked for at the back edge)
@@ -316,6 +294,54 @@ impl Analyzer {
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
+    }
+
+    /// A `for` over known items, unrolled: each iteration straight-line code, `continue`
+    /// rejoining at the next one and `break` at the exit; over a closed dict with some keys only
+    /// maybe there, a maybe one runs on one path and is skipped on the other. `cursor`: a
+    /// one-shot iterator a `break` may leave, and where it stood. False: not unrolled.
+    fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, state: &mut State) -> bool {
+        let unrolled = match &it.ordered_items() {
+            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
+            None => self.maybe_dict_items(itv, state).map(|items| (items, None)),
+            _ => None,
+        };
+        let Some((items, cursor)) = unrolled else { return false };
+        let breaks = self.unroll_for(f, &items, cursor, state);
+        if !f.orelse.is_empty() && state.reachable {
+            self.exec_block(&f.orelse, state);
+        }
+        // (a one-shot iterator a `break` may leave: run to the end, used up)
+        if cursor.is_some() && state.reachable {
+            self.exhaust(itv, state);
+        }
+        join_breaks(state, breaks);
+        true
+    }
+
+    /// A `for` over a list of unknown length whose first items are known on every path: those
+    /// iterations are unrolled, and the loop runs on from there (any later item). Whether it
+    /// did, and the states at its `break`s; None when no path goes on after them (the state is
+    /// the breaks' then).
+    fn for_known_prefix(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, once: Option<ObjId>, state: &mut State) -> Option<(bool, Option<State>)> {
+        let mut prefix_breaks: Option<State> = None;
+        let mut prefixed = false;
+        if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
+                if let Some(p) = self.heap.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
+                    let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
+                    prefixed = true;
+                    prefix_breaks = self.unroll_for(f, &items, None, state);
+                    if !state.reachable {
+                        if let Some(b) = prefix_breaks.take() {
+                            state.replace_with(b);
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+        Some((prefixed, prefix_breaks))
     }
 
     /// An instance of a class of the program with `__iter__` and `__next__` whose `__iter__`
@@ -479,10 +505,10 @@ impl Analyzer {
             _ => None,
         }).collect();
         let scope = self.heap.module_info(self.frame().module).scopes.get(self.frame().scope).cells.clone();
-        let target_names = super::names_in(&f.target);
+        let target_names = crate::syntax::names_in(&f.target);
         for l in appended {
             let name = l.id.as_str();
-            if scope.contains(name) || target_names.iter().any(|t| t == name) || body_mentions(&f.body, name) != 1 {
+            if scope.contains(name) || target_names.iter().any(|t| t == name) || crate::syntax::body_mentions(&f.body, name) != 1 {
                 continue;
             }
             let Some(o) = self.name_value(pre, s(name)).and_then(|v| v.single().filter(|_| v.kv.is_bot())) else { continue };
@@ -540,7 +566,7 @@ impl Analyzer {
             // (rows the body changed; for a summary, only then the walk)
             let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && row_at(*ns) != exit_s.row(oid, *ns)).collect();
             let held = |an: &Analyzer| list.is_some_and(|l| an.held_only_by(oid, l, target, exit_s));
-            if !rows.is_empty() && self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
+            if !rows.is_empty() && self.heap.is_record(oid) && (self.heap.obj(oid).single || held(self)) {
                 for ns in rows {
                     exit_s.set_row_narrowed(oid, ns, row_at(ns));
                 }
@@ -559,7 +585,7 @@ impl Analyzer {
         if self.cx.recent_stack.is_empty() {
             return out;
         }
-        for n in super::names_in(target) {
+        for n in crate::syntax::names_in(target) {
             let sid = intern::s(&n);
             let Some(v) = self.name_value(state, sid).filter(|v| v.pts.len() == 1) else { continue };
             let o = v.pts.iter().next().unwrap();
@@ -571,9 +597,12 @@ impl Analyzer {
         out
     }
 
+    /// A view for a loop's item `o` that stands for several records (`link_view`): one object per
+    /// iteration standing for the record of that iteration, so stores into it are strong. None
+    /// when `o` is one runtime object already, or not a record.
     fn loop_view(&mut self, o: ObjId, target: &'static ast::Expr, state: &mut State) -> Option<ObjId> {
         let ob = self.heap.obj(o);
-        if ob.single || crate::state::is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || crate::state::view_of(o).is_some() {
+        if ob.single || is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || view_of(o).is_some() {
             return None;
         }
         let (kind, label, payload, derived, depth, ty) = (ob.kind, ob.label.to_string(), ob.payload.clone(), ob.derived_from, ob.depth, ob.ty);
@@ -608,7 +637,7 @@ impl Analyzer {
         if let Some(e) = state.elems.get(&o) {
             state.elems.insert(i, e);
         }
-        crate::state::link_view(i, o);
+        link_view(i, o);
         if let Some(sym) = self.names.get(o).cloned() {
             let scope = self.names.scope(o);
             self.names.set(i, sym, scope);
@@ -620,7 +649,7 @@ impl Analyzer {
     /// The rows of each view at the end of the body (the continues' joined in), when no other
     /// object of its family changed it since `hits0` (`view_hits`).
     fn view_ends(&self, views: &[(ObjId, ObjId)], hits0: u64, body_s: &State) -> Vec<(ObjId, [Row; 2])> {
-        if views.is_empty() || crate::state::view_hits() != hits0 {
+        if views.is_empty() || view_hits() != hits0 {
             return Vec::new();
         }
         let cont = self.unwind.loop_stack.last().and_then(|c| c.continues.as_ref());
@@ -684,7 +713,7 @@ impl Analyzer {
     /// Whether nothing but the list `l` (and the loop `target`'s names) holds `s` in `state`
     /// (a walk from the roots that does not enter `l`; a long one answers no).
     fn held_only_by(&self, s: ObjId, l: ObjId, target: &ast::Expr, state: &State) -> bool {
-        let skip: Vec<intern::StrId> = super::names_in(target).iter().map(|n| intern::s(n)).collect();
+        let skip: Vec<intern::StrId> = crate::syntax::names_in(target).iter().map(|n| intern::s(n)).collect();
         let mut work: Vec<ObjId> = Vec::new();
         for fr in &self.cx.frames {
             work.push(fr.module);
@@ -723,25 +752,52 @@ impl Analyzer {
         }
         true
     }
-}
 
-/// How many times the plain name `name` occurs in these statements (nested functions too).
-pub(crate) fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
-    struct V<'n>(&'n str, usize);
-    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
-        fn visit_expr(&mut self, e: &'a ast::Expr) {
-            if let ast::Expr::Name(n) = e {
-                if n.id.as_str() == self.0 {
-                    self.1 += 1;
+    /// Requirements on the loop's own elements are per element, not per program run.
+    pub(in crate::interp) fn promote_elem_reqs(&mut self, exit_s: &mut State, body_s: &State, elem: &Value, state: &State) {
+        if !body_s.reachable {
+            return;
+        }
+        let mut srcs: Vec<SourceId> = Vec::new();
+        // (the element, and the items it holds two levels down: the group of a `groupby` pair
+        // iterated in its turn reads each of its rows once per element too)
+        let mut objs: Vec<ObjId> = elem.pts.iter().collect();
+        let mut level: Vec<ObjId> = objs.clone();
+        for _ in 0..2 {
+            let mut next: Vec<ObjId> = Vec::new();
+            for oid in level {
+                if matches!(self.heap.kind(oid), Kind::List | Kind::Tuple) {
+                    state.slots.each(&oid, &mut |sk, v| {
+                        if matches!(sk.0, Ns::Elem | Ns::Pos) {
+                            next.extend(v.pts.iter());
+                        }
+                    });
                 }
             }
-            ast::visitor::source_order::walk_expr(self, e);
+            next.retain(|o| !objs.contains(o));
+            objs.extend(next.iter().copied());
+            level = next;
+        }
+        for oid in objs {
+            for ns in [Ns::Item, Ns::Attr] {
+                for (src, _) in state.row(oid, ns).sources.iter() {
+                    if !source_is_data(src) && !srcs.contains(&src) {
+                        srcs.push(src);
+                    }
+                }
+            }
+        }
+        for src in srcs {
+            for (k, info) in body_s.reqs.for_key(&src) {
+                if info.always {
+                    if let Some(cur) = exit_s.reqs.get(&src, &k) {
+                        if !cur.always {
+                            exit_s.reqs.set(&src, k, ReqInfo { always: true, ..cur });
+                        }
+                    }
+                }
+            }
         }
     }
-    use ast::visitor::source_order::SourceOrderVisitor;
-    let mut v = V(name, 0);
-    for st in body {
-        v.visit_stmt(st);
-    }
-    v.1
 }
+

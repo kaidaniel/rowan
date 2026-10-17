@@ -12,26 +12,32 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ruff_python_ast as ast;
 
 use super::{Analyzer, Payload, ViewKind};
-use crate::domain::{Chain, Classification, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, kv_literals, label_type, Chain, Classification, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
+use crate::source::SourceId;
 
-
+/// The verdict of one access (a read, `del` or `pop` of a key) on one object, in one call
+/// chain; `report::dedupe` combines those of one access.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Verdict {
     pub line: u32,
     pub col: u32,
     pub key: KeyId,
     pub tier: Tier,
+    /// the object's label (`dict@L4`)
     pub obj: String,
     /// call sites (lines) active when the access ran
     pub chain: Chain,
+    /// why, in words (`is only set on some paths`)
     pub note: String,
-    pub providers: Vec<crate::domain::SourceId>,
+    /// the inputs that may provide the key
+    pub providers: Vec<SourceId>,
     /// unknown code that may have added or removed the key (its call sites)
     pub mutators: Vec<String>,
     pub ns: Ns,
+    /// the access as written (`row["id"]`)
     pub text: String,
     pub oid: ObjId,
     /// module the access is in (empty = main file)
@@ -41,6 +47,7 @@ pub struct Verdict {
 }
 
 impl Verdict {
+    /// What makes two verdicts the same record (`Findings::add`).
     pub(in crate::interp) fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
         (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
     }
@@ -57,12 +64,12 @@ pub struct Fact {
     /// when there are some: those exist in the program's runs)
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     pub general_rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
-    /// the values (`report::render_value`) the general run recorded, distinct texts
+    /// the values (`render::render_value`) the general run recorded, distinct texts
     pub general: Vec<String>,
     /// the values the program's calls recorded, distinct texts, each with the lines of the
     /// calls (of the function the line is in) that gave it
     pub calls: Vec<(String, Vec<u32>)>,
-    /// the symbols the texts mention, with what is known about each (`report::value_legend`)
+    /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
@@ -144,13 +151,13 @@ fn join_opt(a: &Option<Row>, b: &Option<Row>) -> Option<Row> {
     }
 }
 
+/// A `#@row` / `#@value` check of the golden harness: a name's row and value at a line.
 pub struct RowCheck {
     /// the module's path relative to the main file's directory ("" for the main file)
     pub file: String,
     pub line: u32,
     pub name: String,
     pub row: Option<Row>,
-    pub ns: Ns,
     /// the name's value: its known literals, whether it may be anything else, its objects
     pub value: ValueInfo,
     /// tensor facts for the golden harness: {"shape", "dim", "chain", "entry"}
@@ -158,13 +165,19 @@ pub struct RowCheck {
     /// made where the function runs for any call (`in_general_run`), and in a
     /// requirement-only run (whose lines checks of the program's calls do not count)
     pub general: bool,
+    /// made in a requirement-only run
     pub quiet: bool,
 }
 
+/// A name's value as the golden harness checks it (`#@value NAME: exactly= | unknown |
+/// includes=`).
 #[derive(Debug, Clone, Default)]
 pub struct ValueInfo {
+    /// its literals
     pub lits: Vec<KeyId>,
+    /// it may be something not known
     pub unknown: bool,
+    /// its objects, by label
     pub objects: Vec<String>,
     /// the types of its unknown parts known to have one (`int(?)`), and whether some has none
     pub types: Vec<&'static str>,
@@ -218,6 +231,7 @@ impl Findings {
         self.facts_on || self.general_checks
     }
 
+    /// The verdicts recorded, in order.
     pub(in crate::interp) fn verdicts(&self) -> &[Verdict] {
         &self.verdicts
     }
@@ -243,6 +257,7 @@ impl Findings {
         }
     }
 
+    /// The report's notes, in order.
     pub(in crate::interp) fn notes(&self) -> &[String] {
         &self.notes
     }
@@ -260,6 +275,9 @@ impl Findings {
 }
 
 impl Analyzer {
+    /// Records the verdict `cls` of an access of `key` on `oid` at `node` (unless quiet, or a
+    /// `map`): weakened to possibly when the receiver may also be a scalar or the call is one of
+    /// several a value picks; under the running call chain, with the guard mode.
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
         self.gens.read(oid, Some((ns, key)));
         if matches!(cls.tier, Tier::Map) || self.findings.quiet || self.findings.quiet_records {
@@ -321,6 +339,7 @@ impl Analyzer {
         self.mode.verdict_guarded = saved;
     }
 
+    /// A node's text on one line (an access as the report writes it).
     pub(in crate::interp) fn node_text(&self, node: &Node) -> String {
         if node.addr == 0 {
             return String::new();
@@ -340,6 +359,9 @@ impl Analyzer {
         }
     }
 
+    /// Records a hover fact: the value of `name` at `node` of the main module (read or written),
+    /// as text, with the rows of its objects; into the general run's values or the program's
+    /// calls'.
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.findings.facts_on || node.addr == 0 {
             return;
@@ -380,7 +402,7 @@ impl Analyzer {
         } else {
             (None, FxHashMap::default(), Vec::new())
         };
-        let render = |an: &Analyzer| crate::report::in_scope(scope, || (crate::report::render_value(an, state, v, 0, &mut Vec::new()), crate::report::value_legend(an, state, v)));
+        let render = |an: &Analyzer| crate::interp::render::in_scope(scope, || (crate::interp::render::render_value(an, state, v, 0, &mut Vec::new()), crate::interp::render::value_legend(an, state, v)));
         let (text, mut legend) = match pctx {
             Some(ctx) => crate::models::shape::with_ctx(ctx, || render(self)),
             None => render(self),
@@ -462,10 +484,10 @@ impl Analyzer {
             None => info.untyped = true,
         };
         if v.kv.is_literal() {
-            info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
+            info.lits = kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
-            typed(&mut info, v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))));
+            typed(&mut info, v.kv.data_site().and_then(|l| label_type(&intern::str_get(l))));
         }
         for o in v.pts.iter() {
             match self.heap.kind(o) {
@@ -510,13 +532,11 @@ impl Analyzer {
             // (an observation, not a read of the program: no position, so no unbound-name check)
             let v = self.load_name(s(&name), &Node::none(), state);
             let mut rows: Vec<Row> = Vec::new();
-            let mut ns_used = Ns::Item;
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
                 if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).map(|c| self.heap.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
                     let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
                     if let Some(dd) = d.single().filter(|x| self.heap.kind(*x) == Kind::Dict) {
-                        ns_used = Ns::Item;
                         rows.push(state.row(dd, Ns::Item));
                         continue;
                     }
@@ -532,14 +552,13 @@ impl Analyzer {
                 // (an instance of a dict subclass: its items)
                 let dict_sub = self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
                 let ns = if matches!(self.heap.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
-                ns_used = ns;
                 rows.push(state.row(oid, ns));
             }
             let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
             let mut row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             if let Some(r) = row.as_mut() {
                 for (_, _, _, k) in self.findings.row_absent_probes.iter().filter(|(f, l, nm, _)| *f == file && *l == ln && *nm == name) {
-                    if crate::domain::classify(r, *k).tier == crate::domain::Tier::Missing {
+                    if classify(r, *k).tier == crate::domain::Tier::Missing {
                         *r = r.delete(*k, true);
                     }
                 }
@@ -558,7 +577,7 @@ impl Analyzer {
             } else {
                 None
             };
-            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, ns: ns_used, value, tensor, general, quiet: self.findings.quiet });
+            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, value, tensor, general, quiet: self.findings.quiet });
         }
     }
 }

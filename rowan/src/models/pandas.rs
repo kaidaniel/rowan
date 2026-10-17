@@ -1,15 +1,24 @@
-//! pandas models (DataFrame hooks used by the interpreter and the `DataFrame.*` methods).
+//! pandas: a DataFrame is a record whose item keys are its columns (`Kind::Frame`), a Series
+//! one whose keys are its index labels. Construction, projection, column stores, drops,
+//! renames, `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes compute the
+//! columns a frame has; readers (`read_csv`, …) give frames open through their input, so the
+//! columns the code reads become the input's schema. The literals a frame's index labels and
+//! columns may (and surely) hold, and its number of rows, are kept in its `Meta` slots
+//! (`labels`, `vals`, `nrows`). The interpreter calls the hooks here for item,
+//! attribute and `.loc` access on frames (`frame_getitem`, `frame_setattr`, `loc_get`, …).
 
 use indexmap::IndexMap;
 
-use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, FnKind, KeyVal, KeysOf, Ns, ObjSet, RenameFn, Row, RowData, Source, SourceKind, Step, Tier, Value, DATA};
+use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, KeyVal, KeysOf, Ns, ObjSet, Row, RowData, Tier, Value, DATA};
 use crate::frontend::Node;
-use crate::interp::funcs::Elem;
-use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{self, key_str_lit, KeyId, KeySet, EMPTY_LENS};
+use crate::interp::iter::Elem;
+use crate::interp::{Analyzer, Call, Payload, ViewKind};
+use crate::source::{FnKind, RenameFn, Source, SourceKind, Step};
 use crate::state::{Kind, State};
 
 use super::{noeffect, Model};
+use crate::interp::Args;
 
 pub const DF_METHODS: &[&str] = &[
     "abs", "add", "add_prefix", "add_suffix", "agg", "aggregate", "align", "all", "any", "apply", "applymap", "asfreq", "asof", "assign", "astype",
@@ -392,7 +401,7 @@ fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<K
     let mut out = Vec::new();
     for (k, v) in c.kwargs.iter() {
         if c.qual.ends_with(".agg") || c.qual.ends_with(".aggregate") {
-            out.push((intern::key(intern::Key::Str(intern::str_get(*k))), true, col_of(v)));
+            out.push((intern::key_of_str(*k), true, col_of(v)));
         }
     }
     for sk in &c.star_kwargs {
@@ -2177,7 +2186,7 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
             if k.is_empty() {
                 r.sources.clone()
             } else {
-                r.sources.map(|(s0, l)| (s0, crate::domain::lens_push(l, Step::Kill(k.clone()))))
+                r.sources.map(|(s0, l)| (s0, crate::source::lens_push(l, Step::Kill(k.clone()))))
             }
         };
         let mut d = row.data();
@@ -2566,7 +2575,7 @@ fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut row = recv_row(an, st, c);
     let mut colvals: Vec<(KeyId, Option<Known>)> = Vec::new();
     for (k, v) in c.kwargs.iter() {
-        let col = intern::key(intern::Key::Str(intern::str_get(*k)));
+        let col = intern::key_of_str(*k);
         // a callable gets the frame as built so far (earlier keywords included)
         if v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Class)) {
             let tmp = an.alloc(Kind::Frame, &format!("{}:assign:{}", crate::interp::site_string(&c.node), intern::key_py_str(col)), st, &format!("frame@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
@@ -3519,7 +3528,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut cols = Row::new();
         let mut names = Vec::new();
         for (k, v) in c.kwargs.iter() {
-            names.push(intern::key(intern::Key::Str(intern::str_get(*k))));
+            names.push(intern::key_of_str(*k));
             for x in v.pts.iter() {
                 if an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, st) == Some(2) {
                     if let Some(col) = st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit() {
@@ -4838,7 +4847,7 @@ fn set_axis(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return new_frame(an, st, c, closed_ordered(&seq), None, None);
             }
             if let Some(ks) = an.lit_keys(&l, st) {
-                return new_frame(an, st, c, row.project(&ks), None, None);
+                return new_frame(an, st, c, Row::closed_with(ks.clone()), None, None);
             }
             return new_frame(an, st, c, Row::with_source(Source::new(&format!("set_axis@L{}", c.line), SourceKind::Call)), None, None);
         }
@@ -5135,7 +5144,7 @@ pub fn columns_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value>
     let f = c.arg(0, None)?;
     match rename_step(an, st, &f, c, &fs) {
         Some(steps) => {
-            let lens = intern::lens(crate::domain::Lens { steps });
+            let lens = intern::lens(crate::source::Lens { steps });
             let mut ko = KeysOf::new(ObjSet::from_vec(fs), Ns::Item);
             ko.chain = lens;
             Some(Value::kv_only(KeyVal::KeysOf(ko)))
@@ -5171,7 +5180,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
             return;
         }
         if let Some(ks) = an.lit_keys(v, state) {
-            state.set_row(oid, Ns::Item, row.project(&ks));
+            state.set_row(oid, Ns::Item, Row::closed_with(ks.clone()));
             return;
         }
         let mut kv: Option<KeyVal> = if v.pts.is_empty() { Some(v.kv.clone()) } else { None };
@@ -5309,7 +5318,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
                     continue;
                 }
                 // in the list on some paths only: read (and needed of an input) on those only
-                let before: Vec<(crate::domain::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.contains(src, &k))).collect();
+                let before: Vec<(crate::source::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.contains(src, &k))).collect();
                 frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, false);
                 for (src, had) in before {
                     if !had {
@@ -5772,7 +5781,7 @@ pub fn unknown_drop(an: &mut Analyzer, c: &'static ruff_python_ast::ExprCall, no
     let cols: Vec<KeyId> = match &cols_v {
         Some(v) => match lit_key_seq(an, st, v).or_else(|| v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| vec![k])) {
             Some(ks) => ks,
-            None => return Some(an.unknown_call("drop", Some(&recv), &[], &Default::default(), &[], &[], st, node)),
+            None => return Some(an.unknown_call("drop", Some(&recv), Args::pos(&[]), st, node)),
         },
         None => Vec::new(),
     };

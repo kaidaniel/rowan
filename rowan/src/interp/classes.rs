@@ -8,9 +8,12 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, ClassInfo, Frame, FrameKind, Payload};
+use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, Payload};
 
 impl Analyzer {
+    /// A `class` statement: its bases (library ones say what it is), the class object, its body
+    /// run in a class frame (names become class attributes), then its decorators and what its
+    /// library bases make of it (enum members, dataclass fields, pydantic, NamedTuple, …).
     pub(super) fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
         let fr_module = self.frame().module;
         let fr_ctx = self.frame().ctx.clone();
@@ -151,7 +154,7 @@ impl Analyzer {
     fn run_init_subclass(&mut self, c: &'static ast::StmtClassDef, coid: ObjId, info: &ClassInfo, cnode: &Node, state: &mut State) {
         let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
         if let Some(defc) = found {
-            let fv = self.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
+            let fv = self.heap.class_attr(defc, "__init_subclass__");
             let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
             if let Some(args) = &c.arguments {
                 for kw in args.keywords.iter() {
@@ -166,7 +169,7 @@ impl Analyzer {
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
-                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, cnode, false);
+                    self.call_user(f, Some(Value::obj(coid)), Args::kw(&kwargs), state, cnode, false);
                 }
             }
         }

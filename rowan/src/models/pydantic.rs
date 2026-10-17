@@ -15,9 +15,12 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::interp::{dotted_last, Analyzer, Call, Payload};
+use crate::interp::{Analyzer, Call, Payload};
 use crate::state::{Kind, State};
+use crate::syntax::dotted_last;
+use crate::interp::Args;
 
+/// A model's `extra` setting: what validation does with input keys that are no field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Extra {
     Ignore,
@@ -46,6 +49,7 @@ pub enum Ann {
     Other,
 }
 
+/// One declared field of a model.
 #[derive(Clone, Debug)]
 pub struct PField {
     pub name: String,
@@ -67,6 +71,7 @@ pub struct PField {
     pub constraints: Vec<(String, KeyId)>,
 }
 
+/// A `field_validator` / `model_validator` (or v1 `validator` / `root_validator`).
 #[derive(Clone, Debug)]
 pub struct Validator {
     pub func: ObjId,
@@ -86,6 +91,7 @@ pub struct PErr {
     pub ctx: bool,
 }
 
+/// What pydantic makes of a model class: its fields, config and validators.
 #[derive(Clone, Debug)]
 pub struct PClass {
     pub fields: Vec<PField>,
@@ -354,7 +360,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                 }
                 ast::Stmt::FunctionDef(fd) => {
                     let fname = fd.name.id.to_string();
-                    let fv = an.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(&fname))).cloned().unwrap_or_default();
+                    let fv = an.heap.class_attr(c, &fname);
                     let Some(func) = fv.pts.iter().find(|o| an.heap.kind(*o) == Kind::Function) else { continue };
                     for d in &fd.decorator_list {
                         let (callee, call) = match &d.expression {
@@ -670,7 +676,7 @@ fn pyd_settings_env(an: &mut Analyzer, pc: &PClass, prefix: &str, delim: Option<
                     state.set_slot(nid, Ns::Item, sk, state.slot(env, Ns::Item, k), true);
                 }
                 if er.open() {
-                    row = row.data_store(crate::domain::Source::new("os.environ", crate::domain::SourceKind::External));
+                    row = row.data_store(crate::source::Source::new("os.environ", crate::source::SourceKind::External));
                 }
                 state.set_row(nid, Ns::Item, row);
                 v = v.join(&Value::obj(nid));
@@ -984,7 +990,7 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
             state.set_row(inst, Ns::Attr, r);
         }
         if other_data {
-            let r = state.row(inst, Ns::Attr).data_store(crate::domain::Source::new(&format!("{}@L{}", an.heap.class_info(cls).name, node.line), crate::domain::SourceKind::Data));
+            let r = state.row(inst, Ns::Attr).data_store(crate::source::Source::new(&format!("{}@L{}", an.heap.class_info(cls).name, node.line), crate::source::SourceKind::Data));
             state.set_row(inst, Ns::Attr, r);
         }
     }
@@ -1002,7 +1008,7 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
             }
         }
         state.set_row(did, Ns::Item, vrow);
-        let out = an.call_user(v.func, Some(Value::obj(cls)), vec![Value::obj(did)], IndexMap::new(), vec![], vec![], state, node, false);
+        let out = an.call_user(v.func, Some(Value::obj(cls)), Args::pos(&[Value::obj(did)]), state, node, false);
         let outs: Vec<ObjId> = out.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict).collect();
         let strong = outs.len() == 1 && out.kv.is_bot();
         for d in outs {
@@ -1117,7 +1123,7 @@ fn pyd_raise_errors_as(an: &mut Analyzer, errs: Vec<PErr>, state: &mut State, no
         }
     }
     an.heap.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
-    state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
+    state.set_row(eo, Ns::Attr, Row::new().data_store(crate::source::Source::new("ValidationError", crate::source::SourceKind::Data)));
     let exc_cls = (cls != "ValidationError").then(|| crate::interp::builtin_exc_names(cls));
     an.raise_exc(cls, Some(Value::obj(eo)), exc_cls, sure, state);
 }
@@ -1188,7 +1194,7 @@ fn pyd_catching(an: &mut Analyzer, f: ObjId, self_v: Value, args: Vec<Value>, st
     let mut pre = state.copy();
     an.enter_try(rustc_hash::FxHashSet::from_iter(PYD_CAUGHT.iter().map(|x| x.to_string())), &mut pre);
     // (run with the validated values: `v.strip()` of a str field is a str method there)
-    let out = an.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, false);
+    let out = an.call_user(f, Some(self_v), Args::pos(&args), state, node, false);
     // an exception of another class (a KeyError, one of code rowan cannot see) is no
     // validation error: it escapes to the enclosing try / call
     let validation = |c: &Option<crate::interp::ExcNames>| c.as_ref().is_some_and(|(n, _)| n.iter().any(|x| PYD_CAUGHT.contains(&x.as_str())));
@@ -1241,9 +1247,9 @@ fn pyd_init_privates(an: &mut Analyzer, cls: ObjId, inst: ObjId, state: &mut Sta
         state.set_slot(inst, Ns::Attr, priv_key(&name), v, true);
     }
     if let Some(defc) = an.class_lookup(cls, "model_post_init") {
-        let fv = an.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
+        let fv = an.heap.class_attr(defc, "model_post_init");
         for f in fv.pts.iter().filter(|f| an.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
-            an.call_user(f, Some(Value::obj(inst)), vec![an.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+            an.call_user(f, Some(Value::obj(inst)), Args::pos(&[an.none_v.clone()]), state, node, false);
         }
     }
 }
@@ -1912,7 +1918,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     }
                     None => {
                         let e = match it.elem {
-                            crate::interp::funcs::Elem::One(v) => v,
+                            crate::interp::iter::Elem::One(v) => v,
                             _ => Value::data("elem"),
                         };
                         let ce = pyd_convert(an, inner, &e, state, node);
@@ -1934,7 +1940,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     let e = an.path_placeholder_value(o, Ns::Item, intern::STAR, &row, state);
                     let ce = pyd_convert(an, inner, &e, state, node);
                     let nid = an.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, Some(&format!("pyddict{}", o)));
-                    state.set_row(nid, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("dict@L{}", node.line), crate::domain::SourceKind::Data)));
+                    state.set_row(nid, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("dict@L{}", node.line), crate::source::SourceKind::Data)));
                     state.set_slot(nid, Ns::Item, intern::STAR, ce, true);
                     outs.push(Value::obj(nid));
                     continue;
@@ -1962,6 +1968,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
     }
 }
 
+/// The options of a `model_dump` / `dict` / `model_dump_json` call.
 #[derive(Clone, Default)]
 pub struct DumpOpts {
     pub include: Option<KeySet>,
@@ -2328,7 +2335,7 @@ fn ann_optional(e: &ast::Expr) -> bool {
 pub fn pyd_dump(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
     if an.m.pyd_depth > 6 {
         let did = an.alloc_at(Kind::Dict, node, state, &format!("model_dump@L{}", node.line), Payload::None, None, Ns::Item, None, Some("dumpdeep"));
-        state.set_row(did, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("model_dump@L{}", node.line), crate::domain::SourceKind::Data)));
+        state.set_row(did, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("model_dump@L{}", node.line), crate::source::SourceKind::Data)));
         return Value::obj(did);
     }
     an.m.pyd_depth += 1;
@@ -2360,14 +2367,14 @@ fn pyd_dump_inner(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut St
                     let h = an.heap.alloc_raw(Kind::Method, &format!("pyddump:{}", oid), "", true, "serializer handler", Payload::Method("pydantic.dumphandler".into(), Value::obj(oid)));
                     args.push(Value::obj(h));
                 }
-                return an.call_user(ms.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, false);
+                return an.call_user(ms.func, Some(Value::obj(oid)), Args::pos(&args), state, node, false);
             }
         }
     }
     let did = an.alloc_at(Kind::Dict, node, state, &format!("model_dump@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("dump{}", oid)));
     state.set_row(did, Ns::Item, Row::new());
     let Some(cls) = cls.filter(|c| is_model(an, *c)) else {
-        let r = Row::new().data_store(crate::domain::Source::new(&format!("model_dump@L{}", node.line), crate::domain::SourceKind::Data));
+        let r = Row::new().data_store(crate::source::Source::new(&format!("model_dump@L{}", node.line), crate::source::SourceKind::Data));
         state.set_row(did, Ns::Item, r);
         return Value::obj(did);
     };
@@ -2403,7 +2410,7 @@ fn pyd_dump_inner(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut St
             if nparams >= 3 {
                 args.push(Value::data("info"));
             }
-            dv = an.call_user(fs.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, false);
+            dv = an.call_user(fs.func, Some(Value::obj(oid)), Args::pos(&args), state, node, false);
         }
         // per option: Some(true) kept, Some(false) left out, None either
         let none_lit = intern::key_none();
@@ -2546,7 +2553,7 @@ fn pyd_dump_value(an: &mut Analyzer, ann: &Ann, v: &Value, opts: &DumpOpts, stat
                     }
                     None => {
                         let e = match it.elem {
-                            crate::interp::funcs::Elem::One(v) => v,
+                            crate::interp::iter::Elem::One(v) => v,
                             _ => Value::data("elem"),
                         };
                         let ce = pyd_dump_value(an, &inner, &e, opts, state, node);
@@ -2780,7 +2787,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 };
                 let Some(cls) = cls.filter(|c| is_model(an, *c)) else {
                     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("model_extra@L{}", c.line));
-                    let r = Row::new().data_store(crate::domain::Source::new(&format!("model_extra@L{}", c.line), crate::domain::SourceKind::Data));
+                    let r = Row::new().data_store(crate::source::Source::new(&format!("model_extra@L{}", c.line), crate::source::SourceKind::Data));
                     st.set_row(oid, Ns::Item, r);
                     outs.push(Value::obj(oid));
                     continue;
@@ -2924,7 +2931,7 @@ pub fn m_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let k = key_str_lit(key);
                     prow = prow.store(k, true);
                     let fd = an.alloc_at(Kind::Dict, &c.node, st, &format!("property@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("jsf{}:{}", cls, key)));
-                    st.set_row(fd, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("schema@L{}", c.line), crate::domain::SourceKind::Data)));
+                    st.set_row(fd, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("schema@L{}", c.line), crate::source::SourceKind::Data)));
                     st.set_slot(pid, Ns::Item, k, Value::obj(fd), true);
                     if *required {
                         req.push(Value::lit(k));

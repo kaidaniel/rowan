@@ -10,11 +10,17 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, FuncInfo, FuncNode, MAX_ACTIVE, REC_MAX_ITER};
+use super::{Analyzer, Args, FuncInfo, FuncNode};
 use crate::domain::{KeyVal, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, StrId};
 use crate::state::{Footprint, State};
+
+/// Running activations of one function past which a call with other literal arguments joins
+/// one of them (`activation_for`).
+pub const MAX_ACTIVE: usize = 4;
+/// Rounds an activation runs again until its result and state are stable; then widened.
+pub const REC_MAX_ITER: usize = 8;
 
 /// An activation: (function, call site; `entry:` for an entry run, `|…` for literal arguments).
 pub type ActKey = (ObjId, String);
@@ -39,6 +45,7 @@ pub struct Recursion {
 }
 
 impl Recursion {
+    /// Is this activation running (a call of it is recursive)?
     pub(in crate::interp) fn is_active(&self, key: &ActKey) -> bool {
         self.active.contains(key)
     }
@@ -74,8 +81,8 @@ impl Recursion {
 impl Analyzer {
     /// The activation a call of `foid` at `site` runs as. Past `MAX_ACTIVE` running activations
     /// of the function, the innermost one (the call is then recursive).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value]) -> ActKey {
+    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, a: Args) -> ActKey {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let mut key = (foid, if !entry { site.to_string() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
@@ -116,7 +123,7 @@ impl Analyzer {
     /// round).
     pub(super) fn recursive_call(&mut self, key: &ActKey, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State) -> Value {
         self.recursion.hit.insert(key.clone());
-        // widen the entry arguments with the ones of this recursive call (§6.3)
+        // widen the entry arguments with the ones of this recursive call
         if let Some((e_self, e_args, e_kwargs)) = self.recursion.entry.get(key).cloned() {
             let n_self = match (&e_self, &self_v) {
                 (Some(a), Some(b)) => Some(a.join(b)),
@@ -155,7 +162,7 @@ impl Analyzer {
             // global, a cell — what the callee may read)
             let fp = state.footprint(&pre);
             let old = |o: ObjId| self.heap.born_before(o, mark);
-            let fp = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| old(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| old(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| old(*o)).collect() };
+            let fp = Footprint { rows: fp.rows.into_iter().filter(|k| old(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| old(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| old(*o)).collect() };
             if !fp.rows.is_empty() || !fp.slots.is_empty() || !fp.elems.is_empty() {
                 let mut g = self.recursion.heap.get_mut(key).and_then(|e| e.1.take()).unwrap_or_else(|| pre.copy());
                 let before = g.copy();
@@ -179,7 +186,6 @@ impl Analyzer {
 
     /// The rounds of a call's body from `state` (its parameters bound): one, or for a recursive
     /// activation until its result and state are stable, then widened. Its result and end state.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn run_rounds(&mut self, key: &ActKey, fi: &FuncInfo, gen_id: Option<ObjId>, pre_bind: &State, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> (Value, State) {
         let fnode = fi.node;
         let mut entry_state = state.copy();
@@ -233,7 +239,7 @@ impl Analyzer {
                     let fp = g.footprint(p);
                     state.join_heap_fp(g, &fp);
                 }
-                self.bind_params(&fi, &w_self, &w_args, &w_kwargs, &star_args, &star_kwargs, state, node);
+                self.bind_params(&fi, &w_self, Args::new(&w_args, &w_kwargs, &star_args, &star_kwargs), state, node);
                 entry_state = state.copy();
                 continue;
             }
@@ -279,6 +285,7 @@ impl Analyzer {
     }
 }
 
+/// A recursive activation's argument, widened: more than two literals become an unknown.
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
         if ks.len() > 2 {

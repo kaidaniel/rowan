@@ -12,16 +12,20 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{debug_enabled, dotted_last, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
-use crate::domain::{Ns, ObjId, Row, Source, SourceKind, Value};
+use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, FuncInfo, FuncNode, Payload, debug_enabled};
+use crate::domain::{Ns, ObjId, ReqInfo, Row, RowData, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
+use crate::source::{source_label, Source, SourceId, SourceKind};
 use crate::state::{Kind, State};
+use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
-type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+type Reqs = crate::layered::TwoLevel<SourceId, KeyId, ReqInfo>;
 
+/// The entry runs' state: which functions had one, the instances their methods run on, where
+/// runs for any call start, and the runs on demand (see the module doc).
 #[derive(Default)]
 pub struct Entries {
     /// on demand: the state every function's run starts from (`on_demand`)
@@ -100,12 +104,15 @@ struct ModuleEnd {
     cut: bool,
 }
 
-
 /// On demand, a method of a class with more subclasses than this runs for any call on an
 /// instance of the class made by its `__init__`, or of a subclass with any attributes
 /// (`entry_receiver`).
 const MANY_SUBCLASSES: usize = 64;
+
 impl Analyzer {
+    /// Analyses the program: the main module runs (its calls run their callees), then, unless
+    /// `--no-entry`, the entry runs start from the module's end after any of the program's code
+    /// ran (`after_any_code`). The final state is kept for the report.
     pub fn run(&mut self) {
         let mut state = State::new();
         let main = self.program.main_module;
@@ -127,6 +134,7 @@ impl Analyzer {
         self.findings.final_state = Some(state);
     }
 
+    /// Runs a module's code in a module frame of its own (the main module, an import).
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
         let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
@@ -302,8 +310,10 @@ impl Analyzer {
         true
     }
 
-    /// Entry-point rule (§6.4): functions never called get analysed with open parameters, from
-    /// `base` (instances for them are made there); the requirements they find go to `state`.
+    /// The entry runs: functions never called get analysed with open parameters, from `base`
+    /// (instances for them are made there), in rounds over the functions made so far; then the
+    /// requirement-only runs of the functions the program calls; then the facts-only general
+    /// runs. The requirements they find go to `state`.
     pub(super) fn analyse_uncalled(&mut self, base: &mut State, state: &mut State) {
         self.entry.called = (self.heap.len() as ObjId, self.entry.analysed.clone());
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
@@ -345,6 +355,9 @@ impl Analyzer {
         }
     }
 
+    /// The entry runs of the functions `from..n` that need one in this pass (`quiet_pass`: the
+    /// requirement-only runs of called functions; else the runs with verdicts of uncalled ones,
+    /// torch modules' functions, FastAPI handlers and functions their budget refused).
     pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, base: &mut State, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
             if self.budget.over_hard_deadline() {
@@ -406,7 +419,7 @@ impl Analyzer {
                 let mi = self.heap.module_info(fi.module);
                 self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
-                self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, true);
+                self.call_user(oid, None, Args::pos(&[]), &mut st, &fake, true);
                 self.cx.frames.pop();
             }
             return;
@@ -456,7 +469,7 @@ impl Analyzer {
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
         let saved_qr = std::mem::replace(&mut self.findings.quiet_records, called_torch);
         let start_reqs = st.reqs.clone();
-        self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, true);
+        self.call_user(oid, self_val, Args::new(&args, &kwargs, &star_args, &star_kwargs), &mut st, &fake, true);
         if general {
             self.note_contract(fi, &st.reqs, &start_reqs);
         }
@@ -637,7 +650,7 @@ impl Analyzer {
         let own = format!("param {}.", fi.py_qualname());
         let c = self.findings.contracts.get_or_insert_with(State::new);
         for (src, k) in reqs.diff_keys(start) {
-            if !crate::domain::source_label(src).starts_with(&own) {
+            if !source_label(src).starts_with(&own) {
                 continue;
             }
             let Some(info) = reqs.get(&src, &k) else { continue };
@@ -656,7 +669,7 @@ impl Analyzer {
         let span = (fi.node.node().line, fi.node.node().end_line);
         let in_main = fi.module == self.program.main_module;
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
-            if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
+            if quiet && !own_source(&source_label(src), &own, span, in_main) {
                 continue;
             }
             let Some(info) = st.reqs.get(&src, &k) else { continue };
@@ -725,10 +738,10 @@ impl Analyzer {
         None
     }
 
-    /// A declared row for an annotated entry-point parameter (§6.6).
+    /// A declared row for an annotated entry-point parameter.
     /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
-        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), "", Ns::Item, vec![])
+        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id))
     }
 
     /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
@@ -765,6 +778,10 @@ impl Analyzer {
         }
     }
 
+    /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
+    /// tensor or module, an instance of a class of the program (a dataclass's or TypedDict's
+    /// with its declared fields and nothing else; another's made as its `__init__` makes it),
+    /// an open DataFrame; None when the annotation names none of those.
     pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
@@ -789,7 +806,7 @@ impl Analyzer {
                     if ci.lib.typed_dict {
                         if let Some((req, opt)) = crate::models::dataclasses::typed_dict_keys(self, oid) {
                             fields = req.union(&opt);
-                            declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
+                            declared = Row::from_data(RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
                         }
                     }
                     let inst = self.alloc(
@@ -841,7 +858,7 @@ impl Analyzer {
         let ci = self.heap.class_info(cls_oid);
         if self.entry.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance
-            return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]));
+            return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name)));
         }
         let any = self.entry.any_instance;
         self.entry.fresh_in_progress.insert(cls_oid);
@@ -857,6 +874,7 @@ impl Analyzer {
         self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
     }
 
+    /// An instance of `cls_oid` made for entry runs with `row` as its attributes' row.
     fn instance_with(&mut self, cls_oid: ObjId, ci: &ClassInfo, row: Row, state: &mut State, ctx: &str) -> ObjId {
         self.alloc(
             Kind::Instance,
@@ -872,6 +890,9 @@ impl Analyzer {
         )
     }
 
+    /// The instance an entry run's method takes as `self`: open when the class's attributes are
+    /// not all its own; its declared fields present; its `__init__` run with its parameters'
+    /// defaults or annotations (None when that `__init__` cannot complete).
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
         let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
@@ -903,7 +924,7 @@ impl Analyzer {
         }
         let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
-            let inits = self.heap.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            let inits = self.heap.class_attr(init_cls, "__init__");
             for init in inits.pts.iter() {
                 if self.heap.kind(init) != Kind::Function {
                     continue;
@@ -931,7 +952,7 @@ impl Analyzer {
                 let any = self.entry.any_instance;
                 let saved_general = std::mem::replace(&mut self.entry.general, any.then_some(init));
                 let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, (!any).then_some(init));
-                self.call_user(init, Some(Value::obj(inst)), args, kwargs, star_args, star_kwargs, state, &fake, true);
+                self.call_user(init, Some(Value::obj(inst)), Args::new(&args, &kwargs, &star_args, &star_kwargs), state, &fake, true);
                 self.entry.general = saved_general;
                 self.entry.no_facts = saved_nofacts;
                 self.findings.quiet = saved_quiet;

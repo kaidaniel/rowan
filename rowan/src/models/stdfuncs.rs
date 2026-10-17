@@ -436,10 +436,10 @@ pub fn m_operator_fn(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// small generated module whose globals hold the arguments.
 pub fn m_methodcaller(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(mname) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     };
     if !mname.chars().all(|ch| ch.is_alphanumeric() || ch == '_') || !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     let pos: Vec<String> = (1..c.args.len()).map(|i| format!("_mc_a{}", i)).collect();
     let kws: Vec<(String, String)> = c.kwargs.keys().enumerate().map(|(i, k)| (intern::str_get(*k).to_string(), format!("_mc_k{}", i))).collect();

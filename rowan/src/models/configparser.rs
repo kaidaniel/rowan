@@ -6,12 +6,14 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{KeyVal, Ns, Row, Value, DATA};
 use crate::frontend::Node;
-use crate::interp::{Analyzer, Call, Payload};
 use crate::intern::{self, key_str_lit, KeySet};
+use crate::interp::{Analyzer, Call, Payload};
+use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
+/// What a `ConfigParser` read: its sections and options when the text is known.
 #[derive(Clone, Debug, Default)]
 pub struct CfgSpec {
     /// the text read so far is known

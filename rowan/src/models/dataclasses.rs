@@ -8,7 +8,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, Classification, Ns, ObjId, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::interp::{Analyzer, Frame, FrameKind};
+use crate::interp::{Analyzer, Args, Frame, FrameKind};
 use crate::state::{Kind, State};
 
 /// A dataclass field as `__init__` takes it (`dc_specs`).
@@ -50,8 +50,8 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
             Some(items) if it.exhaustive => args_full.extend(items),
             _ => {
                 star_rest = Some(match it.elem {
-                    crate::interp::funcs::Elem::One(v) => v,
-                    crate::interp::funcs::Elem::Pair(a, b) => a.join(&b),
+                    crate::interp::iter::Elem::One(v) => v,
+                    crate::interp::iter::Elem::Pair(a, b) => a.join(&b),
                 })
             }
         }
@@ -148,10 +148,10 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
     }
     // the generated __init__ ends by calling __post_init__ when the class defines one
     if let Some(pc) = an.class_lookup(cls, "__post_init__") {
-        let fv = an.heap.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
+        let fv = an.heap.class_attr(pc, "__post_init__");
         for f in fv.pts.iter() {
             if an.heap.kind(f) == Kind::Function {
-                an.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, false);
+                an.call_user(f, Some(Value::obj(inst)), Args::pos(&initvars), state, node, false);
             }
         }
     }
@@ -173,8 +173,8 @@ pub fn dc_specs(an: &Analyzer, cls: u32) -> Vec<DcSpec> {
             let ast::Stmt::AnnAssign(a) = st else { continue };
             let ast::Expr::Name(n) = &*a.target else { continue };
             let ann_name = match &*a.annotation {
-                ast::Expr::Subscript(sb) => crate::interp::dotted_last(&sb.value),
-                other => crate::interp::dotted_last(other),
+                ast::Expr::Subscript(sb) => crate::syntax::dotted_last(&sb.value),
+                other => crate::syntax::dotted_last(other),
             };
             if ann_name == "KW_ONLY" {
                 kw_only = true;
@@ -189,7 +189,7 @@ pub fn dc_specs(an: &Analyzer, cls: u32) -> Vec<DcSpec> {
             let mut init = true;
             let mut fkw = kw_only;
             if let Some(ast::Expr::Call(fc)) = default {
-                if crate::interp::dotted_last(&fc.func) == "field" {
+                if crate::syntax::dotted_last(&fc.func) == "field" {
                     for k in fc.arguments.keywords.iter() {
                         match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
                             (Some("init"), ast::Expr::BooleanLiteral(b)) => init = b.value,
@@ -232,7 +232,7 @@ pub fn dataclass_default(an: &mut Analyzer, d: &'static ast::Expr, node: &Node, 
 
 fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
     if let ast::Expr::Call(c) = d {
-        if crate::interp::dotted_last(&c.func) == "field" {
+        if crate::syntax::dotted_last(&c.func) == "field" {
             for kw in c.arguments.keywords.iter() {
                 let Some(arg) = &kw.arg else { continue };
                 match arg.id.as_str() {
@@ -272,7 +272,7 @@ pub fn abstract_unimplemented(an: &Analyzer, cls: u32) -> bool {
     let mro = an.heap.mro(cls);
     let is_abc = mro.iter().any(|c| {
         an.heap.class_info_opt(*c).map(|ci| {
-            ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::interp::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::interp::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
+            ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::syntax::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::syntax::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
         }).unwrap_or(false)
     });
     if !is_abc {
@@ -299,7 +299,7 @@ pub fn abstract_unimplemented(an: &Analyzer, cls: u32) -> bool {
                 continue;
             }
             seen.push(name);
-            if decos.iter().any(|d| crate::interp::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if crate::interp::dotted_last(&cl.func) == "abstractmethod")) {
+            if decos.iter().any(|d| crate::syntax::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if crate::syntax::dotted_last(&cl.func) == "abstractmethod")) {
                 return true;
             }
         }
@@ -362,8 +362,8 @@ pub fn declared_fields(c: &'static ast::StmtClassDef, pydantic: bool) -> Vec<(St
         let ast::Stmt::AnnAssign(a) = st else { continue };
         let ast::Expr::Name(n) = &*a.target else { continue };
         let ann = |name: &str, sub: bool| match &*a.annotation {
-            ast::Expr::Subscript(sb) => sub && crate::interp::dotted_last(&sb.value) == name,
-            other => !sub && crate::interp::dotted_last(other) == name,
+            ast::Expr::Subscript(sb) => sub && crate::syntax::dotted_last(&sb.value) == name,
+            other => !sub && crate::syntax::dotted_last(other) == name,
         };
         let skipped = ann("ClassVar", true) || ann("ClassVar", false) || ann("InitVar", true) || ann("KW_ONLY", false);
         if skipped || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
@@ -524,7 +524,7 @@ pub fn dataclass_order(an: &Analyzer, x: u32, y: u32, state: &State) -> Option<s
         return None;
     }
     let compared = |d: &Option<&'static ast::Expr>| match d {
-        Some(ast::Expr::Call(fc)) if crate::interp::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
+        Some(ast::Expr::Call(fc)) if crate::syntax::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
         _ => true,
     };
     let fields: Vec<KeyId> = dataclass_fields_mro(an, cx).iter().filter(|(_, d)| compared(d)).map(|(f, _)| key_str_lit(f)).collect();
@@ -542,8 +542,8 @@ pub fn dataclass_order(an: &Analyzer, x: u32, y: u32, state: &State) -> Option<s
 }
 
 /// A TypedDict class called: a plain dict.
-#[allow(clippy::too_many_arguments)]
-pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, a: Args, state: &mut State, node: &Node) -> Option<Value> {
+    let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     if !an.heap.class_info(cls).lib.typed_dict {
         return None;
     }
@@ -556,8 +556,8 @@ pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, args: &[Value], kwargs:
 /// `__init__`) validates its keyword input; a dict subclass without its own `__init__` is
 /// filled by dict's constructor; a dataclass (or a subclass without its own `__init__`)
 /// runs the generated `__init__`. None: none of these.
-#[allow(clippy::too_many_arguments)]
-pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, a: Args, state: &mut State, node: &Node) -> Option<Value> {
+    let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     let ci = an.heap.class_info(cls);
     if crate::models::pydantic::is_validated(an, cls) {
         let own_init = an.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(an, c) && an.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
@@ -582,12 +582,12 @@ pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value],
             if !an.record_objects(a0).is_empty() {
                 an.copy_into(inst, Ns::Item, a0, state, true, &KeySet::new());
             } else {
-                let r = state.row(inst, Ns::Item).data_store(crate::domain::Source::new(&format!("{}@L{}", ci.name, node.line), crate::domain::SourceKind::Data));
+                let r = state.row(inst, Ns::Item).data_store(crate::source::Source::new(&format!("{}@L{}", ci.name, node.line), crate::source::SourceKind::Data));
                 state.set_row(inst, Ns::Item, r);
             }
         }
         for (k, v) in kwargs.iter() {
-            an.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
+            an.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key_of_str(*k)), v, true, node, state);
         }
         for sk in star_kwargs {
             an.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());

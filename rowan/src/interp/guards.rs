@@ -39,6 +39,8 @@ impl Analyzer {
         (pos.len() <= MAX_WHEN && neg.len() <= MAX_WHEN).then_some((pos, neg))
     }
 
+    /// Does test `e` say the same at the call as here: does it read only parameters `fixed`
+    /// picks, through values nothing wrote since the call began (`unwritten`)?
     fn test_fixed(&mut self, e: &'static ast::Expr, fixed: &dyn Fn(&str) -> bool, pre: &mut State) -> bool {
         let lit = |e: &ast::Expr| matches!(e, ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_));
         match e {
@@ -63,7 +65,7 @@ impl Analyzer {
                     }
                     ast::CmpOp::In | ast::CmpOp::NotIn => {
                         let (ast::Expr::StringLiteral(k), Some(n)) = (l, name(r)) else { return false };
-                        let key = intern::key(intern::Key::Str(k.value.to_str().into()));
+                        let key = intern::key_str_lit(k.value.to_str());
                         let v = self.dep_value(pre, n);
                         unwritten(&v, pre, Some(key))
                     }

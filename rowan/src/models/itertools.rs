@@ -13,6 +13,7 @@ use crate::state::{Kind, State};
 /// Results beyond this many positions: unknown positions.
 const MAX_ITEMS: usize = 256;
 
+/// An endless iterator: `count(start, step)`, `cycle(items)`, `repeat(x)`.
 #[derive(Clone, Debug)]
 pub enum Infinite {
     Count(Value, Value),

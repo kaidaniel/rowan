@@ -1,15 +1,15 @@
 //! Operators and text: `a op b` and `op a` on known values (CPython-exact on literals), the
 //! program's operator dunders, f-strings and `%` formatting.
 
-use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, FnKind, KeyVal, Ns, ObjSet, RenameFn, Value, DATA};
+use crate::domain::{join_values, key_type, kv_join, kv_literals, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjSet, TYPE_NAMES, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
+use crate::source::{FnKind, RenameFn};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, Payload};
+use super::{Analyzer, Args, Payload};
 
 /// A part of an f-string: literal text, a hole of known value, or a hole whose text is not
 /// known.
@@ -36,7 +36,7 @@ impl Analyzer {
     /// parts Python treats as different types. (Beside an unknown object, which may be the
     /// literals too, no: what is done with it covers them.)
     pub(in crate::interp) fn mixed(&self, v: &Value) -> bool {
-        !v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
+        !v.pts.is_empty() && v.kv.is_literal() && kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
     }
 
     /// An operation on values of which one is `mixed`: on its objects and on its literals, each
@@ -76,8 +76,8 @@ impl Analyzer {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
                 let name = format!("expr:{}:{}", scope, text);
-                return Value::data(&match crate::domain::label_type(&l) {
-                    Some(t) => crate::domain::typed_label(t, &name),
+                return Value::data(&match label_type(&l) {
+                    Some(t) => typed_label(t, &name),
                     None => name,
                 });
             }
@@ -103,10 +103,10 @@ impl Analyzer {
         }
         match &v.kv {
             KeyVal::Bot => {}
-            KeyVal::Data(l) => add(crate::domain::label_type(&intern::str_get(*l)))?,
+            KeyVal::Data(l) => add(label_type(&intern::str_get(*l)))?,
             KeyVal::Lit(_) | KeyVal::Lits(_) => {
-                for k in crate::domain::kv_literals(&v.kv).iter() {
-                    add(crate::domain::TYPE_NAMES.iter().copied().find(|t| crate::domain::key_type(k, t)))?;
+                for k in kv_literals(&v.kv).iter() {
+                    add(TYPE_NAMES.iter().copied().find(|t| key_type(k, t)))?;
                 }
             }
             KeyVal::KeysOf(_) => return None,
@@ -119,15 +119,15 @@ impl Analyzer {
     pub fn as_type(&self, v: Value, ty: Option<&'static str>, named: bool) -> Value {
         let (Some(t), true, KeyVal::Data(l)) = (ty, v.pts.is_empty() && !self.m.torch_on, &v.kv) else { return v };
         let l = intern::str_get(*l);
-        let name = crate::domain::label_name(&l);
+        let name = label_name(&l);
         // (labels that carry more than a name — a JSON text, a shape, a pattern — are the
         // models': left as they are; `len` is kept, comparisons read it)
         let plain = name.is_empty() || name.starts_with("expr:") || matches!(name, "str" | "int" | "bool" | "len") || (name.starts_with('L') && name[1..].chars().all(|c| c.is_ascii_digit()));
-        if !plain || crate::domain::label_type(&l) == Some(t) {
+        if !plain || label_type(&l) == Some(t) {
             return v;
         }
         let keep = (named && !matches!(name, "str" | "int" | "bool")) || name == "len";
-        Value::data(&crate::domain::typed_label(t, if keep { name } else { "" }))
+        Value::data(&typed_label(t, if keep { name } else { "" }))
     }
 
     /// `-x`, `+x`, `~x`, `not x`.
@@ -164,6 +164,7 @@ impl Analyzer {
         self.as_type(r, ty, false)
     }
 
+    /// `op v` (`not`, `-`, `+`, `~`) before the result's type is applied.
     fn unary_untyped(&mut self, u: &'static ast::ExprUnaryOp, v: Value, node: &'static ast::Expr, state: &mut State) -> Value {
         match u.op {
             ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
@@ -191,6 +192,9 @@ impl Analyzer {
         }
     }
 
+    /// `a op b`: each part on its own (literals beside objects), CPython's result on known
+    /// literals, the program's operator dunders, the models' (tensors, frames, …), else an
+    /// unknown of the type the operands' types give (`int + int`: `int(?)`).
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(r) = self.split_mixed(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
             return r;
@@ -200,6 +204,10 @@ impl Analyzer {
         self.as_type(r, ty, true)
     }
 
+    /// `a op b` before the result's type is applied: the program's dunders and the models'
+    /// (`binop_by_models`), operators on a parameter (decided per call site), set operations on
+    /// known members, CPython's result on two literals, `%` formatting, pandas results, else an
+    /// unknown.
     fn binop_untyped(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(v) = self.binop_by_models(op, a, b, node, state) {
             return v;
@@ -401,8 +409,8 @@ impl Analyzer {
         // lists (tuples) of any length times a count: one of the same kind, of their elements
         let kind = seq.pts.first().map(|o| self.heap.kind(o)).filter(|k| matches!(k, Kind::List | Kind::Tuple))?;
         let count = match &cnt.kv {
-            KeyVal::Data(l) => crate::domain::label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
-            kv if kv.is_literal() => crate::domain::kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
+            KeyVal::Data(l) => label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
+            kv if kv.is_literal() => kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
             _ => false,
         };
         if !count || !seq.kv.is_bot() || !cnt.pts.is_empty() || seq.pts.iter().any(|o| self.heap.kind(o) != kind) {
@@ -413,7 +421,7 @@ impl Analyzer {
     }
 
     /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.
-    fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &crate::domain::ObjSet, node: &Node, state: &mut State) -> Option<Value> {
+    fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
         let lb = b.kv.as_lit();
         // (a known text before or after one of several texts, or keys; beside an unknown
@@ -438,7 +446,7 @@ impl Analyzer {
         let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
         if !lists.is_empty() {
             // (the elements of every alternative of either side: a list's, an unknown's)
-            let acc = crate::domain::join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
+            let acc = join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
             state.elems.insert(oid, acc.kv);
@@ -499,9 +507,9 @@ impl Analyzer {
         };
         let mut outs = Vec::new();
         for (o, f) in calls {
-            outs.push(self.call_user(f, Some(Value::obj(o)), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, false));
+            outs.push(self.call_user(f, Some(Value::obj(o)), Args::pos(&[other.clone()]), state, node, false));
         }
-        Some(crate::domain::join_values(outs))
+        Some(join_values(outs))
     }
 
     /// The text `pre` + v + `post` for a value v that is one of a few texts or some keys:
@@ -528,6 +536,8 @@ impl Analyzer {
         self.as_type(r, Some("str"), false)
     }
 
+    /// An f-string: its text when every part is known (formatted as CPython does), else a str
+    /// known to start and end with its literal ends (`Payload::Affix`) or not known.
     fn fstring_untyped(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
         let mut parts: Vec<Part> = Vec::new();
         for p in f.value.iter() {
@@ -655,7 +665,7 @@ impl Analyzer {
                 if !v.pts.is_empty() && v.kv.is_literal() {
                     let nd = frontend::node(node);
                     let site = format!("fstring@L{}", nd.line);
-                    let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    let o = self.unknown_source(&site, crate::source::SourceKind::Data, state, &site);
                     self.heap.obj_mut(o).payload = Payload::Affix(pre, post);
                     return Value::with_kv(ObjSet::one(o), kv);
                 }
@@ -681,7 +691,7 @@ impl Analyzer {
         if all_lit {
             return Value::lit(key_str_lit(&text));
         }
-        Value::data(&crate::domain::typed_label("str", ""))
+        Value::data(&typed_label("str", ""))
     }
 }
 
@@ -689,7 +699,7 @@ impl Analyzer {
 /// (at most 64), exactly as Python formats them; None when an argument is not literal or a
 /// combination does not format.
 fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<Vec<String>> {
-    let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv).iter().collect()) } else { None } };
+    let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(kv_literals(&v.kv).iter().collect()) } else { None } };
     let alts: Vec<Vec<KeyId>> = if b.pts.is_empty() {
         vec![lits(b)?]
     } else {
