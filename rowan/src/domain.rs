@@ -1320,3 +1320,15 @@ pub fn join_values(vals: impl IntoIterator<Item = Value>) -> Value {
         _ => Value { pts: ObjSet::from_vec(ids), kv },
     }
 }
+
+impl crate::layered::MapValue for Value {}
+impl crate::layered::MapValue for KeyVal {}
+impl crate::layered::MapValue for ReqInfo {}
+impl crate::layered::MapValue for (Option<usize>, usize, u16) {}
+
+/// A row written again is a new row even when equal (`CondFact`s end at any write).
+impl crate::layered::MapValue for Row {
+    fn same_write(&self, o: &Self) -> bool {
+        self.same_ptr(o)
+    }
+}

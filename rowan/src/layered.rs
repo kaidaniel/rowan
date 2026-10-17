@@ -35,6 +35,16 @@ impl PKey for SourceId {
     }
 }
 
+/// A map's value. Writing a value the key already has (`same_write`) copies nothing, so the
+/// map stays shared with its copies.
+pub trait MapValue: Clone + PartialEq {
+    fn same_write(&self, o: &Self) -> bool {
+        self == o
+    }
+}
+
+impl MapValue for u32 {}
+
 enum Node<K, V> {
     Leaf { h: u64, k: K, v: V },
     /// keys agree with `p` above the branching bit `m`; those with `m` clear go left
@@ -399,13 +409,13 @@ impl<K, V> Clone for LayerMap<K, V> {
     }
 }
 
-impl<K: PKey, V: Clone + PartialEq> Default for LayerMap<K, V> {
+impl<K: PKey, V: MapValue> Default for LayerMap<K, V> {
     fn default() -> Self {
         LayerMap { root: None }
     }
 }
 
-impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
+impl<K: PKey, V: MapValue> LayerMap<K, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -463,6 +473,8 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         let h = k.key64();
         match &mut self.root {
             None => self.root = Some(Arc::new(Node::Leaf { h, k, v })),
+            // (writing the value already there copies nothing: the map stays shared)
+            Some(t) if get(t, h).is_some_and(|old| old.same_write(&v)) => {}
             Some(t) => insert(t, h, k, v),
         }
     }
@@ -620,13 +632,13 @@ impl<K, IK, V> Clone for TwoLevel<K, IK, V> {
     }
 }
 
-impl<K: PKey, IK: IKey, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
+impl<K: PKey, IK: IKey, V: MapValue> Default for TwoLevel<K, IK, V> {
     fn default() -> Self {
         TwoLevel { m: LayerMap::new() }
     }
 }
 
-impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
+impl<K: PKey, IK: IKey, V: MapValue> TwoLevel<K, IK, V> {
     pub fn new() -> Self {
         Self::default()
     }
