@@ -63,7 +63,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | file | what |
 | --- | --- |
 | `mod.rs` | `Analyzer`, the module map, the shared bounds (`UNROLL_MAX`, `CHAIN`, `FN_BUDGET`, `DEADLINE_MS`, `ROWAN_LIMITS`) |
-| `api.rs` | `Call`, and what the models, the report and the driver may use |
+| `api.rs` | `Call` (a model's call) and `Args` (a call's arguments), and what the models, the report and the driver may use |
 | **components** | |
 | `program.rs`, `heap.rs`, `findings.rs`, `names.rs`, `budget.rs`, `recursion.rs`, `entry.rs`, `gens.rs`, `tries.rs`, `context.rs`, `unknown.rs`, `effects.rs` | as in the table above |
 | **the walk** | |

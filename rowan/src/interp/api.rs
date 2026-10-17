@@ -1,4 +1,6 @@
-//! The interpreter's interface to the library models (`models/`), the report and the driver.
+//! The interpreter's interface to the library models (`models/`), the report and the driver:
+//! `Call` (everything a model is told about a call), `Args` (a call's arguments, as calls pass
+//! them on), and these methods.
 //! The components' state (`program`, `findings`, `names`, `budget`, `recursion`, `entry`,
 //! `gens`, `unwind`, `cx`, `mode`, …) is the interpreter's own (`pub(in crate::interp)`), and
 //! so are its methods unless marked `pub`. A model sees:
