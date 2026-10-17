@@ -71,8 +71,8 @@ try:
     r9 = lst < [3]
 except TypeError:
     r9 = "te"
-seen.append(r9)  #@value r9: includes={"te"}
-#@todo value r9: exactly={"te", True}  (lists are not ordered item by item)
+seen.append(r9)  #@value r9: exactly={"te", True}
+# (lists of known items are ordered item by item: was a #@todo)
 try:
     r10 = n + 1
 except TypeError:

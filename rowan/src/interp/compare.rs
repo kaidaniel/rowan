@@ -87,16 +87,8 @@ impl Analyzer {
             if let Some(r) = self.rich_compare(op, a, b, nd, state) {
                 return r;
             }
-            if let Some(o) = self.tuple_order(a, b, state) {
-                use std::cmp::Ordering::*;
-                return lit(match op {
-                    ast::CmpOp::Lt => o == Less,
-                    ast::CmpOp::LtE => o != Greater,
-                    ast::CmpOp::Gt => o == Greater,
-                    ast::CmpOp::GtE => o != Less,
-                    ast::CmpOp::Eq => o == Equal,
-                    _ => o != Equal,
-                });
+            if let Some(r) = self.seq_compare(op, a, b, state) {
+                return r;
             }
         }
         if let Some(r) = self.compare_const(op, a, b, right, state) {
@@ -545,16 +537,60 @@ impl Analyzer {
         ai.zip(bi).and_then(|(x, y)| crate::models::dataclasses::dataclass_order(self, x, y, state))
     }
 
-    /// The order of two tuples (objects with known items, or literal tuples) item by item.
-    pub(super) fn tuple_order(&self, a: &Value, b: &Value, state: &State) -> Option<std::cmp::Ordering> {
-        let tupleish = |an: &Analyzer, v: &Value| {
-            (v.pts.is_empty() && v.kv.as_lit().map(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_)))).unwrap_or(false))
-                || (v.single().map(|o| an.heap.kind(o) == Kind::Tuple).unwrap_or(false) && v.kv.is_bot())
+    /// Tuples and lists of known items compared item by item, per object of each side (`a`
+    /// may be `[1, 2] | [0]`); a list against a tuple is unequal, and ordering them raises
+    /// TypeError. None when some pair's order is not known.
+    fn seq_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, state: &mut State) -> Option<Value> {
+        use std::cmp::Ordering::*;
+        let parts = |an: &Analyzer, v: &Value| -> Option<Vec<(bool, Value)>> {
+            if v.pts.is_empty() {
+                let k = v.kv.as_lit()?;
+                return intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))).then(|| vec![(false, v.clone())]);
+            }
+            if !v.kv.is_bot() || v.pts.len() > 4 {
+                return None;
+            }
+            v.pts.iter().map(|o| match an.heap.kind(o) {
+                Kind::Tuple | Kind::Pair => Some((false, Value::obj(o))),
+                Kind::List if !an.heap.obj(o).iterator => Some((true, Value::obj(o))),
+                _ => None,
+            }).collect()
         };
-        if !tupleish(self, a) || !tupleish(self, b) {
-            return None;
+        let (pa, pb) = (parts(self, a)?, parts(self, b)?);
+        let (mut out, mut raises) = (KeySet::new(), 0);
+        for (la, x) in &pa {
+            for (lb, y) in &pb {
+                let r = if la != lb {
+                    match op {
+                        ast::CmpOp::Eq => false,
+                        ast::CmpOp::NotEq => true,
+                        _ => {
+                            raises += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    let o = crate::models::stdfuncs::value_order(self, state, x, y)?;
+                    match op {
+                        ast::CmpOp::Lt => o == Less,
+                        ast::CmpOp::LtE => o != Greater,
+                        ast::CmpOp::Gt => o == Greater,
+                        ast::CmpOp::GtE => o != Less,
+                        ast::CmpOp::Eq => o == Equal,
+                        _ => o != Equal,
+                    }
+                };
+                out = out.insert(intern::key_bool(r));
+            }
         }
-        crate::models::stdfuncs::value_order(self, state, a, b)
+        if out.is_empty() {
+            self.raise_here("TypeError", state);
+            return Some(Value::new());
+        }
+        if raises > 0 {
+            self.may_raise_here("TypeError", state);
+        }
+        Some(Value::kv_only(KeyVal::lits(out)))
     }
 
     /// `a < b` for sorting / max / min when the items are instances ordering themselves.
