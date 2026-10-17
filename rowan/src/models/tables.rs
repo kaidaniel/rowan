@@ -122,13 +122,13 @@ pub const PURE_BUILTINS: &[&str] = &["len", "isinstance", "issubclass", "print",
 /// code (`re.sub`'s `repl`, `json.dumps`'s `default`) and the dunders reading calls. A
 /// qualified name ending in `.` stands for every function of that module.
 const READ_ONLY_LIBRARY: &[&str] = &[
-    "json.dumps", "json.loads", "os.path.", "posixpath.", "ntpath.", "os.fspath", "os.getenv", "re.match", "re.search", "re.fullmatch", "re.findall",
+    "json.dumps", "json.loads", "os.path.", "posixpath.", "ntpath.", "os.fspath", "re.match", "re.search", "re.fullmatch", "re.findall",
     "re.finditer", "re.sub", "re.subn", "re.split", "re.escape", "re.compile", "math.", "warnings.warn", "inspect.isclass", "inspect.isfunction",
     "inspect.ismethod", "inspect.iscoroutinefunction", "inspect.isgeneratorfunction", "inspect.cleandoc", "textwrap.dedent", "textwrap.indent",
     "textwrap.wrap", "textwrap.fill", "textwrap.shorten", "shlex.quote", "shlex.split", "shlex.join", "fnmatch.", "unicodedata.", "string.capwords",
     "keyword.iskeyword", "base64.", "binascii.", "struct.pack", "struct.unpack", "struct.calcsize", "html.escape", "html.unescape",
     "urllib.parse.quote", "urllib.parse.unquote", "urllib.parse.urlparse", "urllib.parse.urlsplit", "urllib.parse.urlencode", "urllib.parse.urljoin",
-    "urllib.parse.parse_qs", "urllib.parse.parse_qsl", "time.sleep", "time.strftime", "sys.exit", "sys.intern", "logging.getLogger",
+    "urllib.parse.parse_qs", "urllib.parse.parse_qsl", "time.sleep", "time.strftime", "sys.intern", "logging.getLogger",
 ];
 
 /// Does library function `qual` only read its arguments (`READ_ONLY_LIBRARY`)?
