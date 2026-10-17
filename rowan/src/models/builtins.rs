@@ -1238,7 +1238,8 @@ pub(super) const STR_ATTRS: &[&str] = &[
 ];
 
 pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let unknown = Value::data("hasattr");
+    // (undecided: a bool all the same)
+    let unknown = Value::data(&crate::domain::typed_label("bool", ""));
     if c.args.len() < 2 {
         return unknown;
     }

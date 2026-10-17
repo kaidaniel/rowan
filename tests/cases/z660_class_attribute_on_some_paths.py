@@ -24,8 +24,8 @@ elif n == 1:
 p1 = getattr(a, "u", 0)
 #@value p1: exactly={0, 1, 3}
 p2 = hasattr(a, "u")
-#@value p2: includes={False, True}
-#@todo value p2: types={bool} (hasattr where the class or the instance may have it: an unknown of no type)
+#@value p2: types={bool}
+# (hasattr where the class or the instance may have it: undecided)
 try:
     q = b.u
 except AttributeError:

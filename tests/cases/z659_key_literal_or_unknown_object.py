@@ -36,8 +36,8 @@ class C:
 c = C()
 setattr(c, k.lower(), 1)
 p7 = hasattr(c, "a")
-#@value p7: includes={False, True}
-#@todo value p7: types={bool} (hasattr on a row a key not known was stored into: an unknown of no type)
+#@value p7: types={bool}
+# (hasattr on a row a key not known was stored into: undecided)
 e = {"a": 1}
 p8 = k in e
 #@value p8: types={bool}
