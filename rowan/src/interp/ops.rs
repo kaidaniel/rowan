@@ -366,6 +366,8 @@ impl Analyzer {
                     self.load_item(b, Ns::Item, &Value::lit(key_str_lit(&name)), node, state, true);
                     rest = &after[j..];
                 }
+                // (the values it formats may be the program's instances)
+                self.library_dunders(std::slice::from_ref(b), state, node);
                 // a closed mapping of literals: the text
                 if let ([m], false) = (&recs[..], false) {
                     let row = state.row(*m, Ns::Item);
@@ -384,41 +386,81 @@ impl Analyzer {
                 return Some(Value::data(&format!("fmt@L{}", node.line)));
             }
         }
-        if let Some(x) = a.kv.as_lit() {
-            if let Some(sx) = intern::key_as_str(x) {
-                // arguments that are each one of a few literals: every combination, as
-                // Python formats it
-                if let Some(rs) = format_percent_alternatives(&sx, b, state, self) {
-                    return Some(Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r))))));
-                }
-                // "a%sb%s" with one argument not a literal: the literal text around it (a
-                // key built from a parameter keeps its prefix and suffix)
-                let sx2 = sx.to_string();
-                let n = sx2.matches("%s").count();
-                if n >= 1 && !sx2.replace("%s", "").contains('%') {
-                    let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
-                    // (an object's text is not known: an unknown)
-                    let scalar = |v: Value| if v.pts.is_empty() { v.kv } else { DATA };
-                    let args: Vec<KeyVal> = if n == 1 {
-                        vec![scalar(b.clone())]
-                    } else {
-                        match b.single() {
-                            Some(t) if matches!(self.heap.kind(t), Kind::Tuple) && self.heap.llen(t, state) == Some(n) => (0..n).map(|i| scalar(state.slot(t, Ns::Pos, key_int(i as i64)))).collect(),
-                            _ => Vec::new(),
-                        }
-                    };
-                    let lit = |i: usize| args[i].as_lit().map(intern::key_py_str);
-                    if let [h] = (0..args.len()).filter(|i| lit(*i).is_none()).collect::<Vec<_>>()[..] {
-                        if args.len() == n {
-                            let pre: String = (0..h).map(|i| format!("{}{}", segs[i], lit(i).unwrap())).collect::<String>() + &segs[h];
-                            let post: String = segs[h + 1].clone() + &(h + 1..n).map(|i| format!("{}{}", lit(i).unwrap(), segs[i + 1])).collect::<String>();
-                            return Some(Value::kv_only(self.affix(&args[h], &pre, &post)));
-                        }
-                    }
-                }
+        let Some(sx) = a.kv.as_lit().filter(|_| a.pts.is_empty()).and_then(intern::key_as_str) else {
+            // (a text not known: it may format the instances it is given)
+            self.library_dunders(std::slice::from_ref(b), state, node);
+            return None;
+        };
+        let (sx, args) = self.percent_args(&sx, b, node, state)?;
+        // arguments that are each one of a few literals: every combination, as Python formats it
+        if let Some(rs) = format_percent_alternatives(&sx, &args) {
+            return Some(Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r))))));
+        }
+        // "a%sb%s" with one argument not a literal: the literal text around it (a key built
+        // from a parameter keeps its prefix and suffix)
+        let n = sx.matches("%s").count();
+        if n >= 1 && n == args.len() && !sx.replace("%s", "").contains('%') {
+            let segs: Vec<String> = sx.split("%s").map(|s| s.to_string()).collect();
+            // (an object's text is not known: an unknown)
+            let args: Vec<KeyVal> = args.into_iter().map(|v| if v.pts.is_empty() { v.kv } else { DATA }).collect();
+            let lit = |i: usize| args[i].as_lit().map(intern::key_py_str);
+            if let [h] = (0..args.len()).filter(|i| lit(*i).is_none()).collect::<Vec<_>>()[..] {
+                let pre: String = (0..h).map(|i| format!("{}{}", segs[i], lit(i).unwrap())).collect::<String>() + &segs[h];
+                let post: String = segs[h + 1].clone() + &(h + 1..n).map(|i| format!("{}{}", lit(i).unwrap(), segs[i + 1])).collect::<String>();
+                return Some(Value::kv_only(self.affix(&args[h], &pre, &post)));
             }
         }
         None
+    }
+
+    /// The arguments `text % b` formats, in order (b's items when it is a tuple of known
+    /// length, else b), the program's instances among those formatted by `%s` / `%r` / `%a` as
+    /// their `__str__` / `__repr__` make them (those dunders run here); the dunders other
+    /// conversions may run on instances (`%d`: `__index__`) as calls that do not run; with the
+    /// text, those converted as `%s` (their text). None: a tuple whose length is not known.
+    fn percent_args(&mut self, text: &str, b: &Value, node: &Node, state: &mut State) -> Option<(String, Vec<Value>)> {
+        let args: Vec<Value> = match b.single().filter(|t| self.heap.kind(*t) == Kind::Tuple) {
+            Some(t) => {
+                let n = self.heap.llen(t, state)?;
+                (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64))).collect()
+            }
+            None => vec![b.clone()],
+        };
+        let convs = percent_conversions(text);
+        let mut text = text.to_string();
+        let instance = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| an.heap.kind(o) == Kind::Instance);
+        let mut out = Vec::with_capacity(args.len());
+        for (i, v) in args.into_iter().enumerate() {
+            let (at, conv) = convs.as_ref().and_then(|c| c.get(i)).map(|(at, c)| (Some(*at), Some(*c))).unwrap_or((None, None));
+            if !instance(self, &v) {
+                out.push(v);
+                continue;
+            }
+            let names: &[&str] = match conv {
+                Some('s') => &["__str__", "__repr__"],
+                Some('r' | 'a') => &["__repr__"],
+                _ => {
+                    self.library_dunders(std::slice::from_ref(&v), state, node);
+                    out.push(v);
+                    continue;
+                }
+            };
+            let Some((t, rest)) = self.run_dunder(&v, names, vec![], node, state) else {
+                out.push(v);
+                continue;
+            };
+            // (the text made, formatted as `%s`; the rest of v as it was: then the text of
+            // either is not known; `%a`: the repr with non-ASCII characters escaped)
+            if !rest.empty() || conv == Some('a') && !kv_literals(&t.kv).iter().all(|k| intern::key_as_str(k).is_some_and(|x| x.is_ascii())) {
+                out.push(Value::data(&typed_label("str", "")));
+                continue;
+            }
+            if let Some(at) = at {
+                text.replace_range(at..at + 1, "s");
+            }
+            out.push(t);
+        }
+        Some((text, out))
     }
 
     /// `seq * n` on a list / tuple with known positions and a known count (at most 64 items).
@@ -762,18 +804,36 @@ impl Analyzer {
     }
 }
 
+/// The conversion characters of a `%` format's specifiers (with their offsets), in order; None when one takes a
+/// width or precision from the arguments (`%*d`) or the format is a mapping's (`%(name)s`).
+fn percent_conversions(fmt: &str) -> Option<Vec<(usize, char)>> {
+    let mut out = Vec::new();
+    let mut it = fmt.char_indices();
+    while let Some((_, c)) = it.next() {
+        if c != '%' {
+            continue;
+        }
+        loop {
+            match it.next()? {
+                (_, '%') => break,
+                (_, '*' | '(') => return None,
+                (i, ch) if ch.is_ascii_alphabetic() && !matches!(ch, 'l' | 'h' | 'L') => {
+                    out.push((i, ch));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(out)
+}
+
 /// `fmt % args` when each argument is one of a few literals: the texts of every combination
 /// (at most 64), exactly as Python formats them; None when an argument is not literal or a
 /// combination does not format.
-fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<Vec<String>> {
+fn format_percent_alternatives(fmt: &str, args: &[Value]) -> Option<Vec<String>> {
     let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(kv_literals(&v.kv).iter().collect()) } else { None } };
-    let alts: Vec<Vec<KeyId>> = if b.pts.is_empty() {
-        vec![lits(b)?]
-    } else {
-        let o = b.single().filter(|o| an.heap.kind(*o) == Kind::Tuple)?;
-        let n = an.heap.llen(o, state)?;
-        (0..n).map(|i| lits(&state.slot(o, Ns::Pos, key_int(i as i64)))).collect::<Option<Vec<_>>>()?
-    };
+    let alts: Vec<Vec<KeyId>> = args.iter().map(lits).collect::<Option<Vec<_>>>()?;
     let total: usize = alts.iter().map(|a| a.len()).product();
     if total == 0 || total > 64 {
         return None;
