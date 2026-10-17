@@ -313,3 +313,128 @@ pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
     body.iter().for_each(|x| go(x, &mut out));
     out
 }
+
+/// The literal texts a str template's result starts and ends with: an f-string (around its
+/// fields), `"…%s…" % x` (simple conversions, no `%%`), `"…{}…".format(…)` (no `{{` / `}}`);
+/// None for other expressions.
+pub fn template_affix(e: &ast::Expr) -> Option<(String, String)> {
+    let ends = |parts: &[Option<String>]| -> (String, String) {
+        let first = parts.iter().position(Option::is_none).unwrap_or(parts.len());
+        let last = parts.iter().rposition(Option::is_none).map_or(parts.len(), |i| i + 1);
+        let cat = |ps: &[Option<String>]| ps.iter().flatten().cloned().collect::<String>();
+        (cat(&parts[..first]), cat(&parts[last.max(first)..]))
+    };
+    match e {
+        ast::Expr::FString(f) => {
+            let mut parts: Vec<Option<String>> = Vec::new();
+            for p in f.value.iter() {
+                match p {
+                    ast::FStringPart::Literal(l) => parts.push(Some(l.value.to_string())),
+                    ast::FStringPart::FString(fs) => {
+                        for el in fs.elements.iter() {
+                            match el {
+                                ast::InterpolatedStringElement::Literal(l) => parts.push(Some(l.value.to_string())),
+                                ast::InterpolatedStringElement::Interpolation(_) => parts.push(None),
+                            }
+                        }
+                    }
+                }
+            }
+            Some(ends(&parts))
+        }
+        ast::Expr::BinOp(b) if b.op == ast::Operator::Mod => {
+            let ast::Expr::StringLiteral(s) = &*b.left else { return None };
+            let fmt = s.value.to_str();
+            let mut parts: Vec<Option<String>> = Vec::new();
+            let mut rest = fmt;
+            while let Some(i) = rest.find('%') {
+                parts.push(Some(rest[..i].to_string()));
+                let conv = rest[i + 1..].chars().next()?;
+                if !"sdria".contains(conv) {
+                    return None;
+                }
+                parts.push(None);
+                rest = &rest[i + 2..];
+            }
+            parts.push(Some(rest.to_string()));
+            Some(ends(&parts))
+        }
+        ast::Expr::Call(c) => {
+            let ast::Expr::Attribute(a) = &*c.func else { return None };
+            let ast::Expr::StringLiteral(s) = &*a.value else { return None };
+            let fmt = s.value.to_str();
+            if a.attr.as_str() != "format" || fmt.contains("{{") || fmt.contains("}}") {
+                return None;
+            }
+            match (fmt.find('{'), fmt.rfind('}')) {
+                (Some(i), Some(j)) if i < j => Some((fmt[..i].to_string(), fmt[j + 1..].to_string())),
+                (None, None) => Some((fmt.to_string(), String::new())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What a function's local `name` may hold when every binding of it in the function's own code
+/// is `name = e` (its one target): each `e`. None when another binding may be the one (a
+/// parameter, `global` / `nonlocal`, a loop, `with`, `except` or import target, unpacking, `:=`,
+/// `+=`, `del`, `match`, a nested function or class of that name) or there is none.
+pub fn sole_assignments(f: &'static ast::StmtFunctionDef, name: &str) -> Option<Vec<&'static ast::Expr>> {
+    use ast::{Expr, Stmt};
+    struct V<'n> {
+        name: &'n str,
+        out: Vec<&'static Expr>,
+        other: bool,
+    }
+    impl SourceOrderVisitor<'static> for V<'_> {
+        fn visit_stmt(&mut self, st: &'static Stmt) {
+            let n = self.name;
+            let named = |t: &Expr| matches!(t, Expr::Name(x) if x.id.as_str() == n);
+            match st {
+                Stmt::FunctionDef(d) => self.other |= d.name.as_str() == n,
+                Stmt::ClassDef(d) => self.other |= d.name.as_str() == n,
+                Stmt::Global(g) => self.other |= g.names.iter().any(|x| x.as_str() == n),
+                Stmt::Nonlocal(g) => self.other |= g.names.iter().any(|x| x.as_str() == n),
+                Stmt::Import(i) => self.other |= i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str().split('.').next() == Some(n), |x| x.as_str() == n)),
+                Stmt::ImportFrom(i) => self.other |= i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str() == n || a.name.as_str() == "*", |x| x.as_str() == n)),
+                Stmt::Match(_) => self.other = true,
+                Stmt::Assign(a) if a.targets.len() == 1 && named(&a.targets[0]) => {
+                    self.out.push(&a.value);
+                    self.visit_expr(&a.value);
+                }
+                Stmt::AnnAssign(a) if named(&a.target) => {
+                    if let Some(v) = a.value.as_deref() {
+                        self.out.push(v);
+                        self.visit_expr(v);
+                    }
+                }
+                Stmt::Try(t) => {
+                    self.other |= t.handlers.iter().any(|h| {
+                        let ast::ExceptHandler::ExceptHandler(h) = h;
+                        h.name.as_ref().is_some_and(|x| x.as_str() == n)
+                    });
+                    source_order::walk_stmt(self, st);
+                }
+                _ => source_order::walk_stmt(self, st),
+            }
+        }
+        fn visit_expr(&mut self, e: &'static Expr) {
+            match e {
+                Expr::Name(x) if x.id.as_str() == self.name && !matches!(x.ctx, ast::ExprContext::Load) => self.other = true,
+                Expr::Lambda(_) => {}
+                _ => source_order::walk_expr(self, e),
+            }
+        }
+    }
+    let p = &f.parameters;
+    let params = p.posonlyargs.iter().chain(p.args.iter()).chain(p.kwonlyargs.iter()).map(|a| a.parameter.name.as_str()).chain(p.vararg.iter().chain(p.kwarg.iter()).map(|a| a.name.as_str()));
+    if params.into_iter().any(|x| x == name) {
+        return None;
+    }
+    let mut v = V { name, out: Vec::new(), other: false };
+    for st in &f.body {
+        v.visit_stmt(st);
+    }
+    (!v.other && !v.out.is_empty()).then_some(v.out)
+}

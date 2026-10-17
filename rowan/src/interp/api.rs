@@ -289,6 +289,18 @@ impl Analyzer {
         crate::syntax::assignments_to(fi.node.body(), name)
     }
 
+    /// The literal ends of the str a name argument `e` is made by (`template_affix`), directly
+    /// or through a local of the running function only ever assigned templates: one pair each.
+    pub fn template_affixes(&self, e: &'static ruff_python_ast::Expr) -> Option<Vec<(String, String)>> {
+        if let Some(a) = crate::syntax::template_affix(e) {
+            return Some(vec![a]);
+        }
+        let ruff_python_ast::Expr::Name(n) = e else { return None };
+        let fi = self.frame().func.and_then(|f| self.heap.func_info_opt(f))?;
+        let super::FuncNode::Def(f) = fi.node else { return None };
+        crate::syntax::sole_assignments(f, n.id.as_str())?.into_iter().map(crate::syntax::template_affix).collect()
+    }
+
     // ------------------------------------------------------------ exceptions
     /// An exception named `name` is raised here (`sure`) or may be: `exc` the exception object
     /// a model made (None: one of the class, if a handler needs it), `cls` its class names
