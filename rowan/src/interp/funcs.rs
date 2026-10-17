@@ -445,7 +445,7 @@ impl Analyzer {
                 Some(cur) => cur.join(&v),
                 None => v,
             };
-            self.heap.cls_slots.insert(k, nv);
+            self.heap.set_cls_slot(k, nv);
             return;
         }
         // a module-level binding inside a loop is strong under the recency abstraction (the

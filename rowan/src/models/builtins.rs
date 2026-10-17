@@ -1539,14 +1539,14 @@ pub(super) fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
                         let v = st.slot(ns, Ns::Item, k);
-                        an.heap.cls_slots.insert((cls, Ns::Attr, k), v.clone());
+                        an.heap.set_cls_slot((cls, Ns::Attr, k), v.clone());
                         st.set_slot(cls, Ns::Attr, k, v, true);
                         let r = st.row(cls, Ns::Attr).store(k, row.definite.contains(k));
                         st.set_row(cls, Ns::Attr, r);
                     }
                     if lit_name.is_none() {
                         for k in ["__name__", "__qualname__"] {
-                            an.heap.cls_slots.insert((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
+                            an.heap.set_cls_slot((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
                         }
                     }
                 }

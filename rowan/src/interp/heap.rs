@@ -320,6 +320,9 @@ pub struct Heap {
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
+    /// per object, the class attributes whose values were given it (`set_cls_slot`; some may
+    /// hold it no more): what a loop's back edge renames (`rename_recent`)
+    cls_refs: FxHashMap<ObjId, Vec<(ObjId, Ns, KeyId)>>,
     /// class attributes the program stores after the class is made (`Cls.x = 1`): those a
     /// path may lack (`class_lookup_on_path`)
     pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
@@ -342,7 +345,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
@@ -595,6 +598,29 @@ impl Heap {
     }
 
     // ------------------------------------------------------------ classes
+    /// Class `k.0`'s attribute `k.2` holds `v` (flow-insensitive, `cls_slots`).
+    pub fn set_cls_slot(&mut self, k: (ObjId, Ns, KeyId), v: Value) {
+        let kos = match &v.kv {
+            crate::domain::KeyVal::KeysOf(ko) => ko.objs.to_vec(),
+            _ => Vec::new(),
+        };
+        for o in v.pts.iter().chain(kos) {
+            let refs = self.cls_refs.entry(o).or_default();
+            if !refs.contains(&k) {
+                refs.push(k);
+            }
+        }
+        self.cls_slots.insert(k, v);
+    }
+
+    /// The class attributes whose values may hold one of `objs`.
+    pub fn cls_slots_with(&self, objs: &[ObjId]) -> Vec<(ObjId, Ns, KeyId)> {
+        let mut ks: Vec<(ObjId, Ns, KeyId)> = objs.iter().filter_map(|o| self.cls_refs.get(o)).flatten().copied().collect();
+        ks.sort_unstable();
+        ks.dedup();
+        ks
+    }
+
     /// What class `owner` holds under attribute `name` (flow-insensitive, `cls_slots`; the
     /// empty value when nothing).
     pub fn class_attr(&self, owner: ObjId, name: &str) -> Value {
