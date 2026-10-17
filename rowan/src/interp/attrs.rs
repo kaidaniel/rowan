@@ -617,7 +617,7 @@ impl Analyzer {
     }
 
     /// What classes `defs` hold as `nk` (on this path, else on any).
-    fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
+    pub(in crate::interp) fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
         join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
     }
 
