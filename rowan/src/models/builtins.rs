@@ -825,54 +825,114 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(obj) = c.args.first().cloned() else { return Value::data("getattr") };
     let name_v = c.args.get(1).cloned().unwrap_or_default();
-    let lit = name_v.kv.as_lit().and_then(intern::key_as_str).map(|name| {
-        // (with a default: the default where the attribute is surely not there, both where it
-        // may not be)
-        let Some(d) = c.args.get(2) else { return an.load_attr(&obj, &name, &c.node, st, true) };
-        let has = m_hasattr(an, st, &Call { args: c.args[..2].to_vec(), ..c.clone() });
-        let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, &name, &c.node, st, false);
+    // (one name: with a default, the default where the attribute is surely not there, both
+    // where it may not be)
+    let by_name = |an: &mut Analyzer, st: &mut State, name: &str| {
+        let Some(d) = c.args.get(2) else { return an.load_attr(&obj, name, &c.node, st, true) };
+        let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
+        let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, name, &c.node, st, false);
         match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
             Some(false) => d.clone(),
             Some(true) => found(an, st),
             None => found(an, st).join(d),
         }
-    });
-    if lit.is_some() && name_v.pts.is_empty() {
-        return lit.unwrap();
-    }
-    // a name not known: any of the object's attributes (of a library object, anything), or the
-    // default; known in part: that attribute, or one whose name fits the text known of it
-    // (`f"run_{mode}"`: `run_*`), else one rowan does not follow (AGENTS.md: getattr by unknown
-    // names is not followed; every attribute and method of `self` was too costly)
-    let affixes: Option<Vec<(String, String)>> = name_v.pts.iter().map(|o| match &an.heap.obj(o).payload {
-        Payload::Affix(p, s) => Some((p.clone(), s.clone())),
-        _ => None,
-    }).collect();
-    let mut v = match (lit.is_some(), affixes) {
-        (true, Some(afs)) if !afs.is_empty() => {
-            let names = attr_names_like(an, &obj, &afs, st);
-            let mut v = Value::new();
-            for n in names {
-                let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(&n)], ..c.clone() });
-                if has.kv.as_lit() != Some(intern::key_bool(false)) || !has.pts.is_empty() {
-                    v = v.join(&an.load_attr(&obj, &n, &c.node, st, false));
-                }
-            }
-            // (an object of unknown class may have others)
-            if obj.pts.iter().any(|o| !matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module)) {
-                v = v.join(&Value::obj(crate::interp::any_object(&mut an.heap)));
-            }
-            v
-        }
-        (true, _) => Value::obj(crate::interp::any_object(&mut an.heap)),
-        _ => join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))),
     };
+    if let (Some(name), true) = (name_v.kv.as_lit().and_then(intern::key_as_str), name_v.pts.is_empty()) {
+        return by_name(an, st, &name);
+    }
+    // the names it may be: literals, the keys of closed records (`for k in d`), the attributes
+    // whose names fit the text known of it (`f"run_{mode}"`: `run_*`); any other part is a
+    // name nothing is known of (`getattr_any_name`)
+    let (mut names, mut unknown) = getattr_names(&name_v.kv, st);
+    let mut afs: Vec<(String, String)> = Vec::new();
+    for o in name_v.pts.iter() {
+        match &an.heap.obj(o).payload {
+            Payload::Affix(p, s) => afs.push((p.clone(), s.clone())),
+            _ => unknown = true,
+        }
+    }
+    let mut v = Value::new();
+    if !afs.is_empty() {
+        for n in attr_names_like(an, &obj, &afs, st) {
+            let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(&n)], ..c.clone() });
+            if has.kv.as_lit() != Some(intern::key_bool(false)) || !has.pts.is_empty() {
+                v = v.join(&an.load_attr(&obj, &n, &c.node, st, false));
+            }
+        }
+        // (an object of unknown class may have others)
+        if obj.pts.iter().any(|o| !matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module)) {
+            v = v.join(&Value::obj(crate::interp::any_object(&mut an.heap)));
+        }
+    }
+    names.sort();
+    names.dedup();
+    for n in names {
+        v = v.join(&by_name(an, st, &n));
+    }
+    if unknown {
+        v = v.join(&getattr_any_name(an, &obj, &name_v, c, st));
+    }
     if obj.pts.iter().any(|o| an.heap.kind(o) == Kind::External) {
         let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.heap.kind(o) == Kind::External), crate::domain::BOT)];
         v = v.join(&an.unknown_call(&c.qual, None, Args::pos(&lib), st, &c.node));
     }
-    for x in lit.iter().chain(c.args.get(2)) {
-        v = v.join(x);
+    if let Some(d) = c.args.get(2).filter(|_| unknown || !afs.is_empty()) {
+        v = v.join(d);
+    }
+    v
+}
+
+/// The attribute names a name's scalar part may be, and whether it may be another (`Data`, the
+/// keys of a record that may have others).
+fn getattr_names(kv: &KeyVal, st: &State) -> (Vec<String>, bool) {
+    let strs = |ks: &mut dyn Iterator<Item = KeyId>| ks.filter_map(intern::key_as_str).map(|n| n.to_string()).collect::<Vec<_>>();
+    match kv {
+        KeyVal::Bot => (Vec::new(), false),
+        KeyVal::Lit(k) => (strs(&mut std::iter::once(*k)), false),
+        KeyVal::Lits(ks) => (strs(&mut ks.iter()), false),
+        KeyVal::KeysOf(ko) if ko.objs.iter().all(|o| st.row(o, ko.ns).closed()) => {
+            let mut keys = ko.objs.iter().flat_map(|o| st.row(o, ko.ns).present.difference(&ko.exclude).iter().collect::<Vec<_>>());
+            let keys: Vec<KeyId> = (&mut keys).filter_map(|k| crate::source::lens_apply(ko.chain, k)).collect();
+            (strs(&mut keys.into_iter()), false)
+        }
+        _ => (Vec::new(), true),
+    }
+}
+
+/// `getattr(obj, name)` by a name nothing is known of: any attribute the program's objects
+/// (instances, classes, modules) have — their own and their classes', bound as a read binds
+/// them, properties run —, what a `__getattr__` makes of the name, and what their keys under
+/// unknown names hold; any other object's attribute (a dict's, a list's methods) is a library
+/// attribute: the object goes to unknown code (as a library object's does) and the result is
+/// unknown. Without a default the read may raise.
+fn getattr_any_name(an: &mut Analyzer, obj: &Value, name_v: &Value, c: &Call, st: &mut State) -> Value {
+    let mut v = join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
+    let mut lib: Vec<ObjId> = Vec::new();
+    for o in obj.pts.iter() {
+        match an.heap.kind(o) {
+            Kind::Instance | Kind::Class | Kind::Module => {}
+            // (a library object's: below, in `m_getattr`)
+            Kind::External => continue,
+            _ => {
+                lib.push(o);
+                continue;
+            }
+        }
+        let one = Value::obj(o);
+        for n in attr_names_like(an, &one, &[(String::new(), String::new())], st) {
+            v = v.join(&an.load_attr(&one, &n, &c.node, st, false));
+        }
+        let hook = an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__getattr__").is_some());
+        if hook {
+            v = v.join(&an.call_method_with(&one, "__getattr__", vec![name_v.clone()], &c.node, st).unwrap_or_default());
+        }
+    }
+    if !lib.is_empty() || !obj.kv.is_bot() {
+        let given = vec![Value::with_kv(crate::intern::IdSet::from_iter(lib), crate::domain::BOT)];
+        v = v.join(&an.unknown_call(&c.qual, None, Args::pos(&given), st, &c.node));
+    }
+    if c.args.len() < 3 {
+        an.may_raise_here("AttributeError", st);
     }
     v
 }
