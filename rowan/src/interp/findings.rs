@@ -27,7 +27,7 @@ pub struct Verdict {
     /// call sites (lines) active when the access ran
     pub chain: Chain,
     pub note: String,
-    pub providers: Vec<crate::domain::SourceId>,
+    pub providers: Vec<crate::source::SourceId>,
     /// unknown code that may have added or removed the key (its call sites)
     pub mutators: Vec<String>,
     pub ns: Ns,

@@ -78,7 +78,7 @@ impl Analyzer {
     /// The access of `key` needs it of the inputs that may provide it; a key the program
     /// stored on some path is needed only on the others (sometimes).
     pub fn require_providers_k(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State, key: Option<KeyId>, ns: Ns) {
-        let srcs: Vec<crate::domain::SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
+        let srcs: Vec<crate::source::SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
             for t in terms.iter() {

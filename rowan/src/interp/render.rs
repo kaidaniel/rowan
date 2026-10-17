@@ -392,7 +392,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     }
     // (a dict whose keys only the program's stores under keys not known put there: what any
     // of them holds, in typing notation, `dict[?, int(?)]`)
-    let stored_only = ns == Ns::Item && items.is_empty() && row.mutators.is_empty() && !row.top && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.kind == crate::domain::SourceKind::Data && s.site.starts_with("store@L")));
+    let stored_only = ns == Ns::Item && items.is_empty() && row.mutators.is_empty() && !row.top && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.kind == crate::source::SourceKind::Data && s.site.starts_with("store@L")));
     if let (true, Some(v)) = (stored_only, state.slot_opt(o, ns, STAR)) {
         let shown = render_value(an, state, &v, depth + 1, seen);
         seen.pop();

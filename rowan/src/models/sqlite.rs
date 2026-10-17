@@ -8,7 +8,8 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{join_values, KeyVal, Ns, Row, Value, DATA};
+use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::interp::{Analyzer, Call, Payload};
 use crate::intern::{self, key_str_lit, KeyId, KeySet};

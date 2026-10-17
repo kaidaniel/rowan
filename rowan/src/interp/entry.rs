@@ -13,7 +13,8 @@ use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{debug_enabled, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
-use crate::domain::{Ns, ObjId, Row, Source, SourceKind, Value};
+use crate::domain::{Ns, ObjId, Row, Value};
+use crate::source::{Source, SourceKind};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
@@ -21,7 +22,7 @@ use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
-type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+type Reqs = crate::layered::TwoLevel<crate::source::SourceId, KeyId, crate::domain::ReqInfo>;
 
 #[derive(Default)]
 pub struct Entries {
@@ -638,7 +639,7 @@ impl Analyzer {
         let own = format!("param {}.", fi.py_qualname());
         let c = self.findings.contracts.get_or_insert_with(State::new);
         for (src, k) in reqs.diff_keys(start) {
-            if !crate::domain::source_label(src).starts_with(&own) {
+            if !crate::source::source_label(src).starts_with(&own) {
                 continue;
             }
             let Some(info) = reqs.get(&src, &k) else { continue };
@@ -657,7 +658,7 @@ impl Analyzer {
         let span = (fi.node.node().line, fi.node.node().end_line);
         let in_main = fi.module == self.program.main_module;
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
-            if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
+            if quiet && !own_source(&crate::source::source_label(src), &own, span, in_main) {
                 continue;
             }
             let Some(info) = st.reqs.get(&src, &k) else { continue };

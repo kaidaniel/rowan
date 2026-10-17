@@ -903,7 +903,7 @@ fn parse_unknown(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, known_ar
                 r = Row::from_data(d);
             }
             if opaque {
-                r = r.data_store(crate::domain::Source::new(&format!("parse_args@L{}", c.line), crate::domain::SourceKind::Data));
+                r = r.data_store(crate::source::Source::new(&format!("parse_args@L{}", c.line), crate::source::SourceKind::Data));
             }
             st.set_row(o, Ns::Attr, r);
         }

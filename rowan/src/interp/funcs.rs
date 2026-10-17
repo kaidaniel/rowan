@@ -9,7 +9,8 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, ObjId, SourceKind, Value, DATA};
+use crate::domain::{KeyVal, Ns, ObjId, Value, DATA};
+use crate::source::SourceKind;
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};

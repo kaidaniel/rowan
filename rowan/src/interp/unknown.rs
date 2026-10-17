@@ -11,7 +11,8 @@ use super::{Analyzer, Heap, Payload, NOEFFECT_METHOD_NAMES};
 
 /// Records an unknown call's result joins at most (past that: an open row).
 pub const MAX_ARG_JOIN: usize = 64;
-use crate::domain::{join_rows, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{join_rows, KeyVal, Ns, ObjId, Row, Value, DATA};
+use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, s, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
@@ -551,7 +552,7 @@ fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId
         // mapping: the result is open through the call, `consume(line["sku"])["picks"]` needs
         // nothing of `line["sku"]`. An unknown callable's result is open through the call.)
         let src = Source::new(site, SourceKind::Call);
-        let leaf = |(src, _): (crate::domain::SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
+        let leaf = |(src, _): (crate::source::SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
         if callee {
             // (it may give back anything: no key of what it was given is there unless removed)
             d.likely = KeySet::new();

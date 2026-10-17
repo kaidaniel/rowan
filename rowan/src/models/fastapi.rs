@@ -10,7 +10,8 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
+use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Value};
+use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::interp::{Analyzer, Call, FuncNode, Payload};

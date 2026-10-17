@@ -939,8 +939,8 @@ pub fn join_len(a: &LenFact, b: &LenFact) -> LenFact {
 /// Requirements on a source to keep as they are at a join whose other side lacks the source:
 /// a nested source's (that path never read the parent's value, so the requirement still holds
 /// wherever it was read).
-fn nested_keep(s: &crate::domain::SourceId) -> bool {
-    crate::domain::source_is_nested(*s)
+fn nested_keep(s: &crate::source::SourceId) -> bool {
+    crate::source::source_is_nested(*s)
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,7 +1063,7 @@ pub fn fp_visits() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Source, SourceKind};
+    use crate::source::{Source, SourceKind};
     use crate::intern::key_str_lit;
 
     #[test]

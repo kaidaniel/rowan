@@ -34,7 +34,8 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::FxHashMap;
 
-use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
+use crate::domain::{join_values, kv_join, KeyVal, Ns, Row, RowData, Value, DATA};
+use crate::source::{FnKind, RenameFn, Source, SourceKind};
 use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
@@ -2643,10 +2644,10 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if let (Some(sep), Some(arg)) = (kv.as_lit().and_then(intern::key_as_str), c.args.first()) {
                 // a literal tuple key's parts; a column key (`for c in df.columns`): the key renamed
                 if arg.pts.is_empty() {
-                    let step = crate::domain::Step::RenameFn(crate::domain::RenameFn::with_arg(crate::domain::FnKind::Join, key_str_lit(&sep)));
+                    let step = crate::source::Step::RenameFn(crate::source::RenameFn::with_arg(crate::source::FnKind::Join, key_str_lit(&sep)));
                     if let crate::domain::KeyVal::KeysOf(ko) = &arg.kv {
                         let mut ko = ko.clone();
-                        ko.chain = crate::domain::lens_push(ko.chain, step);
+                        ko.chain = crate::source::lens_push(ko.chain, step);
                         return Value::kv_only(crate::domain::KeyVal::KeysOf(ko));
                     }
                     let ks = crate::domain::kv_literals(&arg.kv);
@@ -5973,7 +5974,7 @@ pub struct Tables {
     pub exc_objs: FxHashMap<ObjId, String>,
     /// entry parameters annotated with a TypedDict: the declared row's reads are still the
     /// input's schema (the parameter's source)
-    pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
+    pub td_param_src: FxHashMap<ObjId, crate::source::SourceId>,
     /// `@functools.wraps(fn)` wrappers: fn
     pub wrapped: FxHashMap<ObjId, Value>,
     /// classes decorated with functools.total_ordering

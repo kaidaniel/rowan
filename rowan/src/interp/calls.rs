@@ -8,7 +8,8 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Value, DATA};
+use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::state::{Kind, State};

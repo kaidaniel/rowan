@@ -344,7 +344,7 @@ impl Analyzer {
                 let o = self.heap.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
                 crate::state::mark_merged(o);
                 if !state.has_row(o, Ns::Attr) {
-                    state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::domain::Source::new(n, crate::domain::SourceKind::Data)));
+                    state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::source::Source::new(n, crate::source::SourceKind::Data)));
                 }
                 state.set_slot(o, Ns::Attr, key_str_lit("args"), Value::data("args"), false);
                 self.m.exc_objs.insert(o, n.to_string());

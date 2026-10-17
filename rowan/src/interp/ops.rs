@@ -4,7 +4,8 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, FnKind, KeyVal, Ns, ObjSet, RenameFn, Value, DATA};
+use crate::domain::{kv_join, KeyVal, Ns, ObjSet, Value, DATA};
+use crate::source::{FnKind, RenameFn};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
 use crate::state::{Kind, State};
@@ -655,7 +656,7 @@ impl Analyzer {
                 if !v.pts.is_empty() && v.kv.is_literal() {
                     let nd = frontend::node(node);
                     let site = format!("fstring@L{}", nd.line);
-                    let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    let o = self.unknown_source(&site, crate::source::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
                     self.heap.obj_mut(o).payload = Payload::Affix(pre, post);
                     return Value::with_kv(ObjSet::one(o), kv);
                 }

@@ -582,7 +582,7 @@ pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value],
             if !an.record_objects(a0).is_empty() {
                 an.copy_into(inst, Ns::Item, a0, state, true, &KeySet::new());
             } else {
-                let r = state.row(inst, Ns::Item).data_store(crate::domain::Source::new(&format!("{}@L{}", ci.name, node.line), crate::domain::SourceKind::Data));
+                let r = state.row(inst, Ns::Item).data_store(crate::source::Source::new(&format!("{}@L{}", ci.name, node.line), crate::source::SourceKind::Data));
                 state.set_row(inst, Ns::Item, r);
             }
         }

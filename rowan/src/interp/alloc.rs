@@ -6,7 +6,8 @@
 use rustc_hash::FxHashSet;
 
 use super::{site_string, Analyzer, Payload};
-use crate::domain::{Ns, ObjId, Row, Source, SourceKind};
+use crate::domain::{Ns, ObjId, Row};
+use crate::source::{Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, KeyId};
 use crate::state::{Kind, State};
@@ -179,7 +180,7 @@ impl Analyzer {
 
     pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str, ctx: &str, _ns: Ns, path: Vec<KeyId>) -> ObjId {
         let src = intern::source(Source { site: site.into(), kind, path });
-        let slabel = crate::domain::source_label(src);
+        let slabel = crate::source::source_label(src);
         let kname = match kind {
             SourceKind::External => "external",
             SourceKind::Call => "call",

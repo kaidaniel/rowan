@@ -4,7 +4,8 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, kv_map, KeyVal, Ns, RenameFn, Value, DATA};
+use crate::domain::{kv_join, kv_map, KeyVal, Ns, Value, DATA};
+use crate::source::RenameFn;
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};

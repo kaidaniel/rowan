@@ -8,7 +8,8 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value as J};
 
-use crate::domain::{source_is_data, source_label, Ns, ObjId, Row, SourceId, Tier};
+use crate::domain::{Ns, ObjId, Row, Tier};
+use crate::source::{source_is_data, source_label, SourceId};
 use crate::intern::{self, key_repr, KeyId, STAR};
 use crate::interp::render::{is_internal_key, render_value};
 use crate::interp::{Analyzer, Verdict};
@@ -430,12 +431,12 @@ pub(super) fn source_id_text(an: &Analyzer, src: SourceId) -> String {
 /// with no requirement of its own).
 /// Also: whether every step is read on every path, and the tests of the parameters the steps'
 /// reads are under (a path below is read only where the steps to it are).
-fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::source::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
     let mut out = String::new();
     let mut attr_step = false;
     let (mut always, mut only_if) = (true, intern::IdSet::new());
     for i in from..path.len() {
-        let parent = intern::source(crate::domain::Source { site: site.clone(), kind, path: path[..i].to_vec() });
+        let parent = intern::source(crate::source::Source { site: site.clone(), kind, path: path[..i].to_vec() });
         let attr = match st.reqs.get(&parent, &path[i]) {
             Some(r) => {
                 always &= r.always;
@@ -463,7 +464,7 @@ fn named_call(site: &str) -> bool {
 /// What the code needs of its inputs and of each function's arguments, as Python access
 /// paths: (inputs, functions).
 fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
-    use crate::domain::SourceKind;
+    use crate::source::SourceKind;
     let Some(st) = &an.findings.final_state else { return (vec![], vec![]) };
     // (functions of the program that rowan did not follow are not inputs)
     let program: std::collections::HashSet<String> = (0..an.heap.len() as ObjId).filter_map(|o| an.heap.func_info_opt(o)).map(|fi| fi.py_qualname()).collect();
@@ -489,7 +490,7 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
             SourceKind::Call if named_call(&site) && !program.contains(site.rsplit_once("@L").map(|(q, _)| q).unwrap_or(&site)) => (false, site_text(an, &site).replace('`', ""), String::new()),
             _ => continue,
         };
-        let root = crate::domain::Source::new(&site, kind);
+        let root = crate::source::Source::new(&site, kind);
         if !roots.iter().any(|r| r.2 == root) {
             roots.push((param, header, root, base));
         }

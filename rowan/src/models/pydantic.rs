@@ -671,7 +671,7 @@ fn pyd_settings_env(an: &mut Analyzer, pc: &PClass, prefix: &str, delim: Option<
                     state.set_slot(nid, Ns::Item, sk, state.slot(env, Ns::Item, k), true);
                 }
                 if er.open() {
-                    row = row.data_store(crate::domain::Source::new("os.environ", crate::domain::SourceKind::External));
+                    row = row.data_store(crate::source::Source::new("os.environ", crate::source::SourceKind::External));
                 }
                 state.set_row(nid, Ns::Item, row);
                 v = v.join(&Value::obj(nid));
@@ -985,7 +985,7 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
             state.set_row(inst, Ns::Attr, r);
         }
         if other_data {
-            let r = state.row(inst, Ns::Attr).data_store(crate::domain::Source::new(&format!("{}@L{}", an.heap.class_info(cls).name, node.line), crate::domain::SourceKind::Data));
+            let r = state.row(inst, Ns::Attr).data_store(crate::source::Source::new(&format!("{}@L{}", an.heap.class_info(cls).name, node.line), crate::source::SourceKind::Data));
             state.set_row(inst, Ns::Attr, r);
         }
     }
@@ -1118,7 +1118,7 @@ fn pyd_raise_errors_as(an: &mut Analyzer, errs: Vec<PErr>, state: &mut State, no
         }
     }
     an.heap.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
-    state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
+    state.set_row(eo, Ns::Attr, Row::new().data_store(crate::source::Source::new("ValidationError", crate::source::SourceKind::Data)));
     let exc_cls = (cls != "ValidationError").then(|| crate::interp::builtin_exc_names(cls));
     an.raise_exc(cls, Some(Value::obj(eo)), exc_cls, sure, state);
 }
@@ -1935,7 +1935,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     let e = an.path_placeholder_value(o, Ns::Item, intern::STAR, &row, state);
                     let ce = pyd_convert(an, inner, &e, state, node);
                     let nid = an.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, Some(&format!("pyddict{}", o)));
-                    state.set_row(nid, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("dict@L{}", node.line), crate::domain::SourceKind::Data)));
+                    state.set_row(nid, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("dict@L{}", node.line), crate::source::SourceKind::Data)));
                     state.set_slot(nid, Ns::Item, intern::STAR, ce, true);
                     outs.push(Value::obj(nid));
                     continue;
@@ -2329,7 +2329,7 @@ fn ann_optional(e: &ast::Expr) -> bool {
 pub fn pyd_dump(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
     if an.m.pyd_depth > 6 {
         let did = an.alloc_at(Kind::Dict, node, state, &format!("model_dump@L{}", node.line), Payload::None, None, Ns::Item, None, Some("dumpdeep"));
-        state.set_row(did, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("model_dump@L{}", node.line), crate::domain::SourceKind::Data)));
+        state.set_row(did, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("model_dump@L{}", node.line), crate::source::SourceKind::Data)));
         return Value::obj(did);
     }
     an.m.pyd_depth += 1;
@@ -2368,7 +2368,7 @@ fn pyd_dump_inner(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut St
     let did = an.alloc_at(Kind::Dict, node, state, &format!("model_dump@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("dump{}", oid)));
     state.set_row(did, Ns::Item, Row::new());
     let Some(cls) = cls.filter(|c| is_model(an, *c)) else {
-        let r = Row::new().data_store(crate::domain::Source::new(&format!("model_dump@L{}", node.line), crate::domain::SourceKind::Data));
+        let r = Row::new().data_store(crate::source::Source::new(&format!("model_dump@L{}", node.line), crate::source::SourceKind::Data));
         state.set_row(did, Ns::Item, r);
         return Value::obj(did);
     };
@@ -2781,7 +2781,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 };
                 let Some(cls) = cls.filter(|c| is_model(an, *c)) else {
                     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("model_extra@L{}", c.line));
-                    let r = Row::new().data_store(crate::domain::Source::new(&format!("model_extra@L{}", c.line), crate::domain::SourceKind::Data));
+                    let r = Row::new().data_store(crate::source::Source::new(&format!("model_extra@L{}", c.line), crate::source::SourceKind::Data));
                     st.set_row(oid, Ns::Item, r);
                     outs.push(Value::obj(oid));
                     continue;
@@ -2925,7 +2925,7 @@ pub fn m_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let k = key_str_lit(key);
                     prow = prow.store(k, true);
                     let fd = an.alloc_at(Kind::Dict, &c.node, st, &format!("property@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("jsf{}:{}", cls, key)));
-                    st.set_row(fd, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("schema@L{}", c.line), crate::domain::SourceKind::Data)));
+                    st.set_row(fd, Ns::Item, Row::new().data_store(crate::source::Source::new(&format!("schema@L{}", c.line), crate::source::SourceKind::Data)));
                     st.set_slot(pid, Ns::Item, k, Value::obj(fd), true);
                     if *required {
                         req.push(Value::lit(k));

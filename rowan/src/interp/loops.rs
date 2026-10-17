@@ -90,7 +90,7 @@ impl Analyzer {
         }
         let fp = head.footprint(prev);
         for (o, ns) in fp.rows {
-            let r = head.row(o, ns).data_store(crate::domain::Source::new("loop widening", crate::domain::SourceKind::Data));
+            let r = head.row(o, ns).data_store(crate::source::Source::new("loop widening", crate::source::SourceKind::Data));
             head.set_row(o, ns, r);
         }
         for (o, sk) in fp.slots {
@@ -733,7 +733,7 @@ impl Analyzer {
         if !body_s.reachable {
             return;
         }
-        let mut srcs: Vec<crate::domain::SourceId> = Vec::new();
+        let mut srcs: Vec<crate::source::SourceId> = Vec::new();
         // (the element, and the items it holds two levels down: the group of a `groupby` pair
         // iterated in its turn reads each of its rows once per element too)
         let mut objs: Vec<ObjId> = elem.pts.iter().collect();
@@ -756,7 +756,7 @@ impl Analyzer {
         for oid in objs {
             for ns in [Ns::Item, Ns::Attr] {
                 for (src, _) in state.row(oid, ns).sources.iter() {
-                    if !crate::domain::source_is_data(src) && !srcs.contains(&src) {
+                    if !crate::source::source_is_data(src) && !srcs.contains(&src) {
                         srcs.push(src);
                     }
                 }

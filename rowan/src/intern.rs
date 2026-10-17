@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::domain::{Lens, Source};
+use crate::source::{Lens, Source};
 
 // ---------------------------------------------------------------------------
 // keys

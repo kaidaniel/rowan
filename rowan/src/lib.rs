@@ -10,6 +10,7 @@ pub mod interp;
 pub mod layered;
 pub mod models;
 pub mod scopes;
+pub mod source;
 pub mod state;
 pub mod syntax;
 

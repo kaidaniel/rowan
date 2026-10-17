@@ -7,7 +7,8 @@
 
 use serde_json::{json, Value as J};
 
-use crate::domain::{source_is_data, Ns, ObjId, Row, Tier};
+use crate::domain::{Ns, ObjId, Row, Tier};
+use crate::source::source_is_data;
 use crate::intern;
 use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
 use crate::interp::render::{is_internal_key, join_alternatives};
@@ -182,7 +183,7 @@ fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::St
 /// every path (`always`) or under tests of its parameters (`only_if`).
 fn param_contract(an: &Analyzer, foid: ObjId, name: crate::intern::StrId) -> J {
     let (Some(st), Some(fi)) = (&an.findings.contracts, an.heap.func_info_opt(foid)) else { return json!([]) };
-    let src = crate::domain::Source::new(&format!("param {}.{}", fi.py_qualname(), name), crate::domain::SourceKind::Param);
+    let src = crate::source::Source::new(&format!("param {}.{}", fi.py_qualname(), name), crate::source::SourceKind::Param);
     let needs = reads_below(st, src, &crate::intern::str_get(name), false);
     J::Array(needs.into_iter().map(|n| json!({"path": n.path, "always": n.always, "only_if": n.only_if})).collect())
 }

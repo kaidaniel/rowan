@@ -2,7 +2,8 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, FnKind, KeyVal, KeysOf, Ns, ObjSet, RenameFn, Row, RowData, Source, SourceKind, Step, Tier, Value, DATA};
+use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, KeyVal, KeysOf, Ns, ObjSet, Row, RowData, Tier, Value, DATA};
+use crate::source::{FnKind, RenameFn, Source, SourceKind, Step};
 use crate::frontend::Node;
 use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
@@ -2177,7 +2178,7 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
             if k.is_empty() {
                 r.sources.clone()
             } else {
-                r.sources.map(|(s0, l)| (s0, crate::domain::lens_push(l, Step::Kill(k.clone()))))
+                r.sources.map(|(s0, l)| (s0, crate::source::lens_push(l, Step::Kill(k.clone()))))
             }
         };
         let mut d = row.data();
@@ -5135,7 +5136,7 @@ pub fn columns_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value>
     let f = c.arg(0, None)?;
     match rename_step(an, st, &f, c, &fs) {
         Some(steps) => {
-            let lens = intern::lens(crate::domain::Lens { steps });
+            let lens = intern::lens(crate::source::Lens { steps });
             let mut ko = KeysOf::new(ObjSet::from_vec(fs), Ns::Item);
             ko.chain = lens;
             Some(Value::kv_only(KeyVal::KeysOf(ko)))
@@ -5309,7 +5310,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
                     continue;
                 }
                 // in the list on some paths only: read (and needed of an input) on those only
-                let before: Vec<(crate::domain::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.contains(src, &k))).collect();
+                let before: Vec<(crate::source::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.contains(src, &k))).collect();
                 frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, false);
                 for (src, had) in before {
                     if !had {

@@ -3,7 +3,8 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{ObjId, classify, join_rows, join_values, lens_apply, Classification, KeyVal, Ns, ObjSet, Row, Source, SourceKind, Tier, Value, DATA};
+use crate::domain::{ObjId, classify, join_rows, join_values, Classification, KeyVal, Ns, ObjSet, Row, Tier, Value, DATA};
+use crate::source::{lens_apply, Source, SourceKind};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
@@ -514,7 +515,7 @@ impl Analyzer {
         let mut v = self.all_values(oid, ns, state);
         // (a closed record: the unknown key is one of its keys — one of their values; a map the
         // program filled under data keys: its values are all in its slots)
-        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| crate::source::source_is_data(src));
         if (row.closed() || own_map) && !row.top {
             return v;
         }
@@ -665,7 +666,7 @@ impl Analyzer {
         let star = state.slot(oid, ns, STAR);
         // (a map only the program filled, under keys it computed: a key it has holds one
         // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
-        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::source::source_is_data(src));
         let from_map = own_map && v.empty() && !star.empty();
         if from_map {
             v = star;
@@ -798,7 +799,7 @@ impl Analyzer {
         // (an input's parts below PATH_DEPTH + 1 keys are nothing more of it: data copied out of
         // a placeholder and read again, as a recursion over unknown values does, made paths
         // without end — `args['*'][0][0][0]…` — in contracts no one can read)
-        let srcs = row.sources.filter(|(src, _)| (elem || !crate::domain::source_is_data(src)) && crate::domain::source_depth(src) <= PATH_DEPTH as usize).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
+        let srcs = row.sources.filter(|(src, _)| (elem || !crate::source::source_is_data(src)) && crate::source::source_depth(src) <= PATH_DEPTH as usize).map(|(src, _)| (crate::source::source_extend(src, k), intern::EMPTY_LENS));
         // (the parent's value was read on this path: its requirements are known here, none so
         // far — a path without the entry never read it)
         for (cs, _) in srcs.iter() {
@@ -1177,7 +1178,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
-        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !crate::source::source_is_data(src));
         if row.open() && outside {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
@@ -1259,10 +1260,10 @@ impl Analyzer {
 /// A read on one of several objects (`outs`: the requirements after each one's part, from
 /// `base`, and whether runs may take it): all are made, but one not made on every part runs
 /// may take is needed only sometimes, unless it was before or is an element's.
-type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+type Reqs = crate::layered::TwoLevel<crate::source::SourceId, KeyId, crate::domain::ReqInfo>;
 fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
     let mut reqs = base.clone();
-    let mut changed: Vec<(crate::domain::SourceId, KeyId)> = Vec::new();
+    let mut changed: Vec<(crate::source::SourceId, KeyId)> = Vec::new();
     for (_, out) in outs {
         reqs.copy_changes(out, base);
         changed.extend(out.diff_keys(base));

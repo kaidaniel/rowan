@@ -366,7 +366,7 @@ pub fn t_param(an: &mut Analyzer, ann: &'static ruff_python_ast::Expr, fi: &crat
         ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
         _ => return None,
     };
-    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::domain::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+    let poid = an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::source::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
     if is_str {
         if let Some(sy) = t_sym_of_obj(an, poid) {
             an.m.t_strs.insert(sy);
@@ -5099,7 +5099,7 @@ fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option
             row = row.with_order(ns.clone());
         }
         None => {
-            row = crate::domain::Row::with_source(crate::domain::Source::new(&format!("genfromtxt@L{}", c.line), crate::domain::SourceKind::External));
+            row = crate::domain::Row::with_source(crate::source::Source::new(&format!("genfromtxt@L{}", c.line), crate::source::SourceKind::External));
             st.set_slot(oid, Ns::Item, intern::STAR, tensor_value(elem_shape.clone()), false);
         }
     }
