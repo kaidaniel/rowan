@@ -89,13 +89,18 @@ fn link<K, V>(p0: u64, t0: Tree<K, V>, p1: u64, t1: Tree<K, V>) -> Tree<K, V> {
     }
 }
 
-/// A branch from possibly empty children; `orig` is returned when both children are its own.
+/// A branch from possibly empty children; `orig` (or `alt`, a branch of the other map at the
+/// same place) is returned when both children are its own, so joins keep subtrees shared.
 fn branch<K, V>(p: u64, m: u64, l: Option<Tree<K, V>>, r: Option<Tree<K, V>>, orig: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
+    branch2(p, m, l, r, orig, None)
+}
+
+fn branch2<K, V>(p: u64, m: u64, l: Option<Tree<K, V>>, r: Option<Tree<K, V>>, orig: Option<&Tree<K, V>>, alt: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
     match (l, r) {
         (None, None) => None,
         (Some(x), None) | (None, Some(x)) => Some(x),
         (Some(l), Some(r)) => {
-            if let Some(o) = orig {
+            for o in orig.into_iter().chain(alt) {
                 if let Node::Branch { l: ol, r: or, .. } = &**o {
                     if Arc::ptr_eq(ol, &l) && Arc::ptr_eq(or, &r) {
                         return Some(o.clone());
@@ -191,13 +196,17 @@ pub struct Merge<'a, K, V> {
     pub equal_identity: bool,
 }
 
-fn map_side<K: Clone, V: Clone>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
+fn map_side<K: Clone, V: Clone + PartialEq>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
     if g.one_side_identity {
         return Some(t.clone());
     }
     match &**t {
         Node::Leaf { h, k, v } => {
             let nv = if left { (g.left)(k, v) } else { (g.right)(k, v) }?;
+            // (an unchanged value keeps its leaf: the result shares it)
+            if nv == *v {
+                return Some(t.clone());
+            }
             Some(Arc::new(Node::Leaf { h: *h, k: k.clone(), v: nv }))
         }
         Node::Branch { p, m, l, r } => {
@@ -208,29 +217,35 @@ fn map_side<K: Clone, V: Clone>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>)
     }
 }
 
-fn both_leaf<K: Clone, V: Clone + PartialEq>(h: u64, k: &K, a: &V, b: &V, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
-    if g.equal_identity && a == b {
-        return Some(Arc::new(Node::Leaf { h, k: k.clone(), v: a.clone() }));
-    }
+/// Leaves `ta` (left) and `tb` (right) with one key merged: a result equal to one side's value
+/// is that side's leaf (the joined map keeps sharing it: later joins and diffs skip it).
+fn both_leaf<K: Clone, V: Clone + PartialEq>(ta: &Tree<K, V>, tb: &Tree<K, V>, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
+    let (Node::Leaf { h, k, v: a }, Node::Leaf { v: b, .. }) = (&**ta, &**tb) else { unreachable!() };
     let v = (g.both)(k, a, b)?;
-    Some(Arc::new(Node::Leaf { h, k: k.clone(), v }))
+    if v == *a {
+        return Some(ta.clone());
+    }
+    if v == *b {
+        return Some(tb.clone());
+    }
+    Some(Arc::new(Node::Leaf { h: *h, k: k.clone(), v }))
 }
 
 /// A leaf of the left map merged with a tree of the right one.
 fn merge_leaf<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, leaf_left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
-    let Node::Leaf { h, k, v } = &**s else { unreachable!() };
+    let Node::Leaf { h, v, .. } = &**s else { unreachable!() };
     match &**t {
         Node::Leaf { h: j, k: _, v: w } if j == h => {
             if leaf_left {
                 if g.equal_identity && v == w {
                     return Some(s.clone());
                 }
-                both_leaf(*h, k, v, w, g)
+                both_leaf(s, t, g)
             } else {
                 if g.equal_identity && v == w {
                     return Some(t.clone());
                 }
-                both_leaf(*h, k, w, v, g)
+                both_leaf(t, s, g)
             }
         }
         Node::Branch { p, m, l, r } if match_prefix(*h, *p, *m) => {
@@ -269,7 +284,7 @@ fn merge<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, g: &mut
             if m == n && p == q {
                 let nl = merge(s0, t0, g);
                 let nr = merge(s1, t1, g);
-                branch(*p, *m, nl, nr, Some(s))
+                branch2(*p, *m, nl, nr, Some(s), Some(t))
             } else if m > n && match_prefix(*q, *p, *m) {
                 if zero_bit(*q, *m) {
                     let nl = merge(s0, t, g);
