@@ -66,7 +66,8 @@ pub struct Fact {
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
-    /// recorded by an assignment (whose value the hover shows, not the reads on the line)
+    /// recorded by an assignment (whose value the hover shows, not the reads on the line:
+    /// `x = x + 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
     /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
     /// call chain into the function, the objects given; at most `PASSED`)
@@ -196,7 +197,7 @@ pub struct Findings {
     pub general_checks: bool,
     pub facts: IndexMap<(u32, StrId), Fact>,
     /// the next hover fact is an assignment's
-    pub t_fact_write: bool,
+    pub fact_write: bool,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -352,6 +353,11 @@ impl Analyzer {
             return;
         }
         let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
+        // (an assignment's value is what the hover shows, not the reads on the line: `x = x + 1`)
+        let writing = std::mem::take(&mut self.findings.fact_write);
+        if !writing && self.findings.facts.get(&(node.line, name)).is_some_and(|e| e.written) {
+            return;
+        }
         let rows = self.fact_rows(v, state);
         let scope = self.frame().func.unwrap_or(0);
         // (a fact that has all the texts it shows only joins the value and rows: rendering a
@@ -359,7 +365,7 @@ impl Analyzer {
         // hover is the assignment's own value)
         if !self.m.torch_on {
             if let Some(e) = self.findings.facts.get_mut(&(node.line, name)) {
-                if e.full(call) {
+                if e.full(call) && (e.written || !writing) {
                     e.join_rows(rows, general);
                     return;
                 }
@@ -380,18 +386,14 @@ impl Analyzer {
             None => render(self),
         };
         legend.extend(tlegend);
-        let writing = std::mem::take(&mut self.findings.t_fact_write);
         let e = self.findings.facts.entry((node.line, name)).or_default();
-        // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
-        if self.m.torch_on {
-            if writing && !e.written {
-                e.written = true;
-                e.general.clear();
-                e.calls.clear();
-                e.legend.clear();
-            } else if !writing && e.written {
-                return;
-            }
+        if writing && !e.written {
+            e.written = true;
+            e.general.clear();
+            e.calls.clear();
+            e.legend.clear();
+            e.rows.clear();
+            e.general_rows.clear();
         }
         // (the dims are named as the general run names them)
         if general && self.m.torch_on {

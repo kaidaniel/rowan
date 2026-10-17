@@ -511,9 +511,9 @@ impl Analyzer {
                 self.store_name(name, v.clone(), state);
                 if self.findings.facts_on {
                     let nd = frontend::node(t);
-                    self.findings.t_fact_write = true;
+                    self.findings.fact_write = true;
                     self.record_fact(&nd, name, v, state);
-                    self.findings.t_fact_write = false;
+                    self.findings.fact_write = false;
                 }
             }
             ast::Expr::Attribute(a) => {

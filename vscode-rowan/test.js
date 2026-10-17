@@ -46,6 +46,15 @@ const r8 = hover(a01idx, a01src, 8, "r");
 assert(r8.includes('```python\nr = {"id": u.id, "role"?: "admin"}\n```'), r8);
 assert(r8.includes('**Notes**\n- `"k"?`: possible key'), r8);
 assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
+// ---- a name rebound from its own value: the hover shows what the line binds, not old | new
+{
+  const z614 = path.join(root, "tests", "cases", "z614_rebinding_shows_the_new_value.py");
+  const src = fs.readFileSync(z614, "utf8").split("\n");
+  const idx = indexResult(facts(z614));
+  assert.strictEqual(hover(idx, src, 8, "x"), "```python\nx = 2\n```");
+  assert.strictEqual(hover(idx, src, 10, "name"), '```python\nname = "Ada"\n```');
+  assert.strictEqual(hover(idx, src, 12, "items"), "```python\nitems = [1, 2, 3]\n```");
+}
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");

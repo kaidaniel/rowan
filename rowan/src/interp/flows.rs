@@ -57,6 +57,9 @@ pub struct Pass {
     pub callee: Callee,
     pub slot: Slot,
     pub srcs: Vec<Src>,
+    /// the names (and modules' attributes) whose values the call's arguments may be, when their
+    /// text shows nothing else among them that may be code (`arg_names`); None: some may be
+    pub args: Option<std::rc::Rc<Vec<Src>>>,
 }
 
 /// What may happen to an origin's value where the code does not run.
@@ -664,7 +667,10 @@ impl<'a> Flow<'a> {
         let star = c.arguments.args.iter().position(|x| matches!(x, Expr::Starred(_))).unwrap_or(usize::MAX);
         let pos = c.arguments.args.iter().enumerate().map(|(i, x)| (x, (i < star).then_some(Slot::Pos(i))));
         let kw = c.arguments.keywords.iter().map(|k| (&k.value, k.arg.as_ref().map(|a| Slot::Kw(s(a.as_str())))));
-        for (x, slot) in pos.chain(kw).collect::<Vec<_>>() {
+        let all: Vec<(&'static Expr, Option<Slot>)> = pos.chain(kw).collect();
+        let mut names = Vec::new();
+        let args = all.iter().all(|(x, slot)| slot.is_some() && self.arg_names(x, &mut names)).then(|| std::rc::Rc::new(names));
+        for (x, slot) in all {
             let Some(slot) = slot else {
                 self.expr(x, Pos::Change);
                 continue;
@@ -672,8 +678,45 @@ impl<'a> Flow<'a> {
             let mut srcs = Vec::new();
             self.give(x, &mut srcs);
             if !srcs.is_empty() {
-                self.out.passes.push(Pass { callee, slot, srcs });
+                self.out.passes.push(Pass { callee, slot, srcs, args: args.clone() });
             }
+        }
+    }
+
+    /// Whether argument `e` can be code only as the value of a name (or of a module's
+    /// attribute) its text names, which go to `out`: a constant, a display, an operation, a
+    /// pure builtin's result are data. A local, a parameter, an attribute of anything else, a
+    /// call's result, a lambda may be code: false.
+    fn arg_names(&self, e: &Expr, out: &mut Vec<Src>) -> bool {
+        match e {
+            Expr::StringLiteral(_) | Expr::BytesLiteral(_) | Expr::NumberLiteral(_) | Expr::BooleanLiteral(_) | Expr::NoneLiteral(_) | Expr::EllipsisLiteral(_) | Expr::FString(_) => true,
+            Expr::List(_) | Expr::Tuple(_) | Expr::Set(_) | Expr::Dict(_) | Expr::BinOp(_) | Expr::UnaryOp(_) | Expr::Compare(_) => true,
+            Expr::BoolOp(b) => b.values.iter().all(|v| self.arg_names(v, out)),
+            Expr::If(x) => self.arg_names(&x.body, out) && self.arg_names(&x.orelse, out),
+            Expr::Name(n) if !self.local(n.id.as_str()) => {
+                out.push((Origin::Name(s(n.id.as_str())), Level::Own));
+                true
+            }
+            Expr::Attribute(a) => match &*a.value {
+                Expr::Name(n) if !self.local(n.id.as_str()) => {
+                    out.push((Origin::NameAttr(s(n.id.as_str()), s(a.attr.as_str())), Level::Own));
+                    true
+                }
+                _ => false,
+            },
+            Expr::Call(c) => matches!(&*c.func, Expr::Name(f) if super::PURE_BUILTINS.contains(&f.id.as_str()) && !self.local(f.id.as_str())),
+            _ => false,
+        }
+    }
+
+    /// `m.a.f` of a name `m` the function does not bind: (m, "a.f").
+    fn dotted_callee(&self, e: &Expr) -> Option<(StrId, String)> {
+        match e {
+            Expr::Attribute(a) => match &*a.value {
+                Expr::Name(n) if !self.local(n.id.as_str()) => Some((s(n.id.as_str()), a.attr.to_string())),
+                v => self.dotted_callee(v).map(|(n, path)| (n, format!("{}.{}", path, a.attr.as_str()))),
+            },
+            _ => None,
         }
     }
 
@@ -706,6 +749,10 @@ impl<'a> Flow<'a> {
                         self.expr(v, Pos::Read);
                         // (a module's function called through a local, say: its result is not followed)
                         self.out.untracked.insert(s(m));
+                        // (`os.path.join(…)` of a name: what it does with its arguments, by the callee's name)
+                        if let Some((n, path)) = self.dotted_callee(&c.func).filter(|_| !pure) {
+                            return self.pass_args((n, Some(s(&path))), c);
+                        }
                     }
                 }
                 args.iter().for_each(|x| self.expr(x, if pure { Pos::Read } else { Pos::Change }));
