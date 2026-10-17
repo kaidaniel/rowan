@@ -4,10 +4,10 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{Ns, Row, Value};
+use crate::domain::{classify, kv_literals, Ns, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
-use crate::state::{Kind, State};
+use crate::state::{CondFact, Kind, State};
 use crate::syntax::{collect_assigned, contains_jump};
 
 use super::{Finally, Handler, Analyzer, FuncNode, Payload};
@@ -496,7 +496,7 @@ impl Analyzer {
                     ast::Singleton::True => intern::key_bool(true),
                     ast::Singleton::False => intern::key_bool(false),
                 };
-                let lits = crate::domain::kv_literals(&subj.kv);
+                let lits = kv_literals(&subj.kv);
                 if subj.pts.is_empty() && subj.kv.is_literal() && !lits.is_empty() {
                     if lits.len() == 1 {
                         return Some(lits.contains(want));
@@ -537,8 +537,8 @@ impl Analyzer {
     /// `case 1` / `case Color.RED`: equal to the value.
     fn match_value(&mut self, v: &'static ast::PatternMatchValue, subj: &Value, state: &mut State) -> Option<bool> {
         let pv = self.eval(&v.value, state);
-        let a = crate::domain::kv_literals(&subj.kv);
-        let b = crate::domain::kv_literals(&pv.kv);
+        let a = kv_literals(&subj.kv);
+        let b = kv_literals(&pv.kv);
         if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
             let k = b.iter().next().unwrap();
             if a.len() == 1 {
@@ -697,12 +697,12 @@ impl Analyzer {
                     j.rows.insert(*k, joined.clone());
                 }
             }
-            let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
+            let mut all: Vec<std::sync::Arc<CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
             all.extend(kept);
             j.facts = std::sync::Arc::new(all);
         }
         if then_s.reachable && else_s.reachable && conditional {
-            let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
+            let mut new: Vec<std::sync::Arc<CondFact>> = Vec::new();
             let mut assigned: Vec<intern::StrId> = Vec::new();
             for st in body.iter() {
                 collect_assigned(st, &mut assigned);
@@ -758,7 +758,7 @@ impl Analyzer {
         }
         for o in recs {
             let row = pre.row(o, Ns::Item);
-            let cls = crate::domain::classify(&row, k);
+            let cls = classify(&row, k);
             if cls.tier == crate::domain::Tier::Input {
                 for st in [&mut *then_s, &mut *else_s] {
                     if st.reachable {
@@ -864,8 +864,8 @@ impl Analyzer {
 
 /// Facts of a join on test `key` (positive `pos`): the then-branch rows when it holds, the
 /// else-branch rows when not, for every row the branches leave different.
-pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value)>, then_s: &State, else_s: &State, j: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
-    let mut guards: Vec<((u32, Ns), crate::domain::Row)> = Vec::new();
+pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value)>, then_s: &State, else_s: &State, j: &State) -> Vec<std::sync::Arc<CondFact>> {
+    let mut guards: Vec<((u32, Ns), Row)> = Vec::new();
     for (_, v) in &deps {
         for o in v.pts.iter() {
             for ns in [Ns::Item, Ns::Attr] {
@@ -901,21 +901,21 @@ pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::S
         return Vec::new();
     }
     vec![
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
+        std::sync::Arc::new(CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
+        std::sync::Arc::new(CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
     ]
 }
 
 /// The facts of test `key` both branches still hold whose every row is the branch's own row
 /// on its side (put back by `apply_cond_facts`, unchanged since): the join of the two is the
 /// joined row they record, so they hold after the join too.
-fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<CondFact>> {
     let held = |st: &State, truth: bool| st.facts.iter().find(|f| f.cond == key && f.truth == truth).cloned();
     let (Some(ft), Some(fe)) = (held(then_s, pos), held(else_s, !pos)) else { return Vec::new() };
     if !std::sync::Arc::ptr_eq(&held(else_s, pos).unwrap_or_else(|| ft.clone()), &ft) || !std::sync::Arc::ptr_eq(&held(then_s, !pos).unwrap_or_else(|| fe.clone()), &fe) {
         return Vec::new();
     }
-    let put_back = |st: &State, f: &crate::state::CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
+    let put_back = |st: &State, f: &CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
     if ft.rows.len() != fe.rows.len() || !put_back(then_s, &ft) || !put_back(else_s, &fe) {
         return Vec::new();
     }
@@ -924,7 +924,7 @@ fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State
 
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
 /// testing the name later tells which branch ran.
-pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<CondFact>> {
     let truth_of = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::models::pyvalues::truthy);
     let mut out = Vec::new();
     for (name, va, vb, jv) in vals.iter() {
@@ -943,11 +943,11 @@ pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, O
 }
 
 /// Add facts to a state (keeping the most recent few).
-pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<crate::state::CondFact>>) {
+pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<CondFact>>) {
     if new.is_empty() {
         return;
     }
-    let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = st.facts.iter().cloned().collect();
+    let mut all: Vec<std::sync::Arc<CondFact>> = st.facts.iter().cloned().collect();
     all.extend(new);
     let n = all.len();
     if n > 32 {

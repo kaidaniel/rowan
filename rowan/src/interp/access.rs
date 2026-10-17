@@ -2,9 +2,10 @@
 //! the inputs that provide a key, and running an access once per receiver. The accesses
 //! themselves: `items.rs` (keys, positions, elements), `attrs.rs` (attributes), `keys.rs`.
 
-use crate::domain::{Classification, Ns, ObjId, Row, Value};
+use crate::domain::{join_values, Classification, Ns, ObjId, ReqInfo, Row, Value};
 use crate::intern::{self, KeyId};
 use crate::state::State;
+use crate::source::SourceId;
 
 use super::Analyzer;
 
@@ -81,7 +82,7 @@ impl Analyzer {
     /// The access of `key` needs it of the inputs that may provide it; a key the program
     /// stored on some path is needed only on the others (sometimes).
     pub fn require_providers_k(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State, key: Option<KeyId>, ns: Ns) {
-        let srcs: Vec<crate::source::SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
+        let srcs: Vec<SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
             for t in terms.iter() {
@@ -95,7 +96,7 @@ impl Analyzer {
                 }
                 if ns == Ns::Attr {
                     if let Some(cur) = state.reqs.get(src, &t).filter(|r| !r.attr) {
-                        state.reqs.set(src, t, crate::domain::ReqInfo { attr: true, ..cur });
+                        state.reqs.set(src, t, ReqInfo { attr: true, ..cur });
                     }
                 }
                 if sometimes && !was_always {
@@ -146,6 +147,6 @@ impl Analyzer {
         if let Some(a) = acc {
             state.replace_with(a);
         }
-        Some(crate::domain::join_values(outs))
+        Some(join_values(outs))
     }
 }

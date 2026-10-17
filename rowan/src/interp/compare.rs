@@ -3,9 +3,9 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, ObjId, ObjSet, Row, Value, DATA};
+use crate::domain::{kv_literals, label_name, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_int, key_str_lit, KeyId};
+use crate::intern::{self, key_int, key_str_lit, KeyId, KeySet};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Args, Payload, ViewKind};
@@ -102,12 +102,12 @@ impl Analyzer {
     /// from the value's literals: a value with only non-placeholder objects is never None.
     pub(super) fn compare_const(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
         let none = intern::key_none();
-        let lits = crate::domain::kv_literals(&a.kv);
+        let lits = kv_literals(&a.kv);
         let has_ph = a.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown);
         let known_lits = a.kv.is_literal() || a.kv.is_bot();
         // an unknown length against 0 (or a negative number): `len(xs) >= 0` holds
         if let (true, KeyVal::Data(d), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
-            if crate::domain::label_name(&intern::str_get(*d)) == "len" {
+            if label_name(&intern::str_get(*d)) == "len" {
                 if let ast::Number::Int(i) = &nl.value {
                     if let Some(n) = i.as_i64() {
                         match op {
@@ -148,7 +148,7 @@ impl Analyzer {
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;
                 // anything else is decided per call site when it is concrete there
-                let bl = crate::domain::kv_literals(&b.kv);
+                let bl = kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     return None;
                 }
@@ -167,20 +167,20 @@ impl Analyzer {
     }
 
     /// `a == b` / `a != b` decided on literals, tuples of literals and known members.
-    fn compare_eq(&mut self, op: ast::CmpOp, a: &Value, b: &Value, lits: crate::intern::KeySet) -> Option<bool> {
+    fn compare_eq(&mut self, op: ast::CmpOp, a: &Value, b: &Value, lits: KeySet) -> Option<bool> {
         // Enum members: their keys (a mixed-in one: its value)
         let (a, b, lits) = if self.heap.keys.member_key.is_empty() {
             (a.clone(), b.clone(), lits)
         } else {
             let ka = crate::models::enums::member_base(self, &self.keyify(a));
             let kb = crate::models::enums::member_base(self, &self.keyify(&b));
-            let l = crate::domain::kv_literals(&ka.kv);
+            let l = kv_literals(&ka.kv);
             (ka, kb, l)
         };
-        let bl = crate::domain::kv_literals(&b.kv);
+        let bl = kv_literals(&b.kv);
         // a builtin dict / list / tuple / set never equals a str / number / bool / None
         let container = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !crate::models::pandas::is_series_obj(an, o)) && matches!(v.kv, KeyVal::Bot);
-        let scalar = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).iter().any(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))));
+        let scalar = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !kv_literals(&v.kv).iter().any(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))));
         if (container(self, &a) && scalar(&b)) || (container(self, &b) && scalar(&a)) {
             return Some(op == ast::CmpOp::NotEq);
         }
@@ -232,7 +232,7 @@ impl Analyzer {
 
     /// `a in b` / `a not in b` decided: a record's keys, a container's known members or elements,
     /// a text's substrings.
-    fn compare_in(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, lits: &crate::intern::KeySet, state: &mut State) -> Option<bool> {
+    fn compare_in(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, lits: &KeySet, state: &mut State) -> Option<bool> {
         let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
         // members of a Flag: bits; else a member is its key
         // (and a tuple of known values: its key)
@@ -347,7 +347,7 @@ impl Analyzer {
     /// `__bool__` / `__len__`, functions, classes and modules are true.
     pub fn truthiness(&mut self, v: &Value, state: &State) -> Option<bool> {
         if v.pts.is_empty() && v.kv.is_literal() {
-            let lits = crate::domain::kv_literals(&v.kv);
+            let lits = kv_literals(&v.kv);
             if !lits.is_empty() {
                 // (an Enum member, an identity object: true)
                 let truthy = |k: KeyId| crate::models::pyvalues::truthy(k).unwrap_or(true);

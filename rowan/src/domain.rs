@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHasher;
 
-use crate::intern::{self, key_repr, keys_str, IdSet, KeyId, KeySet, LensId, StrId, EMPTY_LENS};
+use crate::intern::{self, key_as_int, key_is_number, key_none, key_repr, keys_str, str_get, with_key, EMPTY_LENS, IdSet, KeyId, KeySet, LensId, StrId};
 use crate::source::{lens_add_kill, lens_apply, lens_concat, lens_provides, lens_push, lens_str, source_is_data, source_label, Lens, RenameFn, SourceId, Step};
 
 /// Literals a `KeyVal` holds at most; a join with more is an unknown.
@@ -963,7 +963,7 @@ pub fn label_name(label: &str) -> &str {
 
 /// The builtin type of a literal key (`int` for a bool too: an int it is), None for others.
 pub fn key_type(k: KeyId, ty: &str) -> bool {
-    crate::intern::with_key(k, |kk| match kk {
+    with_key(k, |kk| match kk {
         crate::intern::Key::Str(_) => ty == "str",
         crate::intern::Key::Int(_) => ty == "int",
         crate::intern::Key::Bool(_) => ty == "bool" || ty == "int",
@@ -975,7 +975,7 @@ pub fn key_type(k: KeyId, ty: &str) -> bool {
 
 /// A typed label's type dropped (the value may be of another type now), its name kept.
 fn untyped(label: StrId) -> KeyVal {
-    let l = crate::intern::str_get(label);
+    let l = str_get(label);
     if label_type(&l).is_none() {
         return KeyVal::Data(label);
     }
@@ -1010,7 +1010,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
         }
     }
     if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
-        let (lx, ly) = (crate::intern::str_get(*x), crate::intern::str_get(*y));
+        let (lx, ly) = (str_get(*x), str_get(*y));
         if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
         }
@@ -1024,22 +1024,22 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     // possible); a tensor joined with a number: rank 0 possible
     for (d, l) in [(a, b), (b, a)] {
         if let (KeyVal::Data(x), true) = (d, l.is_literal()) {
-            let t = crate::intern::str_get(*x);
+            let t = str_get(*x);
             if crate::models::shape::parse_dim_label(&t).is_some() {
                 let lits = kv_literals(l);
                 // (a dim or None, or a str: no dim)
-                if !lits.iter().all(crate::intern::key_is_number) {
+                if !lits.iter().all(key_is_number) {
                     return DATA;
                 }
-                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
+                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| key_as_int(k) == Some(n))).unwrap_or(false);
                 return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
             }
             if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(&t).unwrap_or(&t)) {
                 // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
                 // or anything else: an unknown (the literal stays possible)
                 let lits = kv_literals(l);
-                let none = crate::intern::key_none();
-                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| crate::intern::key_is_number(*k));
+                let none = key_none();
+                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| key_is_number(*k));
                 if !rest.is_empty() {
                     return DATA;
                 }
@@ -1061,7 +1061,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     // an unknown joined with literals: the unknown, of its type if they are of it too
     for (d, l) in [(a, b), (b, a)] {
         if let KeyVal::Data(x) = d {
-            let t = crate::intern::str_get(*x);
+            let t = str_get(*x);
             // (a label that says what the text is — a JSON or pickle text of known parts, a CSV
             // text of known header — is no longer that)
             if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
@@ -1129,8 +1129,8 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             Some(KeyVal::KeysOf(ko2))
         }
         // a tensor or None, not None: the tensor
-        KeyVal::Data(l) if keys.contains(crate::intern::key_none()) => {
-            let t = crate::intern::str_get(*l);
+        KeyVal::Data(l) if keys.contains(key_none()) => {
+            let t = str_get(*l);
             Some(crate::models::shape::strip_optional(&t).map(KeyVal::data).unwrap_or_else(|| kv.clone()))
         }
         _ => Some(kv.clone()),

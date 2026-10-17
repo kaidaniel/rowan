@@ -13,16 +13,16 @@ use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, FuncInfo, FuncNode, Payload, debug_enabled};
-use crate::domain::{Ns, ObjId, Row, Value};
+use crate::domain::{Ns, ObjId, ReqInfo, Row, RowData, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
-use crate::source::{Source, SourceKind};
+use crate::source::{source_label, Source, SourceId, SourceKind};
 use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
-type Reqs = crate::layered::TwoLevel<crate::source::SourceId, KeyId, crate::domain::ReqInfo>;
+type Reqs = crate::layered::TwoLevel<SourceId, KeyId, ReqInfo>;
 
 /// The entry runs' state: which functions had one, the instances their methods run on, where
 /// runs for any call start, and the runs on demand (see the module doc).
@@ -650,7 +650,7 @@ impl Analyzer {
         let own = format!("param {}.", fi.py_qualname());
         let c = self.findings.contracts.get_or_insert_with(State::new);
         for (src, k) in reqs.diff_keys(start) {
-            if !crate::source::source_label(src).starts_with(&own) {
+            if !source_label(src).starts_with(&own) {
                 continue;
             }
             let Some(info) = reqs.get(&src, &k) else { continue };
@@ -669,7 +669,7 @@ impl Analyzer {
         let span = (fi.node.node().line, fi.node.node().end_line);
         let in_main = fi.module == self.program.main_module;
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
-            if quiet && !own_source(&crate::source::source_label(src), &own, span, in_main) {
+            if quiet && !own_source(&source_label(src), &own, span, in_main) {
                 continue;
             }
             let Some(info) = st.reqs.get(&src, &k) else { continue };
@@ -806,7 +806,7 @@ impl Analyzer {
                     if ci.lib.typed_dict {
                         if let Some((req, opt)) = crate::models::dataclasses::typed_dict_keys(self, oid) {
                             fields = req.union(&opt);
-                            declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
+                            declared = Row::from_data(RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
                         }
                     }
                     let inst = self.alloc(

@@ -4,11 +4,12 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, ObjId, Row, Value};
+use crate::domain::{DATA, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
 use crate::frontend;
 use crate::intern::{self, s};
-use crate::state::{Kind, State};
+use crate::state::{is_any, link_view, view_hits, view_of, Kind, State};
 use crate::syntax::{collect_assigned, contains_jump, is_constant};
+use crate::source::{source_is_data, SourceId};
 
 use super::iter::{Elem, Iteration};
 use super::stmts::{add_facts, cond_facts_for};
@@ -103,7 +104,7 @@ impl Analyzer {
         for o in fp.elems {
             let shape_elem = matches!(head.elems.get(&o), Some(KeyVal::Data(d)) if intern::str_get(d).starts_with('\u{1}'));
             if !shape_elem {
-                head.elems.insert(o, crate::domain::DATA);
+                head.elems.insert(o, DATA);
             }
         }
         for o in head.lens.diff_keys(&prev.lens) {
@@ -270,7 +271,7 @@ impl Analyzer {
         let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             let views = an.bind_views(&f.target, body_s);
-            let hits0 = crate::state::view_hits();
+            let hits0 = view_hits();
             an.exec_block(&f.body, body_s);
             ends = an.view_ends(&views, hits0, body_s);
             // (a generator's next item is asked for at the back edge)
@@ -601,7 +602,7 @@ impl Analyzer {
     /// when `o` is one runtime object already, or not a record.
     fn loop_view(&mut self, o: ObjId, target: &'static ast::Expr, state: &mut State) -> Option<ObjId> {
         let ob = self.heap.obj(o);
-        if ob.single || crate::state::is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || crate::state::view_of(o).is_some() {
+        if ob.single || is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || view_of(o).is_some() {
             return None;
         }
         let (kind, label, payload, derived, depth, ty) = (ob.kind, ob.label.to_string(), ob.payload.clone(), ob.derived_from, ob.depth, ob.ty);
@@ -636,7 +637,7 @@ impl Analyzer {
         if let Some(e) = state.elems.get(&o) {
             state.elems.insert(i, e);
         }
-        crate::state::link_view(i, o);
+        link_view(i, o);
         if let Some(sym) = self.names.get(o).cloned() {
             let scope = self.names.scope(o);
             self.names.set(i, sym, scope);
@@ -648,7 +649,7 @@ impl Analyzer {
     /// The rows of each view at the end of the body (the continues' joined in), when no other
     /// object of its family changed it since `hits0` (`view_hits`).
     fn view_ends(&self, views: &[(ObjId, ObjId)], hits0: u64, body_s: &State) -> Vec<(ObjId, [Row; 2])> {
-        if views.is_empty() || crate::state::view_hits() != hits0 {
+        if views.is_empty() || view_hits() != hits0 {
             return Vec::new();
         }
         let cont = self.unwind.loop_stack.last().and_then(|c| c.continues.as_ref());
@@ -757,7 +758,7 @@ impl Analyzer {
         if !body_s.reachable {
             return;
         }
-        let mut srcs: Vec<crate::source::SourceId> = Vec::new();
+        let mut srcs: Vec<SourceId> = Vec::new();
         // (the element, and the items it holds two levels down: the group of a `groupby` pair
         // iterated in its turn reads each of its rows once per element too)
         let mut objs: Vec<ObjId> = elem.pts.iter().collect();
@@ -780,7 +781,7 @@ impl Analyzer {
         for oid in objs {
             for ns in [Ns::Item, Ns::Attr] {
                 for (src, _) in state.row(oid, ns).sources.iter() {
-                    if !crate::source::source_is_data(src) && !srcs.contains(&src) {
+                    if !source_is_data(src) && !srcs.contains(&src) {
                         srcs.push(src);
                     }
                 }
@@ -791,7 +792,7 @@ impl Analyzer {
                 if info.always {
                     if let Some(cur) = exit_s.reqs.get(&src, &k) {
                         if !cur.always {
-                            exit_s.reqs.set(&src, k, crate::domain::ReqInfo { always: true, ..cur });
+                            exit_s.reqs.set(&src, k, ReqInfo { always: true, ..cur });
                         }
                     }
                 }

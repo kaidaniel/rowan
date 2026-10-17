@@ -5,10 +5,10 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{ObjId, classify, join_values, Classification, KeyVal, Ns, Row, Tier, Value};
+use crate::domain::{classify, join_values, kv_exclude, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, KeyId};
-use crate::state::{Kind, State};
+use crate::intern::{self, key_none, key_str_lit, KeyId};
+use crate::state::{mark_merged, Kind, State};
 
 use super::{Analyzer, Args, DICT_METHOD_NAMES, Payload, STR_METHOD_NAMES, ViewKind, is_scalar_method};
 use super::access::OBJECT_ATTRS;
@@ -206,7 +206,7 @@ impl Analyzer {
         }
         self.mode.recv_scalar = saved_scalar;
         self.end_wide_read(saved_wide, state);
-        acc = acc.join(&crate::domain::join_values(parts));
+        acc = acc.join(&join_values(parts));
         if obj.pts.is_empty() {
             return crate::models::builtins::scalar_attr(self, obj, name, report, state);
         }
@@ -218,7 +218,7 @@ impl Analyzer {
         if !self.mixed(obj) {
             return Value::new();
         }
-        let lits = Value::kv_only(crate::domain::kv_exclude(&obj.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT));
+        let lits = Value::kv_only(kv_exclude(&obj.kv, &crate::intern::KeySet::one(key_none())).unwrap_or(BOT));
         crate::models::builtins::scalar_attr(self, &lits, name, false, state)
     }
 
@@ -301,7 +301,7 @@ impl Analyzer {
         if let Some((_, site)) = self.mode.wide_read.clone().filter(|_| self.in_wide_read()) {
             let ctx = self.frame().ctx.clone();
             let o = self.heap.alloc_raw(Kind::Unknown, &format!("ext@{}:{}", site, name), &ctx, false, &format!("?.{}", name), Payload::None);
-            crate::state::mark_merged(o);
+            mark_merged(o);
             return Value::obj(o);
         }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
@@ -939,7 +939,7 @@ impl Analyzer {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             // (a parameter annotated `str`: a str, its methods' results known by type)
             let recv = match self.heap.obj(oid).ty {
-                Some(t @ ("str" | "bytes")) => Value::data(&crate::domain::typed_label(t, "")),
+                Some(t @ ("str" | "bytes")) => Value::data(&typed_label(t, "")),
                 _ => Value::data(&format!("L{}", node.line)),
             };
             return self.method_value(&q, &recv);

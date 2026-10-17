@@ -1,9 +1,9 @@
 //! Keys: the key a value stands for in a record (numbers equal across int / float / bool,
 //! Enum members, identity-hashed objects, frozen dataclass instances), and back (`unkey`).
 
-use crate::domain::{KeyVal, Ns, Value};
+use crate::domain::{kv_literals, label_type, KeyVal, Ns, Value};
 use crate::intern::{self, key_int, key_str_lit, KeyId, KeySet};
-use crate::state::{Kind, State};
+use crate::state::{is_merged, Kind, State};
 
 use super::{Analyzer, Payload};
 
@@ -140,7 +140,7 @@ impl Analyzer {
         if self.heap.keys.key_member.is_empty() && self.heap.keys.identity_objs.borrow().is_empty() {
             return v.clone();
         }
-        let lits = crate::domain::kv_literals(&v.kv);
+        let lits = kv_literals(&v.kv);
         if !lits.iter().any(intern::key_is_member) || !v.kv.is_literal() {
             return v.clone();
         }
@@ -258,7 +258,7 @@ impl Analyzer {
 /// An unknown of no known type may be anything, a list too; literals and keys hash.
 fn kv_hashing(kv: &KeyVal) -> Hashing {
     match kv {
-        KeyVal::Data(l) if crate::domain::label_type(&intern::str_get(*l)).is_none() => Hashing::Maybe,
+        KeyVal::Data(l) if label_type(&intern::str_get(*l)).is_none() => Hashing::Maybe,
         _ => Hashing::Hashable,
     }
 }
@@ -274,13 +274,13 @@ impl Analyzer {
     /// elements, a closed dict's keys); None when they are not all known.
     pub fn lit_keys(&mut self, v: &Value, state: &State) -> Option<KeySet> {
         if v.kv.is_literal() && v.pts.is_empty() {
-            return Some(crate::domain::kv_literals(&v.kv));
+            return Some(kv_literals(&v.kv));
         }
         let mut out = KeySet::new();
         for oid in v.pts.iter() {
             match self.heap.kind(oid) {
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
-                    Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
+                    Some(kv) if kv.is_literal() => out = out.union(&kv_literals(&kv)),
                     _ => {
                         return None;
                     }
@@ -313,7 +313,7 @@ impl Analyzer {
         let mut out: Option<KeySet> = None;
         for oid in v.pts.iter() {
             let ks: KeySet = match self.heap.kind(oid) {
-                Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).single && !crate::state::is_merged(oid) => {
+                Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).single && !is_merged(oid) => {
                     let n = self.heap.llen(oid, state)?;
                     (0..n).filter_map(|i| { let sv = state.slot(oid, Ns::Pos, key_int(i as i64)); sv.kv.as_lit().filter(|_| sv.pts.is_empty()) }).collect()
                 }

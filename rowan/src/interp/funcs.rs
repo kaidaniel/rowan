@@ -9,7 +9,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, ObjId, Value, DATA};
+use crate::domain::{kv_literals, BOT, DATA, KeyVal, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::source::SourceKind;
@@ -285,7 +285,7 @@ impl Analyzer {
     // ------------------------------------------------------------- names
     /// A read of a name bound on some paths only: possibly a NameError / UnboundLocalError.
     /// After it the program went on, so the name is bound on this path.
-    fn unbound_read(&mut self, name: StrId, module: crate::domain::ObjId, node: &Node, state: &mut State, exc: &str) {
+    fn unbound_read(&mut self, name: StrId, module: ObjId, node: &Node, state: &mut State, exc: &str) {
         if node.line == 0 {
             return;
         }
@@ -561,13 +561,13 @@ impl Analyzer {
     /// What of `v` Python can iterate: its literals that are numbers, None, … raise TypeError
     /// (a `for`, a comprehension, unpacking, `list(v)`); with nothing else, the path ends here.
     pub fn iterable_part(&mut self, v: &Value, state: &mut State) -> Value {
-        let ks = crate::domain::kv_literals(&v.kv);
+        let ks = kv_literals(&v.kv);
         let not_iterable = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Ellipsis | intern::Key::Dec(..) | intern::Key::Frac(..)));
         if !v.kv.is_literal() || !ks.iter().any(not_iterable) {
             return v.clone();
         }
         let rest: intern::KeySet = ks.iter().filter(|k| !not_iterable(*k)).collect();
-        let out = Value::with_kv(v.pts.clone(), if rest.is_empty() { crate::domain::BOT } else { KeyVal::lits(rest) });
+        let out = Value::with_kv(v.pts.clone(), if rest.is_empty() { BOT } else { KeyVal::lits(rest) });
         if out.empty() {
             self.raise_here("TypeError", state);
         } else {
@@ -588,7 +588,7 @@ impl Analyzer {
             _ => None,
         }).collect();
         if !v.kv.is_bot() {
-            let ks = crate::domain::kv_literals(&v.kv);
+            let ks = kv_literals(&v.kv);
             if v.kv.is_literal() && ks.iter().all(intern::key_is_str) {
                 parts.extend(ks.iter().map(|k| Some(intern::key_as_str(k).is_some_and(|t| t.chars().count() != n))));
             } else {
@@ -657,7 +657,7 @@ impl Analyzer {
         }
         // known strings of n characters: their characters (`k, v = "ab"`)
         if v.pts.is_empty() && v.kv.is_literal() {
-            let lits = crate::domain::kv_literals(&v.kv);
+            let lits = kv_literals(&v.kv);
             let strs: Option<Vec<Vec<char>>> = lits.iter().map(|k| intern::key_as_str(k).map(|s| s.chars().collect::<Vec<char>>()).filter(|cs| cs.len() == n)).collect();
             if let Some(strs) = strs.filter(|s| !s.is_empty()) {
                 let mut out: Vec<Value> = (0..n).map(|_| Value::new()).collect();

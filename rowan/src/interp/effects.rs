@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use indexmap::IndexMap;
 
-use crate::domain::{Ns, ObjId, Value};
+use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::Node;
 use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
@@ -580,7 +580,7 @@ impl Analyzer {
             self.note_call(*f, r.as_ref(), state);
         }
         self.gens.force_at = None;
-        let recv = crate::domain::join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
+        let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
@@ -591,7 +591,7 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         self.flag_may_raise(state);
         let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
-        crate::domain::join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
+        join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
     }
 
     /// The arguments of a call of `foid` that does not run, as what its code may change of

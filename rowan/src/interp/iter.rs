@@ -6,7 +6,7 @@
 //! value of several objects iterates as one of them (alternatives, joined position by
 //! position).
 
-use crate::domain::{join_values, KeyVal, KeysOf, Ns, ObjId, ObjSet, Value, DATA};
+use crate::domain::{join_values, kv_literals, ALL_KEYS, DATA, KeyVal, KeysOf, Ns, ObjId, ObjSet, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
@@ -189,7 +189,7 @@ impl Analyzer {
         match (&v.kv, lists.as_mut()) {
             (KeyVal::Bot, _) => {}
             (kv, Some(ls)) if kv.is_literal() => {
-                for k in crate::domain::kv_literals(kv).iter() {
+                for k in kv_literals(kv).iter() {
                     match intern::key_as_str(k) {
                         Some(s) if s.chars().count() <= UNROLL_MAX => ls.push(s.chars().map(|ch| Value::lit(intern::key_str_lit(&ch.to_string()))).collect()),
                         _ => {
@@ -211,7 +211,7 @@ impl Analyzer {
         // (a sequence of some of a dict's keys need not hold them all, `[k for k in d if …]`:
         // only `list(d)` as made, as long as the dict's keys are known)
         acc.exhaustive &= match state.elems.get(&oid) {
-            Some(KeyVal::KeysOf(ko)) if ko.exhaustive_depth == crate::domain::ALL_KEYS && ko.objs.len() == 1 && ko.exclude.is_empty() => {
+            Some(KeyVal::KeysOf(ko)) if ko.exhaustive_depth == ALL_KEYS && ko.objs.len() == 1 && ko.exclude.is_empty() => {
                 let row = state.row(ko.objs.first().unwrap(), ko.ns);
                 !row.open() && row.present == row.definite && ll == Some(row.present.len())
             }
@@ -545,7 +545,7 @@ impl Analyzer {
             let ks: KeySet = chars.into_iter().collect();
             elems.push(Value::kv_only(KeyVal::lits(ks)));
         } else if v.kv.is_literal() {
-            let ks = crate::domain::kv_literals(&v.kv);
+            let ks = kv_literals(&v.kv);
             // (one of several strings: its characters)
             if ks.iter().all(intern::key_is_str) {
                 let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();

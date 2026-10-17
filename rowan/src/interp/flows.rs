@@ -12,7 +12,7 @@
 use ruff_python_ast::{self as ast, Expr, Stmt};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::intern::{s, StrId};
+use crate::intern::{key_as_str, s, KeyId, StrId};
 
 /// Where a value comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -207,10 +207,10 @@ pub struct Like(Vec<Result<String, Option<String>>>);
 
 impl Like {
     /// Could the template make the name `k` (it starts and ends as the template's literal ends)?
-    pub fn matches(&self, k: crate::intern::KeyId) -> bool {
+    pub fn matches(&self, k: KeyId) -> bool {
         let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
         let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
-        crate::intern::key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
+        key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
     }
 
     /// The one name it makes when each hole is a name `bind` knows the text of.

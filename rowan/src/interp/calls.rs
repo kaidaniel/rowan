@@ -12,7 +12,7 @@ use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::source::{Source, SourceKind};
-use crate::state::{Kind, State};
+use crate::state::{Kind, NAME_KEY_DROPS, State};
 use crate::syntax::is_generator;
 
 use super::{Analyzer, Args, Call, Frame, FrameKind, FuncInfo, FuncNode, MAX_CLONES, Payload};
@@ -718,9 +718,9 @@ impl Analyzer {
         // (facts of keys stored through names are the caller's names': a callee's names are its
         // own; what it deletes or gives unknown code voids the caller's)
         let names = std::mem::take(&mut state.name_keys);
-        let drops = crate::state::NAME_KEY_DROPS.with(|c| c.get());
+        let drops = NAME_KEY_DROPS.with(|c| c.get());
         let r = self.call_user_inner(foid, self_v, a, state, node, entry);
-        state.name_keys = if crate::state::NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
+        state.name_keys = if NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();

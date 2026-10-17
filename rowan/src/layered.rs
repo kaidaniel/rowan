@@ -5,6 +5,8 @@
 //! two maps share, so they cost what the maps differ in, whatever their history. `TwoLevel`
 //! adds a copy-on-write inner map per key (object slots, source requirements).
 
+use crate::domain::Ns;
+use crate::intern::{KeyId, SourceId};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -21,13 +23,13 @@ impl PKey for u32 {
     }
 }
 
-impl PKey for (u32, crate::domain::Ns) {
+impl PKey for (u32, Ns) {
     fn key64(&self) -> u64 {
         ((self.0 as u64) << 3) | self.1 as u64
     }
 }
 
-impl PKey for crate::intern::SourceId {
+impl PKey for SourceId {
     fn key64(&self) -> u64 {
         self.0 as u64
     }
@@ -519,23 +521,23 @@ impl IKey for u32 {
     }
 }
 
-impl IKey for crate::intern::KeyId {
+impl IKey for KeyId {
     fn key32(&self) -> u32 {
         debug_assert!(self.0 < SENTINEL, "key id past 2^29");
         self.0
     }
     fn from32(x: u32) -> Self {
-        crate::intern::KeyId(x)
+        KeyId(x)
     }
 }
 
-impl IKey for (crate::domain::Ns, crate::intern::KeyId) {
+impl IKey for (Ns, KeyId) {
     fn key32(&self) -> u32 {
         debug_assert!(self.1 .0 < SENTINEL, "key id past 2^29");
         ((self.0 as u32) << 29) | self.1 .0
     }
     fn from32(x: u32) -> Self {
-        (crate::domain::Ns::Item, crate::intern::KeyId(x))
+        (crate::domain::Ns::Item, KeyId(x))
     }
 }
 

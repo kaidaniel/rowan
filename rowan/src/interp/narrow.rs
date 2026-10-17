@@ -4,10 +4,10 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_exclude, kv_literals, kv_restrict, KeyVal, Ns, ObjId, ObjSet, Value};
+use crate::domain::{kv_exclude, kv_literals, kv_restrict, label_type, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::state::{Kind, State};
+use crate::state::{is_merged, Kind, State};
 use crate::syntax::{chain_text, contains_call, names_in};
 
 use super::Analyzer;
@@ -99,7 +99,7 @@ impl Analyzer {
             } else if stop.reachable {
                 // (what ends it here is a value of that truth: `x and y` is x only when x is
                 // falsy; a bool is that bool)
-                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || crate::domain::label_type(&intern::str_get(d)) == Some("bool"));
+                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || label_type(&intern::str_get(d)) == Some("bool"));
                 v = v.join(&if is_bool { Value::lit(intern::key_bool(!is_and)) } else { truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v) });
             }
             if stop.reachable {
@@ -192,7 +192,7 @@ impl Analyzer {
                 if truth {
                     if self.heap.prefix(o, state).is_none() {
                         let e = state.slot(o, Ns::Elem, intern::STAR);
-                        let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
+                        let ekv = state.elems.get(&o).unwrap_or(DATA);
                         state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
                         state.lens.insert(o, (None, 1, 0));
                     }
@@ -327,7 +327,7 @@ impl Analyzer {
                     let name = s(nm.id.as_str());
                     let cur = self.load_name(name, &Node::none(), state);
                     let Some(o) = self.traced(other_e) else { continue };
-                    let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
+                    let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !is_merged(*x)) else { continue };
                     if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
                         continue;
                     }
@@ -1000,6 +1000,6 @@ pub fn is_structural_qual(q: &str) -> bool {
 
 /// The keys closed records may have, all of them (None: one is open).
 fn closed_keys(recs: &[u32], state: &State) -> Option<KeySet> {
-    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+    let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
     rows.iter().all(|r| r.closed()).then(|| rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present)))
 }

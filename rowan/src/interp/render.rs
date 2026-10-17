@@ -4,7 +4,7 @@
 //! from), cut at a depth (`VALUE_DEPTH`) and width; `value_legend` says what the names it
 //! mentions stand for; `join_alternatives` merges the texts of several runs of a line.
 
-use crate::domain::{KeyVal, Ns, ObjId, Value};
+use crate::domain::{key_display, kv_literals, label_name, label_type, DATA, KeyVal, Ns, ObjId, Value};
 use crate::intern::{self, KeyId, STAR};
 use crate::interp::Analyzer;
 use crate::state::{Kind, State};
@@ -59,9 +59,9 @@ pub fn join_alternatives(texts: &[String]) -> String {
 pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
     let mut parts: Vec<String> = Vec::new();
     // literals
-    let lits = crate::domain::kv_literals(&v.kv);
+    let lits = kv_literals(&v.kv);
     if v.kv.is_literal() && !lits.is_empty() {
-        let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| short_literal(crate::domain::key_display(*k))).collect();
+        let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| short_literal(key_display(*k))).collect();
         if ls.len() > 4 {
             ls.truncate(4);
             ls.push("…".into());
@@ -80,7 +80,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
-    } else if let Some(t) = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))) {
+    } else if let Some(t) = v.kv.data_site().and_then(|l| label_type(&intern::str_get(l))) {
         parts.push(format!("{}(?)", t));
     } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
@@ -237,7 +237,7 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
             // (the scalar part of the elements is kept apart, as iterating and indexing read it:
             // literals, an unknown of a type, `int(?)`; the slot keeps plain data)
             if let Some(kv) = ekv {
-                if ev.kv.is_bot() || ev.kv == crate::domain::DATA {
+                if ev.kv.is_bot() || ev.kv == DATA {
                     ev = Value::with_kv(ev.pts.clone(), kv);
                 }
             }
@@ -277,7 +277,7 @@ fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32
     let body = if depth >= max_depth {
         if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
     } else if kind == Kind::Frame {
-        let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", crate::domain::key_display(*k), row.mark(*k))).collect();
+        let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", key_display(*k), row.mark(*k))).collect();
         if !row.closed() {
             cols.push("**?".into());
         }
@@ -357,7 +357,7 @@ pub fn in_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
 pub fn data_expr(kv: &KeyVal) -> Option<String> {
     let KeyVal::Data(s) = kv else { return None };
     let label = intern::str_get(*s);
-    let rest = crate::domain::label_name(&label).strip_prefix("expr:")?;
+    let rest = label_name(&label).strip_prefix("expr:")?;
     let (scope, text) = rest.split_once(':')?;
     let here = RENDER_SCOPE.with(|c| c.get());
     (scope.parse::<u32>().ok()? == here).then(|| text.to_string())
@@ -382,7 +382,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
             // (an object used as a key: the object, by name)
             let key = match an.heap.keys.identity_objs.borrow().get(k).copied() {
                 Some(ko) => render_object(an, state, ko, VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed), seen),
-                None => crate::domain::key_display(*k),
+                None => key_display(*k),
             };
             items.push(format!("{}{}: {}", key, row.mark(*k), val));
         }
@@ -466,7 +466,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 }
 
 /// The members of set `o` of known length `n` when every position holds one literal, sorted.
-fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<crate::intern::KeyId>> {
+fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<KeyId>> {
     let mut ms = Vec::new();
     for i in 0..n {
         let sv = state.slot_opt(o, Ns::Pos, intern::key_int(i as i64))?;

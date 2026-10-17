@@ -18,7 +18,7 @@ use crate::domain::{KeyVal, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, KeyId, KeySet, StrId};
 use crate::scopes::Scopes;
-use crate::state::{Kind, State};
+use crate::state::{mark_merged, Kind, State};
 
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
 /// onto one context-free summary object.
@@ -316,7 +316,7 @@ pub struct Heap {
     /// keys standing for objects
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
-    pub cls_slots: FxHashMap<(ObjId, crate::domain::Ns, KeyId), Value>,
+    pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
     /// class attributes the program stores after the class is made (`Cls.x = 1`): those a
     /// path may lack (`class_lookup_on_path`)
     pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
@@ -406,7 +406,7 @@ impl Heap {
         if n >= MAX_CLONES && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             let o = self.alloc_raw(kind, site, "", false, label, payload);
-            crate::state::mark_merged(o);
+            mark_merged(o);
             return o;
         }
         self.site_clones.insert(site.to_string(), n + 1);

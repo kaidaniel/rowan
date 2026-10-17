@@ -8,12 +8,12 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value as J};
 
-use crate::domain::{Ns, ObjId, Row, Tier};
+use crate::domain::{key_display, row_joins, FOUND_BEFORE, Ns, ObjId, Row, Tier, Value};
 use crate::intern::{self, key_repr, KeyId, STAR};
 use crate::interp::render::{is_internal_key, render_value};
 use crate::interp::{Analyzer, Verdict};
-use crate::source::{source_is_data, source_label, SourceId};
-use crate::state::{Kind, State};
+use crate::source::{source_is_data, source_label, Source, SourceId, SourceKind};
+use crate::state::{fp_visits, Kind, State};
 
 pub use super::facts::facts_json;
 pub use super::render::VALUE_DEPTH;
@@ -233,7 +233,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         section(&mut lines, "what functions return", result_lines(an));
     }
     if let Some(st) = an.findings.final_state.as_ref().filter(|_| show_rows) {
-        let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(an.program.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
+        let mut names: Vec<(String, Value)> = st.obj_slots(an.program.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
         // definitions (functions, classes, imported modules) are not values worth listing;
         // one line each, cut at 150 characters (the hover has the rest)
@@ -329,15 +329,15 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
         _ if v.key == STAR => "an element".to_string(),
         // (a key computed from data: no name to show)
         _ if v.tier == Tier::DataKey => "the key".to_string(),
-        _ if an.heap.has_obj(v.oid) && an.heap.kind(v.oid) == Kind::Frame => format!("column {}", crate::domain::key_display(v.key)),
+        _ if an.heap.has_obj(v.oid) && an.heap.kind(v.oid) == Kind::Frame => format!("column {}", key_display(v.key)),
         // (an index or a dict key alike: `xs[0]`)
         _ if intern::key_as_int(v.key).is_some() => format!("item {}", key_repr(v.key)),
-        _ => format!("key {}", crate::domain::key_display(v.key)),
+        _ => format!("key {}", key_display(v.key)),
     };
     let unknown_code = || code_list(an, &v.mutators);
     // (the other notes are the reason in words: `is only set on some paths`)
     match v.tier {
-        Tier::Proven if v.note == crate::domain::FOUND_BEFORE => format!("{} is there: an earlier read or test on this path found it", what),
+        Tier::Proven if v.note == FOUND_BEFORE => format!("{} is there: an earlier read or test on this path found it", what),
         Tier::Proven => format!("{} is always there", what),
         Tier::Likely => format!("{} is there, unless {} removed it", what, unknown_code()),
         Tier::Input => format!("{} must be provided by {}", what, v.providers.iter().map(|p| source_id_text(an, *p)).collect::<Vec<_>>().join(" or ")),
@@ -431,12 +431,12 @@ pub(super) fn source_id_text(an: &Analyzer, src: SourceId) -> String {
 /// with no requirement of its own).
 /// Also: whether every step is read on every path, and the tests of the parameters the steps'
 /// reads are under (a path below is read only where the steps to it are).
-fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::source::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
     let mut out = String::new();
     let mut attr_step = false;
     let (mut always, mut only_if) = (true, intern::IdSet::new());
     for i in from..path.len() {
-        let parent = intern::source(crate::source::Source { site: site.clone(), kind, path: path[..i].to_vec() });
+        let parent = intern::source(Source { site: site.clone(), kind, path: path[..i].to_vec() });
         let attr = match st.reqs.get(&parent, &path[i]) {
             Some(r) => {
                 always &= r.always;
@@ -464,7 +464,7 @@ fn named_call(site: &str) -> bool {
 /// What the code needs of its inputs and of each function's arguments, as Python access
 /// paths: (inputs, functions).
 fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
-    use crate::source::SourceKind;
+    use SourceKind;
     let Some(st) = &an.findings.final_state else { return (vec![], vec![]) };
     // (functions of the program that rowan did not follow are not inputs)
     let program: std::collections::HashSet<String> = (0..an.heap.len() as ObjId).filter_map(|o| an.heap.func_info_opt(o)).map(|fi| fi.py_qualname()).collect();
@@ -632,7 +632,7 @@ fn step_text(k: KeyId, attr: bool) -> String {
     } else if attr {
         format!(".{}", intern::key_py_str(k))
     } else {
-        format!("[{}]", crate::domain::key_display(k))
+        format!("[{}]", key_display(k))
     }
 }
 
@@ -652,7 +652,7 @@ fn result_lines(an: &Analyzer) -> Vec<String> {
     by_func.sort_keys();
     let mut out: IndexMap<String, Vec<String>> = IndexMap::new();
     for ((f, frame), row) in by_func {
-        let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}{}", crate::domain::key_display(*k), row.mark(*k), if frame { "" } else { ": …" })).collect();
+        let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}{}", key_display(*k), row.mark(*k), if frame { "" } else { ": …" })).collect();
         if !row.closed() {
             items.push("**?".into());
         }
@@ -818,7 +818,7 @@ pub fn golden_json(an: &Analyzer) -> J {
     let note = |n: &crate::models::torch::ShapeNote| json!({"file": an.program.rel_file(n.module), "line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
     let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
-    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.findings.notes(), "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.heap.len(), "tabulations": an.budget.runs, "joins": crate::domain::row_joins(), "work": an.budget.statements, "visits": an.budget.walked.get() + crate::state::fp_visits(), "havoc": an.havoc.visited})
+    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.findings.notes(), "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.heap.len(), "tabulations": an.budget.runs, "joins": row_joins(), "work": an.budget.statements, "visits": an.budget.walked.get() + fp_visits(), "havoc": an.havoc.visited})
 }
 
 #[cfg(test)]

@@ -13,10 +13,10 @@ use rustc_hash::FxHashSet;
 
 use super::{Analyzer, Payload};
 use super::stmts::{add_facts, name_facts};
-use crate::domain::{Ns, ObjId, Value};
+use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
-use crate::state::{Kind, State};
+use crate::state::{mark_merged, Joins, Kind, State};
 use crate::syntax::{collect_assigned, contains_jump, contains_return, dotted_last};
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
@@ -56,7 +56,7 @@ pub struct TryCtx {
     pub pre: State,
     pub mark: u64,
     /// the raises recorded, per class: (class, the states, the exceptions), joined when it ends
-    pub recs: Vec<(Option<ExcNames>, crate::state::Joins, Value)>,
+    pub recs: Vec<(Option<ExcNames>, Joins, Value)>,
     /// the last raise recorded, before collection (a loop of calls raising at one point adds
     /// nothing)
     pub last: Option<(State, Option<ExcNames>, Value)>,
@@ -76,7 +76,7 @@ impl TryExit {
 
     /// The exceptions raised at the recorded points.
     pub fn value(&self) -> Value {
-        crate::domain::join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
+        join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
     }
 
     /// Code that may raise anything ran (a raise of `any_exc`).
@@ -340,7 +340,7 @@ impl Analyzer {
             let n = name.rsplit('.').next().unwrap_or(name);
             if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
                 let o = self.heap.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
-                crate::state::mark_merged(o);
+                mark_merged(o);
                 if !state.has_row(o, Ns::Attr) {
                     state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::source::Source::new(n, crate::source::SourceKind::Data)));
                 }

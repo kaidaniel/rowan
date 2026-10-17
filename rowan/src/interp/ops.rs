@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, KeyVal, Ns, ObjSet, Value, DATA};
+use crate::domain::{join_values, key_type, kv_join, kv_literals, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjSet, TYPE_NAMES, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
 use crate::source::{FnKind, RenameFn};
@@ -36,7 +36,7 @@ impl Analyzer {
     /// parts Python treats as different types. (Beside an unknown object, which may be the
     /// literals too, no: what is done with it covers them.)
     pub(in crate::interp) fn mixed(&self, v: &Value) -> bool {
-        !v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
+        !v.pts.is_empty() && v.kv.is_literal() && kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
     }
 
     /// An operation on values of which one is `mixed`: on its objects and on its literals, each
@@ -76,8 +76,8 @@ impl Analyzer {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
                 let name = format!("expr:{}:{}", scope, text);
-                return Value::data(&match crate::domain::label_type(&l) {
-                    Some(t) => crate::domain::typed_label(t, &name),
+                return Value::data(&match label_type(&l) {
+                    Some(t) => typed_label(t, &name),
                     None => name,
                 });
             }
@@ -103,10 +103,10 @@ impl Analyzer {
         }
         match &v.kv {
             KeyVal::Bot => {}
-            KeyVal::Data(l) => add(crate::domain::label_type(&intern::str_get(*l)))?,
+            KeyVal::Data(l) => add(label_type(&intern::str_get(*l)))?,
             KeyVal::Lit(_) | KeyVal::Lits(_) => {
-                for k in crate::domain::kv_literals(&v.kv).iter() {
-                    add(crate::domain::TYPE_NAMES.iter().copied().find(|t| crate::domain::key_type(k, t)))?;
+                for k in kv_literals(&v.kv).iter() {
+                    add(TYPE_NAMES.iter().copied().find(|t| key_type(k, t)))?;
                 }
             }
             KeyVal::KeysOf(_) => return None,
@@ -119,15 +119,15 @@ impl Analyzer {
     pub fn as_type(&self, v: Value, ty: Option<&'static str>, named: bool) -> Value {
         let (Some(t), true, KeyVal::Data(l)) = (ty, v.pts.is_empty() && !self.m.torch_on, &v.kv) else { return v };
         let l = intern::str_get(*l);
-        let name = crate::domain::label_name(&l);
+        let name = label_name(&l);
         // (labels that carry more than a name — a JSON text, a shape, a pattern — are the
         // models': left as they are; `len` is kept, comparisons read it)
         let plain = name.is_empty() || name.starts_with("expr:") || matches!(name, "str" | "int" | "bool" | "len") || (name.starts_with('L') && name[1..].chars().all(|c| c.is_ascii_digit()));
-        if !plain || crate::domain::label_type(&l) == Some(t) {
+        if !plain || label_type(&l) == Some(t) {
             return v;
         }
         let keep = (named && !matches!(name, "str" | "int" | "bool")) || name == "len";
-        Value::data(&crate::domain::typed_label(t, if keep { name } else { "" }))
+        Value::data(&typed_label(t, if keep { name } else { "" }))
     }
 
     /// `-x`, `+x`, `~x`, `not x`.
@@ -409,8 +409,8 @@ impl Analyzer {
         // lists (tuples) of any length times a count: one of the same kind, of their elements
         let kind = seq.pts.first().map(|o| self.heap.kind(o)).filter(|k| matches!(k, Kind::List | Kind::Tuple))?;
         let count = match &cnt.kv {
-            KeyVal::Data(l) => crate::domain::label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
-            kv if kv.is_literal() => crate::domain::kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
+            KeyVal::Data(l) => label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
+            kv if kv.is_literal() => kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
             _ => false,
         };
         if !count || !seq.kv.is_bot() || !cnt.pts.is_empty() || seq.pts.iter().any(|o| self.heap.kind(o) != kind) {
@@ -421,7 +421,7 @@ impl Analyzer {
     }
 
     /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.
-    fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &crate::domain::ObjSet, node: &Node, state: &mut State) -> Option<Value> {
+    fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
         let lb = b.kv.as_lit();
         // (a known text before or after one of several texts, or keys; beside an unknown
@@ -446,7 +446,7 @@ impl Analyzer {
         let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
         if !lists.is_empty() {
             // (the elements of every alternative of either side: a list's, an unknown's)
-            let acc = crate::domain::join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
+            let acc = join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
             state.elems.insert(oid, acc.kv);
@@ -509,7 +509,7 @@ impl Analyzer {
         for (o, f) in calls {
             outs.push(self.call_user(f, Some(Value::obj(o)), Args::pos(&[other.clone()]), state, node, false));
         }
-        Some(crate::domain::join_values(outs))
+        Some(join_values(outs))
     }
 
     /// The text `pre` + v + `post` for a value v that is one of a few texts or some keys:
@@ -691,7 +691,7 @@ impl Analyzer {
         if all_lit {
             return Value::lit(key_str_lit(&text));
         }
-        Value::data(&crate::domain::typed_label("str", ""))
+        Value::data(&typed_label("str", ""))
     }
 }
 
@@ -699,7 +699,7 @@ impl Analyzer {
 /// (at most 64), exactly as Python formats them; None when an argument is not literal or a
 /// combination does not format.
 fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<Vec<String>> {
-    let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv).iter().collect()) } else { None } };
+    let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(kv_literals(&v.kv).iter().collect()) } else { None } };
     let alts: Vec<Vec<KeyId>> = if b.pts.is_empty() {
         vec![lits(b)?]
     } else {

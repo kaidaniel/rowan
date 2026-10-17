@@ -8,8 +8,8 @@ use rustc_hash::FxHashSet;
 use super::{site_string, Analyzer, Payload};
 use crate::domain::{Ns, ObjId, Row};
 use crate::frontend::Node;
-use crate::source::{Source, SourceKind};
-use crate::state::{Kind, State};
+use crate::source::{source_label, Source, SourceKind};
+use crate::state::{mark_merged, Kind, State};
 
 impl Analyzer {
     // ------------------------------------------------------------ allocation
@@ -85,7 +85,7 @@ impl Analyzer {
                         Some(v) => oid = v,
                         None => {
                             self.heap.obj_mut(oid).single = false;
-                            crate::state::mark_merged(oid);
+                            mark_merged(oid);
                             if let Some(k) = self.heap.keys.identity_keys.borrow_mut().remove(&oid) {
                                 self.heap.keys.identity_objs.borrow_mut().remove(&k);
                             }
@@ -184,7 +184,7 @@ impl Analyzer {
     /// as the report's symbol.
     pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str) -> ObjId {
         let src = Source::new(site, kind);
-        let slabel = crate::source::source_label(src);
+        let slabel = source_label(src);
         let label = if label.is_empty() { slabel.clone() } else { label.to_string() };
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind.name(), slabel), "", true, &label, Payload::None);
         for n in [Ns::Item, Ns::Attr] {

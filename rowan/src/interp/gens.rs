@@ -14,10 +14,10 @@ use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, Args, Payload};
-use crate::domain::{join_values, kv_join, KeyVal, Ns, ObjId, Value, DATA};
+use crate::domain::{join_values, kv_join, kv_literals, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, KeySet, StrId, STAR};
-use crate::state::{Kind, State};
+use crate::state::{join_env, join_len, Footprint, Kind, SlotKey, State};
 
 /// A generator's suspension point: the yield node, the `yield from` item, the unrolled loop
 /// positions
@@ -81,7 +81,7 @@ pub struct CmHook {
 /// and joined over all of them.
 pub struct GenEffects {
     pub rows: Vec<(ObjId, Ns)>,
-    pub slots: Vec<(ObjId, crate::state::SlotKey)>,
+    pub slots: Vec<(ObjId, SlotKey)>,
     pub elems: Vec<ObjId>,
     pub lens: Vec<ObjId>,
     pub pre: State,
@@ -114,11 +114,11 @@ impl GenEffects {
 }
 
 /// What code changed of an object: one stored key, or anything (None).
-pub type Change = (ObjId, Option<crate::state::SlotKey>);
+pub type Change = (ObjId, Option<SlotKey>);
 
 /// A change code between a generator's items made, as the generator sees it at its yields: a
 /// `Change`, and whether the key may have been deleted.
-pub type Hit = (ObjId, Option<crate::state::SlotKey>, bool);
+pub type Hit = (ObjId, Option<SlotKey>, bool);
 
 /// A generator run whole for a consumer that runs code between its items: the state after
 /// the run, the objects the run changed, what it read after a yield, the budgets before it.
@@ -161,7 +161,7 @@ pub struct Gens {
     /// the state after its run, what it was given and yields) — see `with_gen_restart`
     pub watch: Vec<GenWatch>,
     /// what the running `for` statements iterate (`gen_used_up`)
-    pub for_iters: Vec<crate::domain::ObjSet>,
+    pub for_iters: Vec<ObjSet>,
     /// running generator activations: whether they yielded, and what they read since (an
     /// object's key, or the whole object) — what code between their items may change for them
     pub reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>)>,
@@ -193,7 +193,7 @@ pub struct Gens {
 
 impl Gens {
     /// A running generator that yielded reads `o` (one key, or all of it).
-    pub(in crate::interp) fn read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
+    pub(in crate::interp) fn read(&mut self, o: ObjId, k: Option<SlotKey>) {
         for (_, yielded, reads) in self.reads.iter_mut() {
             if *yielded {
                 reads.insert((o, k));
@@ -315,13 +315,13 @@ impl Analyzer {
         // each was facts × yields).
         let entry = |_: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) { s.lens.get(&o).unwrap_or((None, 0, 0)) };
         // (with the distinct rows already joined: most yield states share their rows)
-        let mut rows: rustc_hash::FxHashMap<(ObjId, Ns), (crate::domain::Row, rustc_hash::FxHashSet<crate::domain::Row>)> = rustc_hash::FxHashMap::default();
+        let mut rows: rustc_hash::FxHashMap<(ObjId, Ns), (Row, rustc_hash::FxHashSet<Row>)> = rustc_hash::FxHashMap::default();
         for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)) {
             let (a, b) = (st.row(o, ns), pre.row(o, ns));
             let j = a.join(&b);
             rows.insert((o, ns), (j, [a, b].into_iter().collect()));
         }
-        let mut slots: rustc_hash::FxHashMap<(ObjId, crate::state::SlotKey), Value> = rustc_hash::FxHashMap::default();
+        let mut slots: rustc_hash::FxHashMap<(ObjId, SlotKey), Value> = rustc_hash::FxHashMap::default();
         let mut touched: Vec<ObjId> = Vec::new();
         for (o, sk) in fp.slots.iter().copied().filter(|(o, _)| old(*o)) {
             touched.push(o);
@@ -330,11 +330,11 @@ impl Analyzer {
         let mut elems: rustc_hash::FxHashMap<ObjId, KeyVal> = rustc_hash::FxHashMap::default();
         for o in fp.elems.iter().copied().filter(|o| old(*o)) {
             touched.push(o);
-            elems.insert(o, crate::domain::kv_join(&st.elems.get(&o).unwrap_or(DATA), &pre.elems.get(&o).unwrap_or(DATA)));
+            elems.insert(o, kv_join(&st.elems.get(&o).unwrap_or(DATA), &pre.elems.get(&o).unwrap_or(DATA)));
         }
         touched.sort_unstable();
         touched.dedup();
-        let mut lens: rustc_hash::FxHashMap<ObjId, (Option<usize>, usize, u16)> = touched.iter().map(|o| (*o, crate::state::join_len(&entry(self, st, *o), &entry(self, pre, *o)))).collect();
+        let mut lens: rustc_hash::FxHashMap<ObjId, (Option<usize>, usize, u16)> = touched.iter().map(|o| (*o, join_len(&entry(self, st, *o), &entry(self, pre, *o)))).collect();
         let mut prev = pre;
         for y in ys {
             let base = std::mem::replace(&mut prev, y);
@@ -354,12 +354,12 @@ impl Analyzer {
             }
             for o in y.elems.diff_keys(&base.elems) {
                 if let Some(kv) = elems.get_mut(&o) {
-                    *kv = crate::domain::kv_join(kv, &y.elems.get(&o).unwrap_or(DATA));
+                    *kv = kv_join(kv, &y.elems.get(&o).unwrap_or(DATA));
                 }
             }
             for o in y.lens.diff_keys(&base.lens) {
                 if let Some(l) = lens.get_mut(&o) {
-                    *l = crate::state::join_len(l, &entry(self, y, o));
+                    *l = join_len(l, &entry(self, y, o));
                 }
             }
         }
@@ -423,7 +423,7 @@ impl Analyzer {
                 targets.sort_unstable();
                 targets.dedup();
                 let reach = self.reach_among(&mods, &targets, state);
-                let keep = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
+                let keep = Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
                 again.join_heap_fp(state, &keep);
             }
             state.replace_with(again);
@@ -439,7 +439,7 @@ impl Analyzer {
     }
 
     /// `changes_between` on these facts (and these objects' elements and lengths).
-    fn changes_in(&self, a: &State, b: &State, rows: &[(ObjId, Ns)], slots: &[(ObjId, crate::state::SlotKey)], others: impl Iterator<Item = ObjId>) -> Vec<Hit> {
+    fn changes_in(&self, a: &State, b: &State, rows: &[(ObjId, Ns)], slots: &[(ObjId, SlotKey)], others: impl Iterator<Item = ObjId>) -> Vec<Hit> {
         let mut changed: Vec<Hit> = Vec::new();
         for &(o, ns) in rows {
             let Some(ra) = a.rows.get(&(o, ns)) else { continue };
@@ -547,7 +547,7 @@ impl Analyzer {
     /// A loop used up the generators among `used`: no later code runs between their items. Those
     /// that saw no change by `fin` are no longer watched; the others are left to the run that
     /// made them, to run again.
-    pub(in crate::interp) fn gen_used_up(&mut self, used: &crate::domain::ObjSet, fin: &State) {
+    pub(in crate::interp) fn gen_used_up(&mut self, used: &ObjSet, fin: &State) {
         let mut i = 0;
         while i < self.gens.watch.len() {
             if used.contains(self.gens.watch[i].gid) && self.gen_interference_of(i, fin, false).is_empty() {
@@ -624,7 +624,7 @@ impl Analyzer {
         let after = std::mem::replace(&mut state.env, callee_env);
         // (another yield's run: the caller's names after the with are either run's)
         let after = match h.env_after.take() {
-            Some(prev) if h.ran => crate::state::join_env(&prev, &after),
+            Some(prev) if h.ran => join_env(&prev, &after),
             _ => after,
         };
         if let Some(top) = self.cx.env_stack.last_mut() {
@@ -935,7 +935,7 @@ fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects)
 fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
     match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
         Some(v) => {
-            let ks = crate::domain::kv_literals(&v.kv);
+            let ks = kv_literals(&v.kv);
             (ks.contains(intern::key_int(1)), ks.contains(intern::key_int(0)))
         }
         None => (false, false),
@@ -974,7 +974,7 @@ fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) 
     for o in &ge.elems {
         if let (Some(a), Some(b)) = (dst.elems.get(o), src.elems.get(o)) {
             if pre.elems.get(o).as_ref() != Some(&b) {
-                dst.elems.insert(*o, crate::domain::kv_join(&a, &b));
+                dst.elems.insert(*o, kv_join(&a, &b));
             }
         }
     }
@@ -984,7 +984,7 @@ fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) 
             continue;
         }
         match (dst.lens.get(o), b) {
-            (Some(a), Some(b)) => dst.set_lens(*o, crate::state::join_len(&a, &b)),
+            (Some(a), Some(b)) => dst.set_lens(*o, join_len(&a, &b)),
             _ => {
                 dst.forget_len(o);
             }
@@ -1092,7 +1092,7 @@ impl Analyzer {
                 let fp = st.footprint(pre_bind);
                 let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
-                let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
+                let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).collect();
                 let mut lens: Vec<ObjId> = slots.iter().map(|(o, _)| *o).chain(elems.iter().copied()).collect();
                 lens.sort_unstable();

@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, KeysOf, Ns, ObjId, Value, BOT};
+use crate::domain::{BOT, DATA, KeyVal, KeysOf, Ns, ObjId, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
@@ -334,7 +334,7 @@ impl Analyzer {
         } else if let Some(n) = summary_n.filter(|n| *n <= 64) {
             // (known items in one pass: as many as there were, each the pass's element)
             let e = state.slot(oid, Ns::Elem, STAR);
-            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(crate::domain::DATA));
+            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA));
             state.drop_obj_ns(oid, Ns::Pos);
             for i in 0..n {
                 state.set_slot(oid, Ns::Pos, key_int(i as i64), ev.clone(), true);
@@ -347,7 +347,7 @@ impl Analyzer {
             // result has one too (one of the body's values)
             if src_nonempty {
                 let e = state.slot(oid, Ns::Elem, STAR);
-                let ekv = state.elems.get(&oid).unwrap_or(crate::domain::DATA);
+                let ekv = state.elems.get(&oid).unwrap_or(DATA);
                 if !(e.pts.is_empty() && ekv.is_bot()) {
                     state.set_slot(oid, Ns::Pos, key_int(0), Value::with_kv(e.pts, ekv), true);
                     state.set_lens(oid, (None, 1, 0));

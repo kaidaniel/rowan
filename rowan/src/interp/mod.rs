@@ -7,7 +7,7 @@
 use crate::domain::Value;
 use crate::frontend::{self, Node};
 use crate::intern;
-use crate::state::{Kind, State};
+use crate::state::{reset_thread_state, Kind, State};
 
 // The components: each owns one field of `Analyzer`.
 pub mod budget;
@@ -187,7 +187,7 @@ impl Analyzer {
     /// searched in `search_paths` (none unless `follow_imports`), entry runs of the functions
     /// the program does not call unless `analyse_entry_points` is false. `run` runs it.
     pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool) -> Result<Analyzer, String> {
-        crate::state::reset_thread_state();
+        reset_thread_state();
         crate::models::pynum::set_opaque(false);
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);

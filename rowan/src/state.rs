@@ -12,9 +12,10 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
-use crate::domain::{kv_join, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
-use crate::intern::{IdSet, KeyId, SourceId, StrId, STAR};
+use crate::domain::{key_display, kv_join, reset_row_joins, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
+use crate::intern::{key_str_lit, str_get, with_source, IdSet, KeyId, SourceId, StrId, STAR};
 use crate::layered::{LayerMap, TwoLevel};
+use crate::source::source_is_nested;
 
 /// What an abstract object is; its payload (`interp::Payload`) holds the rest.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -353,7 +354,7 @@ impl State {
 
     /// Has this state facts of object `oid` (a row, a length, elements, a cell's value)?
     pub fn has_facts(&self, oid: ObjId) -> bool {
-        [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem].iter().any(|ns| self.rows.get(&(oid, *ns)).is_some()) || self.lens.get(&oid).is_some() || self.elems.get(&oid).is_some() || self.slots.get(&oid, &(Ns::Cell, crate::intern::key_str_lit("v"))).is_some()
+        [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem].iter().any(|ns| self.rows.get(&(oid, *ns)).is_some()) || self.lens.get(&oid).is_some() || self.elems.get(&oid).is_some() || self.slots.get(&oid, &(Ns::Cell, key_str_lit("v"))).is_some()
     }
 
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
@@ -854,9 +855,9 @@ impl State {
         if self.path.is_empty() {
             return IdSet::new();
         }
-        let (site, top) = crate::intern::with_source(src, |s| (s.site.clone(), s.path.is_empty()));
-        let own = |t: StrId| top && site.rsplit_once('.').is_some_and(|(_, x)| *crate::intern::str_get(t).replace('\'', "\"") == format!("{} in {}", crate::domain::key_display(term), x));
-        IdSet::from_iter(self.path.iter().filter(|(o, t)| site.starts_with(&*crate::intern::str_get(*o)) && !own(*t)).map(|(_, t)| *t))
+        let (site, top) = with_source(src, |s| (s.site.clone(), s.path.is_empty()));
+        let own = |t: StrId| top && site.rsplit_once('.').is_some_and(|(_, x)| *str_get(t).replace('\'', "\"") == format!("{} in {}", key_display(term), x));
+        IdSet::from_iter(self.path.iter().filter(|(o, t)| site.starts_with(&*str_get(*o)) && !own(*t)).map(|(_, t)| *t))
     }
 
     /// `require` with no alternatives.
@@ -942,7 +943,7 @@ pub fn join_len(a: &LenFact, b: &LenFact) -> LenFact {
 /// a nested source's (that path never read the parent's value, so the requirement still holds
 /// wherever it was read).
 fn nested_keep(s: &crate::source::SourceId) -> bool {
-    crate::source::source_is_nested(*s)
+    source_is_nested(*s)
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,7 +1048,7 @@ pub fn reset_thread_state() {
     VIEWED.with(|v| v.borrow_mut().clear());
     ANY.with(|a| a.set(ObjId::MAX));
     FP_VISITS.with(|c| c.set(0));
-    crate::domain::reset_row_joins();
+    reset_row_joins();
     crate::models::shape::reset();
 }
 
@@ -1066,7 +1067,7 @@ pub fn fp_visits() -> usize {
 mod tests {
     use super::*;
     use crate::source::{Source, SourceKind};
-    use crate::intern::key_str_lit;
+    use crate::intern::{key_repr, key_str_lit};
 
     #[test]
     fn reqs_survive_return_in_branch() {
@@ -1090,7 +1091,7 @@ mod tests {
         assert!(!d[&key_str_lit("objs")].always);
     }
     /// A sequence of `if cond: return` statements, one of which records a requirement.
-    fn branch_return(st: &mut State, req: Option<(crate::intern::SourceId, &str)>) {
+    fn branch_return(st: &mut State, req: Option<(SourceId, &str)>) {
         let mut then_s = st.copy();
         let mut else_s = st.copy();
         if let Some((src, k)) = req {
@@ -1129,7 +1130,7 @@ mod tests {
         let mut exs = ex.copy();
         let fin = st.join(&mut exs);
         let d = fin.reqs.inner(&src2).expect("source lost");
-        let mut ks: Vec<String> = d.keys().map(|k| crate::intern::key_repr(*k)).collect();
+        let mut ks: Vec<String> = d.keys().map(|k| key_repr(*k)).collect();
         ks.sort();
         assert_eq!(ks, vec!["'chain'", "'ns'", "'objs'"]);
     }

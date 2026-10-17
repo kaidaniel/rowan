@@ -12,10 +12,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ruff_python_ast as ast;
 
 use super::{Analyzer, Payload, ViewKind};
-use crate::domain::{Chain, Classification, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, kv_literals, label_type, Chain, Classification, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
+use crate::source::SourceId;
 
 /// The verdict of one access (a read, `del` or `pop` of a key) on one object, in one call
 /// chain; `report::dedupe` combines those of one access.
@@ -32,7 +33,7 @@ pub struct Verdict {
     /// why, in words (`is only set on some paths`)
     pub note: String,
     /// the inputs that may provide the key
-    pub providers: Vec<crate::source::SourceId>,
+    pub providers: Vec<SourceId>,
     /// unknown code that may have added or removed the key (its call sites)
     pub mutators: Vec<String>,
     pub ns: Ns,
@@ -483,10 +484,10 @@ impl Analyzer {
             None => info.untyped = true,
         };
         if v.kv.is_literal() {
-            info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
+            info.lits = kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
-            typed(&mut info, v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))));
+            typed(&mut info, v.kv.data_site().and_then(|l| label_type(&intern::str_get(l))));
         }
         for o in v.pts.iter() {
             match self.heap.kind(o) {
@@ -557,7 +558,7 @@ impl Analyzer {
             let mut row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             if let Some(r) = row.as_mut() {
                 for (_, _, _, k) in self.findings.row_absent_probes.iter().filter(|(f, l, nm, _)| *f == file && *l == ln && *nm == name) {
-                    if crate::domain::classify(r, *k).tier == crate::domain::Tier::Missing {
+                    if classify(r, *k).tier == crate::domain::Tier::Missing {
                         *r = r.delete(*k, true);
                     }
                 }

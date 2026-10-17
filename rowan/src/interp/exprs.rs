@@ -4,7 +4,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, kv_map, KeyVal, Ns, Value, DATA};
+use crate::domain::{join_values, kv_join, kv_literals, kv_map, DATA, KeyVal, Ns, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::source::RenameFn;
@@ -168,7 +168,7 @@ impl Analyzer {
         // the value: the delegated generator's return value
         let rk = key_str_lit("\u{1}genret");
         if !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| state.slot_opt(o, Ns::Attr, rk).is_some()) {
-            return crate::domain::join_values(v.pts.iter().map(|o| state.slot(o, Ns::Attr, rk)).collect::<Vec<_>>());
+            return join_values(v.pts.iter().map(|o| state.slot(o, Ns::Attr, rk)).collect::<Vec<_>>());
         }
         Value::data("yield")
     }
@@ -275,7 +275,7 @@ impl Analyzer {
         }
         // a known string sliced / indexed by known numbers (an index out of range raises
         // IndexError: on every string the value may be, or on some)
-        let strs: Option<Vec<Vec<char>>> = crate::domain::kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
+        let strs: Option<Vec<Vec<char>>> = kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
         if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
             let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
             let out: Option<intern::KeySet> = match (bounds, index) {
@@ -488,7 +488,7 @@ impl Analyzer {
         let nid = self.alloc(kind, &site, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
         let single = self.heap.obj(nid).single;
         let acc = match &vals {
-            Some(vs) => crate::domain::join_values(vs.clone()),
+            Some(vs) => join_values(vs.clone()),
             None => elem,
         };
         state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, crate::models::torch::elem_kv(&acc.kv)), single);
@@ -603,7 +603,7 @@ impl Analyzer {
             state.drop_obj_ns(oid, Ns::Elem);
             state.elems.insert(oid, KeyVal::Lits(intern::KeySet::new()));
         } else {
-            let acc = crate::domain::join_values(vals.clone());
+            let acc = join_values(vals.clone());
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
             state.elems.insert(oid, acc.kv);
         }

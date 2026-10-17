@@ -189,7 +189,7 @@ pub struct Modes {
 /// whether a raise found it held.
 pub struct Building {
     pub mark: u64,
-    pub at: crate::state::State,
+    pub at: State,
     pub roots: Vec<ObjId>,
     pub holders: Vec<ObjId>,
     pub looks: u32,

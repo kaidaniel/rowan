@@ -45,10 +45,10 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use super::{Analyzer, CmHook, ExcNames, Frame, FrameKind, FuncInfo, Names};
-use crate::domain::{ObjId, Value};
+use crate::domain::{row_joins, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{s, KeyId, StrId};
-use crate::state::State;
+use crate::state::{fp_visits, State};
 
 /// A call's arguments as given: positional ones, keywords, and the values of `*xs` and `**kw`.
 #[derive(Clone, Copy)]
@@ -401,6 +401,6 @@ impl Analyzer {
 
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
-        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), crate::domain::row_joins(), self.budget.walked.get() + crate::state::fp_visits(), self.budget.walked.get(), crate::state::fp_visits(), self.havoc.visited)
+        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited)
     }
 }

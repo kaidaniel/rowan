@@ -7,8 +7,8 @@
 
 use serde_json::{json, Value as J};
 
-use crate::domain::{Ns, ObjId, Row, Tier};
-use crate::intern::{self, StrId};
+use crate::domain::{key_display, Chain, Ns, ObjId, Row, Tier};
+use crate::intern::{self, str_get, StrId};
 use crate::interp::{Analyzer, Fact};
 use crate::interp::render::{is_internal_key, join_alternatives};
 use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
@@ -120,7 +120,7 @@ fn fact_object_json(an: &Analyzer, f: &Fact, oid: ObjId, item: &Option<Row>, att
     let mut changed_by: Vec<String> = Vec::new();
     let mut from: Vec<String> = Vec::new();
     // (keys and attributes it never has here)
-    let absent = |r: &Option<Row>| r.as_ref().map(|r| intern::sorted_by_str(r.absent.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| crate::domain::key_display(*k)).collect::<Vec<_>>()).unwrap_or_default();
+    let absent = |r: &Option<Row>| r.as_ref().map(|r| intern::sorted_by_str(r.absent.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| key_display(*k)).collect::<Vec<_>>()).unwrap_or_default();
     for r in rows {
         for m in r.mutators.iter() {
             let t = site_text(an, &intern::str_get(m));
@@ -188,7 +188,7 @@ fn fact_required(an: &Analyzer, f: &Fact, name: StrId) -> Vec<Need> {
 fn param_contract(an: &Analyzer, foid: ObjId, name: StrId) -> J {
     let (Some(st), Some(fi)) = (&an.findings.contracts, an.heap.func_info_opt(foid)) else { return json!([]) };
     let src = crate::source::Source::new(&format!("param {}.{}", fi.py_qualname(), name), crate::source::SourceKind::Param);
-    let needs = reads_below(st, src, &crate::intern::str_get(name), false);
+    let needs = reads_below(st, src, &str_get(name), false);
     J::Array(needs.into_iter().map(|n| json!({"path": n.path, "always": n.always, "only_if": n.only_if})).collect())
 }
 
@@ -196,7 +196,7 @@ fn param_contract(an: &Analyzer, foid: ObjId, name: StrId) -> J {
 /// reads of it: the worst of the accesses of those calls' runs (in the function, its callees
 /// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠~ ⚠ ✗).
 fn call_check(an: &Analyzer, f: &Fact, lines: &[u32]) -> J {
-    let passed: Vec<&(crate::domain::Chain, Vec<ObjId>)> = f.passed.iter().filter(|(c, _)| c.last().is_some_and(|l| lines.contains(l))).collect();
+    let passed: Vec<&(Chain, Vec<ObjId>)> = f.passed.iter().filter(|(c, _)| c.last().is_some_and(|l| lines.contains(l))).collect();
     let Some(st) = &an.findings.final_state else { return J::Null };
     if passed.is_empty() {
         return J::Null;

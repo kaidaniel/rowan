@@ -8,7 +8,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::Heap;
-use crate::domain::{Ns, ObjId};
+use crate::domain::{key_display, Ns, ObjId};
 use crate::intern::{self, KeyId, StrId};
 use crate::state::Kind;
 
@@ -73,7 +73,7 @@ impl Names {
             Ns::Attr => format!("{}.{}", base, intern::key_py_str(key)),
             Ns::Cell => base.clone(),
             _ if key == intern::STAR => format!("{}[*]", base),
-            _ => format!("{}[{}]", base, crate::domain::key_display(key)),
+            _ => format!("{}[{}]", base, key_display(key)),
         })
     }
 }
