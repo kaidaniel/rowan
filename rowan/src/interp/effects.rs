@@ -785,9 +785,7 @@ impl Analyzer {
                 match self.edited(f, v, state) {
                     (true, _) => {
                         out.edited_values.push(v.clone());
-                        if f.removes {
-                            out.removed_values.push(v.clone());
-                        }
+                        out.removed_values.extend(f.removes.then(|| v.clone()));
                     }
                     (false, true) => out.iterated_values.push(v.clone()),
                     _ => {}

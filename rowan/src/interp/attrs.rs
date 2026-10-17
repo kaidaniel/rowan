@@ -123,10 +123,7 @@ impl Analyzer {
         if let Some(v) = crate::models::torch::t_getattr(self, obj, name, node, state) {
             return v;
         }
-        // (None beside the objects has no such attribute: AttributeError)
-        if report && !obj.pts.is_empty() && obj.kv.is_literal() && !name.starts_with("__") && kv_literals(&obj.kv).contains(key_none()) {
-            self.may_raise_here("AttributeError", state);
-        }
+        self.none_beside_lacks(obj, name, report, state);
         let mut acc = Value::new();
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
@@ -215,6 +212,13 @@ impl Analyzer {
             return crate::models::builtins::scalar_attr(self, obj, name, report, state);
         }
         acc.join(&self.mixed_literals_attr(obj, name, state))
+    }
+
+    /// None beside `obj`'s objects has no attribute `name` but a dunder: an AttributeError.
+    fn none_beside_lacks(&mut self, obj: &Value, name: &str, report: bool, state: &mut State) {
+        if report && !obj.pts.is_empty() && obj.kv.is_literal() && !name.starts_with("__") && kv_literals(&obj.kv).contains(key_none()) {
+            self.may_raise_here("AttributeError", state);
+        }
     }
 
     /// The attribute of the literals beside a value's objects (`ops::mixed`), else nothing.
