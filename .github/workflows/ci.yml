@@ -1,5 +1,7 @@
 # CI for rowan: the Rust engine, its golden / snapshot / oracle suites, and the VS Code extension.
-# The commit rule in AGENTS.md (golden, snapshots and `cargo test` must pass) is the `test` job.
+# The commit rule in AGENTS.md (golden, snapshots and `cargo test` must pass) is the `test` job,
+# with the fuzzer and the on-demand check; `clippy`, the runtime oracle and the torch oracle run
+# beside it (the oracles on its binary).
 name: CI
 
 on:
@@ -7,11 +9,6 @@ on:
     branches: [main, rust-port]
   pull_request:
   workflow_dispatch:
-    inputs:
-      torch:
-        description: "Also run the PyTorch oracle (large download)"
-        type: boolean
-        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -66,6 +63,32 @@ jobs:
       - name: Snapshots
         run: uv run --no-project python tests/run_snapshots.py
 
+      - name: Fuzzer, fixed seed (random programs vs CPython, also at budget=0)
+        run: uv run --no-project python tests/fuzz.py -n 50 --seed 1 --shrink --out fuzz-fixed
+
+      - name: Fuzzer, a new seed per run (informational)
+        id: fuzz-rotating
+        # different programs each run; a failure here is a real unsoundness, but one the change
+        # under test may not have caused, so it reports without failing the job. Repro:
+        # `tests/fuzz.py -n 50 --seed <the printed seed> --shrink`
+        continue-on-error: true
+        run: |
+          seed=$(( ${{ github.run_number }} * 1000 + ${{ github.run_attempt }} ))
+          echo "fuzz seed: $seed"
+          uv run --no-project python tests/fuzz.py -n 50 --seed "$seed" --shrink --out fuzz-rotating \
+            || { echo "::warning title=fuzz::unsound programs at seed $seed (tests/fuzz.py -n 50 --seed $seed --shrink)"; exit 1; }
+
+      - name: Fuzzer failures
+        if: failure() || steps.fuzz-rotating.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.os }}
+          path: fuzz-*/
+          retention-days: 7
+
+      - name: On demand vs the whole program (golden cases)
+        run: uv run --no-project python tests/ondemand_check.py -j 4
+
       - name: Extension hover rendering
         working-directory: vscode-rowan
         run: node test.js
@@ -76,6 +99,26 @@ jobs:
           name: ${{ matrix.os == 'ubuntu-latest' && 'rowan-linux' || 'rowan-macos' }}
           path: rowan/target/release/rowan
           retention-days: 7
+
+  clippy:
+    # correctness lints only (deny): the other groups are style, left to the owner
+    name: clippy (correctness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rowan
+          key: clippy
+
+      - name: cargo clippy
+        working-directory: rowan
+        run: cargo clippy --release --locked --all-targets -- -D clippy::correctness
 
   vsix:
     # The platform-specific .vsix as a user installs it (v0.1.8 shipped a Linux engine to
@@ -161,9 +204,8 @@ jobs:
   torch-oracle:
     name: torch oracle
     needs: test
-    if: github.event_name == 'workflow_dispatch' && inputs.torch
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 

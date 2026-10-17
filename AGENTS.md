@@ -146,12 +146,12 @@ uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case
 uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0; -n 50: ~5 s
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
-uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py: vs whole runs; bench/first_hover.py (same arguments, rich): rowan serve's first hover in a file
+uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py [-j N]: vs whole runs; bench/first_hover.py (same arguments, rich): rowan serve's first hover in a file
 uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/)
 ```
 
-Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`) runs the above but
-torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a packed .vsix per native target.
+Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`, every push and PR): build, `cargo test`, golden (`--pending` informational), snapshots,
+`fuzz.py -n 50` (seed 1; a per-run seed informational), `ondemand_check.py -j 4`, `node test.js` (Linux, macOS); `cargo clippy -- -D clippy::correctness`; both oracles; a packed .vsix per native target. `bench.yml` (not blocking): `run.py` on all eight, `hovers.py` / `first_hover.py` on rich and pip, `sitepackages.py` (no `--uncapped`), the `budget=0` golden count; on main into `history.py`'s charts.
 
 ## Tests
 
