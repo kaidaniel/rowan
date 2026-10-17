@@ -51,6 +51,18 @@ def functions(path: Path, n: int) -> list[tuple[str, int]]:
     return out
 
 
+def reply(p: subprocess.Popen, rid: int) -> dict:
+    """The server's answer to request `rid`; events (`{"event":"analysed",…}`, the whole
+    program's document after an on-demand answer) may come before it and are skipped."""
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            return {"ok": False, "error": "the server exited"}
+        r = json.loads(line)
+        if r.get("id") == rid:
+            return r
+
+
 def pct(xs: list[float], p: float) -> float:
     xs = sorted(xs)
     return xs[min(len(xs) - 1, int(round(p * (len(xs) - 1))))] if xs else 0.0
@@ -83,7 +95,7 @@ def main() -> None:
             for again in (False, True):
                 p.stdin.write(json.dumps({"id": i, "cmd": "hover", "path": str(f), "line": line}) + "\n")
                 p.stdin.flush()
-                r = json.loads(p.stdout.readline())
+                r = reply(p, i)
                 if not r.get("ok"):
                     mod["hovers"].append({"function": qn, "line": line, "error": r.get("error")})
                     break

@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from serve_hovers import functions, pct
+from serve_hovers import functions, pct, reply
 
 HERE = Path(__file__).resolve().parent
 GUARD = HERE.parent / ".guard" / "run"
@@ -60,7 +60,7 @@ def main() -> None:
         t0 = time.monotonic()
         p.stdin.write(json.dumps({"id": 1, "cmd": "analyse", "path": str(f)}) + "\n")
         p.stdin.flush()
-        r = json.loads(p.stdout.readline())
+        r = reply(p, 1)
         analyse_ms = (time.monotonic() - t0) * 1000
         demand = bool(r.get("ok") and r["result"].get("on_demand"))
         hover_ms = 0.0
@@ -68,7 +68,7 @@ def main() -> None:
             t1 = time.monotonic()
             p.stdin.write(json.dumps({"id": 2, "cmd": "hover", "path": str(f), "line": line}) + "\n")
             p.stdin.flush()
-            h = json.loads(p.stdout.readline())
+            h = reply(p, 2)
             hover_ms = (time.monotonic() - t1) * 1000
             if not h.get("ok"):
                 hover_ms = -1
