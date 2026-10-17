@@ -283,6 +283,10 @@ impl Analyzer {
         if matches!(cls.tier, Tier::Map) || self.findings.quiet || self.findings.quiet_records {
             return;
         }
+        // (a followed library's own accesses are not the program's findings)
+        if self.budget.lib_entry.is_some() && self.heap.module_info(self.frame().module).library {
+            return;
+        }
         let weakened;
         let cls = match self.cx.picked.last() {
             _ if cls.tier != Tier::Missing => cls,

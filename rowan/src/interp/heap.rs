@@ -236,6 +236,9 @@ pub struct ModuleInfo {
     pub idx: u32,
     pub tree: &'static ast::ModModule,
     pub scopes: Scopes,
+    /// read from a site-packages directory (a followed installed package): its code runs within the
+    /// library allowance (`library.rs`)
+    pub library: bool,
 }
 
 /// What an Enum class's bases make of its members (`models::enums`).

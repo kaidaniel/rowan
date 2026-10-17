@@ -555,6 +555,12 @@ def child_main(argv: List[str]) -> None:
             except OSError:
                 pass
     sys.path.insert(0, os.path.dirname(path))
+    # (`#@argv --site-packages DIR`: the case's installed packages are importable, after its own)
+    m = re.search(r"^#@argv\s+(.*)$", open(path).read(), re.M)
+    words = m.group(1).split() if m else []
+    for i, w in enumerate(words[:-1]):
+        if w == "--site-packages":
+            sys.path.append(os.path.join(os.path.dirname(path), words[i + 1]))
     if "--drop" in argv or "--columns" in argv:
         flag = "--drop" if "--drop" in argv else "--columns"
         i = argv.index(flag)

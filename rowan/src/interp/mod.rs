@@ -40,6 +40,7 @@ pub mod guards;
 pub mod items;
 pub mod iter;
 pub mod keys;
+pub mod library;
 pub mod loops;
 pub mod narrow;
 pub mod ops;
@@ -215,6 +216,11 @@ impl Analyzer {
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
     /// (its calls are unknown calls). Checked at every statement.
     pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
+        // (an entry into a followed library past its allowance: everything stops, it is undone)
+        if self.budget.lib_abort {
+            state.reachable = false;
+            return true;
+        }
         if !self.budget.tick() {
             return false;
         }

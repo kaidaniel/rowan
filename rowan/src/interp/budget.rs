@@ -12,6 +12,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{limit, DEADLINE_MS, FN_BUDGET};
 use crate::domain::ObjId;
 
+/// The work one entry of the program's code into a followed library may do, in quarter budgets.
+const LIB_ENTRY: usize = 16;
+/// The work all of them may do, in quarter budgets.
+const LIB_TOTAL: usize = 64;
+
 /// When the analysis started (the deadline counts from it).
 #[derive(Clone, Copy)]
 pub struct Clock(std::time::Instant);
@@ -59,6 +64,14 @@ pub struct Budget {
     /// calls run no body (`skips_calls`): the main module's `if __name__ == "__main__":` block
     /// while the module code is set up for runs on demand (`Analyzer::main_block_unrun`)
     pub skip_calls: bool,
+    /// the program's code entered a followed library's (`--follow`): the work done then
+    pub lib_entry: Option<usize>,
+    /// the work done in followed libraries' code, entries that ended
+    pub lib_work: usize,
+    /// the running entry is past its allowance: bodies stop, it is undone (`library_entry`)
+    pub lib_abort: bool,
+    /// entries into followed libraries: run, undone, refused (the `ROWAN_DEBUG` `loaded:` line)
+    pub lib_counts: [usize; 3],
 }
 
 impl Budget {
@@ -123,6 +136,7 @@ impl Budget {
         self.started = Clock::default();
         self.hard_cut = false;
         self.hover_cut.set(false);
+        self.lib_work = 0;
     }
 
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
@@ -138,6 +152,20 @@ impl Budget {
     /// The work a function's run on demand may do before its callees' calls are unknown.
     pub fn hover_work_limit() -> usize {
         4 * limit("budget", FN_BUDGET)
+    }
+
+    /// A followed library's code is called within an entry, with the work done so far `work`:
+    /// past the work one entry may do (`LIB_ENTRY`), the entry stops (`lib_abort`).
+    pub fn library_over(&mut self, work: usize) -> bool {
+        let b = limit("budget", FN_BUDGET);
+        self.lib_abort |= self.lib_entry.is_some_and(|w0| work - w0 > limit("lib", LIB_ENTRY) * b / 4);
+        self.lib_abort
+    }
+
+    /// May the program's code enter a followed library's code again, with all entries so far
+    /// within `LIB_TOTAL`?
+    pub fn library_open(&self) -> bool {
+        self.lib_work <= limit("libtotal", LIB_TOTAL) * limit("budget", FN_BUDGET) / 4
     }
 
     /// Has the deadline cut the analysis? Checked at every statement (`cut_body`): one statement

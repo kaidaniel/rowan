@@ -137,7 +137,8 @@ fn site_packages_for(file: &str, given: &[String]) -> Vec<String> {
     if let Ok(v) = std::env::var("VIRTUAL_ENV") {
         candidates.push(std::path::PathBuf::from(v));
     }
-    let mut dir = std::path::Path::new(file).parent().map(|p| p.to_path_buf());
+    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
+    let mut dir = abs.parent().map(|p| p.to_path_buf());
     for _ in 0..10 {
         let Some(d) = dir.clone() else { break };
         candidates.push(d.join(".venv"));
@@ -251,6 +252,9 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     let deps = deps_of(&an, file);
     if std::env::var("ROWAN_DEBUG").is_ok() {
         eprintln!("{}", an.work_line());
+        let [m, l, sm, sl] = rowan::frontend::loaded_counts();
+        eprintln!("loaded: {} modules, {} lines (site-packages: {} modules, {} lines), parsing {} ms", m, l, sm, sl, rowan::frontend::parse_time().as_millis());
+        eprintln!("library entries (run, undone, refused): {:?}, work {}", an.library_counts().0, an.library_counts().1);
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));

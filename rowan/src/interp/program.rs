@@ -41,6 +41,9 @@ pub struct Program {
     pub models: Registry,
     /// the modules imported so far, by name
     pub modules: IndexMap<String, ObjId>,
+    /// the modules loaded from files, by the file's canonical path (a file imported under
+    /// another name is the same module)
+    by_file: FxHashMap<String, ObjId>,
     /// names imported under `if TYPE_CHECKING:` (module, name) -> (module imported, name in it)
     pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
     /// the classes the program defines, in definition order
@@ -52,6 +55,35 @@ pub struct Program {
 impl Program {
     pub fn new(filename: &str, main_idx: u32, search_paths: Vec<String>, analyse_entry_points: bool) -> Program {
         Program { filename: filename.to_string(), main_idx, search_paths, analyse_entry_points, ..Default::default() }
+    }
+
+    /// Is the installed package `top` followed into site-packages (on the allowlist, not
+    /// modelled: the model knows more than its source would yield)?
+    pub fn followed(&self, top: &str) -> bool {
+        self.follow.iter().any(|f| f == top || f == "*") && !crate::models::has_module_models(top)
+    }
+
+    /// Is top-level module `top` (not imported yet) a followed library's, read from
+    /// site-packages (not the program's own)?
+    pub fn from_site(&self, top: &str) -> bool {
+        if !self.followed(top) {
+            return false;
+        }
+        let local = |b: &String| {
+            let d = std::path::Path::new(b);
+            d.join(top).is_dir() || d.join(format!("{}.py", top)).exists()
+        };
+        !self.search_paths.iter().any(local) && self.site_paths.iter().any(|b| {
+            let d = std::path::Path::new(b);
+            d.join(top).is_dir() || d.join(format!("{}.py", top)).exists()
+        })
+    }
+
+    /// Forget the modules imported after the first `n` (an entry into a library undone).
+    pub fn forget_modules_since(&mut self, n: usize) {
+        self.modules.truncate(n);
+        let kept: rustc_hash::FxHashSet<ObjId> = self.modules.values().copied().collect();
+        self.by_file.retain(|_, m| kept.contains(m));
     }
 
     /// The path of module `idx` relative to the main file's directory ("" for the main
@@ -86,12 +118,14 @@ impl Program {
 }
 
 impl Analyzer {
-    /// A module of the program itself: the main file's directory or below.
+    /// A module of the program itself: the main file's directory or below, not a followed
+    /// library's.
     pub fn is_local_module(&self, m: ObjId) -> bool {
         if m == self.program.main_module {
             return true;
         }
-        self.program.is_local_idx(self.heap.module_info(m).idx)
+        let info = self.heap.module_info(m);
+        !info.library && self.program.is_local_idx(info.idx)
     }
 
     /// The path of the running module relative to the main file's directory ("" for the main
@@ -114,9 +148,12 @@ impl Analyzer {
             Some(p) if p.ends_with("__init__.py") || std::path::Path::new(p).is_dir() => name.to_string(),
             _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
         };
-        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree) };
+        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree), library: path.is_some_and(|p| self.program.site_paths.iter().any(|s| p.starts_with(s.as_str()))) };
         let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
         self.program.modules.insert(name.to_string(), oid);
+        if let Some(real) = path.and_then(|p| std::fs::canonicalize(p).ok()) {
+            self.program.by_file.entry(real.to_string_lossy().to_string()).or_insert(oid);
+        }
         oid
     }
 
@@ -204,6 +241,15 @@ impl Analyzer {
         if let Some(&m) = self.program.modules.get(name) {
             return Value::obj(m);
         }
+        // (a followed library imported by the program's code: one entry into it)
+        let top = name.split('.').next().unwrap_or(name);
+        let library = match self.program.modules.get(top) {
+            Some(&m) => self.heap.module_info(m).library,
+            None => self.program.from_site(top),
+        };
+        if library && self.budget.lib_entry.is_none() {
+            return self.import_library(name, node, state);
+        }
         if let Some((parent, leaf)) = name.rsplit_once('.') {
             let pv = self.import_module(parent, node, state);
             let mut found: Option<Value> = None;
@@ -241,8 +287,7 @@ impl Analyzer {
             }
             // an installed package on the allowlist is analysed from site-packages, unless a
             // model covers it (the model knows more than its source would yield)
-            let followed = self.program.follow.iter().any(|f| f == name || f == "*");
-            if followed && !crate::models::has_module_models(name) {
+            if self.program.followed(name) {
                 for base in self.program.site_paths.clone() {
                     let dir = std::path::PathBuf::from(&base);
                     if let Some(v) = self.load_module_file(name, &dir, name, state) {
@@ -252,6 +297,12 @@ impl Analyzer {
             }
         }
         let _ = node;
+        self.external_module(name)
+    }
+
+    /// A module rowan does not read: an external object (torch and numpy turn the shape
+    /// model on).
+    pub(super) fn external_module(&mut self, name: &str) -> Value {
         if name == "torch" || name.starts_with("torch.") {
             self.m.torch_on = true;
             self.m.torch_real = true;
@@ -277,15 +328,9 @@ impl Analyzer {
                 continue;
             }
             let real = std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
-            for (_, &moid) in self.program.modules.clone().iter() {
-                let mi = self.heap.module_info(moid);
-                if let Some(mp) = &mi.path {
-                    let mreal = std::fs::canonicalize(mp).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| mp.clone());
-                    if mreal == real {
-                        self.program.modules.insert(name.to_string(), moid);
-                        return Some(Value::obj(moid));
-                    }
-                }
+            if let Some(&moid) = self.program.by_file.get(&real) {
+                self.program.modules.insert(name.to_string(), moid);
+                return Some(Value::obj(moid));
             }
             let src = match std::fs::read_to_string(p) {
                 Ok(s) => s,
