@@ -69,6 +69,50 @@ pub enum Level {
     Own,
     /// something it holds (its items, its attributes' values)
     Held,
+    /// what it holds under one literal key (`d["k"]`)
+    Part(KeyId),
+    /// a new container of what it holds (`dict(d)`, `list(xs)`, `sorted(xs)`): a change to
+    /// the container itself is none of its own
+    Copy,
+}
+
+/// Which of its parts a value's `Flags::held` concerns: all, or those under a few literal keys.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Parts {
+    #[default]
+    All,
+    Keys([KeyId; 3], u8),
+}
+
+impl Parts {
+    /// The parts under key `k`.
+    pub fn key(k: KeyId) -> Parts {
+        Parts::Keys([k; 3], 1)
+    }
+
+    pub fn join(self, o: Parts) -> Parts {
+        match (self, o) {
+            (Parts::Keys(a, n), Parts::Keys(b, m)) => {
+                let mut ks: Vec<KeyId> = a[..n as usize].to_vec();
+                ks.extend(b[..m as usize].iter().filter(|k| !a[..n as usize].contains(k)));
+                if ks.len() > 3 {
+                    return Parts::All;
+                }
+                let mut out = [ks[0]; 3];
+                out[..ks.len()].copy_from_slice(&ks);
+                Parts::Keys(out, ks.len() as u8)
+            }
+            _ => Parts::All,
+        }
+    }
+
+    /// The keys, None for all.
+    pub fn keys(&self) -> Option<&[KeyId]> {
+        match self {
+            Parts::Keys(a, n) => Some(&a[..*n as usize]),
+            Parts::All => None,
+        }
+    }
 }
 
 /// Where a value comes from: an origin, and whether it is that value or something it holds.
@@ -101,8 +145,9 @@ pub struct Pass {
 pub struct Flags {
     /// it may change or be kept by code rowan does not follow (see the module comment)
     pub changes: bool,
-    /// what it holds may
+    /// what it holds may (`parts`: those under these keys only)
     pub held: bool,
+    pub parts: Parts,
     /// what its parts hold may (a part of it given to code that changes what that holds)
     pub held2: bool,
     /// it is iterated: what it holds is used, and an iterator advances
@@ -174,19 +219,34 @@ impl Removes {
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, kept: false, methods: false, rebinds: false, edits: false, removes: Removes::No };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, parts: Parts::All, held2: false, iterated: false, called: false, kept: false, methods: false, rebinds: false, edits: false, removes: Removes::No };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
         match level {
             Level::Own => Flags { rebinds: false, ..*self },
             Level::Held => Flags { held: self.changes || self.kept || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
+            Level::Part(k) => Flags { parts: Parts::key(k), ..self.lift(Level::Held) },
+            // (the container itself is new: only what it holds is the source's — given away
+            // whole, all of that; else the parts its own `held` concerns)
+            Level::Copy => {
+                let whole = self.changes || self.kept || self.methods || self.called;
+                Flags { held: whole || self.held, parts: if whole { Parts::All } else { self.parts }, held2: self.held2, ..Flags::default() }
+            }
         }
+    }
+
+    /// What it holds may change: those parts (`parts`) among them.
+    pub fn hold(&mut self, parts: Parts) {
+        self.parts = if self.held { self.parts.join(parts) } else { parts };
+        self.held = true;
     }
 
     pub fn join(&mut self, o: &Flags) {
         self.changes |= o.changes;
-        self.held |= o.held;
+        if o.held {
+            self.hold(o.parts);
+        }
         self.held2 |= o.held2;
         self.iterated |= o.iterated;
         self.called |= o.called;
@@ -686,7 +746,14 @@ impl<'a> Flow<'a> {
                     out
                 }
             },
-            Expr::Subscript(x) => held(self.srcs(&x.value)),
+            // (under a literal key: that part)
+            Expr::Subscript(x) => match &*x.slice {
+                Expr::StringLiteral(l) => {
+                    let k = crate::intern::key_str_lit(l.value.to_str());
+                    self.srcs(&x.value).into_iter().map(|(o, l)| (o, if matches!(l, Level::Own | Level::Copy) { Level::Part(k) } else { Level::Held })).collect()
+                }
+                _ => held(self.srcs(&x.value)),
+            },
             Expr::If(x) => [self.srcs(&x.body), self.srcs(&x.orelse)].concat(),
             Expr::BoolOp(b) => b.values.iter().flat_map(|v| self.srcs(v)).collect(),
             Expr::Named(n) => self.srcs(&n.value),
@@ -726,6 +793,12 @@ impl<'a> Flow<'a> {
                         // (a container made from an iterable — `dict(m)`, `list(xs)`, `sorted(xs)` — holds
                         // what it holds, as does an item of it — `min(xs)`; an iterator over it may be
                         // it — `iter(it)` — or advance it)
+                        // (a new container: of what it was given, `Copy`)
+                        "list" | "tuple" | "set" | "frozenset" | "dict" | "sorted" if c.arguments.keywords.iter().all(|k| k.arg.is_some()) && c.arguments.args.len() <= 1 => {
+                            let mut out: Vec<Src> = c.arguments.args.iter().flat_map(|x| self.srcs(x)).map(|(o, l)| (o, if matches!(l, Level::Own | Level::Copy) { Level::Copy } else { Level::Held })).collect();
+                            out.extend(held(c.arguments.keywords.iter().flat_map(|k| self.srcs(&k.value)).collect()));
+                            out
+                        }
                         f if PASSING_BUILTINS.contains(&f) && !matches!(f, "iter" | "reversed" | "enumerate" | "zip") => held(args().flat_map(|x| self.srcs(x)).collect()),
                         f if PASSING_BUILTINS.contains(&f) || matches!(f, "abs" | "round") => args().flat_map(|x| self.srcs(x)).collect(),
                         f => vec![(Origin::Result(s(f), None), Level::Own)],
@@ -747,7 +820,10 @@ impl<'a> Flow<'a> {
             let f = self.flags.entry(*o).or_default();
             match (pos, l) {
                 (Pos::Read | Pos::Bind, _) => {}
-                (_, Level::Held) => f.held = true,
+                // (a copy changed in place, iterated: not its source)
+                (Pos::Edit | Pos::Remove(_) | Pos::Iterate, Level::Copy) => {}
+                (_, Level::Held | Level::Copy) => f.hold(Parts::All),
+                (_, Level::Part(k)) => f.hold(Parts::key(*k)),
                 (Pos::Change, Level::Own) => f.changes = true,
                 (Pos::Iterate, Level::Own) => f.iterated = true,
                 (Pos::Call, Level::Own) => f.called = true,
@@ -1149,7 +1225,7 @@ impl<'a> Flow<'a> {
                     self.name(n, Some(a));
                     self.flags.entry(Origin::NameAttr(n, a)).or_default().rebinds = true;
                 }
-                (Origin::Name(n), Level::Held) => {
+                (Origin::Name(n), Level::Held | Level::Part(_) | Level::Copy) => {
                     self.name(n, None);
                     self.out.class_stores_in.push((n, a));
                 }

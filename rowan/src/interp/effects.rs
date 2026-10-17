@@ -1259,10 +1259,10 @@ impl Analyzer {
                     };
                     // (what an object other than a container holds: a module's, an instance's
                     // attribute by a computed name)
-                    if *l == Level::Held && v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set)) {
+                    if *l != Level::Own && v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set)) {
                         return true;
                     }
-                    self.classes_within(&v, state, if *l == Level::Held { 2 } else { 0 }, out);
+                    self.classes_within(&v, state, if *l != Level::Own { 2 } else { 0 }, out);
                 }
                 Origin::Result(n, a) if depth > 0 => {
                     if self.result_classes(&gi, &gu, (*n, *a), state, depth - 1, out) {
@@ -1441,8 +1441,14 @@ impl Analyzer {
     fn apply_flags(&self, f: &Flags, loc: Loc, state: &State, out: &mut Closure) {
         let v = state.slot(loc.0, loc.1, loc.2);
         let (own, held) = self.flag_effect(f, &v, state);
+        // (what it holds under a few literal keys only, where those are its dicts' slots: they)
+        let parts: Option<Vec<Loc>> = f.parts.keys().filter(|_| held && !(f.iterated && !f.held)).and_then(|ks| {
+            v.pts.iter().flat_map(|d| ks.iter().map(move |k| (d, *k))).map(|(d, k)| (self.heap.kind(d) == Kind::Dict && state.has_slot(d, Ns::Item, k)).then_some((d, Ns::Item, k))).collect()
+        }).filter(|_| v.kv.is_bot() && !v.pts.is_empty());
         if own {
             out.locs.push(loc);
+        } else if let Some(ps) = parts {
+            out.locs.extend(ps);
         } else if held {
             out.held_locs.push(loc);
         } else if f.held2 {
