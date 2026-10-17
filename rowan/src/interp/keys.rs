@@ -331,8 +331,9 @@ impl Analyzer {
         let mut out = KeySet::new();
         for oid in v.pts.iter() {
             match self.heap.kind(oid) {
+                // (items that are objects too — an unknown, which may be any key — are not all literals)
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
-                    Some(kv) if kv.is_literal() => out = out.union(&kv_literals(&kv)),
+                    Some(kv) if kv.is_literal() && state.slot_opt(oid, Ns::Elem, crate::intern::STAR).is_none_or(|e| e.pts.is_empty()) => out = out.union(&kv_literals(&kv)),
                     _ => {
                         return None;
                     }

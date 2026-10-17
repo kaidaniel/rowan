@@ -980,7 +980,8 @@ impl Analyzer {
             return;
         }
         // (a key that may be an object — an unknown call's result beside a literal — is a key
-        // not known: its literal part is no strong store)
+        // not known, its literals possible keys: no strong store)
+        let beside = if key.pts.is_empty() { None } else { Some(self.keyify_in(key, state)).filter(|k| !k.pts.is_empty() && k.kv.is_literal()).map(|k| self.canon_kv(oid, ns, &k.kv, state)) };
         let kv = &self.canon_kv(oid, ns, &self.opaque_key(key, state).kv, state);
         let row = state.row(oid, ns);
         match kv {
@@ -1028,6 +1029,13 @@ impl Analyzer {
                 for k in keys {
                     state.set_slot(oid, ns, k, v.clone(), false);
                 }
+            }
+        }
+        if let Some(ks) = beside {
+            let ks = kv_literals(&ks);
+            state.set_row(oid, ns, state.row(oid, ns).store_many(&ks));
+            for k in ks.iter() {
+                weak_store(state, oid, ns, k, v);
             }
         }
     }

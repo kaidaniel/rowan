@@ -72,7 +72,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
     sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
-    (`"a" if c else [1]`) run on each part (`split_mixed`); `"%s" % obj` runs `__str__` (`%r`: `__repr__`); None beside them raises where Python rejects it (operators with literals or builtin containers, calls, subscripts, attributes, `len`).
+    (`"a" if c else [1]`) run on each part (`split_mixed`); beside an unknown object, which may be them, a model gets no literals, and a key, a position, a `del` or an `==` test none (`opaque_key`); `"%s" % obj` runs `__str__` (`%r`: `__repr__`); None beside them raises where Python rejects it (operators with literals or builtin containers, calls, subscripts, attributes, `len`).
   * **Entry points, general runs:** functions the main run does not call (also those only entry
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
@@ -95,7 +95,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`): `proven`, `possibly`,
   `missing`, `input` are sound; `likely` / `likely-missing` optimistic (unknown code removed nothing). In one of
-  several functions a value picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
+  several functions a value picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`. A `map` (a key of a record filled under keys not known: what its `*` slot holds, also where a path stored the key) is not reported alone; beside other objects it may fail.
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that see the `Heap`, their
   `models::Tables` and the interpreter's public methods) compute CPython's result on known values (str / bytes, formatting,
   json, re, datetime, decimal, sqlite, csv, files: `open()` reads str / bytes, a path of unknown text, a Counter's counts…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
@@ -160,7 +160,7 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 11 areas (lists, dicts, attributes, try, generators, formatting, calls…); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro).
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 11 areas (lists, dicts, attributes, try, generators, formatting, calls…; positions, keys and names also beside an unknown object: `lx`, `kx`, `ax`); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro).
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
