@@ -397,7 +397,7 @@ impl Analyzer {
             }
             Kind::Partial => {
                 let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-                crate::models::partial_call(self, state, &call)
+                crate::models::stdlib::partial_call(self, state, &call)
             }
             Kind::Instance => {
                 if let Some(cls) = self.heap.instance_class(oid) {
@@ -452,7 +452,7 @@ impl Analyzer {
         };
         // (a str method of a str: what it returns is known by the method)
         let r = match self.value_type(&recv) {
-            Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::str_method_type(&qual, t), false),
+            Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::builtins::str_method_type(&qual, t), false),
             _ => r,
         };
         if call_ast.is_some() {
@@ -472,7 +472,7 @@ impl Analyzer {
         let qual = qual.to_string();
         let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
         if let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) {
-            return self.as_type(v, crate::models::result_type(self, &qual, args), false);
+            return self.as_type(v, crate::models::builtins::result_type(self, &qual, args), false);
         }
         // a builtin exception class: an exception object with its args
         if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
@@ -492,7 +492,7 @@ impl Analyzer {
         }
         if let Some(m) = self.program.models.lookup(&qual) {
             let r = self.run_model(m, state, &call);
-            return self.as_type(r, crate::models::result_type(self, &qual, args), false);
+            return self.as_type(r, crate::models::builtins::result_type(self, &qual, args), false);
         }
         let r = self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node);
         // (`input()`: a str all the same)

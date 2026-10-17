@@ -67,7 +67,7 @@ impl Analyzer {
         if ordering {
             // library values (paths, Decimal, datetime); instances: their comparison methods
             // (`__lt__`, reflected, @total_ordering); tuples item by item
-            if let Some(r) = crate::models::library_compare(self, op, a, b) {
+            if let Some(r) = crate::models::builtins::library_compare(self, op, a, b) {
                 return r;
             }
             if let Some(r) = self.rich_compare(op, a, b, nd, state) {

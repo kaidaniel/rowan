@@ -249,7 +249,7 @@ impl Analyzer {
                     let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
                     if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
                         if let Some(name) = intern::key_as_str(k) {
-                            if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
+                            if rec.pts.iter().all(|o| crate::models::builtins::builtin_has_attr(self, o, &name) == Some(!truth)) {
                                 state.reachable = false;
                             }
                         }
@@ -546,7 +546,7 @@ impl Analyzer {
             // (a Protocol: an instance whose class defines all its members is one; one of a
             // closed hierarchy without `__getattr__` that surely lacks a member is not; anything
             // else may have them as attributes)
-            if let Some(ms) = crate::models::protocol_members(self, cls) {
+            if let Some(ms) = crate::models::builtins::protocol_members(self, cls) {
                 let ic = self.heap.instance_class(o).filter(|_| k == Kind::Instance)?;
                 if ms.iter().all(|m| self.class_lookup(ic, m).is_some()) {
                     return Some(true);

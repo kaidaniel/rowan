@@ -158,8 +158,8 @@ impl Analyzer {
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, report && guarded, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.heap.class_info_opt(oid).is_some() => {
-                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
-                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                    let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Class if crate::models::record_class_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
@@ -178,8 +178,8 @@ impl Analyzer {
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.heap.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
                 Kind::Function if name == "__annotations__" && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
-                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
-                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                    let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
                 // a singledispatch function's register
@@ -208,7 +208,7 @@ impl Analyzer {
         self.end_wide_read(saved_wide, state);
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
-            return crate::models::scalar_attr(self, obj, name, report, state);
+            return crate::models::builtins::scalar_attr(self, obj, name, report, state);
         }
         acc.join(&self.mixed_literals_attr(obj, name, state))
     }
@@ -219,7 +219,7 @@ impl Analyzer {
             return Value::new();
         }
         let lits = Value::kv_only(crate::domain::kv_exclude(&obj.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT));
-        crate::models::scalar_attr(self, &lits, name, false, state)
+        crate::models::builtins::scalar_attr(self, &lits, name, false, state)
     }
 
     /// A deque's `maxlen` and methods.
@@ -305,7 +305,7 @@ impl Analyzer {
             return Value::obj(o);
         }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
-        if let Some(v) = crate::models::generated_class(self, state, &q) {
+        if let Some(v) = crate::models::stdlib::generated_class(self, state, &q) {
             return v;
         }
         if let Some(v) = crate::models::external_constant(self, &q) {
