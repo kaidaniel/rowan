@@ -1,7 +1,6 @@
 //! Operators and text: `a op b` and `op a` on known values (CPython-exact on literals), the
 //! program's operator dunders, f-strings and `%` formatting.
 
-use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use crate::domain::{kv_join, KeyVal, Ns, ObjSet, Value, DATA};
@@ -10,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
 use crate::source::{FnKind, RenameFn};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, Payload};
+use super::{Analyzer, Args, Payload};
 
 /// A part of an f-string: literal text, a hole of known value, or a hole whose text is not
 /// known.
@@ -508,7 +507,7 @@ impl Analyzer {
         };
         let mut outs = Vec::new();
         for (o, f) in calls {
-            outs.push(self.call_user(f, Some(Value::obj(o)), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, false));
+            outs.push(self.call_user(f, Some(Value::obj(o)), Args::pos(&[other.clone()]), state, node, false));
         }
         Some(crate::domain::join_values(outs))
     }

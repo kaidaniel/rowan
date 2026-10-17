@@ -10,6 +10,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, StrId};
 use crate::interp::{Analyzer, Call, Payload};
 use crate::state::{Kind, State};
+use crate::interp::Args;
 
 fn obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, ctx: &str) -> ObjId {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.into(), Value::new()), Some(Row::new()), Ns::Attr, None, Some(ctx));
@@ -38,7 +39,7 @@ pub fn call_catching(an: &mut Analyzer, f: &Value, args: Vec<Value>, kwargs: Ind
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
             let v = match an.heap.kind(fo) {
-                Kind::Function => an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, false),
+                Kind::Function => an.call_user(fo, None, Args::new(&args, &kwargs, &[], &[]), state, node, false),
                 _ => an.call_value(&Value::obj(fo), node, None, state, Some(args.clone())),
             };
             outs.push(v);

@@ -4,10 +4,9 @@
 //! any length; the program's functions among it may run (`follow_code`). Calls of the
 //! program's code past their budget are unknown calls too (`skipped_call`, `effects.rs`).
 
-use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, Heap, Payload, NOEFFECT_METHOD_NAMES};
+use super::{Analyzer, Args, Heap, NOEFFECT_METHOD_NAMES, Payload};
 use crate::domain::{join_rows, KeyVal, Ns, ObjId, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, s, KeyId, KeySet, StrId};
@@ -223,7 +222,8 @@ impl Analyzer {
     /// raise; what it is given, and everything that reaches, may change (`havoc_reachable`); the
     /// program's functions it is given may run (`follow_code`); it returns an unknown named by
     /// the call, which may be one of the known objects it was given.
-    pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+    pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise
         // recursion over unknown values makes new objects without end)

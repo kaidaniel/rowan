@@ -869,7 +869,7 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     if obj.pts.iter().any(|o| an.heap.kind(o) == Kind::External) {
         let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.heap.kind(o) == Kind::External), crate::domain::BOT)];
-        v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));
+        v = v.join(&an.unknown_call(&c.qual, None, Args::pos(&lib), st, &c.node));
     }
     for x in lit.iter().chain(c.args.get(2)) {
         v = v.join(x);
@@ -941,7 +941,7 @@ pub(super) fn m_shuffle(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let xs = c.args.first().cloned().unwrap_or_default();
     let lists: Vec<(ObjId, usize)> = xs.pts.iter().filter_map(|o| (an.heap.kind(o) == Kind::List && !an.heap.obj(o).iterator).then(|| an.heap.llen(o, st).map(|n| (o, n))).flatten()).collect();
     if c.args.len() != 1 || xs.pts.is_empty() || !xs.kv.is_bot() || lists.len() != xs.pts.len() {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     for (o, n) in lists {
         let all = join_values((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect::<Vec<_>>());
@@ -970,7 +970,7 @@ pub(super) fn m_reprlib_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Val
         an.obj_edges(o, st, &mut work);
     }
     if own_code {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     Value::data(&format!("L{}", c.line))
 }
@@ -983,7 +983,7 @@ pub(super) fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
             an.store_item(d, Ns::Item, k, v, &c.node, st);
             an.none_v.clone()
         }
-        _ => an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+        _ => an.unknown_call(&c.qual, None, c.arguments(), st, &c.node),
     }
 }
 
@@ -999,7 +999,7 @@ pub(super) fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
     if c.args.len() == 1 && c.kwargs.is_empty() && c.star_args.is_empty() && c.star_kwargs.is_empty() {
         return an.none_v.clone();
     }
-    an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+    an.unknown_call(&c.qual, None, c.arguments(), st, &c.node)
 }
 
 /// `object.__new__(cls)`: a fresh instance of each user class `cls` may be, without attributes
@@ -1022,7 +1022,7 @@ pub(super) fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         }
     }
     if other {
-        out = out.join(&an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node));
+        out = out.join(&an.unknown_call(&c.qual, None, c.arguments(), st, &c.node));
     }
     out
 }
@@ -1442,7 +1442,7 @@ pub(super) fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return out;
         }
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     if c.args.len() == 1 {
         let a = &c.args[0];

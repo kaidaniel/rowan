@@ -316,7 +316,7 @@ pub(super) fn m_dcopy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 pub(super) fn m_unknown_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+    an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node)
 }
 
 /// `lst.append(x)` / `lst.extend(known items)` on a list whose length is one of a few: the
@@ -758,7 +758,7 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                 "__iand__" if kind(Kind::Set) => "set.intersection_update",
                 "__isub__" if kind(Kind::Set) => "set.difference_update",
                 "__ixor__" if kind(Kind::Set) => "set.symmetric_difference_update",
-                _ => return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+                _ => return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
             };
             let mv = an.method_value(m, &recv);
             an.call_value(&mv, &c.node, None, st, Some(c.args.clone()));
@@ -766,7 +766,7 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         }
         // (any other method of a list or set, called by name, may change it: unknown code,
         // unless it only reads)
-        _ if !LIST_READERS.contains(&name) && recv.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Set)) => an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+        _ if !LIST_READERS.contains(&name) && recv.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Set)) => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
         _ => Value::data(&format!("L{}", c.line)),
     }
 }
@@ -808,7 +808,7 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return out;
         }
         if name != "update" {
-            return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+            return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
         }
         let strong = attrs_of.len() == 1 && an.heap.obj(attrs_of[0]).single;
         for oid in attrs_of {

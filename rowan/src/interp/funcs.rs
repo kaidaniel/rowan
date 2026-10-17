@@ -16,7 +16,7 @@ use crate::source::SourceKind;
 use crate::state::{Kind, State};
 
 use super::iter::Elem;
-use super::{is_builtin_name, Analyzer, FrameKind, FuncInfo, FuncNode, Payload, KNOWN_IDENTITY_DECORATORS};
+use super::{Analyzer, Args, FrameKind, FuncInfo, FuncNode, KNOWN_IDENTITY_DECORATORS, Payload, is_builtin_name};
 
 /// The key a closure cell's value is under (`Ns::Cell`).
 pub fn cell_key() -> KeyId {
@@ -245,7 +245,7 @@ impl Analyzer {
         if calls.is_empty() {
             return None;
         }
-        Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, false)))
+        Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), Args::pos(&args), st, node, false)))
     }
 
     /// The (receiver, function) pairs of the instances among `v` whose class defines one of
@@ -278,7 +278,7 @@ impl Analyzer {
             return None;
         }
         let keep = !rest.empty();
-        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, false));
+        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), Args::pos(&args), st, node, false));
         Some((r, rest))
     }
 

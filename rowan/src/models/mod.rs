@@ -50,7 +50,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::domain::{join_values, kv_join, KeyVal, Ns, ObjId, Row, RowData, Value, DATA};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId, STAR};
 use crate::interp::iter::Elem;
-use crate::interp::{Analyzer, Call, Payload, ViewKind};
+use crate::interp::{Analyzer, Args, Call, Payload, ViewKind};
 use crate::source::{FnKind, RenameFn, Source, SourceKind};
 use crate::state::{Kind, State};
 
@@ -403,7 +403,7 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
     let code = |v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
     if !c.qual.starts_with("builtins.") && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
-        return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
     }
     // `print(…, file=buf)` writes into a StringIO; other writers (`json.dump(x, buf)`) make its
     // text unknown
@@ -520,8 +520,8 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
 /// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`; `pprint`'s
 /// printers (`__repr__`). The dunders run
 /// (their effects happen) and give the result; the rest of the argument goes to the model.
-#[allow(clippy::too_many_arguments)]
-pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
+pub fn builtin_dunder(an: &mut Analyzer, qual: &str, a: Args, state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
+    let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     let names: &[&str] = match qual.strip_prefix("builtins.").unwrap_or(qual) {
         "str" | "print" => &["__str__", "__repr__"],
         "pprint.pp" | "pprint.pprint" | "pprint.pformat" => &["__repr__"],
@@ -552,7 +552,7 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
         }
         let mut a = args.to_vec();
         a[0] = rest;
-        an.call_external(qual, &a, kwargs, &[], &[], state, node, None)
+        an.call_external(qual, Args::new(&a, kwargs, &[], &[]), state, node, None)
     };
     match qual {
         // (each argument's text; the call writes those)
@@ -565,7 +565,7 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
                     None => a.clone(),
                 });
             }
-            Some(an.call_external(qual, &texts, kwargs, &[], &[], state, node, None))
+            Some(an.call_external(qual, Args::new(&texts, kwargs, &[], &[]), state, node, None))
         }
         "builtins.bool" if args.len() == 1 => Some(match an.truth_of(&args[0], state, node) {
             Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
@@ -584,7 +584,7 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
         _ if !args.is_empty() => {
             let (r, rest) = an.run_dunder(&args[0], names, args[1..].to_vec(), node, state)?;
             let r = match qual {
-                "builtins.bin" | "builtins.oct" | "builtins.hex" | "builtins.complex" => an.call_external(qual, &[r], kwargs, &[], &[], state, node, None),
+                "builtins.bin" | "builtins.oct" | "builtins.hex" | "builtins.complex" => an.call_external(qual, Args::new(&[r], kwargs, &[], &[]), state, node, None),
                 "builtins.bytes" | "builtins.bytearray" => {
                     an.iterate(&r, node, state);
                     Value::data(&format!("L{}", node.line))

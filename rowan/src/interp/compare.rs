@@ -1,7 +1,6 @@
 //! Comparisons and truth: `==`, `<`, `in`, `is` on known values, the program's rich
 //! comparison dunders, and whether a value is true.
 
-use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use crate::domain::{KeyVal, Ns, ObjId, ObjSet, Row, Value, DATA};
@@ -9,7 +8,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, KeyId};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, Payload, ViewKind};
+use super::{Analyzer, Args, Payload, ViewKind};
 
 impl Analyzer {
     /// `a < b < c`: the chained comparisons (`compare`) joined by `and`.
@@ -433,7 +432,7 @@ impl Analyzer {
             ast::CmpOp::NotEq => ("__ne__", "__ne__"),
             _ => return None,
         };
-        let call = |an: &mut Analyzer, f: ObjId, recv: &Value, other: &Value, state: &mut State| an.call_user(f, Some(recv.clone()), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+        let call = |an: &mut Analyzer, f: ObjId, recv: &Value, other: &Value, state: &mut State| an.call_user(f, Some(recv.clone()), Args::pos(&[other.clone()]), state, node, false);
         if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, name)) {
             return Some(call(self, f, a, b, state));
         }
@@ -486,7 +485,7 @@ impl Analyzer {
 
     /// `@total_ordering`: `a op b` from the class's `__lt__` (run on `a`, `f`) and `__eq__`.
     fn total_ordering_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, f: ObjId, node: &Node, state: &mut State) -> Option<bool> {
-        let lt = self.call_user(f, Some(a.clone()), vec![b.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+        let lt = self.call_user(f, Some(a.clone()), Args::pos(&[b.clone()]), state, node, false);
         let lt = self.truth_of(&lt, state, node);
         let eqv = self.rich_compare(ast::CmpOp::Eq, a, b, node, state).unwrap_or_else(|| Value::data("bool"));
         let eq = self.truth_of(&eqv, state, node);

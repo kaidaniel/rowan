@@ -336,7 +336,7 @@ pub fn m_path_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         other => other.to_string(),
     };
     if cls.contains("Windows") {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     let parts: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     match parts.filter(|_| c.star_args.is_empty()) {
@@ -460,7 +460,7 @@ pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "as_uri" if t.starts_with('/') => Value::lit_str(&format!("file://{}", t)),
         "match" | "full_match" => Value::data("bool"),
         // the file system
-        _ => an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+        _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
     }
 }
 

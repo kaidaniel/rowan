@@ -5142,7 +5142,7 @@ pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
     // (the functions that change what they are given in place: a Python list shuffled)
     if matches!(q, "random.shuffle" | "copyto" | "put" | "place" | "putmask" | "fill_diagonal") {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     if !an.m.torch_on {
         return Value::data(&format!("L{}", c.line));

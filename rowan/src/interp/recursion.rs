@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, FuncInfo, FuncNode};
+use super::{Analyzer, Args, FuncInfo, FuncNode};
 use crate::domain::{KeyVal, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, StrId};
@@ -81,8 +81,8 @@ impl Recursion {
 impl Analyzer {
     /// The activation a call of `foid` at `site` runs as. Past `MAX_ACTIVE` running activations
     /// of the function, the innermost one (the call is then recursive).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value]) -> ActKey {
+    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, a: Args) -> ActKey {
+        let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let mut key = (foid, if !entry { site.to_string() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
@@ -186,7 +186,6 @@ impl Analyzer {
 
     /// The rounds of a call's body from `state` (its parameters bound): one, or for a recursive
     /// activation until its result and state are stable, then widened. Its result and end state.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn run_rounds(&mut self, key: &ActKey, fi: &FuncInfo, gen_id: Option<ObjId>, pre_bind: &State, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> (Value, State) {
         let fnode = fi.node;
         let mut entry_state = state.copy();
@@ -240,7 +239,7 @@ impl Analyzer {
                     let fp = g.footprint(p);
                     state.join_heap_fp(g, &fp);
                 }
-                self.bind_params(&fi, &w_self, &w_args, &w_kwargs, &star_args, &star_kwargs, state, node);
+                self.bind_params(&fi, &w_self, Args::new(&w_args, &w_kwargs, &star_args, &star_kwargs), state, node);
                 entry_state = state.copy();
                 continue;
             }

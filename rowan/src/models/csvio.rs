@@ -10,7 +10,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit};
-use crate::interp::{Analyzer, Call, Payload, ViewKind};
+use crate::interp::{Analyzer, Args, Call, Payload, ViewKind};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
@@ -775,7 +775,7 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
             for fo in f.pts.iter() {
                 if an.heap.kind(fo) == Kind::Function {
-                    an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], st, &nd, false);
+                    an.call_user(fo, None, Args::new(&args, &kwargs, &[], &[]), st, &nd, false);
                 } else {
                     an.call_value(&Value::obj(fo), &nd, None, st, Some(args.clone()));
                 }

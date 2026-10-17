@@ -18,6 +18,7 @@ use crate::source::{FnKind, RenameFn, Source, SourceKind, Step};
 use crate::state::{Kind, State};
 
 use super::{noeffect, Model};
+use crate::interp::Args;
 
 pub const DF_METHODS: &[&str] = &[
     "abs", "add", "add_prefix", "add_suffix", "agg", "aggregate", "align", "all", "any", "apply", "applymap", "asfreq", "asof", "assign", "astype",
@@ -5780,7 +5781,7 @@ pub fn unknown_drop(an: &mut Analyzer, c: &'static ruff_python_ast::ExprCall, no
     let cols: Vec<KeyId> = match &cols_v {
         Some(v) => match lit_key_seq(an, st, v).or_else(|| v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| vec![k])) {
             Some(ks) => ks,
-            None => return Some(an.unknown_call("drop", Some(&recv), &[], &Default::default(), &[], &[], st, node)),
+            None => return Some(an.unknown_call("drop", Some(&recv), Args::pos(&[]), st, node)),
         },
         None => Vec::new(),
     };

@@ -9,7 +9,7 @@ use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::source::{lens_apply, Source, SourceKind};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, Payload, ViewKind, PATH_DEPTH, WIDE_READ};
+use super::{Analyzer, Args, PATH_DEPTH, Payload, ViewKind, WIDE_READ};
 
 /// An item read `obj[key]` (an attribute read when `ns` is `Attr`): what each receiver's part
 /// of it needs.
@@ -425,7 +425,7 @@ impl Analyzer {
                 let fv = self.heap.class_attr(m, "__getitem__");
                 for f in fv.pts.iter() {
                     if self.heap.kind(f) == Kind::Function {
-                        let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                        let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
                         parts.push(r);
                     }
                 }
@@ -469,7 +469,6 @@ impl Analyzer {
     /// not), the requirements on the inputs that may provide it, the value under it (a
     /// placeholder for what an open row holds); a key of an object's keys (`KeysOf`); a key not
     /// known (any value; it may raise).
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         // (a load a `try` handler guards: its exception still fires when the key is missing, so
         // the key is required of the input all the same — the runtime oracle's rule)
@@ -480,7 +479,6 @@ impl Analyzer {
         v
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// `load_record` with the handler's catching mode set.
     pub(super) fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.heap.kind(oid);
@@ -784,7 +782,6 @@ impl Analyzer {
     /// The placeholder `pid` for what `oid` holds under `k` (`elem`: the element a loop takes,
     /// also of an input's own data): named after its parent, a level deeper, its rows open
     /// through the parent's inputs at `k`.
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn fill_placeholder(&mut self, pid: ObjId, oid: ObjId, ns: Ns, k: KeyId, row: &Row, elem: bool, state: &mut State) {
         if let Some(sym) = self.names.access(&self.heap, oid, ns, k).filter(|_| !self.names.has(pid)) {
             let scope = self.names.scope(oid);
@@ -926,7 +923,7 @@ impl Analyzer {
                             let fv = self.heap.class_attr(m, "__setitem__");
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
-                                    self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                                    self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone(), v.clone()]), state, node, false);
                                 }
                             }
                             continue;
@@ -1127,7 +1124,7 @@ impl Analyzer {
                         let fv = self.heap.class_attr(m, "__delitem__");
                         for f in fv.pts.iter() {
                             if self.heap.kind(f) == Kind::Function {
-                                self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
+                                self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
                             }
                         }
                         continue;

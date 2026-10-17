@@ -48,6 +48,32 @@ use crate::frontend::Node;
 use crate::intern::{s, KeyId, StrId};
 use crate::state::State;
 
+/// A call's arguments as given: positional ones, keywords, and the values of `*xs` and `**kw`.
+#[derive(Clone, Copy)]
+pub struct Args<'a> {
+    pub pos: &'a [Value],
+    pub kw: &'a IndexMap<StrId, Value>,
+    pub star: &'a [Value],
+    pub star_kw: &'a [Value],
+}
+
+impl<'a> Args<'a> {
+    pub fn new(pos: &'a [Value], kw: &'a IndexMap<StrId, Value>, star: &'a [Value], star_kw: &'a [Value]) -> Args<'a> {
+        Args { pos, kw, star, star_kw }
+    }
+
+    /// Keyword arguments only.
+    pub fn kw(kw: &'a IndexMap<StrId, Value>) -> Args<'a> {
+        Args { pos: &[], kw, star: &[], star_kw: &[] }
+    }
+
+    /// Positional arguments only.
+    pub fn pos(pos: &'a [Value]) -> Args<'a> {
+        static NO_KEYWORDS: std::sync::LazyLock<IndexMap<StrId, Value>> = std::sync::LazyLock::new(IndexMap::new);
+        Args { pos, kw: &NO_KEYWORDS, star: &[], star_kw: &[] }
+    }
+}
+
 /// Everything a model needs about a call.
 #[derive(Clone)]
 pub struct Call {
@@ -69,6 +95,11 @@ pub struct Call {
 }
 
 impl Call {
+    /// The call's arguments.
+    pub fn arguments(&self) -> Args<'_> {
+        Args::new(&self.args, &self.kwargs, &self.star_args, &self.star_kwargs)
+    }
+
     /// Argument `i`, or the keyword `name`.
     pub fn arg(&self, i: usize, name: Option<&str>) -> Option<Value> {
         if i < self.args.len() {

@@ -452,7 +452,7 @@ pub(super) fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// class an equivalent `class P(NamedTuple)` (with `_asdict`, `_replace`, `_fields`) defines,
 /// analysed as a small generated module.
 pub(super) fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let fallback = |an: &mut Analyzer, st: &mut State, c: &Call| an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    let fallback = |an: &mut Analyzer, st: &mut State, c: &Call| an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     let Some(tname) = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) else { return fallback(an, st, c) };
     let Some(spec) = c.args.get(1).cloned().or_else(|| c.kw("field_names")).or_else(|| c.kw("fields")) else { return fallback(an, st, c) };
     let ident = |s: &str| !s.is_empty() && s.chars().all(|ch| ch.is_alphanumeric() || ch == '_') && !s.starts_with(|ch: char| ch.is_ascii_digit());
@@ -508,7 +508,7 @@ pub(super) fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let item = c.qual.ends_with("itemgetter");
     let keys: Option<Vec<KeyId>> = c.args.iter().map(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).collect();
     let Some(keys) = keys.filter(|k| !k.is_empty() && c.star_args.is_empty()) else {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     };
     let mut parts: Vec<String> = Vec::new();
     for k in &keys {
@@ -516,7 +516,7 @@ pub(super) fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             parts.push(format!("obj[{}]", intern::key_repr(*k)));
         } else {
             let Some(a) = intern::key_as_str(*k).filter(|a| a.split('.').all(|p| !p.is_empty() && p.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))) else {
-                return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+                return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
             };
             parts.push(format!("obj.{}", a));
         }
@@ -579,7 +579,7 @@ pub(super) fn m_locals(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// import statement gives it (`__import__("a.b")` gives `a`).
 pub(super) fn m_import(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(name) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     };
     let m = an.import_module(&name, &c.node, st);
     match name.split_once('.') {
@@ -613,12 +613,12 @@ pub(super) fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let module = an.frame().module;
     reach.push(Value::obj(module));
     reach.extend(c.args.iter().cloned());
-    an.unknown_call(&c.qual, None, &reach, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+    an.unknown_call(&c.qual, None, Args::new(&reach, &c.kwargs, &c.star_args, &c.star_kwargs), st, &c.node)
 }
 
 pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(pat) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     };
     let mut names: Vec<String> = Vec::new();
     let mut rest: &str = &pat;
@@ -745,7 +745,7 @@ pub(super) fn m_astuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `make_dataclass(name, fields)`: a generated `@dataclass` class (`name`, `(name, type)`,
 /// `(name, type, field(default=…))` with literal defaults read from the call's text).
 pub(super) fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let fallback = |an: &mut Analyzer, st: &mut State, c: &Call| an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    let fallback = |an: &mut Analyzer, st: &mut State, c: &Call| an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     let Some(tname) = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) else { return fallback(an, st, c) };
     let Some(ast_call) = c.call_ast else { return fallback(an, st, c) };
     let mut fields: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
@@ -816,7 +816,7 @@ pub(super) fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                 kw.insert(*k, v.clone());
             }
             an.frame_mut().unroll.push(9100);
-            outs.push(an.construct(cls, &[], &kw, &[], &[], st, &c.node));
+            outs.push(an.construct(cls, Args::kw(&kw), st, &c.node));
             an.frame_mut().unroll.pop();
             continue;
         }
@@ -1138,7 +1138,7 @@ pub(super) fn m_partial_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Val
         let mut star = an.m.partial_star.get(&x).cloned().unwrap_or_default();
         star.extend(c.star_kwargs.iter().cloned());
         for fo in f.pts.iter() {
-            outs.push(an.call_one(fo, &fake_args, &kw, &c.star_args, &star, st, &c.node, c.call_ast));
+            outs.push(an.call_one(fo, Args::new(&fake_args, &kw, &c.star_args, &star), st, &c.node, c.call_ast));
         }
     }
     if outs.is_empty() {
@@ -1234,7 +1234,7 @@ pub(super) fn m_type_hints(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
 pub(super) fn m_mappingproxy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(d) = c.args.first().cloned() else { return Value::data("proxy") };
     if d.pts.is_empty() || !d.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Dict | Kind::Unknown)) {
-        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+        return an.unknown_call(&c.qual, None, c.arguments(), st, &c.node);
     }
     let _ = st;
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:proxy:{}:{}", c.site, d.pts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(",")), "", true, "mappingproxy", Payload::View(ViewKind::Proxy, d.clone()));
@@ -1312,7 +1312,7 @@ pub(super) fn m_chrono_clock(_an: &mut Analyzer, _st: &mut State, c: &Call) -> V
 /// A changed decimal context: Decimal arithmetic is no longer simulated.
 pub(super) fn m_decimal_context(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     pynum::set_opaque(true);
-    an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+    an.unknown_call(&c.qual, None, c.arguments(), st, &c.node)
 }
 
 /// A Decimal / Fraction method (`d.quantize(…)`, `f.limit_denominator(…)`).

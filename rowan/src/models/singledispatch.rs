@@ -9,6 +9,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, KeyId, StrId};
 use crate::interp::{Analyzer, Payload};
 use crate::state::{Kind, State};
+use crate::interp::Args;
 
 /// The class a singledispatch implementation's first parameter is annotated with.
 pub fn sdispatch_annotation(an: &mut Analyzer, f: ObjId, method: bool, state: &mut State) -> Option<Value> {
@@ -96,7 +97,6 @@ fn dispatch_distance(an: &Analyzer, t: &Result<String, ObjId>, reg: &Value) -> O
     best
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn sdispatch_call(an: &mut Analyzer, foid: ObjId, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
     let reg = an.m.sdispatch.get(&foid).cloned().unwrap_or_default();
     let mut groups: Vec<(ObjId, Value)> = Vec::new();
@@ -140,7 +140,7 @@ pub(crate) fn sdispatch_call(an: &mut Analyzer, foid: ObjId, self_v: Option<Valu
         if f == foid {
             an.m.sd_bypass = Some(foid);
         }
-        outs.push(an.call_user(f, self_v.clone(), a, kwargs.clone(), vec![], star_kwargs.clone(), &mut st, node, entry));
+        outs.push(an.call_user(f, self_v.clone(), Args::new(&a, &kwargs, &[], &star_kwargs), &mut st, node, entry));
         an.m.sd_bypass = None;
         states.push(st);
     }
@@ -171,7 +171,7 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &
         intern::key_tuple(parts)
     });
     let Some(mk) = key else {
-        return an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, false);
+        return an.call_user(oid, None, Args::new(&args, &kwargs, &[], &[]), state, node, false);
     };
     let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
     let row = state.row(memo, Ns::Item);
@@ -195,7 +195,7 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &
     } else {
         bump(state, "misses", true);
     }
-    let r = an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, false);
+    let r = an.call_user(oid, None, Args::new(&args, &kwargs, &[], &[]), state, node, false);
     let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
     let row = state.row(memo, Ns::Item).store(mk, true);
     state.set_row(memo, Ns::Item, row);

@@ -50,7 +50,7 @@ pub mod facts;
 pub mod render;
 pub mod report;
 
-pub use api::Call;
+pub use api::{Args, Call};
 pub use budget::Budget;
 pub use context::{Context, Frame, FrameKind, Modes, PreCall};
 pub use entry::Entries;

@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
-use crate::interp::{Analyzer, Call, FuncNode, Payload};
+use crate::interp::{Analyzer, Args, Call, FuncNode, Payload};
 use crate::models::pydantic::{Ann, DumpOpts};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
@@ -655,7 +655,7 @@ fn fa_call_dep(an: &mut Analyzer, g: &Value, req: Option<&Req>, state: &mut Stat
             Kind::Function => {
                 let kwargs = fa_bind(an, o, req, state, node, depth);
                 let fi = an.heap.func_info(o);
-                let r = an.call_user(o, None, vec![], kwargs, vec![], vec![], state, node, false);
+                let r = an.call_user(o, None, Args::kw(&kwargs), state, node, false);
                 let is_gen = match &fi.node {
                     FuncNode::Def(f) => crate::syntax::is_generator(&f.body),
                     _ => false,
@@ -681,7 +681,7 @@ fn fa_call_dep(an: &mut Analyzer, g: &Value, req: Option<&Req>, state: &mut Stat
                     },
                     None => IndexMap::new(),
                 };
-                outs.push(an.construct(o, &[], &kwargs, &[], &[], state, node));
+                outs.push(an.construct(o, Args::kw(&kwargs), state, node));
             }
             _ => outs.push(an.call_value(&Value::obj(o), node, None, state, Some(vec![]))),
         }
@@ -727,7 +727,7 @@ pub fn fa_yield_deps(an: &mut Analyzer, func: ObjId, state: &mut State) -> Vec<O
 pub fn fa_run_handler(an: &mut Analyzer, func: ObjId, mut gens: Vec<ObjId>, req: Option<Req>, entry: bool, state: &mut State, node: &Node) -> Value {
     if gens.is_empty() {
         let kwargs = fa_bind(an, func, req.as_ref(), state, node, 0);
-        return an.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, entry);
+        return an.call_user(func, None, Args::kw(&kwargs), state, node, entry);
     }
     let g = gens.remove(0);
     let kwargs = fa_bind(an, g, req.as_ref(), state, node, 1);
@@ -741,7 +741,7 @@ pub fn fa_run_handler(an: &mut Analyzer, func: ObjId, mut gens: Vec<ObjId>, req:
     });
     let outer = an.m.fa_gen_ret.take();
     let h = an.with_cm_then(then, |an| {
-        an.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, false);
+        an.call_user(g, None, Args::kw(&kwargs), state, node, false);
     });
     let ret = std::mem::replace(&mut an.m.fa_gen_ret, outer).unwrap_or_default();
     match h {
@@ -769,7 +769,7 @@ pub fn fa_entry_through_middleware(an: &mut Analyzer, func: ObjId, state: &mut S
     let n = an.m.fa_pending.len();
     an.m.fa_pending.push((idx, rq));
     let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-    an.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, false);
+    an.call_user(first, None, Args::pos(&[robj, Value::obj(cn)]), state, node, false);
     Some(())
 }
 
@@ -919,7 +919,7 @@ fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, no
             match hit {
                 Some((_, _, hf)) => {
                     let robj = req.obj.clone().unwrap_or_else(|| Value::data("request"));
-                    let resp = an.call_user(hf, None, vec![robj, Value::obj(o)], IndexMap::new(), vec![], vec![], &mut rs, node, false);
+                    let resp = an.call_user(hf, None, Args::pos(&[robj, Value::obj(o)]), &mut rs, node, false);
                     let mut rv: Vec<Value> = Vec::new();
                     for x in resp.pts.iter() {
                         if let Some((q, v)) = payload_of(an, x) {
@@ -1208,7 +1208,7 @@ fn fa_client_call(an: &mut Analyzer, app: &Value, method: &str, c: &Call, state:
                 let n = an.m.fa_pending.len();
                 an.m.fa_pending.push((idx, rq.clone()));
                 let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-                let resp = an.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, false);
+                let resp = an.call_user(mws[0], None, Args::pos(&[robj.clone(), Value::obj(cn)]), &mut st, &c.node, false);
                 let mut bodies: Vec<Value> = Vec::new();
                 let mut stv = Value::new();
                 for x in resp.pts.iter() {
@@ -1251,7 +1251,7 @@ fn fa_client_call(an: &mut Analyzer, app: &Value, method: &str, c: &Call, state:
             let n = an.m.fa_pending.len();
             an.m.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
             let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-            an.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, false);
+            an.call_user(first, None, Args::pos(&[robj, Value::obj(cn)]), state, &c.node, false);
         }
         let v = fa_obj(an, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
         set_status(state, &v, code);
@@ -1494,7 +1494,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             let args: Vec<Value> = c.args.iter().skip(1).cloned().collect();
             for fo in f.pts.iter().collect::<Vec<_>>() {
                 if an.heap.kind(fo) == Kind::Function {
-                    an.call_user(fo, None, args.clone(), c.kwargs.clone(), vec![], vec![], st, &c.node, false);
+                    an.call_user(fo, None, Args::new(&args, &c.kwargs, &[], &[]), st, &c.node, false);
                 } else if c.kwargs.is_empty() {
                     // (a bound method, a builtin's method, a partial: called as well)
                     an.call_value(&Value::obj(fo), &c.node, None, st, Some(args.clone()));

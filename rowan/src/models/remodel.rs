@@ -377,7 +377,7 @@ fn fallback(an: &mut Analyzer, st: &mut State, c: &Call, pat: Option<String>) ->
     if matches!(c.qual.as_str(), "re.match" | "re.search" | "re.fullmatch") {
         return crate::models::re_match_generated(an, st, c);
     }
-    an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+    an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node)
 }
 
 /// A Match object's methods.

@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{debug_enabled, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
+use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, FuncInfo, FuncNode, Payload, debug_enabled};
 use crate::domain::{Ns, ObjId, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
@@ -419,7 +419,7 @@ impl Analyzer {
                 let mi = self.heap.module_info(fi.module);
                 self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
-                self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, true);
+                self.call_user(oid, None, Args::pos(&[]), &mut st, &fake, true);
                 self.cx.frames.pop();
             }
             return;
@@ -469,7 +469,7 @@ impl Analyzer {
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
         let saved_qr = std::mem::replace(&mut self.findings.quiet_records, called_torch);
         let start_reqs = st.reqs.clone();
-        self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, true);
+        self.call_user(oid, self_val, Args::new(&args, &kwargs, &star_args, &star_kwargs), &mut st, &fake, true);
         if general {
             self.note_contract(fi, &st.reqs, &start_reqs);
         }
@@ -952,7 +952,7 @@ impl Analyzer {
                 let any = self.entry.any_instance;
                 let saved_general = std::mem::replace(&mut self.entry.general, any.then_some(init));
                 let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, (!any).then_some(init));
-                self.call_user(init, Some(Value::obj(inst)), args, kwargs, star_args, star_kwargs, state, &fake, true);
+                self.call_user(init, Some(Value::obj(inst)), Args::new(&args, &kwargs, &star_args, &star_kwargs), state, &fake, true);
                 self.entry.general = saved_general;
                 self.entry.no_facts = saved_nofacts;
                 self.findings.quiet = saved_quiet;

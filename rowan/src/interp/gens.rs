@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, Payload};
+use super::{Analyzer, Args, Payload};
 use crate::domain::{join_values, kv_join, KeyVal, Ns, ObjId, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, KeySet, StrId, STAR};
@@ -259,7 +259,7 @@ impl Analyzer {
             let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gens.last_reads = None;
-            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, false);
+            let r = self.call_user(lg.foid, lg.self_v.clone(), Args::new(&lg.args, &lg.kwargs, &[], &[]), state, &lg.node, false);
             self.cx.call_chain = saved;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
                 let fp = state.footprint(&pre);

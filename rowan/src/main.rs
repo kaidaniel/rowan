@@ -208,13 +208,11 @@ fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize), only: Opti
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool) -> Result<String, String> {
     run_with_deps(file, opts, json, golden, facts, show_rows, show_summaries).map(|(s, _)| s)
 }
 
 /// `run`, also returning the paths of every module the analysis loaded (the entry first).
-#[allow(clippy::too_many_arguments)]
 fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool) -> Result<(String, Vec<String>), String> {
     let mut an = analyser(file, opts, facts)?;
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;

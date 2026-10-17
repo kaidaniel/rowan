@@ -8,7 +8,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, ClassInfo, Frame, FrameKind, Payload};
+use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, Payload};
 
 impl Analyzer {
     /// A `class` statement: its bases (library ones say what it is), the class object, its body
@@ -169,7 +169,7 @@ impl Analyzer {
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
-                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, cnode, false);
+                    self.call_user(f, Some(Value::obj(coid)), Args::kw(&kwargs), state, cnode, false);
                 }
             }
         }

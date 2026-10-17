@@ -8,7 +8,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, Classification, Ns, ObjId, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::interp::{Analyzer, Frame, FrameKind};
+use crate::interp::{Analyzer, Args, Frame, FrameKind};
 use crate::state::{Kind, State};
 
 /// A dataclass field as `__init__` takes it (`dc_specs`).
@@ -151,7 +151,7 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
         let fv = an.heap.class_attr(pc, "__post_init__");
         for f in fv.pts.iter() {
             if an.heap.kind(f) == Kind::Function {
-                an.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, false);
+                an.call_user(f, Some(Value::obj(inst)), Args::pos(&initvars), state, node, false);
             }
         }
     }
@@ -542,8 +542,8 @@ pub fn dataclass_order(an: &Analyzer, x: u32, y: u32, state: &State) -> Option<s
 }
 
 /// A TypedDict class called: a plain dict.
-#[allow(clippy::too_many_arguments)]
-pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, a: Args, state: &mut State, node: &Node) -> Option<Value> {
+    let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     if !an.heap.class_info(cls).lib.typed_dict {
         return None;
     }
@@ -556,8 +556,8 @@ pub fn typed_dict_construct(an: &mut Analyzer, cls: u32, args: &[Value], kwargs:
 /// `__init__`) validates its keyword input; a dict subclass without its own `__init__` is
 /// filled by dict's constructor; a dataclass (or a subclass without its own `__init__`)
 /// runs the generated `__init__`. None: none of these.
-#[allow(clippy::too_many_arguments)]
-pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, a: Args, state: &mut State, node: &Node) -> Option<Value> {
+    let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     let ci = an.heap.class_info(cls);
     if crate::models::pydantic::is_validated(an, cls) {
         let own_init = an.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(an, c) && an.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
