@@ -571,6 +571,16 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// `n.m(…)` of a name the code does not bind: its method called (`CFG.pop("k")`: what it
+    /// removes, if CFG is a container).
+    fn mark_name_call(&mut self, n: StrId, m: &str, c: &ast::ExprCall) {
+        self.mark(&[(Origin::NameAttr(n, s(m)), Level::Own)], Pos::Call);
+        if CONTAINER_REMOVERS.contains(&m) {
+            let f = self.flags.entry(Origin::NameAttr(n, s(m))).or_default();
+            f.removes = f.removes.join(Removes::of(remover_key(m, c)));
+        }
+    }
+
     /// A name read (each, also where nothing happens to it: the code it holds may run).
     fn name(&mut self, n: StrId, attr: Option<StrId>) {
         self.names.push((n, attr));
@@ -824,12 +834,7 @@ impl<'a> Flow<'a> {
                     Expr::Name(n) if !self.local(n.id.as_str()) => {
                         self.name(s(n.id.as_str()), Some(s(m)));
                         if !pure {
-                            self.mark(&[(Origin::NameAttr(s(n.id.as_str()), s(m)), Level::Own)], Pos::Call);
-                            // (`CFG.pop("k")`: what it removes, if CFG is a container)
-                            if CONTAINER_REMOVERS.contains(&m) {
-                                let f = self.flags.entry(Origin::NameAttr(s(n.id.as_str()), s(m))).or_default();
-                                f.removes = f.removes.join(Removes::of(remover_key(m, c)));
-                            }
+                            self.mark_name_call(s(n.id.as_str()), m, c);
                             return self.pass_args((s(n.id.as_str()), Some(s(m))), c);
                         }
                     }

@@ -606,33 +606,11 @@ impl Analyzer {
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
-        // (on one receiver: the stores its code makes on every way it completes; where the
-        // receiver escapes or the class hooks attribute access, unknown code may remove them)
-        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| ["__setattr__", "__delattr__", "__getattribute__"].iter().any(|h| an.class_lookup(c, h).is_some()));
-        let must: Vec<KeyId> = match recvs.as_slice() {
-            [o] if fi_is_method(self, foid) && !hooked(self, *o) => {
-                let deleted: Vec<KeyId> = match effs.as_slice() {
-                    [(_, e)] => e.deletes.clone(),
-                    _ => self.code_uses(&self.heap.func_info(foid)).deleted.iter().map(|n| key_str_lit(&str_get(*n))).collect(),
-                };
-                self.must_stores(foid, *o, 0).iter().filter(|k| !deleted.contains(k) && !self.setter_of(*o, *k)).collect()
-            }
-            _ => Vec::new(),
-        };
+        let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
-        // (arguments whose items its code may remove: not `likely` after, `may_have_removed`)
-        let bound = usize::from(self_v.is_some());
-        let mut removed: Vec<(ObjId, Removes)> = Vec::new();
-        for (i, v) in args.iter().enumerate() {
-            let rm = self.param_flags(foid, Slot::Pos(i + bound)).removes;
-            removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
-        }
-        for (k, v) in kwargs.iter() {
-            let rm = self.param_flags(foid, Slot::Kw(*k)).removes;
-            removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
-        }
+        let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
         let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
@@ -694,6 +672,35 @@ impl Analyzer {
         }
     }
 
+    /// What a skipped call of `foid` on its one receiver among `recvs` stores on it on every way
+    /// it completes (`must_stores`), but what its code deletes or a setter takes; where the
+    /// receiver escapes (no `effs`), unknown code may remove them after.
+    fn must_after(&mut self, foid: ObjId, recvs: &[ObjId], effs: &[(ObjId, RecvEffects)]) -> Vec<KeyId> {
+        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| ["__setattr__", "__delattr__", "__getattribute__"].iter().any(|h| an.class_lookup(c, h).is_some()));
+        let [o] = recvs else { return Vec::new() };
+        if !fi_is_method(self, foid) || hooked(self, *o) {
+            return Vec::new();
+        }
+        let deleted: Vec<KeyId> = match effs {
+            [(_, e)] => e.deletes.clone(),
+            _ => self.code_uses(&self.heap.func_info(foid)).deleted.iter().map(|n| key_str_lit(&str_get(*n))).collect(),
+        };
+        self.must_stores(foid, *o, 0).iter().filter(|k| !deleted.contains(k) && !self.setter_of(*o, *k)).collect()
+    }
+
+    /// The objects among a skipped call's arguments whose items its code may remove, with what
+    /// it removes (not `likely` after: `may_have_removed`).
+    fn removed_args(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>) -> Vec<(ObjId, Removes)> {
+        let bound = usize::from(bound);
+        let slots = args.iter().enumerate().map(|(i, v)| (Slot::Pos(i + bound), v)).chain(kwargs.iter().map(|(k, v)| (Slot::Kw(*k), v)));
+        let mut out = Vec::new();
+        for (slot, v) in slots.collect::<Vec<_>>() {
+            let rm = self.param_flags(foid, slot).removes;
+            out.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
+        }
+        out
+    }
+
     /// One call of several of the program's functions (with their receivers, if bound) none of
     /// which runs (on demand, past the work its run may do): an unknown call given the arguments
     /// and every receiver whole, that may also change what all their code reaches. It covers
@@ -708,15 +715,7 @@ impl Analyzer {
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
         let mut removed: Vec<(ObjId, Removes)> = Vec::new();
         for (f, r) in fns {
-            let bound = usize::from(r.is_some());
-            for (i, v) in a.pos.iter().enumerate() {
-                let rm = self.param_flags(*f, Slot::Pos(i + bound)).removes;
-                removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
-            }
-            for (k, v) in a.kw.iter() {
-                let rm = self.param_flags(*f, Slot::Kw(*k)).removes;
-                removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
-            }
+            removed.extend(self.removed_args(*f, r.is_some(), a.pos, a.kw));
         }
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
