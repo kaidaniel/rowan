@@ -734,7 +734,7 @@ impl Analyzer {
                 let cls = classify(&row, nk);
                 self.attr_verdict(node, nk, &cls, oid, guarded);
                 // (there on some paths only: an AttributeError the enclosing try handles)
-                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves_on_path(oid, name, state) {
+                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely) && !self.class_resolves_on_path(oid, name, state) {
                     self.may_raise_here("AttributeError", state);
                 }
                 if let Some(c) = cls_of {
@@ -762,7 +762,7 @@ impl Analyzer {
         } else {
             self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
             // (a read that cannot fail, `getattr(o, k, None)`, raises nothing; a try-guarded one may)
-            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) {
+            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely) {
                 // an AttributeError the enclosing try handles
                 if cls.tier == Tier::Missing && single_target && !self.class_resolves(oid, name) {
                     self.raise_here("AttributeError", state);

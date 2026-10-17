@@ -243,7 +243,7 @@ impl Analyzer {
             }
             if fname == "hasattr" && args.len() == 2 {
                 let (Some(kv), Some(mut rec)) = (self.traced(&args[1]), self.traced(&args[0])) else { return };
-                if let Some(k) = kv.kv.as_lit() {
+                if let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) {
                     // (an attribute row describes instances and namespaces; a builtin
                     // container's attributes are its type's: decided by the type, or not)
                     let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
@@ -643,7 +643,7 @@ impl Analyzer {
             if let ast::Expr::Attribute(a) = &*c.func {
                 if a.attr.id.as_str() == "get" && !c.arguments.args.is_empty() {
                     let (Some(kv), Some(rec)) = (self.traced(&c.arguments.args[0]), self.traced(&a.value)) else { return };
-                    if let Some(k) = kv.kv.as_lit() {
+                    if let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) {
                         // only a dict-like receiver: a user instance's `get` is its own method
                         if rec.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace)) {
                             return;
