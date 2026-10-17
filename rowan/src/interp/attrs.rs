@@ -621,6 +621,7 @@ impl Analyzer {
         join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
     }
 
+    /// An attribute read's verdict, guarded or not.
     fn attr_verdict(&mut self, node: &Node, nk: KeyId, cls: &Classification, oid: u32, guarded: bool) {
         if guarded {
             self.verdict_guarded(node, nk, cls, oid, Ns::Attr);

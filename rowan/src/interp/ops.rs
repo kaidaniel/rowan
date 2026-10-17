@@ -165,6 +165,7 @@ impl Analyzer {
         self.as_type(r, ty, false)
     }
 
+    /// `op v` (`not`, `-`, `+`, `~`) before the result's type is applied.
     fn unary_untyped(&mut self, u: &'static ast::ExprUnaryOp, v: Value, node: &'static ast::Expr, state: &mut State) -> Value {
         match u.op {
             ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
@@ -204,6 +205,10 @@ impl Analyzer {
         self.as_type(r, ty, true)
     }
 
+    /// `a op b` before the result's type is applied: the program's dunders and the models'
+    /// (`binop_by_models`), operators on a parameter (decided per call site), set operations on
+    /// known members, CPython's result on two literals, `%` formatting, pandas results, else an
+    /// unknown.
     fn binop_untyped(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(v) = self.binop_by_models(op, a, b, node, state) {
             return v;
@@ -532,6 +537,8 @@ impl Analyzer {
         self.as_type(r, Some("str"), false)
     }
 
+    /// An f-string: its text when every part is known (formatted as CPython does), else a str
+    /// known to start and end with its literal ends (`Payload::Affix`) or not known.
     fn fstring_untyped(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
         let mut parts: Vec<Part> = Vec::new();
         for p in f.value.iter() {

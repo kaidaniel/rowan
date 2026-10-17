@@ -584,6 +584,7 @@ impl Heap {
 
     /// The C3 method resolution order of a user class (user classes only).
     pub fn mro(&self, cls: u32) -> Vec<u32> {
+        /// C3 linearisation (None: inconsistent bases, or deeper than 64).
         fn c3(an: &Heap, cls: u32, depth: usize) -> Option<Vec<u32>> {
             if depth > 64 {
                 return None;

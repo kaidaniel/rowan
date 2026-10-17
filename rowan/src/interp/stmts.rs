@@ -41,6 +41,7 @@ impl Analyzer {
         }
     }
 
+    /// A statement, by its kind.
     fn exec_stmt_inner(&mut self, node: &'static ast::Stmt, state: &mut State) {
         match node {
             ast::Stmt::Expr(e) => {
@@ -606,6 +607,7 @@ impl Analyzer {
         result
     }
 
+    /// `del` of each target: an item, an attribute or a name.
     fn stmt_delete(&mut self, d: &'static ast::StmtDelete, state: &mut State) {
         for t in &d.targets {
             match t {
@@ -628,6 +630,9 @@ impl Analyzer {
         }
     }
 
+    /// An `if` statement: the test splits the state; both branches run and join (with the facts
+    /// a pure test leaves, `CondFact`). `if TYPE_CHECKING:` notes its imports for annotations;
+    /// the main module's `__main__` block runs no calls when set up for runs on demand.
     fn stmt_if(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], state: &mut State) {
         if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
             self.note_type_only_imports(body);

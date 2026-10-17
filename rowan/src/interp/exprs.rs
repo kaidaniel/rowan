@@ -25,6 +25,8 @@ impl Analyzer {
         v
     }
 
+    /// The value of an expression, by its kind (literals, names, operators, calls, displays,
+    /// comprehensions, …).
     fn eval_inner(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
             ast::Expr::StringLiteral(sl) => Value::lit(key_str_lit(sl.value.to_str())),
@@ -358,6 +360,8 @@ impl Analyzer {
         }
     }
 
+    /// A list, tuple or set display: a container of its elements, by position when no starred
+    /// element makes their positions unknown.
     fn container(&mut self, node: &'static ast::Expr, kind: Kind, elts: &'static [ast::Expr], state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);

@@ -44,6 +44,9 @@ impl Analyzer {
         self.as_type(r, ty, false)
     }
 
+    /// A comparison `a op b` (`right`: b's expression) before the result's type is applied: a
+    /// tensor's, a named unknown's against a number, `in` on a container, `is`, CPython's result
+    /// on literals, the program's rich comparison dunders.
     fn compare_untyped(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, nd: &Node, state: &mut State) -> Value {
         let lit = |t: bool| Value::lit(intern::key_bool(t));
         // a tensor is never None

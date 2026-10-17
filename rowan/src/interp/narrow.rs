@@ -417,6 +417,7 @@ impl Analyzer {
         }
     }
 
+    /// `isinstance(target, cls_expr)` being `truth` narrows a name or an attribute chain.
     fn narrow_isinstance(&mut self, target: NarrowTarget, cls_expr: &'static ast::Expr, truth: bool, state: &mut State) {
         let (cur, store): (Value, StoreTarget) = match target {
             NarrowTarget::Name(name) => {
@@ -538,6 +539,8 @@ impl Analyzer {
         }
     }
 
+    /// Is object `o` (of kind `k`) an instance of class `cls`: a Protocol by its members, the
+    /// program's class by the MRO, a library class by the object's kind (None: either).
     fn instance_of_one(&self, o: u32, k: Kind, cls: u32, st: &State) -> Option<bool> {
         if self.heap.kind(cls) == Kind::Class {
             // (a Protocol: an instance whose class defines all its members is one; one of a
@@ -634,6 +637,7 @@ impl Analyzer {
         false
     }
 
+    /// `d.get(k)` being true narrows `d` to having `k`.
     fn narrow_get_truthy(&mut self, expr: &'static ast::Expr, state: &mut State) {
         if let ast::Expr::Call(c) = expr {
             if let ast::Expr::Attribute(a) = &*c.func {
@@ -671,6 +675,8 @@ impl Analyzer {
         self.narrow_member_values(left, &lv, rec_expr, &rv, member, state);
     }
 
+    /// `left in rec` (`member`) or not: narrows the record's keys and `left`'s literals (through a
+    /// `__contains__` that is `return x in y`, its `y`).
     fn narrow_member_values(&mut self, left: &'static ast::Expr, lv: &Value, rec_expr: &'static ast::Expr, rv: &Value, member: bool, state: &mut State) {
         let (lv, rv) = (lv.clone(), rv.clone());
         // user classes defining `__contains__` as `return <x> in <y>`: narrow <y> instead

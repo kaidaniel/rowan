@@ -874,6 +874,7 @@ impl Analyzer {
         self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
     }
 
+    /// An instance of `cls_oid` made for entry runs with `row` as its attributes' row.
     fn instance_with(&mut self, cls_oid: ObjId, ci: &ClassInfo, row: Row, state: &mut State, ctx: &str) -> ObjId {
         self.alloc(
             Kind::Instance,
@@ -889,6 +890,9 @@ impl Analyzer {
         )
     }
 
+    /// The instance an entry run's method takes as `self`: open when the class's attributes are
+    /// not all its own; its declared fields present; its `__init__` run with its parameters'
+    /// defaults or annotations (None when that `__init__` cannot complete).
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
         let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));

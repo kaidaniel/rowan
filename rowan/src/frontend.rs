@@ -105,6 +105,8 @@ pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'s
     r
 }
 
+/// `parse` without the timing: CRLF line ends normalised, the cache consulted, the tree
+/// parsed, mangled, leaked and its nodes registered.
 fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
     // (Windows line ends as `\n`: lines and columns are the same, texts over lines read alike)
     let source = if source.contains("\r\n") { source.replace("\r\n", "\n") } else { source };
@@ -150,6 +152,7 @@ fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u3
 struct Mangler(std::cell::RefCell<Vec<String>>);
 
 impl Mangler {
+    /// `__x` inside the innermost class `C` becomes `_C__x`.
     fn mangle(&self, id: &mut ast::name::Name) {
         let Some(cls) = self.0.borrow().last().cloned() else { return };
         if id.starts_with("__") && !id.ends_with("__") && !id.contains('.') && !cls.is_empty() {

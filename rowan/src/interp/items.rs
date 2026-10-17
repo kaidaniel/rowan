@@ -481,6 +481,7 @@ impl Analyzer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// `load_record` with the handler's catching mode set.
     pub(super) fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.heap.kind(oid);
         let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { self.read_row(oid, ns, state) };
@@ -1282,6 +1283,9 @@ impl Analyzer {
 /// `base`, and whether runs may take it): all are made, but one not made on every part runs
 /// may take is needed only sometimes, unless it was before or is an element's.
 type Reqs = crate::layered::TwoLevel<crate::source::SourceId, KeyId, crate::domain::ReqInfo>;
+/// After a read on each of several receivers (`outs`: per receiver, whether a run goes on with
+/// it, and the requirements after it): a requirement is `always` only when every receiver
+/// that goes on read it always.
 fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
     let mut reqs = base.clone();
     let mut changed: Vec<(crate::source::SourceId, KeyId)> = Vec::new();

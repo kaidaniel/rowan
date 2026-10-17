@@ -596,6 +596,9 @@ impl Analyzer {
         out
     }
 
+    /// A view for a loop's item `o` that stands for several records (`link_view`): one object per
+    /// iteration standing for the record of that iteration, so stores into it are strong. None
+    /// when `o` is one runtime object already, or not a record.
     fn loop_view(&mut self, o: ObjId, target: &'static ast::Expr, state: &mut State) -> Option<ObjId> {
         let ob = self.heap.obj(o);
         if ob.single || crate::state::is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || crate::state::view_of(o).is_some() {

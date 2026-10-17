@@ -286,6 +286,7 @@ impl Analyzer {
     }
 }
 
+/// A recursive activation's argument, widened: more than two literals become an unknown.
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
         if ks.len() > 2 {

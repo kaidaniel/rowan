@@ -246,6 +246,7 @@ pub enum Step {
 }
 
 impl Step {
+/// The key `k` becomes through this step (a removal leaves it).
     pub fn apply(&self, k: KeyId) -> KeyId {
         match self {
             Step::Kill(_) => k,
@@ -253,6 +254,7 @@ impl Step {
             Step::RenameFn(f) => f.apply(k),
         }
     }
+/// The keys that become `k` through this step.
     pub fn inverse(&self, k: KeyId) -> KeySet {
         match self {
             Step::Kill(_) => KeySet::one(k),

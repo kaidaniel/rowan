@@ -63,6 +63,7 @@ pub fn is_generator(body: &'static [ast::Stmt]) -> bool {
     g
 }
 
+/// `is_generator` uncached.
 fn yields(body: &[ast::Stmt]) -> bool {
     struct V(bool);
     impl<'a> SourceOrderVisitor<'a> for V {

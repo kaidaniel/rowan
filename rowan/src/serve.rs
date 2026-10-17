@@ -219,6 +219,7 @@ fn hashed(deps: &[String]) -> Vec<(String, u64)> {
     deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect()
 }
 
+/// The server's loop: requests read on a thread of their own, answered in order.
 pub(crate) fn serve_loop(opts: Opts) {
     let out: Out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared::default()));

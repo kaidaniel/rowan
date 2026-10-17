@@ -452,6 +452,9 @@ impl Analyzer {
         r
     }
 
+    /// `unroll_next`'s probe: `__next__` called up to `UNROLL_MAX` times, each in a try catching
+    /// StopIteration, as long as each call is decided (an item, or surely StopIteration) and
+    /// changes only the iterator and what it holds.
     fn unroll_next_inner(&mut self, it: ObjId, m: &Value, node: &Node, state: &mut State) -> Option<Vec<Value>> {
         let m = m.clone();
         let mut cur = state.copy();

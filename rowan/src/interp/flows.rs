@@ -394,6 +394,7 @@ impl<'a> Flow<'a> {
     }
 
     // ------------------------------------------------------------- bindings
+    /// The local names target `t` binds from `e` (`held`: from what `e` holds).
     fn bind_target(&self, t: &'static Expr, e: &'static Expr, held: bool, binds: &mut Vec<(StrId, &'static Expr, bool)>) {
         match t {
             Expr::Name(n) if self.local(n.id.as_str()) => binds.push((s(n.id.as_str()), e, held)),
@@ -491,6 +492,7 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// What a use at `pos` does to the origins of the values `srcs`.
     fn mark(&mut self, srcs: &[Src], pos: Pos) {
         for (o, l) in srcs {
             let f = self.flags.entry(*o).or_default();
@@ -532,6 +534,7 @@ impl<'a> Flow<'a> {
     }
 
     // ------------------------------------------------------------- uses
+    /// The uses an expression makes, used itself at `pos`.
     fn expr(&mut self, e: &'static Expr, pos: Pos) {
         if !matches!(pos, Pos::Read | Pos::Bind) {
             let srcs = self.srcs(e);
@@ -721,6 +724,8 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// A call's uses: its callee by name, its arguments given to it (to a method of a value, a
+    /// library function, the program's function by name: `Pass`).
     fn call(&mut self, c: &'static ast::ExprCall) {
         let args: Vec<&'static Expr> = c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value)).collect();
         match &*c.func {
@@ -876,6 +881,7 @@ impl<'a> Flow<'a> {
         matches!((e, self.me), (Expr::Name(n), Some(me)) if n.id.as_str() == me && self.alias.get(&s(me)).is_some_and(|v| v.len() == 1))
     }
 
+    /// Does target `t` bind local names only?
     fn all_local(&self, t: &Expr) -> bool {
         match t {
             Expr::Name(n) => self.local(n.id.as_str()),
@@ -937,6 +943,7 @@ impl<'a> Flow<'a> {
         b.iter().for_each(|st| self.stmt(st));
     }
 
+    /// A statement's uses.
     fn stmt(&mut self, st: &'static Stmt) {
         match st {
             Stmt::Expr(x) => self.expr(&x.value, Pos::Read),

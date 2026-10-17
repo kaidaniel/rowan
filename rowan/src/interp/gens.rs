@@ -94,6 +94,8 @@ pub struct GenEffects {
 }
 
 impl GenEffects {
+    /// The effects given once every yield's are (all items taken), joined with the end's;
+    /// computed once.
     fn taken(&self) -> Option<&State> {
         self.taken
             .get_or_init(|| {

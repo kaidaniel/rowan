@@ -220,6 +220,8 @@ impl Analyzer {
         }
     }
 
+    /// Can object `o` be hashed (a dict key, a set member)? Lists, dicts and sets cannot; a tuple
+    /// as its items; others can.
     fn obj_hashing(&self, o: u32, state: &State, depth: usize) -> Hashing {
         let ob = self.heap.obj(o);
         match ob.kind {
