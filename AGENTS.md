@@ -51,12 +51,12 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; to library functions that only read, given no code: nothing, `read_only_library`; a dict, list or set changed
-  in place: its items), a local aliasing what it is bound to; class attributes by name, rebound
+  in place, unpacked or copied (`{**d}`, `dict(d)`): its items), a local aliasing what it is bound to; class attributes by name, rebound
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
-  * **Unknown values** are not taken for the program's instances: their methods are unknown calls. An instance unknown code changed may hold a name its class has (not a method or class).
+  * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class).
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
@@ -101,7 +101,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   json, re, datetime, decimal, sqlite, csv…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
   selection holds its columns, its `drop(columns=…)` the others), pydantic / FastAPI validation and routing, and torch / numpy shapes
   (dims as polynomials; an undecided condition is a requirement and then a fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims, a module-level tensor's unknown dims are one value each).
-* **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
+* **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop, entry runs left out (`cut`); the budget bounds the work.
   **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
   verdicts (fresh budget; past four budgets of work its callees' calls are unknown, `callees_cut`, several callees one `skipped_calls`,
   classes among them their instances made there; every run starts from the module's end, `demand_start`). `rowan serve` starts the whole run and the module code's

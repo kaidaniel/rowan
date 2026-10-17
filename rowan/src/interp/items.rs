@@ -1218,7 +1218,8 @@ impl Analyzer {
             seen.insert(oid, oid);
             return oid;
         }
-        let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
+        // (a copy of a value rowan knows nothing of is as unknown: a DataFrame's, a list's, …)
+        let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame | Kind::Unknown) { o_kind } else { Kind::Dict };
         let tag = if deep { "deep" } else { "copy" };
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a
         // copy of a copy, made here or elsewhere, counts as a copy of the first original — else
@@ -1241,6 +1242,9 @@ impl Analyzer {
         let payload = self.heap.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         self.heap.set_copy_root(nid, root);
+        if kind == Kind::Unknown {
+            self.heap.obj_mut(nid).ty = self.heap.obj(oid).ty;
+        }
         seen.insert(oid, nid);
         let ll = self.heap.llen(oid, state);
         self.heap.set_llen(nid, state, ll);

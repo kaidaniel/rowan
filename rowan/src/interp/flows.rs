@@ -478,6 +478,10 @@ impl<'a> Flow<'a> {
                         "type" if c.arguments.args.len() == 1 => vec![(Origin::TypeOf, Level::Own)],
                         // (`abs` / `round` may give back their argument, by its dunder; `sorted`,
                         // `min`, … what they were given; `len`, `str`, `isinstance`, … a new value)
+                        // (a container made from an iterable — `dict(m)`, `list(xs)`, `sorted(xs)` — holds
+                        // what it holds, as does an item of it — `min(xs)`; an iterator over it may be
+                        // it — `iter(it)` — or advance it)
+                        f if PASSING_BUILTINS.contains(&f) && !matches!(f, "iter" | "reversed" | "enumerate" | "zip") => held(args().flat_map(|x| self.srcs(x)).collect()),
                         f if PASSING_BUILTINS.contains(&f) || matches!(f, "abs" | "round") => args().flat_map(|x| self.srcs(x)).collect(),
                         f => vec![(Origin::Result(s(f), None), Level::Own)],
                     },
@@ -590,13 +594,18 @@ impl<'a> Flow<'a> {
             Expr::Set(x) => x.elts.iter().for_each(|v| self.expr(v, part)),
             Expr::Dict(d) => {
                 for it in &d.items {
-                    if let Some(k) = &it.key {
-                        self.expr(k, part);
+                    match &it.key {
+                        Some(k) => {
+                            self.expr(k, part);
+                            self.expr(&it.value, part);
+                        }
+                        // (`{**m}`: m's values are kept, not m)
+                        None => self.unpacked(&it.value, part),
                     }
-                    self.expr(&it.value, part);
                 }
             }
-            Expr::Starred(x) => self.expr(&x.value, if pos == Pos::Read { Pos::Read } else { Pos::Change }),
+            // (`[*xs]`, `f(*xs)`: xs's items are kept or given, not xs)
+            Expr::Starred(x) => self.unpacked(&x.value, if pos == Pos::Read { Pos::Read } else { Pos::Change }),
             Expr::ListComp(ast::ExprListComp { elt, generators, .. }) | Expr::SetComp(ast::ExprSetComp { elt, generators, .. }) | Expr::Generator(ast::ExprGenerator { elt, generators, .. }) => {
                 self.comprehension(generators);
                 self.expr(elt, part);
@@ -633,6 +642,18 @@ impl<'a> Flow<'a> {
                 }
                 ast::visitor::walk_expr(&mut Sub(self), e);
             }
+        }
+    }
+
+    /// `e` unpacked (`*e`, `**e`) where its parts go to `pos`: what it holds goes there, and it
+    /// is iterated.
+    fn unpacked(&mut self, e: &'static Expr, pos: Pos) {
+        if pos != Pos::Read {
+            let srcs: Vec<Src> = self.srcs(e).into_iter().map(|(o, _)| (o, Level::Held)).collect();
+            self.mark(&srcs, pos);
+            self.expr(e, Pos::Iterate);
+        } else {
+            self.expr(e, Pos::Read);
         }
     }
 
@@ -676,7 +697,12 @@ impl<'a> Flow<'a> {
         let args = all.iter().all(|(x, slot)| slot.is_some() && self.arg_names(x, &mut names)).then(|| std::rc::Rc::new(names));
         for (x, slot) in all {
             let Some(slot) = slot else {
-                self.expr(x, Pos::Change);
+                // (`**kw`: the callee gets a new dict of kw's values)
+                if c.arguments.keywords.iter().any(|k| k.arg.is_none() && std::ptr::eq(&k.value, x)) {
+                    self.unpacked(x, Pos::Change);
+                } else {
+                    self.expr(x, Pos::Change);
+                }
                 continue;
             };
             let mut srcs = Vec::new();

@@ -335,7 +335,7 @@ impl Analyzer {
         // made with `__init__`'s defaults
         if self.findings.wants_general() {
             for oid in std::mem::take(&mut self.entry.facts_runs) {
-                if self.budget.over_hard_deadline() {
+                if self.budget.tick() {
                     break;
                 }
                 let fi = self.heap.func_info(oid);
@@ -360,7 +360,8 @@ impl Analyzer {
     /// torch modules' functions, FastAPI handlers and functions their budget refused).
     pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, base: &mut State, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
-            if self.budget.over_hard_deadline() {
+            // (the entry runs the deadline leaves out: the analysis was cut)
+            if self.budget.tick() {
                 break;
             }
             if self.heap.kind(oid) != Kind::Function || self.entry.done.contains(&oid) {
