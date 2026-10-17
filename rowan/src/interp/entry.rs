@@ -98,7 +98,7 @@ pub struct Entries {
 /// facts and verdicts recorded by then, and whether the deadline cut it.
 struct ModuleEnd {
     state: State,
-    facts: IndexMap<(u32, StrId), super::Fact>,
+    facts: IndexMap<super::findings::FactKey, super::Fact>,
     verdicts: usize,
     cut: bool,
 }

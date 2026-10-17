@@ -1,5 +1,5 @@
 //! The `--facts` document the editor's hovers and diagnostics are made from (`rowan serve`
-//! sends it, `vscode-rowan` renders it): per (line, name) the value as text (for any call, and
+//! sends it, `vscode-rowan` renders it): per occurrence of a name (line, column) the value as text (for any call, and
 //! what each of the program's calls gave), the names it mentions, the objects it may be (where
 //! they were made, what changed them, where their unknowns come from), what the code reads of
 //! it (access paths; a parameter's contract), tensor-shape requirements, and the findings in
@@ -14,14 +14,31 @@ use crate::interp::render::{is_internal_key, join_alternatives};
 use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
 use crate::source::source_is_data;
 use crate::state::Kind;
+use rustc_hash::FxHashMap;
 
-/// The `--facts` document for the editor: per (line, name) the value as text, the names it
+/// The `--facts` document for the editor: per occurrence of a name (line, column) the value as text, the names it
 /// mentions, the objects it may be (for people: where they were made and changed), what the
 /// code reads of it, and the findings in words.
 pub fn facts_json(an: &Analyzer) -> J {
-    let facts: Vec<J> = an.findings.facts.iter().map(|((line, name), f)| fact_json(an, *line, *name, f)).collect();
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
     let main_idx = an.heap.module_info(an.program.main_module).idx;
+    // (one entry for the places of a name on a line that have the same facts, with their columns)
+    let mut facts: Vec<J> = Vec::new();
+    let mut at: FxHashMap<(u32, StrId), Vec<usize>> = FxHashMap::default();
+    for ((line, col, name), f) in an.findings.facts.iter() {
+        let j = fact_json(an, *line, *name, f);
+        let col = crate::frontend::utf16_col(main_idx, *line, *col);
+        let same = at.entry((*line, *name)).or_default();
+        let alike = |k: &J| k["text"] == j["text"] && k.as_object().unwrap().len() == j.as_object().unwrap().len() + 1 && k.as_object().unwrap().iter().all(|(n, v)| n == "cols" || j.get(n) == Some(v));
+        match same.iter().find(|i| alike(&facts[**i])) {
+            Some(i) => facts[*i]["cols"].as_array_mut().unwrap().push(json!(col)),
+            None => {
+                same.push(facts.len());
+                facts.push(j);
+                facts.last_mut().unwrap()["cols"] = json!([col]);
+            }
+        }
+    }
     let verdicts: Vec<J> = reported(an)
         .iter()
         .map(|v| {

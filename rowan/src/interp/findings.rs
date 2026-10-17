@@ -53,7 +53,10 @@ impl Verdict {
     }
 }
 
-/// Facts about one name at one line of the main module (hover support): the values it held and
+/// Where a hover fact is: the line, the column (of the line's text) and the name.
+pub type FactKey = (u32, u32, StrId);
+
+/// Facts about one name at one place of the main module (hover support): the values it held and
 /// the rows of the objects it pointed to. Two sets of values, never joined into one: what holds
 /// for any call of the function the line is in (its general run, with open parameters of their
 /// annotated types; module code), and what the program's own calls gave (with their lines).
@@ -73,8 +76,8 @@ pub struct Fact {
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
-    /// recorded by an assignment (whose value the hover shows, not the reads on the line:
-    /// `x = x + 1` is `x = 2`, not `1 | 2`)
+    /// recorded by an assignment (whose value the hover shows, not the read of the same name:
+    /// `x += 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
     /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
     /// call chain into the function, the objects given; at most `PASSED`)
@@ -208,7 +211,9 @@ pub struct Findings {
     pub facts_on: bool,
     /// the golden harness checks values for any call (`#@general`)
     pub general_checks: bool,
-    pub facts: IndexMap<(u32, StrId), Fact>,
+    /// by (line, column, name): each occurrence of a name on a line has its own value (in
+    /// `row["a"] + row["b"]` the second `row` has `"a"`)
+    pub facts: IndexMap<FactKey, Fact>,
     /// the next hover fact is an assignment's
     pub fact_write: bool,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
@@ -379,9 +384,9 @@ impl Analyzer {
             return;
         }
         let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
-        // (an assignment's value is what the hover shows, not the reads on the line: `x = x + 1`)
+        // (an assignment's value is what the hover shows, not the read of its target: `x += 1`)
         let writing = std::mem::take(&mut self.findings.fact_write);
-        if !writing && self.findings.facts.get(&(node.line, name)).is_some_and(|e| e.written) {
+        if !writing && self.findings.facts.get(&(node.line, node.col, name)).is_some_and(|e| e.written) {
             return;
         }
         let rows = self.fact_rows(v, state);
@@ -390,7 +395,7 @@ impl Analyzer {
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
         if !self.m.torch_on {
-            if let Some(e) = self.findings.facts.get_mut(&(node.line, name)) {
+            if let Some(e) = self.findings.facts.get_mut(&(node.line, node.col, name)) {
                 if e.full(call) && (e.written || !writing) {
                     e.join_rows(rows, general);
                     return;
@@ -412,7 +417,7 @@ impl Analyzer {
             None => render(self),
         };
         legend.extend(tlegend);
-        let e = self.findings.facts.entry((node.line, name)).or_default();
+        let e = self.findings.facts.entry((node.line, node.col, name)).or_default();
         if writing && !e.written {
             e.written = true;
             e.general.clear();
@@ -458,7 +463,7 @@ impl Analyzer {
             let Some(v) = bound.get(&name) else { continue };
             let node = frontend::node_in(module, p);
             self.record_fact(&node, name, v, state);
-            let Some(f) = self.findings.facts.get_mut(&(node.line, name)) else { continue };
+            let Some(f) = self.findings.facts.get_mut(&(node.line, node.col, name)) else { continue };
             f.param_of = Some(foid);
             if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, _)| *c == self.cx.call_chain) {
                 f.passed.push((self.cx.call_chain.clone(), v.pts.to_vec()));
