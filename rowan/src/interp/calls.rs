@@ -73,8 +73,9 @@ impl Analyzer {
                 self.force_gen(&r, state, true);
             }
         }
-        // (the program's own code takes them as they are: its loops run them)
-        let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class));
+        // (the program's own code takes them as they are: its loops run them; so does `iter`,
+        // which gives them back)
+        let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class) || matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.iter" && self.heap.kind(o) == Kind::External));
         for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user) {
             self.force_gen(a, state, !bulk);
         }

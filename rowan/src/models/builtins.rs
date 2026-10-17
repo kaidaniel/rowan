@@ -148,6 +148,21 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
+    // `iter(it)` of an iterator (a generator, another `iter`'s) is `it`: none of a generator's
+    // body runs before its items are taken
+    if let (true, [a]) = (c.qual == "builtins.iter" && c.kwargs.is_empty(), c.args.as_slice()) {
+        let is_it = |an: &Analyzer, o: ObjId| an.heap.obj(o).iterator && an.heap.kind(o) == Kind::List;
+        let its = a.pts.filter(|o| is_it(an, o));
+        if !its.is_empty() {
+            let rest = Value { pts: a.pts.filter(|o| !is_it(an, o)), kv: a.kv.clone() };
+            if rest.pts.is_empty() && rest.kv.is_bot() {
+                return a.clone();
+            }
+            let mut c2 = c.clone();
+            c2.args = vec![rest];
+            return m_list(an, st, &c2).join(&Value::objs(its));
+        }
+    }
     let kind = match c.qual.as_str() {
         "builtins.tuple" => Kind::Tuple,
         "builtins.set" | "builtins.frozenset" => Kind::Set,
