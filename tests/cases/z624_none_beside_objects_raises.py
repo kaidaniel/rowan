@@ -72,7 +72,7 @@ try:
 except TypeError:
     r9 = "te"
 seen.append(r9)  #@value r9: exactly={"te", True}
-# (lists of known items are ordered item by item: was a #@todo)
+# (lists of known items are ordered item by item: this was a todo)
 try:
     r10 = n + 1
 except TypeError:
