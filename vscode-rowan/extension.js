@@ -87,7 +87,10 @@ function parseValue(s) {
       } else if (CLOSE_OF[c]) {
         flush();
         i++;
-        parts.push({ open: c, close: CLOSE_OF[c], items: items(CLOSE_OF[c]) });
+        const node = { open: c, close: CLOSE_OF[c], items: items(CLOSE_OF[c]) };
+        // (a one-item tuple keeps its comma: `(x,)`)
+        if (c === "(" && s[i - 2] === "," && node.items.length === 1) node.trail = true;
+        parts.push(node);
       } else if (c === close) {
         i++;
         endItem();
@@ -108,7 +111,7 @@ function parseValue(s) {
 }
 
 function flatParts(parts) {
-  return parts.map((p) => (typeof p === "string" ? p : p.open + p.items.map(flatParts).join(", ") + p.close)).join("");
+  return parts.map((p) => (typeof p === "string" ? p : p.open + p.items.map(flatParts).join(", ") + (p.trail ? "," : "") + p.close)).join("");
 }
 
 /** The top-level alternatives of a value (`A | B`), outside brackets and strings. */
@@ -179,7 +182,7 @@ function prettyValue(text, width = VALUE_WIDTH) {
 /** `text` with brackets nested deeper than `depth` cut to `{…}` / `[…]` / `(…)`. */
 function cutDepth(text, depth) {
   const flat = (parts, d) =>
-    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => flat(i, d + 1)).join(", ") + p.close)).join("");
+    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => flat(i, d + 1)).join(", ") + (p.trail ? "," : "") + p.close)).join("");
   return parseValue(text).map((i) => flat(i, 0)).join(", ");
 }
 

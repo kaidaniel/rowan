@@ -257,6 +257,9 @@ assert.strictEqual(lines[0], "Repo(");
 assert(lines.includes('  name="customers"'), lines.join("\n"));
 assert(lines.includes('    {"key": 1, "op": "add"},'), lines.join("\n"));
 assert.deepStrictEqual(prettyValue("[1, 2, 3]"), ["[1, 2, 3]"]);
+// a one-item tuple keeps its comma, also when cut or broken over lines
+assert.deepStrictEqual(prettyValue("E(args=(str(?),)) | ?"), ["E(args=(str(?),)) | ?"]);
+assert.deepStrictEqual(prettyValue("[(1,), (2, 3)]"), ["[(1,), (2, 3)]"]);
 assert.strictEqual(lines.join("").replace(/\s+/g, ""), repo.replace(/\s+/g, ""));
 assert.deepStrictEqual(prettyValue('{"t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"], **?}', 40), ["{", '  "t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"],', "  **?", "}"]);
 // one of several long values: one per line
