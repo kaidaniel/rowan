@@ -25,6 +25,7 @@ pub fn hdr_key() -> intern::KeyId {
     key_str_lit("\u{1}csvhdr")
 }
 
+/// A `csv.writer` / `DictWriter`: its file and dialect.
 #[derive(Clone, Debug)]
 pub struct CsvWriter {
     pub file: Value,

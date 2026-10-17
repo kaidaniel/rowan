@@ -15,6 +15,7 @@ use crate::intern::{self, key_str_lit, KeySet};
 use crate::models::pyre::{self, Regex, Spans};
 use crate::state::{Kind, State};
 
+/// A `re.Match` on known text: the pattern, the text and the groups' spans.
 #[derive(Clone, Debug)]
 pub struct ReMatch {
     pub pat: String,

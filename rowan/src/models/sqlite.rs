@@ -15,6 +15,7 @@ use crate::interp::{Analyzer, Call, Payload};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
+/// A table of the simulated database: its columns, its rows when known.
 #[derive(Clone, Debug)]
 pub struct Table {
     pub cols: Vec<(String, String)>,
@@ -25,6 +26,7 @@ pub struct Table {
     pub pk: Option<usize>,
 }
 
+/// A connection's simulated database.
 #[derive(Clone, Debug, Default)]
 pub struct Db {
     /// an in-memory database: every table is the program's

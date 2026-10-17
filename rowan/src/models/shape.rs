@@ -18,13 +18,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// A named unknown: (function scope, program text), e.g. (f, "x"), (0, "cfg.d").
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Sym(pub u32);
+/// An interned `Atom`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct AtomId(pub u32);
+/// An interned dim: a normalised polynomial (`Poly`) over atoms.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct DimId(pub u32);
+/// An interned `Shape`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct ShapeId(pub u32);
 
+/// A dim's variable: what a polynomial dim is made of.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Atom {
     /// `x.shape[i]` (i < 0: from the end)
@@ -48,6 +52,7 @@ pub enum Atom {
 pub type Mono = Vec<(AtomId, u32)>;
 pub type Poly = Vec<(Mono, i64)>;
 
+/// The middle of a shape whose number of dims is not known.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Rest {
     /// `x.shape[from : len-back]`
@@ -60,6 +65,7 @@ pub enum Rest {
     Any,
 }
 
+/// What a tensor's rank is known (or required) to be.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum RankRel {
     Eq(u32),
@@ -67,14 +73,20 @@ pub enum RankRel {
     Ge(u32),
 }
 
+/// A constraint on shapes: a requirement an operation records when it is not decided, and the
+/// fact a path then carries.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Cons {
+    /// two dims are equal
     Eq(DimId, DimId),
+    /// an unknown tensor's rank
     Rank(Sym, RankRel),
     /// `main if given…`
     If(Box<Cons>, Vec<Cons>),
 }
 
+/// A tensor's shape: known leading dims, an optional middle of unknown length, known trailing
+/// dims (a fully known shape is all `prefix`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Shape {
     pub prefix: Vec<DimId>,
@@ -564,6 +576,8 @@ pub fn ceildiv(a: DimId, b: DimId) -> DimId {
 // facts
 // ---------------------------------------------------------------------------
 
+/// The tensor facts a path carries (`State::tf`): which unknowns are tensors or sizes, their
+/// ranks, and the dims known equal.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct TFacts {
     /// unknowns used as tensors on this path (`x.size(0)` ran: x is a tensor)

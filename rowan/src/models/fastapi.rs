@@ -19,6 +19,7 @@ use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
+/// A route an app or router records: its methods, path, handler and decorator call.
 #[derive(Clone, Debug)]
 pub struct FaRoute {
     pub app: ObjId,

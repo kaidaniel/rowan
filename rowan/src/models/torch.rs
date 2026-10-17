@@ -16,6 +16,7 @@ use crate::state::{Kind, State};
 
 pub const SIZE_PREFIX: &str = "\u{1}S";
 
+/// A tensor-shape requirement or a definite mismatch, for the report and the hovers.
 #[derive(Clone, Debug)]
 pub struct ShapeNote {
     /// the module (frontend index) and line of the operation
@@ -839,6 +840,7 @@ pub fn t_locate(an: &mut Analyzer, s: &Shape, i: i64, node: &Node, st: &mut Stat
     }
 }
 
+/// A dim's place in a `Shape`: counted from the front or from the back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pos {
     /// index in the prefix

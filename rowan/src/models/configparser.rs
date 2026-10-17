@@ -13,6 +13,7 @@ use crate::interp::{Analyzer, Call, Payload};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
+/// What a `ConfigParser` read: its sections and options when the text is known.
 #[derive(Clone, Debug, Default)]
 pub struct CfgSpec {
     /// the text read so far is known

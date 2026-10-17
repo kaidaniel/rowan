@@ -14,6 +14,7 @@ use crate::intern::{self, key_str_lit};
 use crate::interp::{Analyzer, Call, Payload};
 use crate::state::{Kind, State};
 
+/// An argument's `action=`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Store,
@@ -29,6 +30,7 @@ pub enum Action {
     Other,
 }
 
+/// An argument's `type=` conversion.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Conv {
     Str,
@@ -38,6 +40,7 @@ pub enum Conv {
     Other,
 }
 
+/// An argument's `nargs=`: one value, `?`, `*`, `+`, N, or `argparse.REMAINDER`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Nargs {
     One,
@@ -48,6 +51,7 @@ pub enum Nargs {
     Rest,
 }
 
+/// One `add_argument` call: its option strings or name and how it parses.
 #[derive(Clone, Debug)]
 pub struct ArgSpec {
     pub flags: Vec<String>,
@@ -64,6 +68,7 @@ pub struct ArgSpec {
     pub suppress: bool,
 }
 
+/// A parser's `add_subparsers()`: its `dest`, whether a command is required, the commands.
 #[derive(Clone, Debug, Default)]
 pub struct SubSpec {
     pub dest: Option<String>,
@@ -73,6 +78,7 @@ pub struct SubSpec {
     pub after_positionals: usize,
 }
 
+/// What a parser knows: its arguments, `set_defaults`, subparsers.
 #[derive(Clone, Debug, Default)]
 pub struct ParserSpec {
     pub args: Vec<ArgSpec>,
@@ -84,6 +90,7 @@ pub struct ParserSpec {
     pub exit_on_error: bool,
 }
 
+/// An argparse object the model keeps (`Tables::argp`): a parser, its subparsers, a group.
 #[derive(Clone, Debug)]
 pub enum ArgObj {
     Parser(ParserSpec),

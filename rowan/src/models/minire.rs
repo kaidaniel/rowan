@@ -17,6 +17,7 @@ enum Node {
     Repeat(Box<Node>, usize, Option<usize>),
 }
 
+/// A compiled pattern of the small matcher.
 pub struct Regex {
     root: Node,
 }

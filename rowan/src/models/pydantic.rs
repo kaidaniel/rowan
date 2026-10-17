@@ -19,6 +19,7 @@ use crate::interp::{Analyzer, Call, Payload};
 use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
+/// A model's `extra` setting: what validation does with input keys that are no field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Extra {
     Ignore,
@@ -47,6 +48,7 @@ pub enum Ann {
     Other,
 }
 
+/// One declared field of a model.
 #[derive(Clone, Debug)]
 pub struct PField {
     pub name: String,
@@ -68,6 +70,7 @@ pub struct PField {
     pub constraints: Vec<(String, KeyId)>,
 }
 
+/// A `field_validator` / `model_validator` (or v1 `validator` / `root_validator`).
 #[derive(Clone, Debug)]
 pub struct Validator {
     pub func: ObjId,
@@ -87,6 +90,7 @@ pub struct PErr {
     pub ctx: bool,
 }
 
+/// What pydantic makes of a model class: its fields, config and validators.
 #[derive(Clone, Debug)]
 pub struct PClass {
     pub fields: Vec<PField>,
@@ -1963,6 +1967,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
     }
 }
 
+/// The options of a `model_dump` / `dict` / `model_dump_json` call.
 #[derive(Clone, Default)]
 pub struct DumpOpts {
     pub include: Option<KeySet>,

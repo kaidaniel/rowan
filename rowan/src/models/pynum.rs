@@ -24,6 +24,7 @@ fn opaque() -> bool {
     OPAQUE.with(|o| o.get())
 }
 
+/// A finite `Decimal`: sign, coefficient and exponent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dec {
     pub neg: bool,
@@ -31,6 +32,7 @@ pub struct Dec {
     pub exp: i32,
 }
 
+/// A `decimal` rounding mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rounding {
     HalfEven,

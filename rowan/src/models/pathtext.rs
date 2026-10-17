@@ -472,6 +472,7 @@ pub fn path_repr(an: &Analyzer, o: u32) -> Option<String> {
 
 // -------------------------------------------------------------------- textwrap
 
+/// `textwrap`'s options.
 pub struct Wrap {
     pub width: usize,
     pub initial_indent: String,
