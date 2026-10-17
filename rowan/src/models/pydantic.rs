@@ -1913,7 +1913,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     }
                     None => {
                         let e = match it.elem {
-                            crate::interp::funcs::Elem::One(v) => v,
+                            crate::interp::iter::Elem::One(v) => v,
                             _ => Value::data("elem"),
                         };
                         let ce = pyd_convert(an, inner, &e, state, node);
@@ -2547,7 +2547,7 @@ fn pyd_dump_value(an: &mut Analyzer, ann: &Ann, v: &Value, opts: &DumpOpts, stat
                     }
                     None => {
                         let e = match it.elem {
-                            crate::interp::funcs::Elem::One(v) => v,
+                            crate::interp::iter::Elem::One(v) => v,
                             _ => Value::data("elem"),
                         };
                         let ce = pyd_dump_value(an, &inner, &e, opts, state, node);

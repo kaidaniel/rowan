@@ -1164,6 +1164,96 @@ impl Analyzer {
             state.set_row(oid, ns, row);
         }
     }
+
+    /// The join of every value in one namespace of the object.
+    pub fn all_values(&self, oid: u32, ns: Ns, state: &State) -> Value {
+        state.all_slots(oid, ns)
+    }
+
+    /// The values a record holds, including what its unknown keys hold (a parameter's dict,
+    /// an open record: its content under an unknown key).
+    pub(in crate::interp) fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
+        let v = state.all_slots(oid, Ns::Item);
+        let row = state.row(oid, Ns::Item);
+        // (keys stored under unknown names keep their values in the `*` slot: only content
+        // from outside — a parameter, an input, unknown code — is not there)
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        if row.open() && outside {
+            return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
+        }
+        v
+    }
+
+    /// A copy of object `oid` made at `node` (`copy.copy`, `dict(d)`, `deepcopy` when `deep`:
+    /// what it holds copied too, `seen` keeping shared parts shared): a tuple is its own copy;
+    /// the copy's site names the first original, so copies of copies in a loop share a site.
+    pub fn copy_object(&mut self, oid: u32, node: &Node, state: &mut State, deep: bool, seen: &mut IndexMap<u32, u32>) -> u32 {
+        if let Some(&n) = seen.get(&oid) {
+            return n;
+        }
+        let o_kind = self.heap.kind(oid);
+        // a tuple is its own copy (`copy.copy`), and its own deep copy when nothing in it is
+        // copied (CPython returns the same object)
+        if o_kind == Kind::Tuple && (!deep || state.slots_of(oid).iter().all(|(_, v)| v.pts.iter().all(|x| !matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)))) {
+            seen.insert(oid, oid);
+            return oid;
+        }
+        let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
+        let tag = if deep { "deep" } else { "copy" };
+        // (the original's id in the site: a deep copy's nested copies are distinct objects; a
+        // copy of a copy, made here or elsewhere, counts as a copy of the first original — else
+        // copies of copies in a loop make new sites every round)
+        let prefix = format!("{}:{}:", tag, self.site_of(node));
+        // (a copy renamed since, `#recent`: its site still names its original)
+        let site = &self.heap.obj(oid).site;
+        let site_root = (site.starts_with("copy:") || site.starts_with("deep:")).then(|| site.split('#').next().and_then(|s| s.rsplit(':').next()).and_then(|r| r.parse::<u32>().ok())).flatten();
+        let root = match (self.heap.copy_root.get(&oid), site_root) {
+            (Some(&r), _) => r,
+            (_, Some(r)) if (r as usize) < self.heap.len() => self.heap.copy_root.get(&r).copied().unwrap_or(r),
+            _ => oid,
+        };
+        // (a copy of a copy made elsewhere is named by the first original: `copy of X@L5`)
+        let mut base: &str = &self.heap.obj(root).label;
+        while let Some(rest) = base.strip_prefix("copy of ").or_else(|| base.strip_prefix("deep of ")) {
+            base = rest.rsplit_once("@L").filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map(|(b, _)| b).unwrap_or(rest);
+        }
+        let label = format!("{} of {}@L{}", tag, base, node.line);
+        let payload = self.heap.obj(oid).payload.clone();
+        let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
+        self.heap.copy_root.insert(nid, root);
+        seen.insert(oid, nid);
+        let ll = self.heap.llen(oid, state);
+        self.heap.set_llen(nid, state, ll);
+        let nsingle = self.heap.obj(nid).single;
+        for ns in [Ns::Item, Ns::Attr] {
+            if state.has_row(oid, ns) {
+                let prev = state.rows.get(&(nid, ns));
+                let r = match prev {
+                    Some(p) if !nsingle => p.join(&state.row(oid, ns)),
+                    _ => state.row(oid, ns),
+                };
+                state.set_row(nid, ns, r);
+            }
+        }
+        if let Some(e) = state.elems.get(&oid) {
+            state.elems.insert(nid, e);
+        }
+        for ((ns, k), mut v) in state.slots_of(oid) {
+            if deep && seen.len() < 64 {
+                let mut newp: Vec<u32> = Vec::new();
+                for x in v.pts.iter() {
+                    if matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance) {
+                        newp.push(self.copy_object(x, node, state, true, seen));
+                    } else {
+                        newp.push(x);
+                    }
+                }
+                v = Value::with_kv(ObjSet::from_vec(newp), v.kv);
+            }
+            state.set_slot(nid, ns, k, v, true);
+        }
+        nid
+    }
 }
 
 /// A read on one of several objects (`outs`: the requirements after each one's part, from

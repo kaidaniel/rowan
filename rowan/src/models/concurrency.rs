@@ -230,7 +230,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             "map" => {
                 let Some(f) = c.args.first().cloned() else { return Value::data("map") };
                 let its: Vec<Value> = c.args.iter().skip(1).cloned().collect();
-                let iters: Vec<crate::interp::funcs::Iteration> = its.iter().map(|x| an.iterate(x, &c.node, st)).collect();
+                let iters: Vec<crate::interp::iter::Iteration> = its.iter().map(|x| an.iterate(x, &c.node, st)).collect();
                 let all_known = iters.iter().all(|i| i.items.is_some());
                 let mut results = Vec::new();
                 let mut worst = Raised { level: 0, names: vec![], exc: Value::new() };

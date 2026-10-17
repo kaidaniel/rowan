@@ -2,7 +2,7 @@
 //! Enum members, identity-hashed objects, frozen dataclass instances), and back (`unkey`).
 
 use crate::domain::{KeyVal, Ns, Value};
-use crate::intern::{self, key_str_lit, KeyId, KeySet};
+use crate::intern::{self, key_int, key_str_lit, KeyId, KeySet};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload};
@@ -264,5 +264,90 @@ impl Analyzer {
     pub fn hashes_keys(&self, o: u32) -> bool {
         let ob = self.heap.obj(o);
         matches!(ob.kind, Kind::Dict | Kind::Set) && !ob.iterator
+    }
+
+    /// The literals a value may be or a container may hold (a list's, tuple's or set's scalar
+    /// elements, a closed dict's keys); None when they are not all known.
+    pub fn lit_keys(&mut self, v: &Value, state: &State) -> Option<KeySet> {
+        if v.kv.is_literal() && v.pts.is_empty() {
+            return Some(crate::domain::kv_literals(&v.kv));
+        }
+        let mut out = KeySet::new();
+        for oid in v.pts.iter() {
+            match self.heap.kind(oid) {
+                Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
+                    Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
+                    _ => {
+                        return None;
+                    }
+                },
+                Kind::Dict => {
+                    let row = state.row(oid, Ns::Item);
+                    if row.closed() && row.present == row.definite {
+                        out = out.union(&row.present);
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        if v.pts.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// The literals a container surely holds, whichever of its objects it is: of a list,
+    /// tuple or set of known length the positions that are one literal, of a dict its keys
+    /// there on every path (the literals `lit_keys` gives may be there; these are).
+    pub fn sure_lit_keys(&mut self, v: &Value, state: &State) -> Option<KeySet> {
+        if v.pts.is_empty() || !v.kv.is_bot() {
+            return None;
+        }
+        let mut out: Option<KeySet> = None;
+        for oid in v.pts.iter() {
+            let ks: KeySet = match self.heap.kind(oid) {
+                Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).single && !crate::state::is_merged(oid) => {
+                    let n = self.heap.llen(oid, state)?;
+                    (0..n).filter_map(|i| { let sv = state.slot(oid, Ns::Pos, key_int(i as i64)); sv.kv.as_lit().filter(|_| sv.pts.is_empty()) }).collect()
+                }
+                Kind::Dict => state.row(oid, Ns::Item).definite.clone(),
+                _ => return None,
+            };
+            out = Some(match out {
+                None => ks,
+                Some(o) => o.filter(|k| ks.contains(k)),
+            });
+        }
+        out
+    }
+
+    /// The (key, literal value) items of closed dicts whose keys are all there and whose values
+    /// are each one literal (pandas: `df.rename(columns={…})`, a replace mapping).
+    pub fn literal_mapping(&mut self, v: &Value, state: &State) -> Option<Vec<(KeyId, KeyId)>> {
+        let mut out: Vec<(KeyId, KeyId)> = Vec::new();
+        for oid in v.pts.iter() {
+            if self.heap.kind(oid) != Kind::Dict {
+                return None;
+            }
+            let row = state.row(oid, Ns::Item);
+            if row.open() || row.present != row.definite {
+                return None;
+            }
+            for k in row.present.iter() {
+                let sv = state.slot(oid, Ns::Item, k);
+                match sv.kv.as_lit() {
+                    Some(l) => out.push((k, l)),
+                    None => return None,
+                }
+            }
+        }
+        if v.pts.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 }

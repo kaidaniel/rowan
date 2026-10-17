@@ -906,7 +906,7 @@ fn kw<'a>(c: &'a Call, name: &str) -> Option<&'a Value> {
 /// An unknown known to be a number: a dim, a number the shape model made, an index of
 /// `enumerate` (`ENUM_INDEX`).
 pub fn is_number_label(l: &str) -> bool {
-    l.starts_with(sh::DIM_PREFIX) || l == sh::NUM_LABEL || l == crate::interp::funcs::ENUM_INDEX
+    l.starts_with(sh::DIM_PREFIX) || l == sh::NUM_LABEL || l == crate::interp::iter::ENUM_INDEX
 }
 
 // ---------------------------------------------------------------------------

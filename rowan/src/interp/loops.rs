@@ -14,7 +14,7 @@ use super::{Analyzer, LoopCtx, UNROLL_MAX};
 
 /// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
 pub const LOOP_MAX_ITER: usize = 40;
-use super::funcs::Elem;
+use super::iter::Elem;
 use super::stmts::{add_facts, cond_facts_for};
 
 impl Analyzer {
@@ -726,6 +726,53 @@ impl Analyzer {
             self.obj_edges(o, state, &mut work);
         }
         true
+    }
+
+    /// Requirements on the loop's own elements are per element, not per program run.
+    pub(in crate::interp) fn promote_elem_reqs(&mut self, exit_s: &mut State, body_s: &State, elem: &Value, state: &State) {
+        if !body_s.reachable {
+            return;
+        }
+        let mut srcs: Vec<crate::domain::SourceId> = Vec::new();
+        // (the element, and the items it holds two levels down: the group of a `groupby` pair
+        // iterated in its turn reads each of its rows once per element too)
+        let mut objs: Vec<ObjId> = elem.pts.iter().collect();
+        let mut level: Vec<ObjId> = objs.clone();
+        for _ in 0..2 {
+            let mut next: Vec<ObjId> = Vec::new();
+            for oid in level {
+                if matches!(self.heap.kind(oid), Kind::List | Kind::Tuple) {
+                    state.slots.each(&oid, &mut |sk, v| {
+                        if matches!(sk.0, Ns::Elem | Ns::Pos) {
+                            next.extend(v.pts.iter());
+                        }
+                    });
+                }
+            }
+            next.retain(|o| !objs.contains(o));
+            objs.extend(next.iter().copied());
+            level = next;
+        }
+        for oid in objs {
+            for ns in [Ns::Item, Ns::Attr] {
+                for (src, _) in state.row(oid, ns).sources.iter() {
+                    if !crate::domain::source_is_data(src) && !srcs.contains(&src) {
+                        srcs.push(src);
+                    }
+                }
+            }
+        }
+        for src in srcs {
+            for (k, info) in body_s.reqs.for_key(&src) {
+                if info.always {
+                    if let Some(cur) = exit_s.reqs.get(&src, &k) {
+                        if !cur.always {
+                            exit_s.reqs.set(&src, k, crate::domain::ReqInfo { always: true, ..cur });
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 
 use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, FnKind, KeyVal, KeysOf, Ns, ObjSet, RenameFn, Row, RowData, Source, SourceKind, Step, Tier, Value, DATA};
 use crate::frontend::Node;
-use crate::interp::funcs::Elem;
+use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{self, key_str_lit, KeyId, KeySet, EMPTY_LENS};
 use crate::state::{Kind, State};

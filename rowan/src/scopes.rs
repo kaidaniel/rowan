@@ -70,11 +70,6 @@ impl Scopes {
     pub fn get(&self, id: usize) -> &Scope {
         &self.scopes[id]
     }
-    /// A detached function scope for a node we never collected (defensive).
-    pub fn add_detached(&mut self, kind: ScopeKind) -> usize {
-        self.scopes.push(Scope { kind, parent: None, ..Default::default() });
-        self.scopes.len() - 1
-    }
 }
 
 /// A node's address: its identity (trees are leaked, `frontend.rs`).

@@ -662,7 +662,7 @@ fn fa_call_dep(an: &mut Analyzer, g: &Value, req: Option<&Req>, state: &mut Stat
                     let it = an.iterate(&r, node, state);
                     outs.push(match (it.items, it.elem) {
                         (Some(items), _) if !items.is_empty() => items[0].clone(),
-                        (_, crate::interp::funcs::Elem::One(e)) => e,
+                        (_, crate::interp::iter::Elem::One(e)) => e,
                         _ => Value::data("depends"),
                     });
                     // (FastAPI runs it to its end after the response: its effects all happen)

@@ -50,8 +50,8 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
             Some(items) if it.exhaustive => args_full.extend(items),
             _ => {
                 star_rest = Some(match it.elem {
-                    crate::interp::funcs::Elem::One(v) => v,
-                    crate::interp::funcs::Elem::Pair(a, b) => a.join(&b),
+                    crate::interp::iter::Elem::One(v) => v,
+                    crate::interp::iter::Elem::Pair(a, b) => a.join(&b),
                 })
             }
         }

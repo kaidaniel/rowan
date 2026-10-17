@@ -9,7 +9,7 @@ use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
 use crate::syntax::{is_constant, names_in};
 
-use super::funcs::Elem;
+use super::iter::Elem;
 use super::{Analyzer, Payload, UNROLL_MAX};
 
 impl Analyzer {
@@ -139,7 +139,7 @@ impl Analyzer {
     /// closed dict with some keys only maybe there: one iteration per key, a maybe one joined
     /// with skipping it. False: not known.
     #[allow(clippy::too_many_arguments)]
-    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::funcs::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::iter::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
         if let Some(items) = &it.items {
             let same = self.identical_summaries(items);
             if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {

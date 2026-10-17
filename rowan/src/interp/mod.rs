@@ -37,6 +37,7 @@ pub mod funcs;
 pub mod gc;
 pub mod guards;
 pub mod items;
+pub mod iter;
 pub mod keys;
 pub mod loops;
 pub mod narrow;

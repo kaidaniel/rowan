@@ -1,5 +1,9 @@
-//! Calls: dispatch, unknown calls, construction, user functions, bindings (port of the
-//! "calls" section of `rowan/interp.py`).
+//! Calls: `call_value` evaluates the arguments and dispatches on what the callee may be — the
+//! program's functions and methods (`call_user`: the body runs at the call site, in a context of
+//! the innermost call sites, within its function's budget), classes (`construct`: `__new__`,
+//! the instance, `__init__`), library functions and methods (`call_external`, a model or an
+//! unknown call), and several of these at once (`several_callees`: alternatives, one state
+//! each). Also the frames calls run in and how arguments bind to parameters.
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -14,6 +18,8 @@ use super::{Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_C
 
 impl Analyzer {
     // ---------------------------------------------------------------- calls
+    /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
+    /// generators among them run (`force_gen`), then each callee `fv` may be called.
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
         let mut args: Vec<Value> = Vec::new();
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
@@ -328,6 +334,10 @@ impl Analyzer {
         self.alternatives(fns.len(), false, state, &mut |an, i, st| an.call_user(fns[i], Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), st, node, false))
     }
 
+    /// A call of one callee object: a torch layer or module (its `forward`), a function (a
+    /// class's unbound method takes its receiver from the arguments; a classmethod the class), a
+    /// bound method, a class, a library function or method, `functools.partial`, an instance
+    /// (its `__call__`), or unknown code.
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let kind = self.heap.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
@@ -527,6 +537,9 @@ impl Analyzer {
         r
     }
 
+    /// A call of a class of the program: an Enum lookup, a TypedDict, a `__new__` of its own
+    /// (then `__init__` on what it returns), a library base's construction, or a fresh instance
+    /// and its `__init__` (an exception's args when a builtin exception class is its base).
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         if crate::models::dataclasses::abstract_unimplemented(self, cls) {
             self.raise_here("TypeError", state);
@@ -608,8 +621,8 @@ impl Analyzer {
         let ci = self.heap.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
-        // not collapse onto one instance (prototype: same site, last class wins); by the class
-        // object, as two classes may share a name (`type(name, bases, ns)` per choice of bases)
+        // not collapse onto one instance; by the class object, as two classes may share a name
+        // (`type(name, bases, ns)` per choice of bases)
         let site = format!("{}:{}", super::site_string(node), cls);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.lib.typed_dict {
@@ -664,6 +677,10 @@ impl Analyzer {
         }
     }
 
+    /// A call of the program's function `foid` (`self_v`: a method's receiver; `entry`: its
+    /// entry run). Unknown code instead past the work a run on demand may do, past the deadline,
+    /// or past its budget (`skipped_call`); a generator function's call makes a lazy generator
+    /// (its body runs when consumed); else its body runs here (`call_user_inner`).
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
         // (its run for any call starts from the heap here too)
@@ -715,6 +732,11 @@ impl Analyzer {
         r
     }
 
+    /// The body run of a call: singledispatch picks its implementation; a call of a running
+    /// activation takes its partial result (`recursive_call`); one past its budget is unknown
+    /// code. Else the callee's frame is pushed (its allocation context: receiver and call site),
+    /// the arguments bound, the body run to its recursion fixpoint (`run_rounds`), and its result
+    /// (a generator's object for a generator) recorded as a summary.
     #[allow(clippy::too_many_arguments)]
     fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
         let forced = self.gens.force_at.take();
@@ -748,7 +770,7 @@ impl Analyzer {
         if super::debug_enabled() {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
         }
-        // context for allocations inside the callee (§3)
+        // context for allocations inside the callee
         let ctx = match forced {
             Some((_, ctx)) => ctx,
             None => self.receiver_ctx(&self_v, &site),
@@ -819,6 +841,8 @@ impl Analyzer {
         Caller { env, unbound: std::mem::take(&mut state.unbound), path, ret: state.ret.take(), exits: state.exits.take() }
     }
 
+    /// The caller's part of the state back after the callee's run (`take_caller`); the callee's
+    /// returns go, its exits replace the caller's when the caller had some.
     fn give_back(&mut self, c: Caller, state: &mut State) {
         self.cx.env_stack.pop();
         state.env = c.env;
@@ -853,6 +877,8 @@ impl Analyzer {
         new_fr
     }
 
+    /// `f` runs in a frame of method `foid` with `self_v` and `args` bound, in the caller's
+    /// allocation context (narrowing through a `__contains__` that is `return x in y`).
     pub(in crate::interp) fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let fi = self.heap.func_info(foid);
         let ctx = self.frame().ctx.clone();
@@ -874,6 +900,8 @@ impl Analyzer {
         state.unbound = saved_unbound;
     }
 
+    /// Binds a call's arguments to the parameters of `fi` in the running frame (and records the
+    /// parameters' hover facts at the `def`).
     #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) {
         let bound = self.compute_bindings(fi, self_v, args, kwargs, star_args, star_kwargs, state, node);
@@ -1007,8 +1035,7 @@ impl Analyzer {
     }
 }
 
-
-/// (see `Analyzer::take_caller`)
+/// The caller's part of the state a callee's run takes out (`Analyzer::take_caller`).
 struct Caller {
     env: IndexMap<StrId, Value>,
     unbound: std::sync::Arc<Vec<StrId>>,

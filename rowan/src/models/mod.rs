@@ -35,7 +35,7 @@ use ruff_python_ast as ast;
 use rustc_hash::FxHashMap;
 
 use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
-use crate::interp::funcs::Elem;
+use crate::interp::iter::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
 use crate::state::{Kind, State};
@@ -1943,7 +1943,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         // `map(f, a, b, …)`: f gets one item of each (as many as the shortest has)
-        let others: Vec<crate::interp::funcs::Iteration> = c.args.iter().skip(2).map(|a| an.iterate(a, &c.node, st)).collect();
+        let others: Vec<crate::interp::iter::Iteration> = c.args.iter().skip(2).map(|a| an.iterate(a, &c.node, st)).collect();
         if !c.qual.ends_with("filter") && an.heap.obj(oid).single {
             let n_known = std::iter::once(it.items.as_ref().map(|x| x.len())).chain(others.iter().map(|o| o.items.as_ref().map(|x| x.len()))).collect::<Option<Vec<usize>>>().and_then(|v| v.into_iter().min());
             if let (Some(items), Some(n)) = (&it.items, n_known) {
