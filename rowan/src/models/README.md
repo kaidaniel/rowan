@@ -49,7 +49,7 @@ at once.
 | `itertools.rs`, `stdfuncs.rs`, `singledispatch.rs` | itertools; heapq, bisect, `operator` callables; `singledispatch` and `lru_cache` |
 | `concurrency.rs` | threads and executors running their targets |
 | **third-party libraries** | |
-| `pandas.rs` | DataFrames and Series: columns through every operation, readers open through their input; the literals a column holds through iteration, cells and stores |
+| `pandas.rs` | DataFrames and Series: columns through every operation, readers open through their input; the literals a column holds (in row order for literal data) through iteration, cells and stores |
 | `pydantic.rs` | models, fields, validation, validators, dumps, settings |
 | `fastapi.rs` | apps, routes, parameter binding, dependencies, the test client |
 | `torch.rs`, `shape.rs` | PyTorch and numpy: tensors with symbolic shapes (`shape.rs`: dims as polynomials, constraints, the facts a path carries) |
