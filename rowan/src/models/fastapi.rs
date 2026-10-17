@@ -727,6 +727,10 @@ pub fn fa_yield_deps(an: &mut Analyzer, func: ObjId, state: &mut State) -> Vec<O
 pub fn fa_run_handler(an: &mut Analyzer, func: ObjId, mut gens: Vec<ObjId>, req: Option<Req>, entry: bool, state: &mut State, node: &Node) -> Value {
     if gens.is_empty() {
         let kwargs = fa_bind(an, func, req.as_ref(), state, node, 0);
+        // (a request whose parameters fail to validate never reaches the handler)
+        if !state.reachable {
+            return Value::new();
+        }
         return an.call_user(func, None, Args::kw(&kwargs), state, node, entry);
     }
     let g = gens.remove(0);

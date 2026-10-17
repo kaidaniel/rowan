@@ -370,6 +370,31 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   assert(hx.includes("x = Tensor[A, T, d]") && hx.includes("- `A, T`: `ids.shape`"), hx);
 }
 
+// ---- a FastAPI handler's parameter: the requests that reach it, not one its validation rejects
+{
+  const f = path.join(root, "tests", "fastapi", "small", "f042_rejected_request_never_reaches_handler.py");
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const h = hover(indexResult(facts(f)), src, at("def create("), "order");
+  assert(h.includes(`\`OrderIn(item="tea", qty=4, size="M")\` on line ${at("ok = ")}.`) && h.includes(`on line ${at("dup = ")}.`) && !h.includes(`on line ${at("bad = ")}`) && !h.includes("qty=0"), h);
+}
+// ---- `m = m.copy()` of a parameter rowan knows nothing of: as unknown, not a dict (`{**?}`)
+{
+  const pm = path.join(root, "tests", "pandas", "models", "pm01_sales_etl.py");
+  const src = fs.readFileSync(pm, "utf8").split("\n");
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const h = hover(indexResult(facts(pm)), src, at("    m = m.copy()"), "m");
+  assert(h.startsWith("```python\nm = ?\n```"), h);
+}
+// ---- a module's defaults only copied (`{**DEFAULTS, …}`): no code changes them, so for any
+// call their keys are there and their values known
+{
+  const f = path.join(root, "tests", "cases", "z616_module_defaults_copied_not_changed.py");
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const h = hover(indexResult(facts(f)), src, at("    cfg = {**DEFAULTS"), "cfg");
+  assert(h.includes('"retries": 3 | json.loads(text)["retries"]') && !h.includes('"retries"~'), h);
+}
 // ---- a list appended to on some paths: each list it may be, not `list[?]`; an item of a
 // slice to a bound not known is the list's own
 {

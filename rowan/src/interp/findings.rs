@@ -441,7 +441,8 @@ impl Analyzer {
     pub(in crate::interp) fn record_param_facts(&mut self, fi: &super::FuncInfo, bound: &IndexMap<StrId, Value>, state: &State) {
         let (Some(params), Some(foid)) = (fi.node.params(), self.frame().func) else { return };
         let module = fi.node.node().module;
-        if !self.findings.facts_on || module != self.heap.module_info(self.program.main_module).idx {
+        // (a call that cannot bind its arguments, or that no path reaches, passes nothing)
+        if !self.findings.facts_on || !state.reachable || module != self.heap.module_info(self.program.main_module).idx {
             return;
         }
         let general = self.in_general_run();
