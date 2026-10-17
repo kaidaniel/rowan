@@ -21,7 +21,7 @@ pub mod items;
 pub mod keys;
 pub mod loops;
 pub mod budget;
-pub use budget::{Budget, Clock};
+pub use budget::Budget;
 pub mod calls;
 pub mod classes;
 pub mod compare;
@@ -49,16 +49,16 @@ pub use names::Names;
 pub mod narrow;
 pub mod ops;
 pub mod program;
-pub use program::{package_of_file, package_root_of_file, Program};
+pub use program::{package_root_of_file, Program};
 pub use crate::models::tables::*;
 pub mod recursion;
 pub mod report;
-pub use recursion::{ActKey, Recursion};
+pub use recursion::Recursion;
 pub mod stmts;
 pub mod tries;
 pub use tries::*;
 pub mod unknown;
-pub use unknown::{any_object, Havoc, HavocMemo};
+pub use unknown::{any_object, Havoc};
 
 pub const UNROLL_MAX: usize = 16;
 pub const LOOP_MAX_ITER: usize = 40;
@@ -171,7 +171,7 @@ impl FuncInfo {
     }
 }
 
-pub use crate::models::exceptions::{builtin_exc_names, EXC_BASES};
+pub use crate::models::exceptions::builtin_exc_names;
 
 #[derive(Debug)]
 pub struct ClassInfo {
@@ -414,8 +414,6 @@ impl Analyzer {
     pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool) -> Result<Analyzer, String> {
         crate::state::reset_thread_state();
         crate::models::pynum::set_opaque(false);
-        crate::models::pynum::reset_used();
-        crate::models::chrono::reset_used();
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);
         let program = Program::new(filename, idx, if follow_imports { search_paths } else { Vec::new() }, analyse_entry_points);

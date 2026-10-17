@@ -150,7 +150,6 @@ pub struct RowCheck {
     pub line: u32,
     pub name: String,
     pub row: Option<Row>,
-    pub ns: Ns,
     /// the name's value: its known literals, whether it may be anything else, its objects
     pub value: ValueInfo,
     /// tensor facts for the golden harness: {"shape", "dim", "chain", "entry"}
@@ -510,13 +509,11 @@ impl Analyzer {
             // (an observation, not a read of the program: no position, so no unbound-name check)
             let v = self.load_name(s(&name), &Node::none(), state);
             let mut rows: Vec<Row> = Vec::new();
-            let mut ns_used = Ns::Item;
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
                 if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).map(|c| self.heap.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
                     let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
                     if let Some(dd) = d.single().filter(|x| self.heap.kind(*x) == Kind::Dict) {
-                        ns_used = Ns::Item;
                         rows.push(state.row(dd, Ns::Item));
                         continue;
                     }
@@ -532,7 +529,6 @@ impl Analyzer {
                 // (an instance of a dict subclass: its items)
                 let dict_sub = self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
                 let ns = if matches!(self.heap.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
-                ns_used = ns;
                 rows.push(state.row(oid, ns));
             }
             let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
@@ -558,7 +554,7 @@ impl Analyzer {
             } else {
                 None
             };
-            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, ns: ns_used, value, tensor, general, quiet: self.findings.quiet });
+            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, value, tensor, general, quiet: self.findings.quiet });
         }
     }
 }

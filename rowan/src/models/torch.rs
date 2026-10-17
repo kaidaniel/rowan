@@ -903,12 +903,6 @@ fn kw<'a>(c: &'a Call, name: &str) -> Option<&'a Value> {
 }
 
 
-#[allow(dead_code)]
-fn unused(_: StrId, _: KeyId, _: IndexMap<u8, u8>, _: Vec<Value>) {
-    let _ = join_values(vec![]);
-    let _ = STAR;
-}
-
 /// An unknown known to be a number: a dim, a number the shape model made, an index of
 /// `enumerate` (`ENUM_INDEX`).
 pub fn is_number_label(l: &str) -> bool {

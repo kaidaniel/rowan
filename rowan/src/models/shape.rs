@@ -8,7 +8,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -1661,10 +1660,6 @@ pub fn is_bool_label(l: &str) -> bool {
 }
 pub fn parse_dim_label(l: &str) -> Option<DimId> {
     l.strip_prefix(DIM_PREFIX)?.parse().ok().map(DimId)
-}
-
-pub fn shared(f: TFacts) -> Arc<TFacts> {
-    Arc::new(f)
 }
 
 #[cfg(test)]

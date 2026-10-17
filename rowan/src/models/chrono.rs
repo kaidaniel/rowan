@@ -18,22 +18,7 @@ const US_DAY: i64 = 86_400_000_000;
 /// (timedelta goes to 999999999 days; past 100 million days the value is not simulated)
 const MAX_DELTA_US: i64 = 100_000_000 * US_DAY;
 
-thread_local! {
-    /// the program made a datetime value (attribute reads of parameters named like a
-    /// datetime method then tabulate)
-    static USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub fn used() -> bool {
-    USED.with(|u| u.get())
-}
-
-pub fn reset_used() {
-    USED.with(|u| u.set(false));
-}
-
 pub fn chrono_key(kind: u8, v: i64, tz: i32) -> KeyId {
-    USED.with(|u| u.set(true));
     key(Key::Chrono(kind, v, tz))
 }
 
@@ -141,17 +126,16 @@ pub struct Parts {
     pub s: i64,
     pub us: i64,
     pub ord: i64,
-    pub tz: i32,
 }
 
-pub fn parts(kind: u8, v: i64, tz: i32) -> Parts {
+pub fn parts(kind: u8, v: i64) -> Parts {
     let (ord, tod) = match kind {
         DATE => (v, 0),
         DATETIME => (v.div_euclid(US_DAY) + 1, v.rem_euclid(US_DAY)),
         _ => (1, v),
     };
     let (y, mo, d) = ord_to_ymd(ord);
-    Parts { y, mo, d, h: tod / 3_600_000_000, mi: tod / 60_000_000 % 60, s: tod / 1_000_000 % 60, us: tod % 1_000_000, ord, tz }
+    Parts { y, mo, d, h: tod / 3_600_000_000, mi: tod / 60_000_000 % 60, s: tod / 1_000_000 % 60, us: tod % 1_000_000, ord }
 }
 
 fn dt_value(ord: i64, h: i64, mi: i64, s: i64, us: i64) -> Option<i64> {
@@ -196,7 +180,7 @@ fn time_text(p: &Parts, timespec: &str) -> Option<String> {
 
 pub fn isoformat(k: KeyId, sep: &str, timespec: &str) -> Option<String> {
     let (kind, v, tz) = as_chrono(k)?;
-    let p = parts(kind, v, tz);
+    let p = parts(kind, v);
     Some(match kind {
         DATE => format!("{:04}-{:02}-{:02}", p.y, p.mo, p.d),
         DATETIME => format!("{:04}-{:02}-{:02}{}{}{}", p.y, p.mo, p.d, sep, time_text(&p, timespec)?, offset_text(tz, true)),
@@ -273,7 +257,7 @@ pub fn repr_of(k: KeyId) -> Option<String> {
 
 /// `repr` of a value from its parts (no key lookups: usable while the interner is borrowed).
 pub fn repr_raw(kind: u8, v: i64, tz: i32) -> String {
-    let p = parts(kind, v, tz);
+    let p = parts(kind, v);
     let tzs = if tz != NAIVE { format!(", tzinfo={}", tz_repr(tz)) } else { String::new() };
     match kind {
         DATE => format!("datetime.date({}, {}, {})", p.y, p.mo, p.d),
@@ -308,7 +292,7 @@ pub fn strftime(k: KeyId, fmt: &str) -> Option<String> {
     if kind == DELTA || kind == TZ {
         return None;
     }
-    let p = parts(kind, v, tz);
+    let p = parts(kind, v);
     let (y, mo, d) = if kind == TIME { (1900, 1, 1) } else { (p.y, p.mo, p.d) };
     let ord = if kind == TIME { ymd_to_ord(1900, 1, 1)? } else { p.ord };
     let wd = weekday(ord);
@@ -870,7 +854,7 @@ pub fn construct(class: &str, args: &[KeyId], kwargs: &[(&str, KeyId)]) -> Optio
 /// Attributes of a value (`d.year`, `td.days`, `dt.tzinfo`).
 pub fn attr(k: KeyId, name: &str) -> Option<Option<KeyId>> {
     let (kind, v, tz) = as_chrono(k)?;
-    let p = parts(kind, v, tz);
+    let p = parts(kind, v);
     let i = |x: i64| Some(Some(key_int(x)));
     match (kind, name) {
         (DATE | DATETIME, "year") => i(p.y),
@@ -892,7 +876,7 @@ pub fn attr(k: KeyId, name: &str) -> Option<Option<KeyId>> {
 /// Methods of a value; Some(result) / None not simulated.
 pub fn method(k: KeyId, name: &str, args: &[KeyId], kwargs: &[(&str, KeyId)]) -> Option<KeyId> {
     let (kind, v, tz) = as_chrono(k)?;
-    let p = parts(kind, v, tz);
+    let p = parts(kind, v);
     let s = |x: String| intern::key_str_lit(&x);
     match (kind, name) {
         (DATE | DATETIME, "weekday") => Some(key_int(weekday(p.ord))),

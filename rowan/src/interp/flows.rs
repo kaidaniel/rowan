@@ -97,10 +97,6 @@ impl Flags {
         }
     }
 
-    pub fn any(&self) -> bool {
-        self.changes || self.held || self.held2 || self.iterated || self.called || self.rebinds || self.methods || self.edits
-    }
-
     pub fn join(&mut self, o: &Flags) {
         self.changes |= o.changes;
         self.held |= o.held;

@@ -119,7 +119,7 @@ fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u3
         r.modules.push(ModuleSource { name: name.to_string(), path: path.map(|p| p.to_string()), source, lines });
         (r.modules.len() - 1) as u32
     });
-    let mut v = Registrar { idx, addrs: Vec::new() };
+    let mut v = Registrar { addrs: Vec::new() };
     for s in &module.body {
         v.visit_stmt(s);
     }
@@ -201,9 +201,8 @@ impl Transformer for Mangler {
     }
 }
 
+/// Collects the addresses of every node of a parsed module (`node` locates them).
 struct Registrar {
-    #[allow(dead_code)]
-    idx: u32,
     addrs: Vec<usize>,
 }
 
