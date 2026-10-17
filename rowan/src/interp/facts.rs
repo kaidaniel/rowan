@@ -25,7 +25,10 @@ pub fn facts_json(an: &Analyzer) -> J {
     // (one entry for the places of a name on a line that have the same facts, with their columns)
     let mut facts: Vec<J> = Vec::new();
     let mut at: FxHashMap<(u32, StrId), Vec<usize>> = FxHashMap::default();
-    for ((line, col, name), f) in an.findings.facts.iter() {
+    // (in the order of the lines: a loop's rounds may have recorded some anew)
+    let mut entries: Vec<(&crate::interp::FactKey, &crate::interp::findings::Fact)> = an.findings.facts.iter().collect();
+    entries.sort_by_key(|((line, col, _), _)| (*line, *col));
+    for ((line, col, name), f) in entries {
         let j = fact_json(an, *line, *name, f);
         let col = crate::frontend::utf16_col(main_idx, *line, *col);
         let same = at.entry((*line, *name)).or_default();

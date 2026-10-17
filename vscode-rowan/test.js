@@ -78,6 +78,14 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
   assert(hover(idx, src, 12, "limit").startsWith("```python\nlimit = int(?)\n```"), hover(idx, src, 12, "limit"));
   assert(hover(idx, src, 14, "t").startsWith("```python\nt = int(?)\n```"), hover(idx, src, 14, "t"));
 }
+// ---- a loop's line shows the value the loop's fixpoint gives, not each round's as alternatives
+// (`counts` was `{} | dict[?, 1] | dict[?, int(?)]`)
+{
+  const a04 = path.join(root, "tests", "cases", "a04_loop_keys.py");
+  const src = fs.readFileSync(a04, "utf8").split("\n");
+  const idx = indexResult(facts(a04));
+  assert(hover(idx, src, 10, "counts").startsWith("```python\ncounts = dict[?, int(?)]\n```"), hover(idx, src, 10, "counts"));
+}
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");

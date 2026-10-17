@@ -144,10 +144,12 @@ impl Analyzer {
         let mut converged = false;
         let mut prev_head = head.copy();
         let mut vmark = self.findings.mark();
+        self.findings.fact_rounds_begin();
         for _ in 0..LOOP_MAX_ITER {
             // (a round before the fixpoint ran on less than the loop's states: what its accesses
-            // said is superseded by the next round's)
+            // said, and the values its lines showed, are superseded by the next round's)
             self.findings.drop_since(vmark);
+            self.findings.fact_round_restart();
             vmark = self.findings.mark();
             let mut body_s = head.copy();
             let mark = self.heap.len() as u32;
@@ -176,12 +178,14 @@ impl Analyzer {
             self.widen_unconverged(&mut head, &prev_head);
             // (the accesses as the widened states make them)
             self.findings.drop_since(vmark);
+            self.findings.fact_round_restart();
             self.unwind.loop_stack.push(LoopCtx::default());
             self.cx.recent_stack.push(Vec::new());
             round(self, &mut head.copy());
             self.cx.recent_stack.pop();
             self.unwind.loop_stack.pop();
         }
+        self.findings.fact_rounds_end();
         self.cx.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
         (head, breaks, back)
