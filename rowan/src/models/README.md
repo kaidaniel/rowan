@@ -36,11 +36,11 @@ at once.
 | `pure.rs` | calls whose arguments are all literals, computed by `pyvalues.rs` |
 | `pyvalues.rs` | Python operations on literal values exactly as CPython 3.14 does (formatting, arithmetic, str methods, …) |
 | `pytext.rs` | text and bytes functions on literals (`bytes`, `shlex`, `html`, `base64`, quoting) |
-| `pathtext.rs` | `os.path` and pure `pathlib` paths on known text |
+| `pathtext.rs` | `os.path` and pure `pathlib` paths on known text (a path of unknown text: its parts typed) |
 | `pynum.rs`, `chrono.rs` | `decimal` / `fractions` and `datetime` values as literals |
 | `pyre.rs`, `remodel.rs` | a regex engine with Python's syntax; `re` on known patterns |
 | `minire.rs` | the small regex matcher pandas' regex arguments use |
-| `csvio.rs` | `io.StringIO` and `csv` on known text |
+| `csvio.rs` | `io.StringIO` and `csv` on known text; file objects (`open()`: reads of str / bytes) |
 | `sqlite.rs` | `sqlite3` connections simulating simple SQL |
 | `configparser.rs`, `argparse.rs` | INI parsing; argument parsers on a known argv |
 | `counter.rs` | `collections.Counter` |
