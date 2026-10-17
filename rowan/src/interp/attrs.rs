@@ -997,6 +997,10 @@ impl Analyzer {
             if self.heap.kind(o) == Kind::View {
                 crate::models::pandas::view_setattr(self, o, name, v, state);
             }
+            if crate::models::pandas::is_series_obj(self, o) {
+                let strong = obj.pts.len() == 1 && self.heap.obj(o).single;
+                crate::models::pandas::series_setattr(self, o, name, v, state, strong);
+            }
         }
         let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Function)).collect();
         for &oid in &targets {

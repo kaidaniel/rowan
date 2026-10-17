@@ -5328,7 +5328,51 @@ pub fn view_setattr(an: &mut Analyzer, vid: u32, name: &str, v: &Value, state: &
     }
 }
 
+/// `s.index = labels` (the values keep their positions) / `s.name = x`.
+pub fn series_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, state: &mut State, strong: bool) {
+    match name {
+        "name" => state.set_slot(oid, Ns::Meta, mk("name"), v.clone(), strong),
+        "index" => {
+            let row = state.row(oid, Ns::Item);
+            let cell = join_values(row.present.iter().map(|k| state.slot(oid, Ns::Item, k)));
+            let cell = if row.open() || row.present.is_empty() { cell.join(&Value::data("cell")) } else { cell };
+            let new = match lit_key_seq(an, state, v) {
+                Some(seq) => closed_ordered(&seq),
+                None => Row::with_source(Source::new("index", SourceKind::Data)),
+            };
+            let new = if strong { new } else { row.join(&new) };
+            for k in new.present.iter() {
+                state.set_slot(oid, Ns::Item, k, cell.clone(), strong);
+            }
+            state.set_row(oid, Ns::Item, new);
+            let plain = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple));
+            set_index_levels(state, oid, if plain { Some(&[None]) } else { None });
+            for i in 0..4 {
+                set_lvals(state, oid, i, None);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `df.index = labels`: the row labels (one unnamed level of a list's).
+fn frame_set_index_attr(an: &mut Analyzer, oid: u32, v: &Value, state: &mut State) {
+    let seq = lit_key_seq(an, state, v);
+    let k = seq.map(|s| Known::exact(KeySet::from_iter(s)));
+    set_labels(state, oid, k.as_ref());
+    for i in 0..4 {
+        set_lvals(state, oid, i, None);
+    }
+    set_lvals(state, oid, 0, k.as_ref());
+    let plain = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple));
+    set_index_levels(state, oid, if plain { Some(&[None]) } else { None });
+}
+
 pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &Node, state: &mut State, strong: bool) {
+    if name == "index" {
+        frame_set_index_attr(an, oid, v, state);
+        return;
+    }
     if name == "columns" {
         let row = state.row(oid, Ns::Item);
         // (what is known of the values goes with the columns' positions; else it is lost)
