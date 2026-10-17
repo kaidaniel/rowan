@@ -3996,6 +3996,16 @@ fn df_pipe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn iterrows(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let base = recv_row(an, st, c);
     let fs = frames(an, c.recv.as_ref());
+    // (a few rows known in order: each a (label, row) pair of its own, in order)
+    if let (Some(lab), [f]) = (fs.first().and_then(|f| frame_order(st, *f)).filter(|o| o.len() <= crate::interp::UNROLL_MAX), fs.as_slice()) {
+        let items: Vec<Value> = lab.iter().enumerate().map(|(i, l)| {
+            let site = format!("{}:r{}", crate::interp::site_string(&c.node), i);
+            let r = an.alloc(Kind::Dict, &site, st, &format!("row@L{}", c.line), Payload::None, Some(base.clone()), Ns::Item, None, None);
+            fill_row(st, r, &base, &[*f], Some(i));
+            an.alloc_positional_sfx(Kind::Tuple, &c.node, &format!(":p{}", i), Some(vec![Value::lit(*l), Value::obj(r)]), Value::new(), KeyVal::lits(KeySet::one(*l)), st)
+        }).collect();
+        return iterator_list(an, st, &c.node, "rows", items);
+    }
     let vrow = an.alloc_at(Kind::Dict, &c.node, st, &format!("row@L{}", c.line), Payload::None, Some(base.clone()), Ns::Item, Some(false), None);
     mark_view(an, vrow, &fs);
     fill_row(st, vrow, &base, &fs, None);
@@ -4063,38 +4073,24 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             };
             known.filter(|k| !k.may.is_empty()).map(|k| Value::kv_only(KeyVal::lits(k.may)))
         };
-        let site = format!("{}:t{}", crate::interp::site_string(&c.node), j);
-        let vrow = if plain {
-            let t = an.alloc(Kind::Namespace, &site, st, &format!("tuple@L{}", c.line), Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
-            if order.is_some() && base.present == base.definite {
-                an.heap.set_llen(t, st, Some(fields.len()));
-                for (i, col) in cols.iter().enumerate() {
-                    let v = cell(st, *col).unwrap_or_else(|| Value::data("cell"));
-                    st.set_slot(t, Ns::Pos, intern::key_int(i as i64), v, true);
-                }
+        let tname = c.kw("name").and_then(|v| lit_key(&Some(v))).and_then(intern::key_as_str).map(|n| format!(":{}", n)).unwrap_or_default();
+        let shape = TupleRow { plain, fields: &fields, cols: &cols, base: &base, ordered: order.is_some(), label: if plain { format!("tuple@L{}", c.line) } else { format!("row@L{}{}", c.line, tname) } };
+        // (a few rows known in order: each a tuple of its own, in order)
+        if let (Some(lab), [_]) = (frame_order(st, *f).filter(|o| o.len() <= crate::interp::UNROLL_MAX), fs.as_slice()) {
+            let cells: Option<Vec<Option<Vec<(KeyId, KeyId)>>>> = cols.iter().map(|col| match col {
+                Some(k) => frame_cells(st, *f, *k).map(Some),
+                None => Some(None),
+            }).collect();
+            if let Some(cells) = cells.filter(|_| order.is_some() && base.present == base.definite) {
+                let rows: Vec<Value> = (0..lab.len()).map(|i| {
+                    let at = |_: &State, j: usize| Some(Value::lit(cells[j].as_ref().map(|cs| cs[i].1).unwrap_or(lab[i])));
+                    Value::obj(tuple_row(an, st, &format!("{}:t{}r{}", crate::interp::site_string(&c.node), j, i), &shape, &at))
+                }).collect();
+                return iterator_list(an, st, &c.node, "rows", rows);
             }
-            t
-        } else {
-            let mut r = Row::new();
-            for (k, def) in &fields {
-                r = r.store(*k, *def);
-            }
-            if order.is_none() && base.open() {
-                let mut d = r.data();
-                d.sources = base.sources.clone();
-                r = Row::from_data(d);
-            }
-            let tname = c.kw("name").and_then(|v| lit_key(&Some(v))).and_then(intern::key_as_str).map(|n| format!(":{}", n)).unwrap_or_default();
-            let t = an.alloc(Kind::Namespace, &site, st, &format!("row@L{}{}", c.line, tname), Payload::None, Some(r.clone()), Ns::Attr, Some(false), None);
-            for ((k, _), col) in fields.iter().zip(&cols) {
-                let v = cell(st, *col).unwrap_or_else(|| unknown_cell(*k));
-                st.set_slot(t, Ns::Attr, *k, v, false);
-            }
-            if order.is_some() {
-                an.heap.set_llen(t, st, Some(fields.len()));
-            }
-            t
-        };
+        }
+        let joined = |st: &State, i: usize| cell(st, cols[i]);
+        let vrow = tuple_row(an, st, &format!("{}:t{}", crate::interp::site_string(&c.node), j), &shape, &joined);
         mark_view(an, vrow, &[*f]);
         rows_v = rows_v.join(&Value::obj(vrow));
     }
@@ -4105,6 +4101,61 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, rows_v.clone()));
     an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, rows_v);
     Value::obj(vid)
+}
+
+/// What the tuples `itertuples` makes are: plain or named, their fields and the columns they
+/// hold (None: the index).
+struct TupleRow<'a> {
+    plain: bool,
+    fields: &'a [(KeyId, bool)],
+    cols: &'a [Option<KeyId>],
+    base: &'a Row,
+    ordered: bool,
+    label: String,
+}
+
+/// One tuple of `itertuples`, its i-th field `value(i)` (None: not known).
+fn tuple_row(an: &mut Analyzer, st: &mut State, site: &str, t: &TupleRow, value: &dyn Fn(&State, usize) -> Option<Value>) -> u32 {
+    if t.plain {
+        // (a tuple: no attributes, its fields by position)
+        let o = an.alloc(Kind::Namespace, site, st, &t.label, Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
+        if t.ordered && t.base.present == t.base.definite {
+            an.heap.set_llen(o, st, Some(t.fields.len()));
+            for i in 0..t.cols.len() {
+                let v = value(st, i).unwrap_or_else(|| Value::data("cell"));
+                st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v, true);
+            }
+        }
+        return o;
+    }
+    let mut r = Row::new();
+    for (k, def) in t.fields {
+        r = r.store(*k, *def);
+    }
+    if !t.ordered && t.base.open() {
+        let mut d = r.data();
+        d.sources = t.base.sources.clone();
+        r = Row::from_data(d);
+    }
+    let o = an.alloc(Kind::Namespace, site, st, &t.label, Payload::None, Some(r), Ns::Attr, Some(false), None);
+    for (i, (k, _)) in t.fields.iter().enumerate() {
+        let v = value(st, i).unwrap_or_else(|| unknown_cell(*k));
+        st.set_slot(o, Ns::Attr, *k, v, false);
+    }
+    if t.ordered {
+        an.heap.set_llen(o, st, Some(t.fields.len()));
+    }
+    o
+}
+
+/// An iterator over these items, in order (`iterrows` / `itertuples` of a few rows known).
+fn iterator_list(an: &mut Analyzer, st: &mut State, node: &Node, tag: &str, items: Vec<Value>) -> Value {
+    let e = join_values(items.clone());
+    let v = an.alloc_positional_sfx(Kind::List, node, &format!(":{}", tag), Some(items), e.clone(), e.kv, st);
+    for o in v.pts.iter() {
+        an.heap.obj_mut(o).iterator = true;
+    }
+    v
 }
 
 /// A list object of known literal items (a frame's columns / labels, in order).
