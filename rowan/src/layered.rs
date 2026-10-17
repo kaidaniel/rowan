@@ -1,7 +1,6 @@
-//! Persistent maps for the fork/join pattern of abstract states: path-compressed radix-16
-//! tries on integer keys (Okasaki & Gill's mergeable Patricia tries with 16-way nodes, as in
-//! Bagwell's HAMT and Steindorfer & Vinju's CHAMP, but keyed by the integer itself, so a key
-//! set has one shape). A copy is O(1) (an `Arc`), a write copies the path to its leaf
+//! Persistent maps for the fork/join pattern of abstract states: big-endian Patricia tries
+//! on integer keys (Okasaki & Gill, "Fast Mergeable Integer Maps"; the design of SPARTA's
+//! `PatriciaTreeMap`). A copy is O(1) (an `Arc`), a write copies the path to its leaf
 //! (in place when no copy shares it), and `join` / `same` / `diff_keys` skip subtrees the
 //! two maps share, so they cost what the maps differ in, whatever their history. `TwoLevel`
 //! adds a copy-on-write inner map per key (object slots, source requirements).
@@ -36,56 +35,41 @@ impl PKey for SourceId {
     }
 }
 
-/// A trie node. Keys are read four bits (a digit) at a time from the top: a branch at `s`
-/// holds keys that agree above bit `s + W` (`p`) and differ in the digit at `s`; it has a
-/// child per digit present (`bm`, in digit order), at least two. A node with one child is
-/// never made (path compression), so a key set has exactly one shape.
 enum Node<K, V> {
     Leaf { h: u64, k: K, v: V },
-    Branch { p: u64, s: u8, bm: u16, kids: Box<[Tree<K, V>]> },
+    /// keys agree with `p` above the branching bit `m`; those with `m` clear go left
+    Branch { p: u64, m: u64, l: Arc<Node<K, V>>, r: Arc<Node<K, V>> },
 }
 
 impl<K: Clone, V: Clone> Clone for Node<K, V> {
     fn clone(&self) -> Self {
         match self {
             Node::Leaf { h, k, v } => Node::Leaf { h: *h, k: k.clone(), v: v.clone() },
-            Node::Branch { p, s, bm, kids } => Node::Branch { p: *p, s: *s, bm: *bm, kids: kids.clone() },
+            Node::Branch { p, m, l, r } => Node::Branch { p: *p, m: *m, l: l.clone(), r: r.clone() },
         }
     }
 }
 
 type Tree<K, V> = Arc<Node<K, V>>;
 
-/// A branch's children by digit while it is built (on the stack).
-type Kids<K, V> = smallvec::SmallVec<[(u32, Tree<K, V>); 1 << W]>;
-
-/// The bits above digit `s`.
-/// Bits per digit (a branch has up to 2^W children).
-const W: u8 = 4;
-
 #[inline]
-fn hi_mask(s: u8) -> u64 {
-    if s + W >= 64 {
-        0
-    } else {
-        !0u64 << (s + W)
-    }
+fn mask(k: u64, m: u64) -> u64 {
+    k & !((m << 1).wrapping_sub(1))
 }
 
 #[inline]
-fn digit(h: u64, s: u8) -> u32 {
-    ((h >> s) & ((1 << W) - 1)) as u32
-}
-
-/// The position of digit `d`'s child among a branch's children.
-#[inline]
-fn slot(bm: u16, d: u32) -> usize {
-    (bm & ((1u16 << d) - 1)).count_ones() as usize
+fn match_prefix(k: u64, p: u64, m: u64) -> bool {
+    mask(k, m) == p
 }
 
 #[inline]
-fn covers(h: u64, p: u64, s: u8) -> bool {
-    h & hi_mask(s) == p
+fn zero_bit(k: u64, m: u64) -> bool {
+    k & m == 0
+}
+
+#[inline]
+fn branching_bit(a: u64, b: u64) -> u64 {
+    1u64 << (63 - (a ^ b).leading_zeros())
 }
 
 fn prefix_of<K, V>(t: &Node<K, V>) -> u64 {
@@ -96,60 +80,42 @@ fn prefix_of<K, V>(t: &Node<K, V>) -> u64 {
 }
 
 /// Two trees with disjoint prefixes under one branch.
-#[inline]
 fn link<K, V>(p0: u64, t0: Tree<K, V>, p1: u64, t1: Tree<K, V>) -> Tree<K, V> {
-    let b = 63 - (p0 ^ p1).leading_zeros() as u8;
-    let s = b - b % W;
-    let (d0, d1) = (digit(p0, s), digit(p1, s));
-    let kids: Box<[Tree<K, V>]> = if d0 < d1 { Box::new([t0, t1]) } else { Box::new([t1, t0]) };
-    Arc::new(Node::Branch { p: p0 & hi_mask(s), s, bm: (1 << d0) | (1 << d1), kids })
+    let m = branching_bit(p0, p1);
+    if zero_bit(p0, m) {
+        Arc::new(Node::Branch { p: mask(p0, m), m, l: t0, r: t1 })
+    } else {
+        Arc::new(Node::Branch { p: mask(p0, m), m, l: t1, r: t0 })
+    }
 }
 
-/// A branch from its children by digit (possibly none, or one: then that child itself);
-/// `orig` is returned when the children are exactly its own.
-#[inline]
-fn branch<K, V>(p: u64, s: u8, kids: Kids<K, V>, orig: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
-    match kids.len() {
-        0 => None,
-        1 => kids.into_iter().next().map(|(_, t)| t),
-        _ => {
-            let bm = kids.iter().fold(0u16, |b, (d, _)| b | (1 << d));
+/// A branch from possibly empty children; `orig` is returned when both children are its own.
+fn branch<K, V>(p: u64, m: u64, l: Option<Tree<K, V>>, r: Option<Tree<K, V>>, orig: Option<&Tree<K, V>>) -> Option<Tree<K, V>> {
+    match (l, r) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(l), Some(r)) => {
             if let Some(o) = orig {
-                if let Node::Branch { bm: obm, kids: ok, .. } = &**o {
-                    if *obm == bm && ok.iter().zip(kids.iter()).all(|(a, (_, b))| Arc::ptr_eq(a, b)) {
+                if let Node::Branch { l: ol, r: or, .. } = &**o {
+                    if Arc::ptr_eq(ol, &l) && Arc::ptr_eq(or, &r) {
                         return Some(o.clone());
                     }
                 }
             }
-            Some(Arc::new(Node::Branch { p, s, bm, kids: kids.into_iter().map(|(_, t)| t).collect() }))
+            Some(Arc::new(Node::Branch { p, m, l, r }))
         }
     }
-}
-
-/// A branch's children with their digits.
-#[inline]
-fn kids_of<K, V>(bm: u16, kids: &[Tree<K, V>]) -> impl Iterator<Item = (u32, &Tree<K, V>)> {
-    let mut b = bm;
-    kids.iter().map(move |t| {
-        let d = b.trailing_zeros();
-        b &= b - 1;
-        (d, t)
-    })
 }
 
 fn get<'a, K, V>(mut t: &'a Tree<K, V>, h: u64) -> Option<&'a V> {
     loop {
         match &**t {
             Node::Leaf { h: j, v, .. } => return if *j == h { Some(v) } else { None },
-            Node::Branch { p, s, bm, kids } => {
-                if !covers(h, *p, *s) {
+            Node::Branch { p, m, l, r } => {
+                if !match_prefix(h, *p, *m) {
                     return None;
                 }
-                let d = digit(h, *s);
-                if bm & (1 << d) == 0 {
-                    return None;
-                }
-                t = &kids[slot(*bm, d)];
+                t = if zero_bit(h, *m) { l } else { r };
             }
         }
     }
@@ -158,7 +124,7 @@ fn get<'a, K, V>(mut t: &'a Tree<K, V>, h: u64) -> Option<&'a V> {
 fn insert<K: Clone, V: Clone>(t: &mut Tree<K, V>, h: u64, k: K, v: V) {
     let fits = match &**t {
         Node::Leaf { h: j, .. } => *j == h,
-        Node::Branch { p, s, .. } => covers(h, *p, *s),
+        Node::Branch { p, m, .. } => match_prefix(h, *p, *m),
     };
     if !fits {
         let old = t.clone();
@@ -168,18 +134,11 @@ fn insert<K: Clone, V: Clone>(t: &mut Tree<K, V>, h: u64, k: K, v: V) {
     }
     match Arc::make_mut(t) {
         Node::Leaf { v: val, .. } => *val = v,
-        Node::Branch { s, bm, kids, .. } => {
-            let d = digit(h, *s);
-            let i = slot(*bm, d);
-            if *bm & (1 << d) != 0 {
-                insert(&mut kids[i], h, k, v)
+        Node::Branch { m, l, r, .. } => {
+            if zero_bit(h, *m) {
+                insert(l, h, k, v)
             } else {
-                let mut nk: Vec<Tree<K, V>> = Vec::with_capacity(kids.len() + 1);
-                nk.extend_from_slice(&kids[..i]);
-                nk.push(Arc::new(Node::Leaf { h, k, v }));
-                nk.extend_from_slice(&kids[i..]);
-                *kids = nk.into_boxed_slice();
-                *bm |= 1 << d;
+                insert(r, h, k, v)
             }
         }
     }
@@ -188,41 +147,35 @@ fn insert<K: Clone, V: Clone>(t: &mut Tree<K, V>, h: u64, k: K, v: V) {
 /// `t` without `h`: None when nothing changes, Some(rest) otherwise (rest None: empty).
 fn remove<K: Clone, V: Clone>(t: &Tree<K, V>, h: u64) -> Option<(Option<Tree<K, V>>, V)> {
     match &**t {
-        Node::Leaf { h: j, v, .. } => (*j == h).then(|| (None, v.clone())),
-        Node::Branch { p, s, bm, kids } => {
-            if !covers(h, *p, *s) {
+        Node::Leaf { h: j, v, .. } => {
+            if *j == h {
+                Some((None, v.clone()))
+            } else {
+                None
+            }
+        }
+        Node::Branch { p, m, l, r } => {
+            if !match_prefix(h, *p, *m) {
                 return None;
             }
-            let d = digit(h, *s);
-            if bm & (1 << d) == 0 {
-                return None;
+            if zero_bit(h, *m) {
+                let (nl, v) = remove(l, h)?;
+                Some((branch(*p, *m, nl, Some(r.clone()), None), v))
+            } else {
+                let (nr, v) = remove(r, h)?;
+                Some((branch(*p, *m, Some(l.clone()), nr, None), v))
             }
-            let (nt, v) = remove(&kids[slot(*bm, d)], h)?;
-            Some((replace_kid(*p, *s, *bm, kids, d, nt), v))
         }
     }
-}
-
-/// A branch with digit `d`'s child replaced (or dropped).
-#[inline]
-fn replace_kid<K, V>(p: u64, s: u8, bm: u16, kids: &[Tree<K, V>], d: u32, nt: Option<Tree<K, V>>) -> Option<Tree<K, V>> {
-    let mut out: Kids<K, V> = Kids::new();
-    for (e, t) in kids_of(bm, kids) {
-        if e == d {
-            if let Some(n) = &nt {
-                out.push((e, n.clone()));
-            }
-        } else {
-            out.push((e, t.clone()));
-        }
-    }
-    branch(p, s, out, None)
 }
 
 fn for_each<K, V>(t: &Tree<K, V>, f: &mut dyn FnMut(&K, &V)) {
     match &**t {
         Node::Leaf { k, v, .. } => f(k, v),
-        Node::Branch { kids, .. } => kids.iter().for_each(|c| for_each(c, f)),
+        Node::Branch { l, r, .. } => {
+            for_each(l, f);
+            for_each(r, f);
+        }
     }
 }
 
@@ -247,9 +200,10 @@ fn map_side<K: Clone, V: Clone>(t: &Tree<K, V>, left: bool, g: &mut Merge<K, V>)
             let nv = if left { (g.left)(k, v) } else { (g.right)(k, v) }?;
             Some(Arc::new(Node::Leaf { h: *h, k: k.clone(), v: nv }))
         }
-        Node::Branch { p, s, bm, kids } => {
-            let out = kids_of(*bm, kids).filter_map(|(d, c)| Some((d, map_side(c, left, g)?))).collect();
-            branch(*p, *s, out, None)
+        Node::Branch { p, m, l, r } => {
+            let nl = map_side(l, left, g);
+            let nr = map_side(r, left, g);
+            branch(*p, *m, nl, nr, None)
         }
     }
 }
@@ -262,108 +216,90 @@ fn both_leaf<K: Clone, V: Clone + PartialEq>(h: u64, k: &K, a: &V, b: &V, g: &mu
     Some(Arc::new(Node::Leaf { h, k: k.clone(), v }))
 }
 
-/// Two results with disjoint prefixes, either possibly empty.
-#[inline]
-fn link_opt<K, V>(a: Option<Tree<K, V>>, b: Option<Tree<K, V>>) -> Option<Tree<K, V>> {
-    match (a, b) {
-        (None, x) | (x, None) => x,
-        (Some(a), Some(b)) => {
-            let (pa, pb) = (prefix_of(&a), prefix_of(&b));
-            Some(link(pa, a, pb, b))
-        }
-    }
-}
-
-/// `inner` (a tree under one digit of branch `t`, or a leaf) merged into `t`: the child at
-/// its digit merges with it (`f`), the other children are one-sided (`t_left`: t is the left map).
-fn merge_into<K: Clone, V: Clone + PartialEq>(t: &Tree<K, V>, d_in: u32, g: &mut Merge<K, V>, t_left: bool, f: &mut dyn FnMut(Option<&Tree<K, V>>, &mut Merge<K, V>) -> Option<Tree<K, V>>) -> Option<Tree<K, V>> {
-    let Node::Branch { p, s, bm, kids } = &**t else { unreachable!() };
-    let mut out: Kids<K, V> = Kids::new();
-    let mut done = false;
-    for (d, c) in kids_of(*bm, kids) {
-        if !done && d > d_in {
-            out.extend(f(None, g).map(|x| (d_in, x)));
-            done = true;
-        }
-        if d == d_in {
-            out.extend(f(Some(c), g).map(|x| (d, x)));
-            done = true;
-        } else {
-            out.extend(map_side(c, t_left, g).map(|x| (d, x)));
-        }
-    }
-    if !done {
-        out.extend(f(None, g).map(|x| (d_in, x)));
-    }
-    branch(*p, *s, out, Some(t))
-}
-
-/// A leaf of one map merged with a tree of the other.
+/// A leaf of the left map merged with a tree of the right one.
 fn merge_leaf<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, leaf_left: bool, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
     let Node::Leaf { h, k, v } = &**s else { unreachable!() };
     match &**t {
         Node::Leaf { h: j, k: _, v: w } if j == h => {
-            if g.equal_identity && v == w {
-                return Some(if leaf_left { s.clone() } else { t.clone() });
-            }
             if leaf_left {
+                if g.equal_identity && v == w {
+                    return Some(s.clone());
+                }
                 both_leaf(*h, k, v, w, g)
             } else {
+                if g.equal_identity && v == w {
+                    return Some(t.clone());
+                }
                 both_leaf(*h, k, w, v, g)
             }
         }
-        Node::Branch { p, s: sh, .. } if covers(*h, *p, *sh) => {
-            let d = digit(*h, *sh);
-            merge_into(t, d, g, !leaf_left, &mut |c, g| match c {
-                Some(c) => merge_leaf(s, c, leaf_left, g),
-                None => map_side(s, leaf_left, g),
-            })
+        Node::Branch { p, m, l, r } if match_prefix(*h, *p, *m) => {
+            if zero_bit(*h, *m) {
+                let nl = merge_leaf(s, l, leaf_left, g);
+                let nr = map_side(r, !leaf_left, g);
+                branch(*p, *m, nl, nr, Some(t))
+            } else {
+                let nl = map_side(l, !leaf_left, g);
+                let nr = merge_leaf(s, r, leaf_left, g);
+                branch(*p, *m, nl, nr, Some(t))
+            }
         }
         _ => {
             let a = map_side(s, leaf_left, g);
             let b = map_side(t, !leaf_left, g);
-            link_opt(a, b)
+            match (a, b) {
+                (None, x) | (x, None) => x,
+                (Some(a), Some(b)) => {
+                    let (pa, pb) = (prefix_of(&a), prefix_of(&b));
+                    Some(link(pa, a, pb, b))
+                }
+            }
         }
     }
 }
 
-fn merge<K: Clone, V: Clone + PartialEq>(a: &Tree<K, V>, b: &Tree<K, V>, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
-    if g.equal_identity && Arc::ptr_eq(a, b) {
-        return Some(a.clone());
+fn merge<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, g: &mut Merge<K, V>) -> Option<Tree<K, V>> {
+    if g.equal_identity && Arc::ptr_eq(s, t) {
+        return Some(s.clone());
     }
-    match (&**a, &**b) {
-        (Node::Leaf { .. }, _) => merge_leaf(a, b, true, g),
-        (_, Node::Leaf { .. }) => merge_leaf(b, a, false, g),
-        (Node::Branch { p, s, bm, kids }, Node::Branch { p: q, s: t, bm: bn, kids: kn }) => {
-            if s == t && p == q {
-                let all = bm | bn;
-                let mut out: Kids<K, V> = Kids::new();
-                let mut x = all;
-                while x != 0 {
-                    let d = x.trailing_zeros();
-                    x &= x - 1;
-                    let r = match (bm & (1 << d) != 0, bn & (1 << d) != 0) {
-                        (true, true) => merge(&kids[slot(*bm, d)], &kn[slot(*bn, d)], g),
-                        (true, false) => map_side(&kids[slot(*bm, d)], true, g),
-                        _ => map_side(&kn[slot(*bn, d)], false, g),
-                    };
-                    out.extend(r.map(|r| (d, r)));
+    match (&**s, &**t) {
+        (Node::Leaf { .. }, _) => merge_leaf(s, t, true, g),
+        (_, Node::Leaf { .. }) => merge_leaf(t, s, false, g),
+        (Node::Branch { p, m, l: s0, r: s1 }, Node::Branch { p: q, m: n, l: t0, r: t1 }) => {
+            if m == n && p == q {
+                let nl = merge(s0, t0, g);
+                let nr = merge(s1, t1, g);
+                branch(*p, *m, nl, nr, Some(s))
+            } else if m > n && match_prefix(*q, *p, *m) {
+                if zero_bit(*q, *m) {
+                    let nl = merge(s0, t, g);
+                    let nr = map_side(s1, true, g);
+                    branch(*p, *m, nl, nr, Some(s))
+                } else {
+                    let nl = map_side(s0, true, g);
+                    let nr = merge(s1, t, g);
+                    branch(*p, *m, nl, nr, Some(s))
                 }
-                branch(*p, *s, out, Some(a))
-            } else if s > t && covers(*q, *p, *s) {
-                merge_into(a, digit(*q, *s), g, true, &mut |c, g| match c {
-                    Some(c) => merge(c, b, g),
-                    None => map_side(b, false, g),
-                })
-            } else if t > s && covers(*p, *q, *t) {
-                merge_into(b, digit(*p, *t), g, false, &mut |c, g| match c {
-                    Some(c) => merge(a, c, g),
-                    None => map_side(a, true, g),
-                })
+            } else if m < n && match_prefix(*p, *q, *n) {
+                if zero_bit(*p, *n) {
+                    let nl = merge(s, t0, g);
+                    let nr = map_side(t1, false, g);
+                    branch(*q, *n, nl, nr, Some(t))
+                } else {
+                    let nl = map_side(t0, false, g);
+                    let nr = merge(s, t1, g);
+                    branch(*q, *n, nl, nr, Some(t))
+                }
             } else {
-                let x = map_side(a, true, g);
-                let y = map_side(b, false, g);
-                link_opt(x, y)
+                let a = map_side(s, true, g);
+                let b = map_side(t, false, g);
+                match (a, b) {
+                    (None, x) | (x, None) => x,
+                    (Some(a), Some(b)) => {
+                        let (pa, pb) = (prefix_of(&a), prefix_of(&b));
+                        Some(link(pa, a, pb, b))
+                    }
+                }
             }
         }
     }
@@ -401,25 +337,21 @@ fn diff<K: Clone, V: PartialEq>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, 
             true
         }
         (_, Node::Leaf { .. }) => diff(Some(t), Some(s), f),
-        (Node::Branch { p, s: a, bm, kids }, Node::Branch { p: q, s: b, bm: bn, kids: kn }) => {
-            if a == b && p == q {
-                let mut x = bm | bn;
-                while x != 0 {
-                    let d = x.trailing_zeros();
-                    x &= x - 1;
-                    let l = (bm & (1 << d) != 0).then(|| &kids[slot(*bm, d)]);
-                    let r = (bn & (1 << d) != 0).then(|| &kn[slot(*bn, d)]);
-                    if !diff(l, r, f) {
-                        return false;
-                    }
+        (Node::Branch { p, m, l: s0, r: s1 }, Node::Branch { p: q, m: n, l: t0, r: t1 }) => {
+            if m == n && p == q {
+                diff(Some(s0), Some(t0), f) && diff(Some(s1), Some(t1), f)
+            } else if m > n && match_prefix(*q, *p, *m) {
+                if zero_bit(*q, *m) {
+                    diff(Some(s0), Some(t), f) && all_keys(s1, f)
+                } else {
+                    all_keys(s0, f) && diff(Some(s1), Some(t), f)
                 }
-                true
-            } else if a > b && covers(*q, *p, *a) {
-                let din = digit(*q, *a);
-                diff_into(*bm, kids, din, t, f)
-            } else if b > a && covers(*p, *q, *b) {
-                let din = digit(*p, *b);
-                diff_into(*bn, kn, din, s, f)
+            } else if m < n && match_prefix(*p, *q, *n) {
+                if zero_bit(*p, *n) {
+                    diff(Some(s), Some(t0), f) && all_keys(t1, f)
+                } else {
+                    all_keys(t0, f) && diff(Some(s), Some(t1), f)
+                }
             } else {
                 all_keys(s, f) && all_keys(t, f)
             }
@@ -427,25 +359,17 @@ fn diff<K: Clone, V: PartialEq>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, 
     }
 }
 
-/// `diff` of a branch's children and a tree `other` under digit `din` of it.
-fn diff_into<K: Clone, V: PartialEq>(bm: u16, kids: &[Tree<K, V>], din: u32, other: &Tree<K, V>, f: &mut dyn FnMut(&K) -> bool) -> bool {
-    if bm & (1 << din) == 0 && !all_keys(other, f) {
-        return false;
-    }
-    kids_of(bm, kids).all(|(d, c)| if d == din { diff(Some(c), Some(other), f) } else { all_keys(c, f) })
-}
-
 fn all_keys<K, V>(t: &Tree<K, V>, f: &mut dyn FnMut(&K) -> bool) -> bool {
     match &**t {
         Node::Leaf { k, .. } => f(k),
-        Node::Branch { kids, .. } => kids.iter().all(|c| all_keys(c, f)),
+        Node::Branch { l, r, .. } => all_keys(l, f) && all_keys(r, f),
     }
 }
 
 fn all_keys_where<K, V>(t: &Tree<K, V>, f: &mut dyn FnMut(&K, u64, &V) -> bool) -> bool {
     match &**t {
         Node::Leaf { h, k, v } => f(k, *h, v),
-        Node::Branch { kids, .. } => kids.iter().all(|c| all_keys_where(c, f)),
+        Node::Branch { l, r, .. } => all_keys_where(l, f) && all_keys_where(r, f),
     }
 }
 
@@ -629,27 +553,23 @@ impl<K: PKey, IK: IKey> PKey for Pair<K, IK> {
     }
 }
 
-/// The subtree holding exactly the keys whose high 32 bits are `hi` (the trie keeps keys
-/// with a common prefix together), if any.
+/// The subtree holding exactly the keys whose high 32 bits are `hi` (big-endian Patricia
+/// tries keep keys with a common prefix together), if any.
 fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
     let lo = hi << 32;
     let mut t = t;
     loop {
         match &**t {
             Node::Leaf { h, .. } => return if h >> 32 == hi { Some(t) } else { None },
-            Node::Branch { p, s, bm, kids } => {
-                if *s < 32 {
+            Node::Branch { p, m, l, r } => {
+                if *m < 1 << 32 {
                     // (every key below shares the high bits)
                     return if p >> 32 == hi { Some(t) } else { None };
                 }
-                if !covers(lo, *p, *s) {
+                if !match_prefix(lo, *p, *m) {
                     return None;
                 }
-                let d = digit(lo, *s);
-                if bm & (1 << d) == 0 {
-                    return None;
-                }
-                t = &kids[slot(*bm, d)];
+                t = if zero_bit(lo, *m) { l } else { r };
             }
         }
     }
@@ -661,18 +581,13 @@ fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64) -> Option<Option<Tree<
     match &**t {
         Node::Leaf { h, .. } => (h >> 32 == hi).then_some(None),
         // (every key below shares the high bits)
-        Node::Branch { p, s, .. } if *s < 32 => (p >> 32 == hi).then_some(None),
-        Node::Branch { p, s, bm, kids } => {
+        Node::Branch { p, m, .. } if *m < 1 << 32 => (p >> 32 == hi).then_some(None),
+        Node::Branch { p, m, l, r } => {
             let lo = hi << 32;
-            if !covers(lo, *p, *s) {
+            if !match_prefix(lo, *p, *m) {
                 return None;
             }
-            let d = digit(lo, *s);
-            if bm & (1 << d) == 0 {
-                return None;
-            }
-            let nt = remove_hi(&kids[slot(*bm, d)], hi)?;
-            Some(replace_kid(*p, *s, *bm, kids, d, nt))
+            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi)?, None) })
         }
     }
 }
