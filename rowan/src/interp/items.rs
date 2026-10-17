@@ -51,6 +51,16 @@ impl Analyzer {
         if let Some(r) = self.split_mixed(&[obj], state, &mut |an, vs, st| an.load_item(&vs[0], ns, key, node, st, report)) {
             return r;
         }
+        // (None, a number: not subscriptable; None beside objects: may be)
+        if ns == Ns::Item && report && obj.kv.is_literal() {
+            if obj.pts.is_empty() && !obj.kv.may_have_items() {
+                self.raise_here("TypeError", state);
+                return Value::new();
+            }
+            if !obj.pts.is_empty() && kv_literals(&obj.kv).contains(intern::key_none()) {
+                self.may_raise_here("TypeError", state);
+            }
+        }
         if ns == Ns::Item {
             if let Some(v) = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__getitem__"), state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report)) {
                 return v;

@@ -2232,6 +2232,15 @@ pub(super) fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return r;
         }
     }
+    // (None, a number: no length; beside objects, `may_type_error` says it may raise)
+    if v.pts.is_empty() && v.kv.is_literal() && !v.kv.may_have_items() {
+        an.raise_here("TypeError", st);
+        return Value::new();
+    }
+    if !v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).contains(intern::key_none()) {
+        let rest = Value::with_kv(v.pts.clone(), crate::domain::kv_exclude(&v.kv, &KeySet::one(intern::key_none())).unwrap_or(crate::domain::BOT));
+        return m_len(an, st, &Call { args: vec![rest], ..c.clone() });
+    }
     // the length of a placeholder: decided per call site where it is a known container
     if v.pts.is_empty() {
         if let Some(k) = v.kv.as_lit() {

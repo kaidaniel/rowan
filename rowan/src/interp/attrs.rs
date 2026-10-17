@@ -5,7 +5,7 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{classify, join_values, kv_exclude, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, join_values, kv_exclude, kv_literals, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_none, key_str_lit, KeyId};
 use crate::state::{mark_merged, Kind, State};
@@ -123,6 +123,10 @@ impl Analyzer {
         if let Some(v) = crate::models::torch::t_getattr(self, obj, name, node, state) {
             return v;
         }
+        // (None beside the objects has no such attribute: AttributeError)
+        if report && !obj.pts.is_empty() && obj.kv.is_literal() && !name.starts_with("__") && kv_literals(&obj.kv).contains(key_none()) {
+            self.may_raise_here("AttributeError", state);
+        }
         let mut acc = Value::new();
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
@@ -219,6 +223,9 @@ impl Analyzer {
             return Value::new();
         }
         let lits = Value::kv_only(kv_exclude(&obj.kv, &crate::intern::KeySet::one(key_none())).unwrap_or(BOT));
+        if lits.kv.is_bot() {
+            return Value::new();
+        }
         crate::models::builtins::scalar_attr(self, &lits, name, false, state)
     }
 

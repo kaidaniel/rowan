@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, key_type, kv_join, kv_literals, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjSet, TYPE_NAMES, Value};
+use crate::domain::{join_values, key_type, kv_exclude, kv_join, kv_literals, BOT, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjSet, TYPE_NAMES, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
 use crate::source::{FnKind, RenameFn};
@@ -34,7 +34,8 @@ impl Part {
 impl Analyzer {
     /// Literals other than None beside objects (`"dev" if c else ["p", "q"]`): a value whose
     /// parts Python treats as different types. (Beside an unknown object, which may be the
-    /// literals too, no: what is done with it covers them.)
+    /// literals too, no: what is done with it covers them. None beside objects: `binop`,
+    /// `load_item`, `load_attr`, calls raise for it.)
     pub(in crate::interp) fn mixed(&self, v: &Value) -> bool {
         !v.pts.is_empty() && v.kv.is_literal() && kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
     }
@@ -160,6 +161,18 @@ impl Analyzer {
             (ast::UnaryOp::USub | ast::UnaryOp::UAdd, Some("float")) => Some("float"),
             _ => None,
         };
+        // (None, a str, a builtin container: no `-`, `+`, `~` — TypeError)
+        if u.op != ast::UnaryOp::Not && self.builtin_operand(&v) {
+            let bad = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::None | intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::Tuple(_)));
+            let lits = kv_literals(&v.kv);
+            let (some, all) = (!v.pts.is_empty() || lits.iter().any(bad), lits.iter().all(bad));
+            if some && all {
+                self.raise_here("TypeError", state);
+                return Value::new();
+            } else if some {
+                self.may_raise_here("TypeError", state);
+            }
+        }
         let r = self.unary_untyped(u, v, node, state);
         self.as_type(r, ty, false)
     }
@@ -192,10 +205,29 @@ impl Analyzer {
         }
     }
 
+    /// Is `v` literals and builtin containers only (no unknown, no instance whose methods an
+    /// operator may run)?
+    pub(in crate::interp) fn builtin_operand(&self, v: &Value) -> bool {
+        !matches!(v.kv, KeyVal::Data(_) | KeyVal::KeysOf(_)) && !crate::models::pandas::is_seriesish(self, v) && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Dict | Kind::Tuple | Kind::Set | Kind::View))
+    }
+
     /// `a op b`: each part on its own (literals beside objects), CPython's result on known
     /// literals, the program's operator dunders, the models' (tensors, frames, …), else an
     /// unknown of the type the operands' types give (`int + int`: `int(?)`).
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
+        // None with a literal or a builtin container: no operator takes it (TypeError); the
+        // rest of its value goes on
+        for (x, y, first) in [(a, b, true), (b, a, false)] {
+            if x.kv.is_literal() && kv_literals(&x.kv).contains(intern::key_none()) && self.builtin_operand(y) {
+                let rest = Value::with_kv(x.pts.clone(), kv_exclude(&x.kv, &intern::KeySet::one(intern::key_none())).unwrap_or(BOT));
+                if rest.pts.is_empty() && rest.kv.is_bot() {
+                    self.raise_here("TypeError", state);
+                    return Value::new();
+                }
+                self.may_raise_here("TypeError", state);
+                return if first { self.binop(op, &rest, y, node, state) } else { self.binop(op, y, &rest, node, state) };
+            }
+        }
         if let Some(r) = self.split_mixed(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
             return r;
         }

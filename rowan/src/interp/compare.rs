@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_literals, label_name, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
+use crate::domain::{kv_exclude, kv_literals, label_name, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, KeyId, KeySet};
 use crate::state::{Kind, State};
@@ -62,6 +62,21 @@ impl Analyzer {
                 return r;
             }
             return self.compare_const(op, a, b, right, state).map(lit).unwrap_or_else(|| Value::data("bool"));
+        }
+        // None ordered against a literal or a builtin container: TypeError; the rest of its
+        // value goes on
+        if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) {
+            for (x, y, first) in [(a, b, true), (b, a, false)] {
+                if x.kv.is_literal() && kv_literals(&x.kv).contains(intern::key_none()) && self.builtin_operand(y) {
+                    let rest = Value::with_kv(x.pts.clone(), kv_exclude(&x.kv, &KeySet::one(intern::key_none())).unwrap_or(crate::domain::BOT));
+                    if rest.pts.is_empty() && rest.kv.is_bot() {
+                        self.raise_here("TypeError", state);
+                        return Value::new();
+                    }
+                    self.may_raise_here("TypeError", state);
+                    return if first { self.compare_untyped(op, &rest, y, right, nd, state) } else { self.compare_untyped(op, y, &rest, right, nd, state) };
+                }
+            }
         }
         if ordering {
             // library values (paths, Decimal, datetime); instances: their comparison methods
