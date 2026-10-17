@@ -68,6 +68,16 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
   assert.strictEqual(hover(idx, src, 15, "x"), "```python\nx = 2\n```");
   assert.strictEqual(hover(idx, src, 15, "x", 1), "```python\nx = 1\n```");
 }
+// ---- an unknown named by an expression, joined with a literal, is no longer that expression
+// (`limit = max(1, y)` was `limit = retries - 1`)
+{
+  const z630 = path.join(root, "tests", "cases", "z630_joined_expression_is_not_the_expression.py");
+  const src = fs.readFileSync(z630, "utf8").split("\n");
+  const idx = indexResult(facts(z630));
+  assert(hover(idx, src, 11, "y").startsWith("```python\ny = retries - 1\n```"), hover(idx, src, 11, "y"));
+  assert(hover(idx, src, 12, "limit").startsWith("```python\nlimit = int(?)\n```"), hover(idx, src, 12, "limit"));
+  assert(hover(idx, src, 14, "t").startsWith("```python\nt = int(?)\n```"), hover(idx, src, 14, "t"));
+}
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");

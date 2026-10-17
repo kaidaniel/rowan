@@ -11,7 +11,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
-  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators).
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
