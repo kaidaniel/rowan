@@ -53,6 +53,7 @@ def block(op, depth: int, count: int, conds=COND) -> list:
 # ---------------------------------------------------------------- lists, dicts, sets
 LV = ["0", "1", "2", "7", '"s"', '"t"', "None", "1.5"]
 LISTS_HEAD = """import sys
+import json
 def f_app(xs, v):
     xs.append(v)
 def f_set(xs, v):
@@ -67,6 +68,8 @@ def f_ret(xs, v):
 def pick(x, y):
     return x if n > 2 else y
 n = len(sys.argv)
+# (`lx`: 1, or on other runs an unknown call's result that is 0)
+lx = 1 if n > 2 else json.loads((sys.argv[0][:0] + "0").lower())
 a = [1, 2]
 b = ["s"]
 c = []
@@ -90,13 +93,15 @@ def lists_op() -> list:
         [f"pick({x}, {y}).append({v})"], [f"pick({x}, {y}).insert(0, {v})"], [f"pick({x}, {y}).sort(key=str)"],
         [f"if pick({x}, {y}):", f"    pick({x}, {y})[0] = {v}"], [f"pick({x}, {y}).extend([{v}])"], [f"pick({x}, {y}).clear()"],
         [f"pick(d, {{}})[{v}] = {w}"], [f"pick(s, set()).add({v})"],
+        [f"if len({x}) > 1:", f"    {x}[lx] = {v}"], [f"if len({x}) > 1:", f"    del {x}[lx]"], [f"if len({x}) > 1:", f"    {x}.pop(lx)"],
+        [f"{x}.insert(lx, {v})"],
     ])
 
 
 def lists_program():
     probes = ["[e for e in d]", "[e for e in s]", "len(s)"]
     for v in "abc":
-        probes += [f"len({v})", f"{v}[0] if {v} else -9", f"{v}[-1] if {v} else -9", f"[e for e in {v}]", f"'s' in {v}", f"7 in {v}"]
+        probes += [f"len({v})", f"{v}[0] if {v} else -9", f"{v}[lx] if len({v}) > 1 else -9", f"{v}[-1] if {v} else -9", f"[e for e in {v}]", f"'s' in {v}", f"7 in {v}"]
     return LISTS_HEAD.split("\n"), block(lists_op, 0, random.randrange(4, 12)), probes
 
 
@@ -391,7 +396,7 @@ def attrs_op() -> list:
         ["try:", f"    del {o}.{at}  #ACC {at!r}", "except AttributeError:", "    r = -2  #BAD"],
         [f"if {at!r} in vars({o}):", f"    del {o}.{at}"], [f"r = {cl}.k"], [f"{o}.k = {o}.k + '!' if isinstance({o}.k, str) else 'x'"],
         [f"{o}.items = [{v}]"], [f"r = len(vars({o}))"], [f"if isinstance({o}, A):", f"    {o}.v = {v}"],
-        [f"setattr({o}, ax, {v})"], [f"r = getattr({o}, ax, {v})"], [f"if hasattr({o}, ax):", f"    r = {o}.{at}"], [f"{o}.__dict__[ax] = {v}"],
+        [f"setattr({o}, ax, {v})"], [f"r = getattr({o}, ax, {v})"], [f"if hasattr({o}, ax):", f"    r = getattr({o}, ax)"], [f"{o}.__dict__[ax] = {v}"],
         [f"if isinstance({o}, A):", f"    {o}.put(ax, {v})"], [f"if ax in vars({o}):", f"    delattr({o}, ax)"],
         ["try:", f"    delattr({o}, ax)", "except AttributeError:", "    r = -3"],
     ])
