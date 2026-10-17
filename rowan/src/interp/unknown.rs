@@ -423,10 +423,12 @@ impl Analyzer {
             parts.dedup();
             vals.extend(parts.into_iter().map(Value::obj));
             self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
+            let objs = |locs: &[(ObjId, Ns, KeyId)], values: &[Value], state: &State| -> Vec<ObjId> { locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect() };
             for (locs, values, change) in [(&cl.edited_locs, &cl.edited_values, true), (&cl.iterated_locs, &cl.iterated_values, false)] {
-                let objs: Vec<ObjId> = locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect();
+                let objs = objs(locs, values, state);
                 self.havoc.edit(&mut self.heap, &objs, change, site, state);
             }
+            may_have_removed(&objs(&cl.removed_locs, &cl.removed_values, state), state);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
@@ -482,6 +484,21 @@ fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work:
 /// (`any_id`), its rows have the call as a mutator, a list or set any items and length (what
 /// the slots hold is walked next).
 #[allow(clippy::too_many_arguments)]
+/// The program's own code not run may have removed items of `objs` (dicts, lists, sets changed
+/// in place: `Flags::removes`): no key of theirs is there for sure, nor likely.
+pub(super) fn may_have_removed(objs: &[ObjId], state: &mut State) {
+    for &o in objs {
+        for ns in [Ns::Item, Ns::Attr] {
+            if let Some(r0) = state.rows.get(&(o, ns)) {
+                let r = r0.may_remove_any();
+                if r != r0 {
+                    state.set_row(o, ns, r);
+                }
+            }
+        }
+    }
+}
+
 fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Vec<ObjId>) {
     // (an enum member's `name` and `value` cannot be set or deleted)
     let member = heap.keys.member_key.contains_key(&o);

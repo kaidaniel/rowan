@@ -443,6 +443,15 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
         an.raise_here("TypeError", state);
         return;
     }
+    // (literals beside objects, `None | [1]`: the literals alone may be rejected)
+    for (i, a) in args.iter().enumerate().filter(|(_, a)| !a.pts.is_empty() && a.kv.is_literal()) {
+        let mut alone = args.to_vec();
+        alone[i] = Value::kv_only(a.kv.clone());
+        if sure_type_error(an, qual, &alone, kwargs, state) {
+            an.may_raise_here("TypeError", state);
+            return;
+        }
+    }
     if !an.in_try() {
         return;
     }
@@ -810,6 +819,8 @@ pub struct Tables {
     pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_field: Option<KeyId>,
+    /// a validation called with `from_attributes=True` (or `from_orm`) is running
+    pub pyd_from_attrs: bool,
     /// a nested model being validated for this field of the enclosing one (its errors' loc
     /// starts with it)
     pub pyd_nest_prefix: Option<KeyId>,

@@ -5,7 +5,7 @@ use crate::domain::{kv_literals, label_type, KeyVal, Ns, Value};
 use crate::intern::{self, key_int, key_str_lit, KeyId, KeySet};
 use crate::state::{is_merged, Kind, State};
 
-use super::{Analyzer, Payload};
+use super::{Analyzer, Payload, ViewKind};
 
 impl Analyzer {
     /// `True`, `1` and `1.0` are one dict key: a numeric literal key equal to a key the record
@@ -245,13 +245,52 @@ impl Analyzer {
             Kind::Instance => match self.heap.instance_class(o).and_then(|c| Some((c, self.heap.class_info_opt(c)?))) {
                 Some((c, ci)) => {
                     let unfrozen = (ci.dataclass_fields.borrow().is_some() && !ci.dc_frozen.get()) || self.m.pyd_classes.get(&c).is_some_and(|p| !p.frozen);
-                    let eq_only = self.class_lookup(c, "__eq__").is_some() && self.class_lookup(c, "__hash__").is_none();
-                    if unfrozen || eq_only { Hashing::Maybe } else { Hashing::Hashable }
+                    match self.class_hash(c, state) {
+                        Hashing::Hashable if unfrozen => Hashing::Maybe,
+                        h => h,
+                    }
                 }
                 None => Hashing::Maybe,
             },
+            // (a dict's keys and items are set-like: unhashable; its values view hashes)
+            Kind::View => match &ob.payload {
+                Payload::View(ViewKind::Keys | ViewKind::Items, _) => Hashing::Unhashable,
+                _ => Hashing::Hashable,
+            },
             _ => Hashing::Hashable,
         }
+    }
+}
+
+impl Analyzer {
+    /// Do instances of the program's class `c` hash? Along its MRO, the first class that sets
+    /// `__hash__` decides (`__hash__ = None`: no), or one whose body defines `__eq__` without
+    /// it (CPython sets its `__hash__` to None); a class stored into later, or a value not
+    /// known: maybe.
+    fn class_hash(&self, c: u32, state: &State) -> Hashing {
+        let (hk, ek) = (intern::key_str_lit("__hash__"), intern::key_str_lit("__eq__"));
+        let order = self.heap.mro(c);
+        if order.is_empty() {
+            return if self.class_lookup(c, "__eq__").is_some() && self.class_lookup(c, "__hash__").is_none() { Hashing::Maybe } else { Hashing::Hashable };
+        }
+        for k in order {
+            if self.heap.cls_slots.contains_key(&(k, Ns::Attr, hk)) {
+                let v = self.class_values(&[k], hk, state);
+                let none = v.pts.is_empty() && v.kv.as_lit() == Some(intern::key_none());
+                let late = self.heap.cls_late.contains(&(k, hk));
+                return if none && !late {
+                    Hashing::Unhashable
+                } else if v.kv.is_bot() && !v.pts.is_empty() && !late {
+                    Hashing::Hashable
+                } else {
+                    Hashing::Maybe
+                };
+            }
+            if self.heap.cls_slots.contains_key(&(k, Ns::Attr, ek)) {
+                return if self.heap.cls_late.contains(&(k, ek)) { Hashing::Maybe } else { Hashing::Unhashable };
+            }
+        }
+        Hashing::Hashable
     }
 }
 

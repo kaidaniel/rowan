@@ -8,7 +8,7 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Value, DATA};
+use crate::domain::{chain_extend, join_values, kv_literals, Ns, ObjId, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::source::{Source, SourceKind};
@@ -79,6 +79,15 @@ impl Analyzer {
             self.force_gen(a, state, !bulk);
         }
         let a = Args::new(&args, &kwargs, &star_args, &star_kwargs);
+        // (None, a number, a str… is not callable: TypeError)
+        let lits = kv_literals(&fv.kv);
+        if !lits.is_empty() && lits.iter().all(|k| !intern::with_key(k, |k| matches!(k, intern::Key::Member(..) | intern::Key::Inv(..)))) {
+            self.may_raise_here("TypeError", state);
+            if fv.pts.is_empty() {
+                state.reachable = false;
+                return Value::new();
+            }
+        }
         if fv.pts.is_empty() {
             return self.unknown_call("?", None, a, state, node);
         }

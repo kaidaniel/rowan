@@ -204,8 +204,11 @@ impl Analyzer {
             match fnode {
                 FuncNode::Lambda(l) => {
                     let v = self.eval(&l.body, &mut st);
-                    st.ret = Some(v);
-                    st.record_exit();
+                    // (a body that raised on every path returns nothing)
+                    if st.reachable {
+                        st.ret = Some(v);
+                        st.record_exit();
+                    }
                     st.reachable = false;
                 }
                 FuncNode::Def(f) => self.with_gen_restart(&mut st, true, &mut |an, s| an.exec_block(&f.body, s)),

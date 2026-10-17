@@ -621,10 +621,17 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     r = r.delete(k, true);
                 }
             }
-            series_like(an, st, c, &ss, r, "d")
+            let sid = series_like_id(an, st, c, &ss, r, "d");
+            values_subset(st, sid, false);
+            Value::obj(sid)
         }
         "reindex" | "set_axis" => match c.arg(0, None).or_else(|| c.kw("index")).or_else(|| c.kw("labels")).and_then(|v| an.lit_keys(&v, st)) {
-            Some(ks) => series_like(an, st, c, &ss, Row::closed_with(ks), "x"),
+            Some(ks) => {
+                // (some of the values; a label not there before: NaN)
+                let sid = series_like_id(an, st, c, &ss, Row::closed_with(ks), "x");
+                values_subset(st, sid, name == "reindex");
+                Value::obj(sid)
+            }
             None => series(an),
         },
         "add_prefix" | "add_suffix" => {
@@ -645,7 +652,9 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut d = idx.data();
             d.definite = KeySet::new();
             d.likely = KeySet::new();
-            series_like(an, st, c, &ss, Row::from_data(d), "h")
+            let sid = series_like_id(an, st, c, &ss, Row::from_data(d), "h");
+            values_subset(st, sid, false);
+            Value::obj(sid)
         }
         "copy" | "sort_values" | "sort_index" | "astype" | "fillna" | "round" | "abs" | "clip" | "cumsum" | "cumprod" | "cummax" | "cummin" | "shift" | "diff" | "rank" | "pct_change" | "isna" | "isnull" | "notna" | "notnull" | "replace" | "where" | "mask" | "map" | "apply" | "transform" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "interpolate" | "ffill" | "bfill" | "convert_dtypes" | "infer_objects" | "explode" | "mean_" => {
             let sid = series_like_id(an, st, c, &ss, idx, "m");
@@ -832,6 +841,15 @@ fn copy_meta(src: u32, dst: u32, state: &mut State) {
 // labels (`labels` = every label that may be there, `labels!` = surely there; no slot =
 // unknown) and per column its literal values (`("vals", c)` / `("vals!", c)`) and dtype.
 // Ops copy them (`derive`), weaken them (row subsets) or drop them.
+
+/// Series `sid` holds some of its values only (rows dropped), NaN too when `nan` (labels
+/// that were not there).
+fn values_subset(st: &mut State, sid: u32, nan: bool) {
+    if let Some(v) = vals(st, sid, vkey()) {
+        let may = if nan { v.may.insert(nan_key()) } else { v.may };
+        set_vals(st, sid, vkey(), Some(&Known { may, sure: KeySet::new() }));
+    }
+}
 
 /// A set of literals: those that may occur and those that surely do.
 #[derive(Clone, Debug, PartialEq)]
@@ -5545,7 +5563,14 @@ pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut
     }
     if cols.kv.as_lit().is_some() && cols.pts.is_empty() {
         let g = an.is_guarded(Ns::Item);
-        return frame_getitem(an, foid, &cols, node, state, g);
+        let v = frame_getitem(an, foid, &cols, node, state, g);
+        // (rows selected: some of the column's values)
+        if !(is_slice(&rows) && slice_bounds(&rows) == Some((None, None, None))) {
+            for o in v.pts.iter().filter(|o| is_series_obj(an, *o)) {
+                values_subset(state, o, false);
+            }
+        }
+        return v;
     }
     if let Some(seq) = lit_key_seq(an, state, &cols) {
         let g = an.is_guarded(Ns::Item);

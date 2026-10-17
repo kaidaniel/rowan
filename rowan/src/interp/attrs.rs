@@ -5,7 +5,7 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{classify, join_values, kv_exclude, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, join_values, kv_exclude, kv_literals, typed_label, BOT, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_none, key_str_lit, KeyId};
 use crate::state::{mark_merged, Kind, State};
@@ -123,6 +123,7 @@ impl Analyzer {
         if let Some(v) = crate::models::torch::t_getattr(self, obj, name, node, state) {
             return v;
         }
+        self.none_beside_lacks(obj, name, report, state);
         let mut acc = Value::new();
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
@@ -213,12 +214,22 @@ impl Analyzer {
         acc.join(&self.mixed_literals_attr(obj, name, state))
     }
 
+    /// None beside `obj`'s objects has no attribute `name` but a dunder: an AttributeError.
+    fn none_beside_lacks(&mut self, obj: &Value, name: &str, report: bool, state: &mut State) {
+        if report && !obj.pts.is_empty() && obj.kv.is_literal() && !name.starts_with("__") && kv_literals(&obj.kv).contains(key_none()) {
+            self.may_raise_here("AttributeError", state);
+        }
+    }
+
     /// The attribute of the literals beside a value's objects (`ops::mixed`), else nothing.
     fn mixed_literals_attr(&mut self, obj: &Value, name: &str, state: &mut State) -> Value {
         if !self.mixed(obj) {
             return Value::new();
         }
         let lits = Value::kv_only(kv_exclude(&obj.kv, &crate::intern::KeySet::one(key_none())).unwrap_or(BOT));
+        if lits.kv.is_bot() {
+            return Value::new();
+        }
         crate::models::builtins::scalar_attr(self, &lits, name, false, state)
     }
 
@@ -617,7 +628,7 @@ impl Analyzer {
     }
 
     /// What classes `defs` hold as `nk` (on this path, else on any).
-    fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
+    pub(in crate::interp) fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
         join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
     }
 

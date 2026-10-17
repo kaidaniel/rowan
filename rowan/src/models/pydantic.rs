@@ -97,6 +97,8 @@ pub struct PClass {
     pub fields: Vec<PField>,
     pub extra: Extra,
     pub populate_by_name: bool,
+    /// `from_attributes=True` (v1 `orm_mode`): an object's attributes validate as its fields
+    pub from_attributes: bool,
     /// `frozen=True`: assignment raises
     pub frozen: bool,
     /// `validate_assignment=True`: an assigned field value is validated
@@ -207,6 +209,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
     let mut fields: Vec<PField> = Vec::new();
     let mut extra = Extra::Ignore;
     let mut populate_by_name = false;
+    let mut from_attributes = false;
     let mut root_ann: Option<Ann> = None;
     let mut settings: Option<(String, Option<String>)> = None;
     let mut frozen = false;
@@ -244,6 +247,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                     Some("extra") => extra = extra_of(&k.value).unwrap_or(extra),
                     Some("populate_by_name") => populate_by_name = bool_lit(&k.value).unwrap_or(populate_by_name),
                     Some("frozen") => frozen = bool_lit(&k.value).unwrap_or(frozen),
+                    Some("from_attributes") => from_attributes = bool_lit(&k.value).unwrap_or(from_attributes),
                     _ => {}
                 }
             }
@@ -257,6 +261,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                         if let Some(v) = &a.value {
                             config_of(v, &mut extra, &mut populate_by_name, &mut frozen);
                             validate_assignment |= config_flag(v, "validate_assignment");
+                            from_attributes = config_flag(v, "from_attributes") || (from_attributes && !config_names(v, "from_attributes"));
                             settings_of(v, &mut settings);
                         }
                         continue;
@@ -337,6 +342,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                         if n.id.as_str() == "model_config" {
                             config_of(&a.value, &mut extra, &mut populate_by_name, &mut frozen);
                             validate_assignment |= config_flag(&a.value, "validate_assignment");
+                            from_attributes = config_flag(&a.value, "from_attributes") || (from_attributes && !config_names(&a.value, "from_attributes"));
                             settings_of(&a.value, &mut settings);
                         }
                     }
@@ -352,6 +358,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
                                     "frozen" => frozen = bool_lit(&a.value).unwrap_or(frozen),
                                     "validate_assignment" => validate_assignment = bool_lit(&a.value).unwrap_or(validate_assignment),
                                     "allow_mutation" => frozen = !bool_lit(&a.value).unwrap_or(!frozen),
+                                    "orm_mode" | "from_attributes" => from_attributes = bool_lit(&a.value).unwrap_or(true),
                                     _ => {}
                                 }
                             }
@@ -420,7 +427,7 @@ pub fn pyd_class(an: &mut Analyzer, cls: ObjId, state: &State) -> Rc<PClass> {
             f.ann = subst(&f.ann, &bind);
         }
     }
-    let p = Rc::new(PClass { fields, extra, populate_by_name, frozen, validate_assignment, settings, root, model_before, model_after, root_post, field_validators, computed, privates, field_serializers, model_serializer });
+    let p = Rc::new(PClass { fields, extra, populate_by_name, from_attributes, frozen, validate_assignment, settings, root, model_before, model_after, root_post, field_validators, computed, privates, field_serializers, model_serializer });
     an.m.pyd_classes.insert(cls, p.clone());
     p
 }
@@ -782,7 +789,23 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
     };
     let inst = an.alloc(Kind::Instance, &site, state, &format!("{}@L{}", an.heap.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
     state.set_row(inst, Ns::Attr, Row::new());
-    let recs: Vec<ObjId> = data.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::Dict | Kind::Unknown | Kind::Instance | Kind::Namespace)).collect();
+    let mut recs: Vec<ObjId> = data.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::Dict | Kind::Unknown | Kind::Instance | Kind::Namespace)).collect();
+    // another class's object (not a mapping, not this model's instance) validates by its
+    // attributes only `from_attributes` (the class's config, or the call's); else `model_type`
+    // (an object whose class has bases rowan does not see may be a mapping)
+    if !pc.from_attributes && !an.m.pyd_from_attrs {
+        let plain_obj = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
+            Kind::Namespace => true,
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| an.heap.mro(c).iter().all(|k| an.heap.class_info_opt(*k).is_some_and(|ci| !ci.open_base))),
+            _ => false,
+        };
+        let bad: Vec<ObjId> = recs.iter().copied().filter(|o| plain_obj(an, *o)).collect();
+        if !bad.is_empty() {
+            recs.retain(|o| !bad.contains(o));
+            let sure = recs.is_empty() && data.kv.is_bot() && data.pts.iter().all(|o| bad.contains(&o));
+            pyd_err(an, None, "model_type", sure, false);
+        }
+    }
     let recv = Value::objs(crate::domain::ObjSet::from_vec(recs.clone()));
     let other_data = data.pts.is_empty() || data.pts.iter().any(|o| !recs.contains(&o));
     let mut field_keys: Vec<KeyId> = Vec::new();
@@ -2268,6 +2291,15 @@ fn config_of(v: &ast::Expr, extra: &mut Extra, populate: &mut bool, frozen: &mut
     }
 }
 
+/// Does `ConfigDict(…)` / a config dict literal set option `name` (to anything)?
+fn config_names(v: &ast::Expr, name: &str) -> bool {
+    match v {
+        ast::Expr::Call(c) => kw(c, name).is_some(),
+        ast::Expr::Dict(d) => d.items.iter().any(|it| it.key.as_ref().and_then(str_lit).as_deref() == Some(name)),
+        _ => false,
+    }
+}
+
 /// A boolean option of `ConfigDict(…)` / a config dict literal.
 fn config_flag(v: &ast::Expr, name: &str) -> bool {
     match v {
@@ -2787,7 +2819,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             join_values(outs)
         }
-        "model_fields" | "__fields__" | "model_computed_fields" | "model_json_schema" | "schema" | "model_validate" | "model_validate_json" | "parse_obj" | "parse_raw" | "model_construct" | "construct" => m_class(an, st, c),
+        "model_fields" | "__fields__" | "model_computed_fields" | "model_json_schema" | "schema" | "model_validate" | "model_validate_json" | "parse_obj" | "from_orm" | "parse_raw" | "model_construct" | "construct" => m_class(an, st, c),
         "model_extra" => {
             // the attributes that are not fields (`extra="allow"`), else None
             let mut outs = Vec::new();
@@ -2849,9 +2881,18 @@ pub fn m_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut outs: Vec<Value> = Vec::new();
     for cls in classes {
         let v = match name.as_str() {
-            "model_validate" | "parse_obj" | "validate" => {
+            "model_validate" | "parse_obj" | "validate" | "from_orm" => {
                 let data = c.arg(0, Some("obj")).unwrap_or_else(|| Value::data("obj"));
-                pyd_validate(an, cls, &data, st, &c.node, false)
+                // (`from_attributes=True`, `from_orm`: for nested models too; not known: maybe)
+                let fa = match c.kw("from_attributes") {
+                    Some(v) => v.kv.as_lit() != Some(crate::intern::key_bool(false)) || !v.pts.is_empty(),
+                    None => name == "from_orm",
+                };
+                let on = an.m.pyd_from_attrs || fa;
+                let saved = std::mem::replace(&mut an.m.pyd_from_attrs, on);
+                let r = pyd_validate(an, cls, &data, st, &c.node, false);
+                an.m.pyd_from_attrs = saved;
+                r
             }
             "model_validate_json" | "parse_raw" | "model_validate_strings" => {
                 let text = c.arg(0, Some("json_data")).unwrap_or_else(|| Value::data("json"));

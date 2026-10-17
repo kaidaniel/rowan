@@ -50,7 +50,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; to library functions that only read, given no code: nothing, `read_only_library`; a dict, list or set changed
-  in place, unpacked or copied (`{**d}`, `dict(d)`): its items), a local aliasing what it is bound to; class attributes by name, rebound
+  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: no key `likely`, `Flags::removes`), a local aliasing what it is bound to; class attributes by name, rebound
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
@@ -65,12 +65,12 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
-    the program's functions; several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one
-    call per function when it would not run, or on demand; those none of which runs — out of budget, past the work on demand
-    or the deadline — one `skipped_calls`).
+    the program's functions; several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
+    per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
-    may come from those taken to fail only on wrong types, and from hashing a list, dict or set (`check_hashable`). Models,
-    operators and subscripts on literals beside objects (`"a" if c else [1]`) run on each part (`split_mixed`).
+    may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
+    sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
+    (`"a" if c else [1]`) run on each part (`split_mixed`); None beside them raises where Python rejects it (operators with literals or builtin containers, calls, subscripts, attributes, `len`).
   * **Entry points, general runs:** functions the main run does not call (also those only entry
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
@@ -84,8 +84,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
   there-unless-removed too; deletes) changes what the generator reads after a yield (`Gens::watch`, also after the call
   that started it while held, or a global holds it), it runs again with that changed at each yield (`with_gen_restart`).
-  `@contextmanager` bodies run at yields. A `for` over a user iterator (`__iter__` returns self) calls `__next__` before each
-  iteration (`for_user_iterator`).
+  `@contextmanager` bodies run at yields. A `for` over a user iterator (`__iter__` returns self) calls `__next__` each round (`for_user_iterator`).
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
@@ -110,8 +109,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`; no per-function budgets)
   or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
-  a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
-  `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit, `Payload::Affix`), metaclasses and
+  a general run's `x: int` is an int, not a subclass overriding int's operators). `getattr` by a name not known reads every attribute
+  of the program's objects, quietly (known in part, an f-string's: those whose names fit, `Payload::Affix`; a container's, or past a wide
+  read: one method per call site, unknown code on them when called); `exec`, `setattr` with unknown names on a class, metaclasses and
   monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
   unknown code does not shadow a class attribute on an instance of a library-based class; an unknown beside objects is no instance
   of the program's or a library's classes (`isinstance`: a builtin's, by its type); a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
@@ -169,14 +169,12 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 
 ## Layout (`rowan/src/`, ~72k lines: the engine ~29k, the models ~43k)
 
-Maps of the code, file by file, with where to start reading: `rowan/README.md` (the crate, the
-binary, `py/`), `rowan/src/README.md` (syntax, domains, `main.rs` / `serve.rs`),
-`rowan/src/interp/README.md` (the `Analyzer`'s components, how a program runs),
-`rowan/src/models/README.md` (what a model is, a file per library). In short: `frontend.rs`,
-`scopes.rs`, `syntax.rs` parse; `intern.rs`, `domain.rs`, `source.rs`, `layered.rs`, `state.rs`
-are the domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output);
-`models/` are the libraries; `rowan/py/` a PyO3 binding (does not load on macOS 26);
-`vscode-rowan/` the editor extension (talks to `rowan serve`).
+Maps of the code, file by file, with where to start reading: `rowan/README.md` (the crate, the binary, `py/`),
+`rowan/src/README.md` (syntax, domains, `main.rs` / `serve.rs`), `rowan/src/interp/README.md` (the `Analyzer`'s
+components, how a program runs), `rowan/src/models/README.md` (what a model is, a file per library). In short:
+`frontend.rs`, `scopes.rs`, `syntax.rs` parse; `intern.rs`, `domain.rs`, `source.rs`, `layered.rs`, `state.rs` are the
+domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output); `models/` are the libraries;
+`rowan/py/` a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor extension (talks to `rowan serve`).
 
 ## Implementation rules that are easy to break
 
