@@ -365,8 +365,9 @@ Linux and Windows; the `.vsix` packages of each version are attached to the
   `os.environ`, `os.path`, `pathlib`, `argparse`, `contextlib`, `threading` /
   `concurrent.futures`, `copy`, `logging`.
 * **pandas:** a DataFrame's columns through construction, selection, stores, drops and renames,
-  `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes. Files read with
-  `read_csv` and friends have whatever columns the code reads.
+  `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes; for a frame built from
+  literal data, its values too (`list(df["sku"])`, `df.loc[0, "sku"]`, each row of a loop over
+  `iterrows()`). Files read with `read_csv` and friends have whatever columns the code reads.
 * **pydantic** (v2 and v1 spellings): fields and aliases, validation, nested models,
   validators, dumps and their options, `ValidationError.errors()`, `BaseSettings`.
 * **FastAPI:** routes, parameters converted by annotation, dependencies, middlewares,

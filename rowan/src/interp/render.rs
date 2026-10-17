@@ -137,9 +137,13 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             let row = state.row(o, Ns::Attr);
             // (attribute bags: argparse's and types' namespaces, a request's `state`; other model
             // objects keep their attributes for the model's own use)
-            let bag = ["args@", "namespace@", "request.state"].iter().any(|p| label.starts_with(p));
+            let bag = ["args@", "namespace@", "request.state", "row@"].iter().any(|p| label.starts_with(p));
             if bag && row.present.iter().any(|k| !is_internal_key(k)) {
-                let shown = name.trim_matches(|c| c == '<' || c == '>');
+                // (a frame's row from `itertuples`: the namedtuple it names, "Pandas" by default)
+                let shown = match label.strip_prefix("row@") {
+                    Some(rest) => rest.split_once(':').map(|x| x.1).unwrap_or("Pandas"),
+                    None => name.trim_matches(|c| c == '<' || c == '>'),
+                };
                 if depth >= max_depth {
                     return format!("{}(…)", shown);
                 }
@@ -290,7 +294,13 @@ fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32
     // (a frame by its columns, a Series / Counter / defaultdict by their keys, as
     // Python prints them)
     let label = an.heap.obj(o).label.clone();
-    let wrap = if kind == Kind::Frame { Some("DataFrame") } else { ["series@", "Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@')) };
+    let wrap = if kind == Kind::Frame {
+        Some("DataFrame")
+    } else if crate::models::pandas::is_series_obj(an, o) {
+        Some("Series")
+    } else {
+        ["Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@'))
+    };
     let body = if depth >= max_depth {
         if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
     } else if kind == Kind::Frame {
