@@ -1967,11 +1967,13 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
 }
 
 /// A column's values as pandas stores them: in a column of numbers or of strs, None is NaN
-/// (and ints with a missing value are floats); a column of other values keeps None.
+/// (and ints beside a float or a missing value are floats); a column of other values keeps
+/// them as given.
 fn missing_as_nan(k: Known) -> Known {
     let (none, nan) = (none_key(), nan_key());
     let rest: Vec<KeyId> = k.may.iter().filter(|x| *x != none && *x != nan).collect();
-    if rest.is_empty() || !(k.may.contains(none) || k.may.contains(nan)) {
+    let float = |x: &KeyId| intern::with_key(*x, |kk| matches!(kk, intern::Key::Float(_)));
+    if rest.is_empty() || !(k.may.contains(none) || k.may.contains(nan) || rest.iter().any(float)) {
         return k;
     }
     let num = |x: &KeyId| intern::with_key(*x, |kk| matches!(kk, intern::Key::Int(_) | intern::Key::Float(_)));
