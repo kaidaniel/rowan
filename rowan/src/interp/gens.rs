@@ -422,7 +422,7 @@ impl Analyzer {
                 let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).collect();
                 targets.sort_unstable();
                 targets.dedup();
-                let reach = self.reach_among(&mods, &targets, state);
+                let reach = self.reach_among(&mods, &targets, state, false);
                 let keep = Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
                 again.join_heap_fp(state, &keep);
             }
@@ -482,7 +482,7 @@ impl Analyzer {
             FxHashSet::default()
         } else {
             let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
-            let mut kept = self.reach_among(&roots, &gids, at);
+            let mut kept = self.reach_among(&roots, &gids, at, false);
             // (a generator a global holds is resumed by later calls)
             kept.extend(gids.iter().filter(|g| self.gens.global_held.contains(g)));
             kept
@@ -530,7 +530,21 @@ impl Analyzer {
         let older = |o: ObjId| self.heap.born_before(o, w.born);
         // (the objects it changes itself: as the consumer changed what it was given of them)
         let own = w.own_hits.iter().filter(|c| read(c)).cloned();
-        let mut hit: Vec<Hit> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && read(c)).chain(own).collect();
+        let (mut hit, unread): (Vec<Hit>, Vec<Hit>) = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0)).partition(read);
+        hit.extend(own);
+        // (what changed that the run again may read through what changed for it: the generator
+        // reads on where a changed value leads, so it is changed for it now, not a round later)
+        if !hit.is_empty() && !unread.is_empty() {
+            let roots: Vec<Value> = hit.iter().map(|(o, k, _)| match k {
+                Some(sk) => fin.slots.get(o, sk).unwrap_or_default(),
+                None => Value::obj(*o),
+            }).collect();
+            let mut targets: Vec<ObjId> = unread.iter().map(|c| c.0).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            let reach = self.reach_among(&roots, &targets, fin, true);
+            hit.extend(unread.into_iter().filter(|c| reach.contains(&c.0)));
+        }
         if all && !hit.is_empty() {
             hit = w.reads.iter().map(|r| (r.0, None, false)).collect();
         }
@@ -558,8 +572,9 @@ impl Analyzer {
         }
     }
 
-    /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found).
-    pub(super) fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State) -> FxHashSet<ObjId> {
+    /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found;
+    /// modules and functions end a path, classes too unless `classes`: their attributes).
+    pub(super) fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State, classes: bool) -> FxHashSet<ObjId> {
         let mut found: FxHashSet<ObjId> = FxHashSet::default();
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         let mut work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
@@ -574,8 +589,14 @@ impl Analyzer {
                     break;
                 }
             }
-            if !matches!(self.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
-                self.obj_edges(o, st, &mut work);
+            match self.heap.kind(o) {
+                Kind::Module | Kind::Function => {}
+                Kind::Class if !classes => {}
+                Kind::Class => {
+                    self.obj_edges(o, st, &mut work);
+                    work.extend(self.heap.class_info_opt(o).map(|ci| ci.bases.clone()).unwrap_or_default());
+                }
+                _ => self.obj_edges(o, st, &mut work),
             }
         }
         found
