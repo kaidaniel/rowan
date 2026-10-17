@@ -495,6 +495,7 @@ fn path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.may_raise_here("ValueError", st);
                 str_value()
             }
+            "open" => crate::models::csvio::open_file(an, st, &c.node, &Value::obj(o), c.arg(0, Some("mode"))),
             _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
         };
     };
@@ -550,6 +551,7 @@ fn path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "is_absolute" => Value::lit(intern::key_bool(t.starts_with('/'))),
         "as_posix" | "__str__" | "__fspath__" => Value::lit_str(&t),
         "as_uri" if t.starts_with('/') => Value::lit_str(&format!("file://{}", t)),
+        "open" => crate::models::csvio::open_file(an, st, &c.node, &Value::obj(o), c.arg(0, Some("mode"))),
         "match" | "full_match" => Value::data("bool"),
         // the file system
         _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),

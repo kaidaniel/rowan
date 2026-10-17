@@ -122,7 +122,7 @@ impl Registry {
                 "builtins.print",
                 "builtins.id", "builtins.hash",
                 "builtins.format", "builtins.input", "builtins.issubclass", "builtins.hex",
-                "builtins.chr", "builtins.ord", "builtins.open", "builtins.divmod", "builtins.pow",
+                "builtins.chr", "builtins.ord", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
             ],
             noeffect,

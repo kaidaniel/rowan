@@ -116,6 +116,12 @@ impl Analyzer {
                 Kind::View => self.iter_view(oid, node, state, &mut acc),
                 // an sqlite cursor: its remaining rows
                 Kind::Namespace if self.m.sql_cursors.contains_key(&oid) => self.iter_cursor(oid, node, state, &mut acc),
+                // a file object: its lines (str, or bytes in a binary mode), how many not known
+                Kind::Namespace if crate::models::csvio::file_type(self, oid).is_some() => {
+                    acc.items = None;
+                    acc.exhaustive = false;
+                    acc.elems.push(crate::models::csvio::file_text(self, &Value::obj(oid), "line"));
+                }
                 // itertools.count / cycle / repeat: no end
                 Kind::Namespace if self.m.infinites.contains_key(&oid) => {
                     acc.items = None;
