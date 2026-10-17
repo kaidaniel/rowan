@@ -856,6 +856,14 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // name nothing is known of (`getattr_any_name`)
     let (mut names, mut unknown) = getattr_names(&name_v.kv, st);
     let mut afs: Vec<(String, String)> = Vec::new();
+    // (a name made by a template, `"_on_%s" % mode`, `f"_on_{mode}"`, directly or through a
+    // local only ever assigned such: the attributes whose names fit it)
+    if unknown {
+        if let Some(t) = c.call_ast.and_then(|ca| ca.arguments.args.get(1)).and_then(|e| an.template_affixes(e)) {
+            afs.extend(t);
+            unknown = false;
+        }
+    }
     for o in name_v.pts.iter() {
         match &an.heap.obj(o).payload {
             Payload::Affix(p, s) => afs.push((p.clone(), s.clone())),

@@ -16,25 +16,29 @@ pub fn value_order(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<Or
     if let (Some(x), Some(y)) = (la, lb) {
         return key_order(x, y);
     }
-    // tuples (objects or literals) compare item by item
-    let items = |v: &Value| -> Option<Vec<Value>> {
+    // tuples (objects or literals) and lists of known items compare item by item (a list
+    // with a tuple does not: TypeError)
+    let items = |v: &Value| -> Option<(bool, Vec<Value>)> {
         if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
             return match intern::key_get(k) {
-                intern::Key::Tuple(ks) => Some(ks.into_iter().map(Value::lit).collect()),
+                intern::Key::Tuple(ks) => Some((false, ks.into_iter().map(Value::lit).collect())),
                 _ => None,
             };
         }
         // a (key, value) pair of items() / zip / enumerate
         if let Some(o) = v.single().filter(|o| an.heap.kind(*o) == Kind::Pair && v.kv.is_bot()) {
             if let crate::interp::Payload::Pair(k, x) = &an.heap.obj(o).payload {
-                return Some(vec![k.clone(), x.clone()]);
+                return Some((false, vec![k.clone(), x.clone()]));
             }
         }
-        let o = v.single().filter(|o| an.heap.kind(*o) == Kind::Tuple && v.kv.is_bot())?;
+        let o = v.single().filter(|o| matches!(an.heap.kind(*o), Kind::Tuple | Kind::List) && v.kv.is_bot())?;
         let n = an.heap.llen(o, st)?;
-        Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+        Some((an.heap.kind(o) == Kind::List, (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect()))
     };
-    let (ia, ib) = (items(a)?, items(b)?);
+    let ((la, ia), (lb, ib)) = (items(a)?, items(b)?);
+    if la != lb {
+        return None;
+    }
     for (x, y) in ia.iter().zip(ib.iter()) {
         match value_order(an, st, x, y)? {
             Ordering::Equal => continue,

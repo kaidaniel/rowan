@@ -216,6 +216,9 @@ pub struct Findings {
     pub facts: IndexMap<FactKey, Fact>,
     /// the next hover fact is an assignment's
     pub fact_write: bool,
+    /// per loop running to a fixpoint (innermost last): the facts its running round changed, as
+    /// they were before (None: not there), put back when the next round supersedes the round
+    fact_rounds: Vec<FxHashMap<FactKey, Option<Fact>>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -253,6 +256,48 @@ impl Findings {
         }
         self.keys.insert(key);
         self.verdicts.push(make());
+    }
+
+    /// A loop's fixpoint starts: what its rounds record of hover facts can be put back.
+    pub(in crate::interp) fn fact_rounds_begin(&mut self) {
+        if self.facts_on {
+            self.fact_rounds.push(FxHashMap::default());
+        }
+    }
+
+    /// A round of the innermost loop is superseded by the next (its states are less than the
+    /// loop's): the facts it recorded are put back as they were.
+    pub(in crate::interp) fn fact_round_restart(&mut self) {
+        let Some(j) = self.fact_rounds.last_mut() else { return };
+        for (k, f) in std::mem::take(j) {
+            match f {
+                Some(f) => drop(self.facts.insert(k, f)),
+                None => drop(self.facts.swap_remove(&k)),
+            }
+        }
+    }
+
+    /// The innermost loop's fixpoint ends: its last round's facts stand (an enclosing loop's
+    /// round may still put them back).
+    pub(in crate::interp) fn fact_rounds_end(&mut self) {
+        if !self.facts_on {
+            return;
+        }
+        let j = self.fact_rounds.pop().unwrap_or_default();
+        if let Some(outer) = self.fact_rounds.last_mut() {
+            for (k, f) in j {
+                outer.entry(k).or_insert(f);
+            }
+        }
+    }
+
+    /// Fact `k` is about to change: keep what it was for the running round of a loop.
+    fn touch_fact(&mut self, k: FactKey) {
+        if let Some(j) = self.fact_rounds.last_mut() {
+            if !j.contains_key(&k) {
+                j.insert(k, self.facts.get(&k).cloned());
+            }
+        }
     }
 
     /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
@@ -394,6 +439,7 @@ impl Analyzer {
         // (a fact that has all the texts it shows only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
+        self.findings.touch_fact((node.line, node.col, name));
         if !self.m.torch_on {
             if let Some(e) = self.findings.facts.get_mut(&(node.line, node.col, name)) {
                 if e.full(call) && (e.written || !writing) {
@@ -463,6 +509,7 @@ impl Analyzer {
             let Some(v) = bound.get(&name) else { continue };
             let node = frontend::node_in(module, p);
             self.record_fact(&node, name, v, state);
+            self.findings.touch_fact((node.line, node.col, name));
             let Some(f) = self.findings.facts.get_mut(&(node.line, node.col, name)) else { continue };
             f.param_of = Some(foid);
             if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, _)| *c == self.cx.call_chain) {

@@ -10,10 +10,10 @@ use indexmap::IndexMap;
 use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::Node;
 use ruff_python_ast as ast;
-use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
+use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Slot};
+use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -116,8 +116,8 @@ pub struct Closure {
     pub edited_locs: Vec<Loc>,
     pub edited_values: Vec<Value>,
     /// among those, the ones whose items it may remove (`Flags::removes`)
-    pub removed_locs: Vec<Loc>,
-    pub removed_values: Vec<Value>,
+    pub removed_locs: Vec<(Loc, Removes)>,
+    pub removed_values: Vec<(Value, Removes)>,
     pub iterated_locs: Vec<Loc>,
     pub iterated_values: Vec<Value>,
 }
@@ -186,7 +186,7 @@ impl Analyzer {
         let (by_name, stored) = (&uses.0, &uses.1);
         let mut work: Vec<ObjId> = vec![inst];
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        let (mut walk, mut edited, mut removed): (Vec<Value>, Vec<ObjId>, Vec<ObjId>) = Default::default();
+        let (mut walk, mut edited, mut removed): (Vec<Value>, Vec<ObjId>, Vec<(ObjId, Removes)>) = Default::default();
         while let Some(inst) = work.pop() {
             if !seen.insert(inst) {
                 continue;
@@ -210,8 +210,8 @@ impl Analyzer {
                 // in place: its items)
                 if self.edited(&f, &v, state).0 {
                     edited.extend(v.pts.iter());
-                    if f.removes {
-                        removed.extend(v.pts.iter());
+                    if f.removes.any() {
+                        removed.extend(v.pts.iter().map(|o| (o, f.removes)));
                     }
                 }
                 let mut objs: Vec<ObjId> = Vec::new();
@@ -241,7 +241,7 @@ impl Analyzer {
         let w = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
         self.havoc.edit(&mut self.heap, &edited, true, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
@@ -398,26 +398,45 @@ impl Analyzer {
         Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code, stores_like })
     }
 
-    /// The attribute names a method's own code stores on its receiver on every way it
-    /// completes: the top-level `self.x = …` statements before any statement that may return.
-    pub(in crate::interp) fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
-        let Payload::Func(fi) = &self.heap.obj(foid).payload else { return Vec::new() };
-        let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return Vec::new() };
-        let me = me.parameter.name.id.as_str();
-        let mine = |t: &Expr| match t {
-            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == me) => Some(key_str_lit(a.attr.as_str())),
-            _ => None,
-        };
-        let mut out = Vec::new();
-        for st in f.body.iter().take_while(|st| !crate::syntax::contains_return(std::slice::from_ref(*st)) && !crate::syntax::is_generator(std::slice::from_ref(*st))) {
-            match st {
-                Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
-                Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),
-                Stmt::AugAssign(a) => out.extend(mine(&a.target)),
-                _ => {}
-            }
+    /// The attribute names method `foid`'s code stores on its receiver `recv` on every way it
+    /// completes (`MustWalk`), those of the method `super().m(…)` calls in it too.
+    pub(in crate::interp) fn must_stores(&self, foid: ObjId, recv: ObjId, depth: usize) -> KeySet {
+        let Some(fi) = self.heap.func_info_opt(foid) else { return KeySet::new() };
+        let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return KeySet::new() };
+        if depth > 4 || crate::syntax::is_generator(&f.body) {
+            return KeySet::new();
         }
-        out
+        // (`super().m(…)`: the next class after `foid`'s along the receiver's MRO defining m)
+        let sup = |name: &str| -> KeySet {
+            let (Some(cls), Some(rc)) = (fi.cls, self.heap.instance_class(recv)) else { return KeySet::new() };
+            let k = key_str_lit(name);
+            let mro = self.heap.mro(rc);
+            let Some(at) = mro.iter().position(|c| *c == cls) else { return KeySet::new() };
+            // (a base rowan does not see may be the one called)
+            if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) {
+                return KeySet::new();
+            }
+            for c in &mro[at + 1..] {
+                if let Some(v) = self.heap.cls_slots.get(&(*c, Ns::Attr, k)) {
+                    return match v.single().filter(|g| fi_is_method(self, *g) && v.kv.is_bot()) {
+                        Some(g) => self.must_stores(g, recv, depth + 1),
+                        None => KeySet::new(),
+                    };
+                }
+            }
+            KeySet::new()
+        };
+        let cls = fi.qualname.rsplit('.').nth(1).unwrap_or("");
+        let mut w = MustWalk { me: me.parameter.name.id.as_str(), cls, ret: None, supers: Vec::new(), sup: &sup, rebound: false };
+        let fall = w.block(&f.body, KeySet::new());
+        if w.rebound {
+            return KeySet::new();
+        }
+        match (fall, w.ret) {
+            (Some(a), Some(b)) => a.intersection(&b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => KeySet::new(),
+        }
     }
 
     /// Where `name` (read in the code of `fi`) is bound — a cell, a module's global — or the
@@ -587,27 +606,11 @@ impl Analyzer {
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
-        // (on one receiver: the stores its code makes on every way it completes)
-        let must: Vec<KeyId> = match effs.as_slice() {
-            [(_, e)] if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k) && !self.setter_of(recvs[0], *k)).collect(),
-            _ => Vec::new(),
-        };
+        let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
-        // (arguments whose items its code may remove: not `likely` after, `may_have_removed`)
-        let bound = usize::from(self_v.is_some());
-        let mut removed: Vec<ObjId> = Vec::new();
-        for (i, v) in args.iter().enumerate() {
-            if self.param_flags(foid, Slot::Pos(i + bound)).removes {
-                removed.extend(v.pts.iter());
-            }
-        }
-        for (k, v) in kwargs.iter() {
-            if self.param_flags(foid, Slot::Kw(*k)).removes {
-                removed.extend(v.pts.iter());
-            }
-        }
+        let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
         let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
         let site = s(&format!("{}@L{}", q, node.line));
@@ -619,7 +622,7 @@ impl Analyzer {
         roots.extend(effs.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -653,9 +656,12 @@ impl Analyzer {
             let o = *o;
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
             let mut row = state.row(o, Ns::Attr);
-            for k in must {
+            for &k in &must {
                 state.set_slot(o, Ns::Attr, k, any.clone(), true);
                 row = row.store(k, true);
+            }
+            if !by_names {
+                row = row.mutate_like(site, &|k| must.contains(&k));
             }
             state.set_row(o, Ns::Attr, row);
         }
@@ -664,6 +670,35 @@ impl Analyzer {
             Some(v) => r.join(v),
             None => r,
         }
+    }
+
+    /// What a skipped call of `foid` on its one receiver among `recvs` stores on it on every way
+    /// it completes (`must_stores`), but what its code deletes or a setter takes; where the
+    /// receiver escapes (no `effs`), unknown code may remove them after.
+    fn must_after(&mut self, foid: ObjId, recvs: &[ObjId], effs: &[(ObjId, RecvEffects)]) -> Vec<KeyId> {
+        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| ["__setattr__", "__delattr__", "__getattribute__"].iter().any(|h| an.class_lookup(c, h).is_some()));
+        let [o] = recvs else { return Vec::new() };
+        if !fi_is_method(self, foid) || hooked(self, *o) {
+            return Vec::new();
+        }
+        let deleted: Vec<KeyId> = match effs {
+            [(_, e)] => e.deletes.clone(),
+            _ => self.code_uses(&self.heap.func_info(foid)).deleted.iter().map(|n| key_str_lit(&str_get(*n))).collect(),
+        };
+        self.must_stores(foid, *o, 0).iter().filter(|k| !deleted.contains(k) && !self.setter_of(*o, *k)).collect()
+    }
+
+    /// The objects among a skipped call's arguments whose items its code may remove, with what
+    /// it removes (not `likely` after: `may_have_removed`).
+    fn removed_args(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>) -> Vec<(ObjId, Removes)> {
+        let bound = usize::from(bound);
+        let slots = args.iter().enumerate().map(|(i, v)| (Slot::Pos(i + bound), v)).chain(kwargs.iter().map(|(k, v)| (Slot::Kw(*k), v)));
+        let mut out = Vec::new();
+        for (slot, v) in slots.collect::<Vec<_>>() {
+            let rm = self.param_flags(foid, slot).removes;
+            out.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
+        }
+        out
     }
 
     /// One call of several of the program's functions (with their receivers, if bound) none of
@@ -678,19 +713,9 @@ impl Analyzer {
         self.gens.force_at = None;
         let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
-        let mut removed: Vec<ObjId> = Vec::new();
+        let mut removed: Vec<(ObjId, Removes)> = Vec::new();
         for (f, r) in fns {
-            let bound = usize::from(r.is_some());
-            for (i, v) in a.pos.iter().enumerate() {
-                if self.param_flags(*f, Slot::Pos(i + bound)).removes {
-                    removed.extend(v.pts.iter());
-                }
-            }
-            for (k, v) in a.kw.iter() {
-                if self.param_flags(*f, Slot::Kw(*k)).removes {
-                    removed.extend(v.pts.iter());
-                }
-            }
+            removed.extend(self.removed_args(*f, r.is_some(), a.pos, a.kw));
         }
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
@@ -699,7 +724,7 @@ impl Analyzer {
         roots.append(&mut self.havoc.code);
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
         self.flag_may_raise(state);
         let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
         join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
@@ -785,7 +810,7 @@ impl Analyzer {
                 match self.edited(f, v, state) {
                     (true, _) => {
                         out.edited_values.push(v.clone());
-                        out.removed_values.extend(f.removes.then(|| v.clone()));
+                        out.removed_values.extend(f.removes.any().then(|| (v.clone(), f.removes)));
                     }
                     (false, true) => out.iterated_values.push(v.clone()),
                     _ => {}
@@ -839,7 +864,7 @@ impl Analyzer {
                 }
                 // (`n.append(…)`: n changes in place as a container, if it is one)
                 let edit = f.called && super::flows::CONTAINER_MUTATORS.contains(&&*str_get(a));
-                let removes = f.called && super::flows::CONTAINER_REMOVERS.contains(&&*str_get(a));
+                let removes = if f.called && super::flows::CONTAINER_REMOVERS.contains(&&*str_get(a)) { if f.removes.any() { f.removes } else { Removes::Any } } else { Removes::No };
                 f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, removes, held: f.changes || f.methods || f.held || f.held2 || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
@@ -1126,9 +1151,9 @@ impl Analyzer {
             out.held2_locs.push(loc);
         }
         match self.edited(f, &v, state) {
-            (true, _) if f.removes => {
+            (true, _) if f.removes.any() => {
                 out.edited_locs.push(loc);
-                out.removed_locs.push(loc);
+                out.removed_locs.push((loc, f.removes));
             }
             (true, _) => out.edited_locs.push(loc),
             (false, true) => out.iterated_locs.push(loc),
@@ -1184,4 +1209,144 @@ impl Analyzer {
 /// A function run with a receiver (not a static / class method).
 fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
     an.heap.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
+}
+
+/// A walk of a method's statements for what it stores on its receiver (`me`) on every way it
+/// completes: `block` gives the names stored when the block falls through (None: it never
+/// does), from those stored before it; each `return` meets its names into `ret`. A raise does
+/// not complete; a loop, `with` or `match` keeps what was stored before it (its returns count).
+struct MustWalk<'a> {
+    me: &'a str,
+    /// the name of the method's class
+    cls: &'a str,
+    ret: Option<KeySet>,
+    /// locals bound to a method of `super()` (`init = super().__init__`)
+    supers: Vec<(&'static str, &'static str)>,
+    sup: &'a dyn Fn(&str) -> KeySet,
+    /// the receiver's name is rebound: its stores may go elsewhere
+    rebound: bool,
+}
+
+impl MustWalk<'_> {
+    fn block(&mut self, body: &'static [Stmt], mut acc: KeySet) -> Option<KeySet> {
+        for st in body {
+            acc = self.stmt(st, acc)?;
+        }
+        Some(acc)
+    }
+
+    fn meet(a: Option<KeySet>, b: Option<KeySet>) -> Option<KeySet> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.intersection(&b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn target(&mut self, t: &'static Expr, acc: KeySet) -> KeySet {
+        match t {
+            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == self.me) => acc.insert(key_str_lit(a.attr.as_str())),
+            Expr::Name(n) if n.id.as_str() == self.me => {
+                self.rebound = true;
+                acc
+            }
+            Expr::Tuple(t) => t.elts.iter().fold(acc, |acc, e| self.target(e, acc)),
+            Expr::List(t) => t.elts.iter().fold(acc, |acc, e| self.target(e, acc)),
+            _ => acc,
+        }
+    }
+
+    /// `super().m` / `super(C, self).m` of the method's own class C: m.
+    fn super_method(&self, e: &'static Expr) -> Option<&'static str> {
+        let Expr::Attribute(a) = e else { return None };
+        let Expr::Call(c) = &*a.value else { return None };
+        let name = |x: &Expr, n: &str| matches!(x, Expr::Name(y) if y.id.as_str() == n);
+        let own = match &c.arguments.args[..] {
+            [] => true,
+            [k, me] => name(k, self.cls) && name(me, self.me),
+            _ => false,
+        };
+        (name(&c.func, "super") && own).then(|| a.attr.as_str())
+    }
+
+    fn stmt(&mut self, st: &'static Stmt, acc: KeySet) -> Option<KeySet> {
+        match st {
+            Stmt::Assign(a) => {
+                if let ([Expr::Name(n)], Some(m)) = (a.targets.as_slice(), self.super_method(&a.value)) {
+                    self.supers.push((n.id.as_str(), m));
+                }
+                Some(a.targets.iter().fold(acc, |acc, t| self.target(t, acc)))
+            }
+            Stmt::AnnAssign(a) if a.value.is_some() => Some(self.target(&a.target, acc)),
+            Stmt::AugAssign(a) => Some(self.target(&a.target, acc)),
+            Stmt::Expr(e) => {
+                let Expr::Call(c) = &*e.value else { return Some(acc) };
+                let m = self.super_method(&c.func).or_else(|| match &*c.func {
+                    Expr::Name(n) => self.supers.iter().rev().find(|(l, _)| *l == n.id.as_str()).map(|(_, m)| *m),
+                    _ => None,
+                });
+                Some(match m {
+                    Some(m) => acc.union(&(self.sup)(m)),
+                    None => acc,
+                })
+            }
+            Stmt::Return(_) => {
+                self.ret = Self::meet(self.ret.take(), Some(acc));
+                None
+            }
+            Stmt::Raise(_) => None,
+            Stmt::If(i) => {
+                let mut fall = self.block(&i.body, acc.clone());
+                let mut has_else = false;
+                for c in &i.elif_else_clauses {
+                    has_else |= c.test.is_none();
+                    let f = self.block(&c.body, acc.clone());
+                    fall = if fall.is_none() { f } else if f.is_none() { fall } else { Self::meet(fall, f) };
+                }
+                if !has_else {
+                    fall = Self::meet(fall, Some(acc));
+                }
+                fall
+            }
+            Stmt::Try(t) if !crate::syntax::contains_return(&t.finalbody) => {
+                let mut fall = self.block(&t.body, acc.clone()).and_then(|b| self.block(&t.orelse, b));
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    let f = self.block(&h.body, acc.clone());
+                    fall = if fall.is_none() { f } else if f.is_none() { fall } else { Self::meet(fall, f) };
+                }
+                fall.and_then(|f| self.block(&t.finalbody, f))
+            }
+            Stmt::For(_) | Stmt::While(_) | Stmt::With(_) | Stmt::Match(_) => {
+                // (their returns, with what was stored before them along the body)
+                let bodies: Vec<&'static [Stmt]> = match st {
+                    Stmt::For(f) => vec![&f.body, &f.orelse],
+                    Stmt::While(w) => vec![&w.body, &w.orelse],
+                    Stmt::With(w) => vec![&w.body],
+                    Stmt::Match(m) => m.cases.iter().map(|c| c.body.as_slice()).collect(),
+                    _ => Vec::new(),
+                };
+                for b in bodies {
+                    self.block(b, acc.clone());
+                }
+                Some(acc)
+            }
+            // (a `return` in a `finally`: every way out has what was stored before)
+            Stmt::Try(_) => {
+                self.ret = Self::meet(self.ret.take(), Some(acc.clone()));
+                Some(acc)
+            }
+            Stmt::Delete(d) => {
+                let mut acc = acc;
+                for t in &d.targets {
+                    match t {
+                        Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == self.me) => acc = acc.remove(key_str_lit(a.attr.as_str())),
+                        Expr::Name(n) if n.id.as_str() == self.me => self.rebound = true,
+                        _ => {}
+                    }
+                }
+                Some(acc)
+            }
+            _ => Some(acc),
+        }
+    }
 }

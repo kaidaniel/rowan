@@ -397,11 +397,13 @@ impl Analyzer {
                 let n = sx2.matches("%s").count();
                 if n >= 1 && !sx2.replace("%s", "").contains('%') {
                     let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
+                    // (an object's text is not known: an unknown)
+                    let scalar = |v: Value| if v.pts.is_empty() { v.kv } else { DATA };
                     let args: Vec<KeyVal> = if n == 1 {
-                        vec![b.kv.clone()]
+                        vec![scalar(b.clone())]
                     } else {
                         match b.single() {
-                            Some(t) if matches!(self.heap.kind(t), Kind::Tuple) && self.heap.llen(t, state) == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
+                            Some(t) if matches!(self.heap.kind(t), Kind::Tuple) && self.heap.llen(t, state) == Some(n) => (0..n).map(|i| scalar(state.slot(t, Ns::Pos, key_int(i as i64)))).collect(),
                             _ => Vec::new(),
                         }
                     };

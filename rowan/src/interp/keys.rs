@@ -205,6 +205,8 @@ impl Analyzer {
     /// `check_hashable`, of a value that is hashed only if `hashed` (else maybe: the items of
     /// an iterable that may be empty).
     pub fn check_hashable_if(&mut self, v: &Value, hashed: bool, state: &mut State) {
+        // (an Enum member as a key is its object: its class may not hash)
+        let v = &self.unkey(v);
         if v.pts.is_empty() && !(self.in_try() && kv_hashing(&v.kv) == Hashing::Maybe) {
             return;
         }
