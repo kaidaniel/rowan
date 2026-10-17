@@ -640,8 +640,10 @@ impl Analyzer {
         }
         let out = self.bound_outs(&cv, oid, c, name, node, state);
         // (an instance of a class of the program unknown code changed: it may hold the data
-        // name itself, over the class's)
-        if cv.pts.is_empty() && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
+        // name itself, over the class's — a scalar or an object, not a method or a class:
+        // rebinding those is not modelled)
+        let code = cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound | Kind::Method | Kind::Partial | Kind::Class));
+        if !code && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
             return Some(out.join(&Value::data(&format!("L{}", node.line))));
         }
         Some(out)
