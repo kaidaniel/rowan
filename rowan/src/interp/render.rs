@@ -508,7 +508,14 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
                     // keys seen on it describe it; objects an unknown call was given are what it
                     // may also be (besides anything else)
                     let given = an.names.origins.get(&o).map(|(_, _, g)| !g.is_empty()).unwrap_or(false);
-                    let desc = if parts.is_empty() { "?".to_string() } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
+                    // (named by an expression, nothing more known of it than its type: `str(?)`; a
+                    // parameter's type is the hover's own, `Fact` `type`)
+                    let expr = !sym.chars().all(|c| c.is_alphanumeric() || c == '_');
+                    let unknown = match an.heap.obj(o).ty {
+                        Some(t) if parts.is_empty() && expr => format!("{}(?)", t),
+                        _ => "?".to_string(),
+                    };
+                    let desc = if parts.is_empty() { unknown } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
                     out.push((sym.clone(), desc));
                 }
                 // (what a container holds: under its keys, attributes, positions, elements)

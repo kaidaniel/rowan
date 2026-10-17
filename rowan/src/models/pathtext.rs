@@ -402,6 +402,26 @@ pub fn path_div(an: &mut Analyzer, st: &mut State, a: &Value, b: &Value, node: &
 
 /// A path object's methods (`stdobj.path.NAME`).
 pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let r = path_method(an, st, c);
+    // (a file's text is a str, its bytes bytes, whatever the path)
+    let ty = match c.qual.rsplit('.').next() {
+        Some("read_text") => "str",
+        Some("read_bytes") => "bytes",
+        _ => return r,
+    };
+    for o in r.pts.iter() {
+        if an.heap.kind(o) == Kind::Unknown && an.heap.obj(o).site.starts_with("ret:") {
+            an.heap.obj_mut(o).ty = Some(ty);
+        }
+    }
+    match r.kv {
+        KeyVal::Data(_) => Value::with_kv(r.pts.clone(), KeyVal::data(&crate::domain::typed_label(ty, ""))),
+        _ => r,
+    }
+}
+
+/// A path method's result (`m_path_method`).
+fn path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(o) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("path") };
     let Some(t) = path_text(an, o) else { return Value::data("path") };

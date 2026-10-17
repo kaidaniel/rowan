@@ -813,6 +813,16 @@ impl Analyzer {
                 }
             }
         }
+        // (an item or character of a text not known: a str; of bytes: an int)
+        if ns != Ns::Attr && !shared && self.heap.obj(pid).ty.is_none() {
+            if let Some(t) = self.heap.obj(oid).ty.and_then(|t| match t {
+                "str" => Some("str"),
+                "bytes" => Some("int"),
+                _ => None,
+            }) {
+                self.heap.obj_mut(pid).ty = Some(t);
+            }
+        }
         let o = self.heap.obj_mut(pid);
         o.depth = if shared { o.depth.max(d) } else { d };
         o.iter_elem |= elem;
