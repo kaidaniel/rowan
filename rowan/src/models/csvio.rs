@@ -880,8 +880,7 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
             an.m.exit_callbacks.insert(o, Vec::new());
         }
         for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
-            let mut nd = *node;
-            nd.col = node.col.wrapping_add(3_000_000 + i as u32);
+            let nd = node.sub(3_000_000 + i as u32);
             for fo in f.pts.iter() {
                 if an.heap.kind(fo) == Kind::Function {
                     an.call_user(fo, None, Args::new(&args, &kwargs, &[], &[]), st, &nd, false);

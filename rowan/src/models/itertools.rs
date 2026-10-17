@@ -22,9 +22,7 @@ pub enum Infinite {
 }
 
 fn sub_node(node: &Node, i: usize, salt: u32) -> Node {
-    let mut n = *node;
-    n.col = node.col.wrapping_add(salt + i as u32);
-    n
+    node.sub(salt + i as u32)
 }
 
 /// A one-shot iterator over `vals` (positions known) or with element `elem` (unknown count).

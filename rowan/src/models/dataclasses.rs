@@ -236,9 +236,9 @@ fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node,
             for kw in c.arguments.keywords.iter() {
                 let Some(arg) = &kw.arg else { continue };
                 match arg.id.as_str() {
-                    "default_factory" => {
+                    "default_factory" | "factory" => {
                         let f = an.eval(&kw.value, state);
-                        return an.call_value(&f, node, None, state, Some(vec![]));
+                        return an.call_value(&f, &factory_site(node, &kw.value), None, state, Some(vec![]));
                     }
                     "default" => return an.eval(&kw.value, state),
                     _ => {}
@@ -246,8 +246,22 @@ fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node,
             }
             return Value::data("field");
         }
+        // attrs' `Factory(f)` as a default
+        if crate::syntax::dotted_last(&c.func) == "Factory" && c.arguments.keywords.is_empty() {
+            if let [fe] = &c.arguments.args[..] {
+                let f = an.eval(fe, state);
+                return an.call_value(&f, &factory_site(node, fe), None, state, Some(vec![]));
+            }
+        }
     }
     an.eval(d, state)
+}
+
+/// The call site of a field's default factory at a construction `node`: one per field (the
+/// factory expression's place), so two fields' factories make two objects.
+pub fn factory_site(node: &Node, factory: &ast::Expr) -> Node {
+    use ruff_text_size::Ranged;
+    node.sub(4_000_000 + u32::from(factory.range().start()))
 }
 
 /// Dataclass fields in constructor order: base classes' fields first (MRO, nearest last).

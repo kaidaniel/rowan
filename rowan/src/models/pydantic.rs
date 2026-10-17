@@ -1262,7 +1262,7 @@ fn pyd_init_privates(an: &mut Analyzer, cls: ObjId, inst: ObjId, state: &mut Sta
         let v = match (fac, d) {
             (Some(f), _) => {
                 let fv = an.eval(f, state);
-                an.call_value(&fv, node, None, state, Some(vec![]))
+                an.call_value(&fv, &crate::models::dataclasses::factory_site(node, f), None, state, Some(vec![]))
             }
             (None, Some(d)) => an.eval(d, state),
             _ => continue,
@@ -1429,7 +1429,7 @@ fn pyd_read_guarded(an: &mut Analyzer, recs: &[ObjId], k: KeyId, state: &mut Sta
 fn pyd_default(an: &mut Analyzer, f: &PField, node: &Node, state: &mut State) -> Value {
     if let Some(fac) = f.factory {
         let fv = an.eval(fac, state);
-        return an.call_value(&fv, node, None, state, Some(vec![]));
+        return an.call_value(&fv, &crate::models::dataclasses::factory_site(node, fac), None, state, Some(vec![]));
     }
     match f.default {
         // (in the module defining the field: `Priority.NORMAL` names the model's module's;
@@ -1440,7 +1440,7 @@ fn pyd_default(an: &mut Analyzer, f: &PField, node: &Node, state: &mut State) ->
             for o in v.pts.iter() {
                 if matches!(an.heap.kind(o), Kind::List | Kind::Dict | Kind::Set) {
                     let mut seen = IndexMap::new();
-                    out = out.join(&Value::obj(an.copy_object(o, node, state, true, &mut seen)));
+                    out = out.join(&Value::obj(an.copy_object(o, &crate::models::dataclasses::factory_site(node, d), state, true, &mut seen)));
                 } else {
                     out = out.join(&Value::obj(o));
                 }
