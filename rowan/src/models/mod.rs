@@ -819,6 +819,8 @@ pub struct Tables {
     pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_field: Option<KeyId>,
+    /// a validation called with `from_attributes=True` (or `from_orm`) is running
+    pub pyd_from_attrs: bool,
     /// a nested model being validated for this field of the enclosing one (its errors' loc
     /// starts with it)
     pub pyd_nest_prefix: Option<KeyId>,
