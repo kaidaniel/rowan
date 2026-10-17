@@ -114,6 +114,17 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Dict | Kind::Frame => render_mapping(an, state, o, kind, depth, seen),
         // objects of library models: their attributes when they have some (`Namespace(n=3)`),
         // else what made them (`re.compile('a+')`, `PosixPath('/tmp')`) or their type (`<Match>`)
+        // a builtin exception as Python writes it: `KeyError("k")`
+        Kind::Namespace if an.m.exc_objs.contains_key(&o) && state.has_slot(o, Ns::Attr, intern::key_str_lit("args")) => {
+            let args = state.slot(o, Ns::Attr, intern::key_str_lit("args"));
+            if depth >= max_depth {
+                return format!("{}(…)", an.m.exc_objs[&o]);
+            }
+            seen.push(o);
+            let items = args_items(an, state, &args, depth, seen);
+            seen.pop();
+            format!("{}({})", an.m.exc_objs[&o], items.join(", "))
+        }
         Kind::Namespace => {
             let label = an.heap.obj(o).label.to_string();
             let name = opaque_name(&label);
@@ -168,7 +179,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
         // (unnamed here: of its type when it has one, `int(?)`)
         Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match (an.heap.ann.get(&o), an.heap.obj(o).ty) {
-            (Some(a), _) => crate::interp::entry::annotation_text(a),
+            (Some((a, _)), _) => crate::interp::annotations::annotation_text(a),
             (None, Some(t)) => format!("{}(?)", t),
             (None, None) => "?".into(),
         }),
@@ -370,7 +381,15 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     let row = state.row(o, ns);
     seen.push(o);
     let mut items: Vec<String> = Vec::new();
-    let keys: Vec<KeyId> = intern::sorted_by_str(row.present.iter()).into_iter().filter(|k| !is_internal_key(*k)).collect();
+    let mut keys: Vec<KeyId> = intern::sorted_by_str(row.present.iter()).into_iter().filter(|k| !is_internal_key(*k)).collect();
+    // an exception as Python writes it: its `args` first, by position (`AppError("too big",
+    // code=400)`), its `__cause__` when one is set
+    if let Some(args) = exception_args(an, state, o, ns, &row) {
+        let cause = intern::key_str_lit("__cause__");
+        let no_cause = |k: KeyId| k == cause && state.slot_opt(o, ns, k).is_some_and(|v| v.pts.is_empty() && v.kv.as_lit() == Some(intern::key_none()));
+        keys.retain(|k| *k != intern::key_str_lit("args") && !no_cause(*k));
+        items.extend(args_items(an, state, &args, depth, seen));
+    }
     for k in keys.iter().take(MAX_ITEMS) {
         let val = match state.slot_opt(o, ns, *k) {
             Some(sv) => render_value(an, state, &sv, depth + 1, seen),
@@ -407,6 +426,35 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
         (Ns::Attr, None) => format!("obj({})", items.join(", ")),
         _ => format!("{{{}}}", items.join(", ")),
     }
+}
+
+/// An exception's `args` as the arguments of a call: a tuple of known length by position,
+/// else `*args`.
+fn args_items(an: &Analyzer, state: &State, args: &Value, depth: u32, seen: &mut Vec<ObjId>) -> Vec<String> {
+    let tuple = args.single().filter(|t| args.kv.is_bot() && an.heap.kind(*t) == Kind::Tuple);
+    match tuple.and_then(|t| Some((t, an.heap.llen(t, state)?))) {
+        Some((t, n)) if n <= 8 => (0..n)
+            .map(|i| match state.slot_opt(t, Ns::Pos, intern::key_int(i as i64)) {
+                Some(sv) => render_value(an, state, &sv, depth + 1, seen),
+                None => "?".into(),
+            })
+            .collect(),
+        _ => vec![format!("*{}", render_value(an, state, args, depth + 1, seen))],
+    }
+}
+
+/// The `args` of `o` when it is an instance of an exception class of the program (its attribute
+/// row has them).
+fn exception_args(an: &Analyzer, state: &State, o: ObjId, ns: Ns, row: &crate::domain::Row) -> Option<Value> {
+    let args = intern::key_str_lit("args");
+    if ns != Ns::Attr || an.heap.kind(o) != Kind::Instance || !row.definite.contains(args) {
+        return None;
+    }
+    let names = an.exc_class_names(an.heap.instance_class(o)?)?;
+    if !names.0.iter().any(|n| crate::interp::exprs::is_exception_name(n)) {
+        return None;
+    }
+    state.slot_opt(o, ns, args)
 }
 
 /// The symbols a value mentions (unknown objects printed by name) with what is known about

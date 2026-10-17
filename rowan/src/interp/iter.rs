@@ -523,6 +523,11 @@ impl Analyzer {
             acc.elems.push(Value::data("deep"));
             return;
         }
+        // (an element annotated with a class of the program: an instance of it)
+        if let Some(v) = self.part_instance(oid, STAR, state) {
+            acc.elems.push(v);
+            return;
+        }
         let row = state.row(oid, Ns::Item);
         let label = format!("elem of {}", self.heap.obj(oid).label);
         let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);

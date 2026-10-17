@@ -1550,19 +1550,29 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
     match ann {
         Ann::Model(c) => {
             let c = *c;
-            // None / literals pass (a validation error otherwise: not this model's concern)
+            // a model takes a dict or an instance: None or another literal fails (model_type)
             let recs: Vec<ObjId> = val.pts.iter().collect();
-            if recs.is_empty() {
-                return val.clone();
+            let lit_part = val.kv.is_literal() && !val.kv.is_bot();
+            if lit_part {
+                let sure = recs.is_empty();
+                if an.m.pyd_errs.is_empty() {
+                    if sure {
+                        an.raise_here("ValidationError", state);
+                        return Value::new();
+                    }
+                    an.may_raise_here("ValidationError", state);
+                } else {
+                    let loc = an.m.pyd_field;
+                    pyd_err(an, loc, "model_type", sure, true);
+                }
             }
-            let lits = Value::kv_only(val.kv.clone());
+            if recs.is_empty() {
+                return if lit_part { Value::new() } else { val.clone() };
+            }
             // (its errors are this model's, under this field)
             let saved_prefix = std::mem::replace(&mut an.m.pyd_nest_prefix, an.m.pyd_field);
-            let mut out = pyd_validate(an, c, &Value::objs(crate::domain::ObjSet::from_vec(recs)), state, node, false);
+            let out = pyd_validate(an, c, &Value::objs(crate::domain::ObjSet::from_vec(recs)), state, node, false);
             an.m.pyd_nest_prefix = saved_prefix;
-            if !val.kv.is_bot() && val.kv.is_literal() {
-                out = out.join(&lits);
-            }
             out
         }
         Ann::Optional(inner) => {
@@ -1784,8 +1794,9 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     };
                     pyd_err(an, loc, code, containers == total, false);
                 }
+                // (what is neither a container nor a literal — something unknown — may be one)
                 let rest = Value::kv_only(coerce_kv(t, &val.kv));
-                return if containers == total { rest } else { rest.join(&Value::data(t)) };
+                return if containers == val.pts.len() { rest } else { rest.join(&Value::data(t)) };
             }
             Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
         }

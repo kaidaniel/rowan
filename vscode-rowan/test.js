@@ -257,6 +257,9 @@ assert.strictEqual(lines[0], "Repo(");
 assert(lines.includes('  name="customers"'), lines.join("\n"));
 assert(lines.includes('    {"key": 1, "op": "add"},'), lines.join("\n"));
 assert.deepStrictEqual(prettyValue("[1, 2, 3]"), ["[1, 2, 3]"]);
+// a one-item tuple keeps its comma, also when cut or broken over lines
+assert.deepStrictEqual(prettyValue("E(args=(str(?),)) | ?"), ["E(args=(str(?),)) | ?"]);
+assert.deepStrictEqual(prettyValue("[(1,), (2, 3)]"), ["[(1,), (2, 3)]"]);
 assert.strictEqual(lines.join("").replace(/\s+/g, ""), repo.replace(/\s+/g, ""));
 assert.deepStrictEqual(prettyValue('{"t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"], **?}', 40), ["{", '  "t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"],', "  **?", "}"]);
 // one of several long values: one per line
@@ -427,9 +430,35 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   assert(h.includes("```python\nidx = {") && !h.includes("✓"), h);
 }
 
+// ---- a parameter annotated with a dataclass: its fields (its bases' too) as annotated
+const z618 = path.join(root, "tests", "cases", "z618_annotated_field_classes.py");
+const z618src = fs.readFileSync(z618, "utf8").split("\n");
+const hIt = hover(indexResult(facts(z618)), z618src, z618src.findIndex((l) => l.startsWith("def describe(")) + 1, "it");
+for (const part of ["ident=int(?)", "label=str(?)", "note=None | str(?)", "tags=list[str(?)]"]) assert(hIt.includes(part), hIt);
+
+// ---- a parameter's own argument beside its default, in its body and in In Calls (a framework's
+// request: the annotated type, never the parameter's name as a value)
+const f043 = path.join(root, "tests", "fastapi", "small", "f043_request_parameters_as_annotated.py");
+const f043src = fs.readFileSync(f043, "utf8").split("\n");
+const f043idx = indexResult(facts(f043));
+const defLine = f043src.findIndex((l) => l.startsWith("def read_run(")) + 1;
+const hLimit = hover(f043idx, f043src, defLine, "limit");
+assert(hLimit.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```") && hLimit.includes("- `10 | int(?)` on line ") && !/`[^`]*\blimit\b[^`]*` on line/.test(hLimit), hLimit);
+const hLimit2 = hover(f043idx, f043src, defLine + 3, "limit");
+assert(hLimit2.startsWith("```python\nlimit = (parameter) 10 | int(?)\n```"), hLimit2);
+
+// ---- exceptions as Python writes them: their arguments by position, `__cause__` when set
+const z619 = path.join(root, "tests", "cases", "z619_exception_values.py");
+const z619src = fs.readFileSync(z619, "utf8").split("\n");
+const z619idx = indexResult(facts(z619));
+const errLine = z619src.findIndex((l) => l.trim() === "err = e") + 1;
+assert(hover(z619idx, z619src, errLine, "err").startsWith('```python\nerr = AppError("too big")\n```'), hover(z619idx, z619src, errLine, "err"));
+const codedLine = z619src.findIndex((l) => l.trim() === "coded = c") + 1;
+assert(hover(z619idx, z619src, codedLine, "coded").startsWith('```python\ncoded = Coded("negative", __cause__=KeyError("k"), code=400)\n```'), hover(z619idx, z619src, codedLine, "coded"));
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
-  a01, z, g, kinds,
+  a01, z, g, kinds, z618, f043, z619,
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"),
   path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py"),
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),

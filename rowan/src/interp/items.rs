@@ -759,6 +759,10 @@ impl Analyzer {
             self.fill_placeholder(pid, oid, ns, k, row, false, state);
             return Value::obj(pid);
         }
+        // (a part annotated with a class of the program: an instance of it)
+        if let Some(v) = self.part_instance(oid, k, state) {
+            return v;
+        }
         let label = format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k));
         // the content under an unknown key stands for many values: stores on it are weak
         let single = k != STAR;
@@ -789,13 +793,13 @@ impl Analyzer {
         }
         let d = self.heap.obj(oid).depth + 1;
         // (a part of a value annotated `list[int]`, `dict[str, float]`: of that type)
-        let part = self.heap.ann.get(&oid).and_then(|a| crate::interp::entry::part_annotation(a, k));
+        let part = self.heap.ann.get(&oid).and_then(|(a, m)| Some((crate::interp::annotations::part_annotation(a, k)?, *m)));
         let shared = self.heap.obj(pid).site.starts_with("path@");
-        if let (Some(p), false) = (part, shared) {
-            if let Some((t, false)) = crate::interp::entry::builtin_annotation(p) {
+        if let (Some((p, module)), false) = (part, shared) {
+            if let Some((t, false)) = crate::interp::annotations::builtin_annotation(p) {
                 self.heap.obj_mut(pid).ty = Some(t);
-                if let Some(c) = crate::interp::entry::container_annotation(p) {
-                    self.heap.ann.insert(pid, c);
+                if let Some(c) = crate::interp::annotations::container_annotation(p) {
+                    self.heap.ann.insert(pid, (c, module));
                 }
             }
         }

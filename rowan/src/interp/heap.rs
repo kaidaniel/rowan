@@ -331,9 +331,9 @@ pub struct Heap {
     /// serial order: a collector after mark `m` finds the young originals at the log's end (a
     /// generational collector's remembered set)
     root_log: Vec<(u64, ObjId)>,
-    /// the builtin container annotation an unknown follows (`list[dict[str, int]]`): its
-    /// parts' types (`entry::part_annotation`)
-    pub ann: FxHashMap<ObjId, &'static ruff_python_ast::Expr>,
+    /// the builtin container annotation an unknown follows (`list[dict[str, int]]`) and the
+    /// module it is written in: its parts' types (`annotations::part_annotation`)
+    pub ann: FxHashMap<ObjId, (&'static ruff_python_ast::Expr, ObjId)>,
 }
 
 impl Default for Heap {

@@ -87,7 +87,10 @@ function parseValue(s) {
       } else if (CLOSE_OF[c]) {
         flush();
         i++;
-        parts.push({ open: c, close: CLOSE_OF[c], items: items(CLOSE_OF[c]) });
+        const node = { open: c, close: CLOSE_OF[c], items: items(CLOSE_OF[c]) };
+        // (a one-item tuple keeps its comma: `(x,)`)
+        if (c === "(" && s[i - 2] === "," && node.items.length === 1) node.trail = true;
+        parts.push(node);
       } else if (c === close) {
         i++;
         endItem();
@@ -108,7 +111,7 @@ function parseValue(s) {
 }
 
 function flatParts(parts) {
-  return parts.map((p) => (typeof p === "string" ? p : p.open + p.items.map(flatParts).join(", ") + p.close)).join("");
+  return parts.map((p) => (typeof p === "string" ? p : p.open + p.items.map(flatParts).join(", ") + (p.trail ? "," : "") + p.close)).join("");
 }
 
 /** The top-level alternatives of a value (`A | B`), outside brackets and strings. */
@@ -179,7 +182,7 @@ function prettyValue(text, width = VALUE_WIDTH) {
 /** `text` with brackets nested deeper than `depth` cut to `{…}` / `[…]` / `(…)`. */
 function cutDepth(text, depth) {
   const flat = (parts, d) =>
-    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => flat(i, d + 1)).join(", ") + p.close)).join("");
+    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => flat(i, d + 1)).join(", ") + (p.trail ? "," : "") + p.close)).join("");
   return parseValue(text).map((i) => flat(i, 0)).join(", ");
 }
 
@@ -307,7 +310,10 @@ function requirementLines(f) {
 function callLines(f, marks) {
   const merged = new Map();
   for (const c of f.calls || []) {
-    const t = shorten(c.text, VALUE_WIDTH);
+    // (a parameter's own argument, from a caller rowan cannot see, a framework's request: its
+    // annotated type, else `?`)
+    const text = f.param ? [...new Set(alternatives(c.text).map((a) => (a === f.name ? (f.type ? typeText(f.type) : "?") : a)))].join(" | ") : c.text;
+    const t = shorten(text, VALUE_WIDTH);
     const m = merged.get(t) || { lines: [], check: null };
     m.lines = m.lines.concat((c.lines || []).filter((l) => !m.lines.includes(l)));
     if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
@@ -435,8 +441,11 @@ function renderHover(name, facts, verdicts) {
       legend.splice(self, 1);
     }
     const own = value === name && !legend.length;
+    // (the argument of the parameter of this name, perhaps beside its default: `18 | min_age`)
+    const argument = unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `));
+    const withDefault = !own && argument && alternatives(value).includes(name) && !legend.some(([sym]) => sym !== name);
     let tag = null;
-    if (f.param || (own && unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `)))) {
+    if (f.param || (own && argument) || withDefault) {
       // a parameter: what any call may pass, when something is known of it
       tag = "(parameter)";
       value = paramValue(value, name, f.type);

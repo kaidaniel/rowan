@@ -104,7 +104,7 @@ fn fact_json(an: &Analyzer, line: u32, name: StrId, f: &Fact) -> J {
     // (a builtin container's: with its parts' types, `list[dict[str(?), int(?)]]`)
     if let Some(o) = f.general_rows.keys().chain(f.rows.keys()).filter(|o| own(o)).find(|o| an.heap.obj(**o).ty.is_some()) {
         fact["type"] = match an.heap.ann.get(o) {
-            Some(a) => json!(crate::interp::entry::annotation_text(a)),
+            Some((a, _)) => json!(crate::interp::annotations::annotation_text(a)),
             None => json!(an.heap.obj(*o).ty),
         };
     }

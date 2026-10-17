@@ -25,6 +25,7 @@ pub mod unknown;
 
 // The walk: statements, expressions and what they share.
 pub mod access;
+pub mod annotations;
 pub mod alloc;
 pub mod attrs;
 pub mod calls;

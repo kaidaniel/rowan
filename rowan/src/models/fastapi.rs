@@ -553,9 +553,12 @@ fn fa_param(an: &mut Analyzer, func: ObjId, p: &'static ast::ParameterWithDefaul
         }
         return v;
     }
-    // an entry run: anything the client sends, or the default
+    // an entry run: anything the client sends (converted as annotated: `int(?)`), or the default
     let mut ov = open(an, state);
     if let Some(a) = ann {
+        if let Some(o) = ov.single() {
+            ov = an.as_annotated(o, a, fi.module);
+        }
         ov = fa_restrict(an, &fi, a, ov, None, state);
     }
     match default {
