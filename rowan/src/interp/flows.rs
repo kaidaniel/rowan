@@ -86,11 +86,14 @@ pub struct Flags {
     /// it is changed in place as a container (`v[k] = …`, `del v[k]`, `v.append(…)`, `v.pop()`):
     /// a dict, list or set changes its items, not what they are
     pub edits: bool,
+    /// among those changes, its items may be removed (`del v[k]`, `v.pop(…)`, `v.clear()`): the
+    /// program's own code, not code rowan cannot see, so its keys are not `likely` after
+    pub removes: bool,
 }
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false, removes: false };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
@@ -109,6 +112,7 @@ impl Flags {
         self.rebinds |= o.rebinds;
         self.methods |= o.methods;
         self.edits |= o.edits;
+        self.removes |= o.removes;
     }
 }
 
@@ -127,6 +131,8 @@ enum Pos {
     Method,
     /// changed in place as a container
     Edit,
+    /// changed in place as a container, items removed
+    Remove,
 }
 
 /// A name the code reads that it does not bind, with an attribute read on it (`m.x`).
@@ -255,6 +261,9 @@ fn pure_method(m: &str) -> bool {
 /// The methods by which a dict, list or set changes its items (`pop`, `popitem` and
 /// `setdefault` give one back: `srcs`); on other objects, a method that may change them.
 pub const CONTAINER_MUTATORS: &[&str] = &["append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse", "update", "setdefault", "popitem", "add", "discard", "difference_update", "intersection_update", "symmetric_difference_update"];
+
+/// Those of `CONTAINER_MUTATORS` that may remove items.
+pub const CONTAINER_REMOVERS: &[&str] = &["remove", "pop", "clear", "popitem", "discard", "difference_update", "intersection_update", "symmetric_difference_update"];
 
 /// Builtins that iterate their first argument and keep nothing of it but in their result.
 const PASSING_BUILTINS: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "reversed", "enumerate", "zip", "min", "max", "sum", "any", "all", "iter"];
@@ -508,6 +517,10 @@ impl<'a> Flow<'a> {
                 (Pos::Call, Level::Own) => f.called = true,
                 (Pos::Method, Level::Own) => f.methods = true,
                 (Pos::Edit, Level::Own) => f.edits = true,
+                (Pos::Remove, Level::Own) => {
+                    f.edits = true;
+                    f.removes = true;
+                }
             }
         }
     }
@@ -777,7 +790,7 @@ impl<'a> Flow<'a> {
                     }
                     v => {
                         let recv = self.srcs(v);
-                        self.mark(&recv, if pure { Pos::Read } else if CONTAINER_MUTATORS.contains(&m) { Pos::Edit } else { Pos::Method });
+                        self.mark(&recv, if pure { Pos::Read } else if CONTAINER_REMOVERS.contains(&m) { Pos::Remove } else if CONTAINER_MUTATORS.contains(&m) { Pos::Edit } else { Pos::Method });
                         self.expr(v, Pos::Read);
                         // (a module's function called through a local, say: its result is not followed)
                         self.out.untracked.insert(s(m));
@@ -950,7 +963,7 @@ impl<'a> Flow<'a> {
             }
             Expr::Subscript(x) => {
                 let base = self.srcs(&x.value);
-                self.mark(&base, Pos::Edit);
+                self.mark(&base, if deleting { Pos::Remove } else { Pos::Edit });
                 self.expr(&x.value, Pos::Read);
                 self.expr(&x.slice, Pos::Read);
             }

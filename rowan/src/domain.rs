@@ -477,6 +477,17 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// Any key may have been removed (by code that is not unknown: not `likely` either).
+    pub fn may_remove_any(&self) -> Row {
+        if self.definite.is_empty() && self.likely.is_empty() {
+            return self.clone();
+        }
+        let mut d = self.data();
+        d.likely = KeySet::new();
+        d.definite = KeySet::new();
+        Row::from_data(d)
+    }
+
     /// `mutate` of the keys `like` names only: unknown code may have stored such keys (new
     /// ones too) or removed them; the others are as they were.
     pub fn mutate_like(&self, site: StrId, like: &dyn Fn(KeyId) -> bool) -> Row {
