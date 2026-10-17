@@ -362,7 +362,8 @@ impl Analyzer {
         }
         acc.pair = true;
         let iv = self.elem_value(&ii.elem, node, "en");
-        acc.pairs.push((Value::data(ENUM_INDEX), iv));
+        // (an int whatever it enumerates: `start` must be one)
+        acc.pairs.push((Value::data(&crate::domain::typed_label("int", ENUM_INDEX)), iv));
     }
 
     /// An sqlite cursor: its remaining rows.

@@ -684,6 +684,13 @@ pub fn external_record(an: &mut Analyzer, qual: &str, state: &mut State) -> Opti
         if !state.has_row(oid, Ns::Item) {
             state.set_row(oid, Ns::Item, Row::with_source(Source::new(qual, SourceKind::External)));
         }
+        // (what it holds is text: `os.environ["HOME"]` is a str, as if annotated)
+        if !an.heap.ann.contains_key(&oid) {
+            if let Some(a) = crate::frontend::parse_expression(if qual == "os.environ" { "dict[str, str]" } else { "dict[bytes, bytes]" }) {
+                let m = an.main_module();
+                an.heap.ann.insert(oid, (a, m));
+            }
+        }
         return Some(oid);
     }
     None

@@ -183,6 +183,17 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
     assert(h.includes('**Requirements**\n- `cfg["name"]`\n\n'), h);
   }
 }
+// ---- values of a known builtin type: a range's items, enumerate's index, input() and what follows
+// (they were `?`)
+{
+  const z642 = path.join(root, "tests", "cases", "z642_builtin_results_of_known_type.py");
+  const src = fs.readFileSync(z642, "utf8").split("\n");
+  const idx = indexResult(facts(z642));
+  assert(hover(idx, src, 15, "i").startsWith("```python\ni = int(?)\n```"), hover(idx, src, 15, "i"));
+  assert(hover(idx, src, 20, "j").startsWith("```python\nj = int(?)\n```"), hover(idx, src, 20, "j"));
+  assert(hover(idx, src, 27, "parts").startsWith("```python\nparts = list[str(?)]\n```"), hover(idx, src, 27, "parts"));
+  assert(hover(idx, src, 27, "parts").includes("- `str(?)`: a str not known statically"), hover(idx, src, 27, "parts"));
+}
 // ---- a function's value for any call, apart from what the program's calls give (with their lines)
 {
   const z532 = path.join(root, "tests", "cases", "z532_general_and_call_values.py");

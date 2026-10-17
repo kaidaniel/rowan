@@ -1628,6 +1628,15 @@ pub fn result_type(an: &Analyzer, qual: &str, args: &[Value]) -> Option<&'static
         "str" | "repr" | "ascii" | "chr" | "format" | "json.dumps" => Some("str"),
         "float" => Some("float"),
         "bool" | "isinstance" | "issubclass" | "callable" | "hasattr" => Some("bool"),
+        "input" | "os.getcwd" => Some("str"),
+        "time.time" | "time.perf_counter" | "time.monotonic" | "time.process_time" | "time.thread_time" | "random.random" => Some("float"),
+        "time.time_ns" | "time.perf_counter_ns" | "time.monotonic_ns" | "time.process_time_ns" | "os.getpid" | "os.getppid" | "random.randint" | "random.randrange" | "random.getrandbits" => Some("int"),
+        // (`math`'s functions of real numbers: a float, whatever number they are given)
+        "math.sqrt" | "math.exp" | "math.expm1" | "math.log" | "math.log2" | "math.log10" | "math.log1p" | "math.sin" | "math.cos" | "math.tan" | "math.asin" | "math.acos" | "math.atan" | "math.atan2" | "math.sinh" | "math.cosh"
+        | "math.tanh" | "math.hypot" | "math.pow" | "math.fabs" | "math.radians" | "math.degrees" | "math.fsum" | "math.copysign" | "math.fmod" | "math.dist" => Some("float"),
+        "math.isnan" | "math.isinf" | "math.isfinite" | "math.isclose" | "os.path.exists" | "os.path.isfile" | "os.path.isdir" | "os.path.isabs" | "os.path.islink" => Some("bool"),
+        "math.factorial" | "math.gcd" | "math.lcm" | "math.comb" | "math.perm" | "math.isqrt" => Some("int"),
+        "math.floor" | "math.ceil" | "math.trunc" if matches!(arg_type()?, "int" | "bool" | "float") => Some("int"),
         "abs" => match arg_type()? {
             "bool" | "int" => Some("int"),
             "float" => Some("float"),
@@ -2239,14 +2248,14 @@ pub(super) fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.heap.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)
-        st.elems.insert(oid, if an.m.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { DATA });
+        st.elems.insert(oid, if an.m.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { KeyVal::data(&crate::domain::typed_label("int", "")) });
         return Value::obj(oid);
     };
     let len = if step > 0 { (hi - lo + step - 1).max(0) / step } else { (lo - hi - step - 1).max(0) / -step };
     let vals: Option<Vec<Value>> = if len <= 64 { Some((0..len).map(|i| Value::lit(intern::key_int(lo + i * step))).collect()) } else { None };
     let kv = match &vals {
         Some(vs) => KeyVal::lits(vs.iter().filter_map(|v| v.kv.as_lit()).collect()),
-        None => DATA,
+        None => KeyVal::data(&crate::domain::typed_label("int", "")),
     };
     let v = an.alloc_positional(Kind::List, &c.node, vals, Value::new(), kv, st);
     if let Some(oid) = v.single() {
@@ -2374,12 +2383,16 @@ pub(super) fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
+    // (ints from an int, 0 by default: an int, also of no items)
+    let start_v = c.args.get(1).or(c.kwargs.get(&s("start")));
+    let ints = |an: &Analyzer, v: &Value| matches!(an.value_type(v), Some("int" | "bool"));
+    let unknown = if !an.m.torch_on && start_v.is_none_or(|v| ints(an, v)) && ints(an, &it.elem.flat()) { Value::data(&crate::domain::typed_label("int", "")) } else { Value::data("sum") };
     if let Some(items) = it.items {
         let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
-        let start = match c.args.get(1).or(c.kwargs.get(&s("start"))) {
+        let start = match start_v {
             Some(v) => match lit(v) {
                 Some(k) => k,
-                None => return Value::data("sum"),
+                None => return unknown,
             },
             None => intern::key_int(0),
         };
@@ -2387,15 +2400,15 @@ pub(super) fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for item in &items {
             match lit(item) {
                 Some(k) => ks.push(k),
-                None => return Value::data("sum"),
+                None => return unknown,
             }
         }
         return match py_sum(start, &ks) {
             Some(k) => Value::lit(k),
-            None => Value::data("sum"),
+            None => unknown,
         };
     }
-    Value::data("sum")
+    unknown
 }
 
 /// CPython's `sum(items, start)` on literals: the exact int path, then the compensated
