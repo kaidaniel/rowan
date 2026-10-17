@@ -922,7 +922,7 @@ impl Analyzer {
                         let insts: Vec<u32> = inst.pts.iter().collect();
                         for i in &insts {
                             let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single;
-                            self.store_key(*i, Ns::Attr, &key.kv, v, s1, node, state);
+                            self.store_key(*i, Ns::Attr, &key, v, s1, node, state);
                         }
                     }
                     continue;
@@ -932,20 +932,20 @@ impl Analyzer {
                     let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                     for m in self.record_objects(&first) {
                         let s1 = strong && first.pts.len() == 1 && self.heap.obj(m).single;
-                        self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
+                        self.store_key(m, Ns::Item, &key, v, s1, node, state);
                     }
                     if self.m.chainmaps[&oid].len() > 1 {
                         self.refresh_chainmap(oid, state);
                     } else {
                         let s1 = strong && self.heap.obj(oid).single;
-                        self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
+                        self.store_key(oid, Ns::Item, &key, v, s1, node, state);
                     }
                 }
                 Kind::Dict if self.m.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
                     let inst = self.m.attr_mirrors[&oid];
                     let s1 = strong && self.heap.obj(inst).single;
-                    self.store_key(inst, Ns::Attr, &key.kv, v, s1, node, state);
+                    self.store_key(inst, Ns::Attr, &key, v, s1, node, state);
                 }
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.heap.instance_class(oid) {
@@ -962,23 +962,25 @@ impl Analyzer {
                 }
                 _ => {}
             }
-            self.store_key(oid, ns, &key.kv, v, strong, node, state);
+            self.store_key(oid, ns, &key, v, strong, node, state);
         }
     }
 
-    /// Stores `v` under key `kv` of record `oid`: a literal key into the row and slot; several
+    /// Stores `v` under `key` of record `oid`: a literal key into the row and slot; several
     /// literals weakly; one of another object's keys (`for k in d: out[k] = …`) copies those
     /// keys (definite when the loop covers them all); a key not known opens the row through a
     /// `store` data source (the value in the `*` slot and any key's). Into the shared unknown
     /// object, the value escapes to unknown code.
-    pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
+    pub fn store_key(&mut self, oid: u32, ns: Ns, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
         // a store into what unknown code holds (the shared unknown object): the value goes to
         // unknown code, as if given to it; the shared object stays "anything"
         if self.is_any(oid) {
             self.escape(v, &format!("store into unknown@L{}", node.line), state);
             return;
         }
-        let kv = &self.canon_kv(oid, ns, kv, state);
+        // (a key that may be an object — an unknown call's result beside a literal — is a key
+        // not known: its literal part is no strong store)
+        let kv = &self.canon_kv(oid, ns, &self.opaque_key(key, state).kv, state);
         let row = state.row(oid, ns);
         match kv {
             KeyVal::Lit(k) => {
@@ -1166,10 +1168,12 @@ impl Analyzer {
                     }
                 }
             }
-            let ckey = Value::with_kv(key.pts.clone(), self.canon_kv(oid, ns, &key.kv, state));
+            // (a key that may be an object: a key not known, no literal of it surely removed)
+            let okey = self.opaque_key(key, state);
+            let ckey = Value::with_kv(okey.pts.clone(), self.canon_kv(oid, ns, &okey.kv, state));
             let key = &ckey;
             let mut row = state.row(oid, ns);
-            let is_lit = matches!(key.kv, KeyVal::Lit(_));
+            let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
             let mut raise: Option<(bool, KeyId)> = None;
             for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
                 let cls = classify(&row, k);

@@ -45,7 +45,7 @@ pub(super) fn json_literal_h(an: &mut Analyzer, st: &mut State, c: &Call, j: &se
             let strong = an.heap.obj(oid).single;
             for (k, x) in m.iter() {
                 let v = json_literal_h(an, st, c, x, &format!("{}.{}", path, k), hook);
-                an.store_key(oid, Ns::Item, &KeyVal::Lit(key_str_lit(k)), &v, strong, &c.node, st);
+                an.store_key(oid, Ns::Item, &Value::lit(key_str_lit(k)), &v, strong, &c.node, st);
             }
             match hook {
                 Some(h) => {
@@ -473,7 +473,7 @@ pub(super) fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
                     if let Some(o) = e.single() {
                         let strong = an.heap.obj(o).single;
                         for (name, v) in [("msg", Value::lit(intern::key_str_lit(&msg))), ("doc", Value::lit(intern::key_str_lit(&text))), ("pos", Value::lit(intern::key_int(pos as i64))), ("lineno", Value::lit(intern::key_int(lineno))), ("colno", Value::lit(intern::key_int(colno)))] {
-                            an.store_key(o, Ns::Attr, &KeyVal::Lit(intern::key_str_lit(name)), &v, strong, &c.node, st);
+                            an.store_key(o, Ns::Attr, &Value::lit(intern::key_str_lit(name)), &v, strong, &c.node, st);
                         }
                     }
                     an.raise_exc("JSONDecodeError", Some(e), None, true, st);

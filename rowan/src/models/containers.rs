@@ -89,13 +89,13 @@ pub(super) fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32,
                 Some(items) => {
                     for k in items {
                         let v = an.call_method_with(&Value::obj(inst), "__getitem__", vec![k.clone()], &c.node, st).unwrap_or_else(|| Value::data("getitem"));
-                        an.store_key(oid, Ns::Item, &k.kv, &v, strong, &c.node, st);
+                        an.store_key(oid, Ns::Item, &k, &v, strong, &c.node, st);
                     }
                 }
                 None => {
                     let k = it.elem.flat();
                     let v = an.call_method_with(&Value::obj(inst), "__getitem__", vec![k.clone()], &c.node, st).unwrap_or_else(|| Value::data("getitem"));
-                    an.store_key(oid, Ns::Item, &KeyVal::Data(intern::s("mapkeys")), &v, false, &c.node, st);
+                    an.store_key(oid, Ns::Item, &Value::data("mapkeys"), &v, false, &c.node, st);
                 }
             }
         } else {
@@ -118,11 +118,11 @@ pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             } else if !src.pts.is_empty() {
                 let it = an.iterate(src, &c.node, st);
                 match (&it.elem, &it.items) {
-                    (Elem::Pair(k, v), _) => an.store_key(oid, Ns::Item, &k.kv, v, false, &c.node, st),
+                    (Elem::Pair(k, v), _) => an.store_key(oid, Ns::Item, &k, v, false, &c.node, st),
                     (_, Some(items)) => {
                         for item in items {
                             let parts = an.unpack(item, 2, st, &c.node);
-                            an.store_key(oid, Ns::Item, &parts[0].kv, &parts[1], strong, &c.node, st);
+                            an.store_key(oid, Ns::Item, &parts[0], &parts[1], strong, &c.node, st);
                         }
                     }
                     _ => {
@@ -136,7 +136,7 @@ pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         for (k, v) in c.kwargs.iter() {
-            an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, strong, &c.node, st);
+            an.store_key(oid, Ns::Item, &Value::lit(intern::key_of_str(*k)), v, strong, &c.node, st);
         }
         for sk in &c.star_kwargs {
             an.copy_into(oid, Ns::Item, sk, st, strong, &KeySet::new());
@@ -821,7 +821,7 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             for (k, v) in c.kwargs.iter() {
-                an.store_key(oid, Ns::Attr, &KeyVal::Lit(intern::key_of_str(*k)), v, strong, &c.node, st);
+                an.store_key(oid, Ns::Attr, &Value::lit(intern::key_of_str(*k)), v, strong, &c.node, st);
             }
             for sk in &c.star_kwargs {
                 an.copy_into(oid, Ns::Attr, sk, st, strong, &KeySet::new());

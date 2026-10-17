@@ -604,7 +604,7 @@ impl Analyzer {
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
                         let strong = self.heap.obj(oid).single;
-                        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &r, strong, node, state);
+                        self.store_key(oid, Ns::Attr, &Value::lit(key_str_lit(name)), &r, strong, node, state);
                     }
                     outs.push(r);
                 } else if fi.is_static.get() {

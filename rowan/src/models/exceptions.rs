@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
-use crate::domain::{KeyVal, Ns, Row, Value, DATA};
+use crate::domain::{Ns, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit};
 use crate::interp::{Analyzer, ExcNames, Payload};
@@ -96,7 +96,7 @@ pub fn exception_object(an: &mut Analyzer, cls_name: &str, args: Vec<Value>, nod
     let row = Row::with_source(crate::source::Source::new(cls_name, crate::source::SourceKind::Data));
     let oid = an.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
     let strong = an.heap.obj(oid).single;
-    an.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+    an.store_key(oid, Ns::Attr, &Value::lit(key_str_lit("args")), &t, strong, node, state);
     an.m.exc_objs.insert(oid, cls_name.to_string());
     Value::obj(oid)
 }
@@ -143,7 +143,7 @@ pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::in
         let name = an.heap.instance_class(o).and_then(|cl| an.heap.class_info_opt(cl)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
         let t = an.alloc_positional(Kind::Tuple, &c.node, Some(c.args.clone()), Value::new(), DATA, st);
         let strong = recv.pts.len() == 1 && an.heap.obj(o).single;
-        an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, &c.node, st);
+        an.store_key(o, Ns::Attr, &Value::lit(key_str_lit("args")), &t, strong, &c.node, st);
         an.m.exc_objs.insert(o, name);
     }
     an.none_v.clone()
