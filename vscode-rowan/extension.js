@@ -915,8 +915,7 @@ function activate(context) {
       const lineText = doc.lineAt(Math.min(ln, doc.lineCount - 1)).text;
       const start = lineText.length - lineText.trimStart().length;
       const range = new vscode.Range(ln, start, ln, Math.max(start + 1, lineText.length));
-      const chain = e.chain && e.chain.length ? ` (via ${e.chain.map((c) => "L" + c).join(">")})` : "";
-      const d = new vscode.Diagnostic(range, `shape mismatch: ${e.message}${chain}`, vscode.DiagnosticSeverity.Error);
+      const d = new vscode.Diagnostic(range, diagnosticMessage({ message: `shape mismatch: ${e.message}`, chain: e.chain }), vscode.DiagnosticSeverity.Error);
       d.source = "rowan";
       diags.push(d);
     }
