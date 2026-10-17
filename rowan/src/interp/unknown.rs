@@ -7,7 +7,10 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, Heap, Payload, MAX_ARG_JOIN, NOEFFECT_METHOD_NAMES};
+use super::{Analyzer, Heap, Payload, NOEFFECT_METHOD_NAMES};
+
+/// Records an unknown call's result joins at most (past that: an open row).
+pub const MAX_ARG_JOIN: usize = 64;
 use crate::domain::{join_rows, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, s, KeyId, KeySet, StrId};

@@ -360,7 +360,7 @@ impl Analyzer {
             _ => None,
         };
         let mut out = Vec::new();
-        for st in f.body.iter().take_while(|st| !super::stmts::contains_return(std::slice::from_ref(*st)) && !super::is_generator(std::slice::from_ref(*st))) {
+        for st in f.body.iter().take_while(|st| !crate::syntax::contains_return(std::slice::from_ref(*st)) && !crate::syntax::is_generator(std::slice::from_ref(*st))) {
             match st {
                 Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
                 Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),
@@ -582,7 +582,7 @@ impl Analyzer {
         }
         self.gens.force_at = None;
         let recv = crate::domain::join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
-        let text = call_ast.and_then(|c| super::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
+        let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("call of {}@L{}", text, node.line));
         self.names.skipped_sites.insert(site);
@@ -845,7 +845,7 @@ impl Analyzer {
         let fi = self.heap.func_info(f);
         let Some(ps) = fi.node.params() else { return Flags::CHANGE };
         if let super::FuncNode::Def(d) = fi.node {
-            if d.is_async || super::is_generator(&d.body) {
+            if d.is_async || crate::syntax::is_generator(&d.body) {
                 return Flags::CHANGE;
             }
         }
@@ -946,7 +946,7 @@ impl Analyzer {
             super::FuncNode::Def(d) => {
                 let (n, handler) = (s(&fi.name), handlers.contains(&fi.node.addr()));
                 let callers = handler || names.called.contains(&n) && !names.decorated.contains(&n);
-                fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !super::is_generator(&d.body) && callers && !names.values.contains(&n)
+                fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !crate::syntax::is_generator(&d.body) && callers && !names.values.contains(&n)
             }
             super::FuncNode::Lambda(_) => false,
         };

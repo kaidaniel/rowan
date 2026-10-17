@@ -7,14 +7,17 @@
 //! path without a length for an object does not know it. Allocation *policy* (contexts, strong / recent /
 //! variant / merged objects) is `Analyzer::alloc` (`interp/alloc.rs`); this is the table.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use rustc_hash::FxHashMap;
+use ruff_python_ast as ast;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{ClassInfo, FuncInfo, ModuleInfo};
 use crate::domain::{KeyVal, Ns, ObjId, Value};
+use crate::frontend::{self, Node};
 use crate::intern::{self, KeyId, KeySet, StrId};
+use crate::scopes::Scopes;
 use crate::state::{Kind, State};
 
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
@@ -86,6 +89,127 @@ pub enum Payload {
 impl Payload {
     pub fn is_none(&self) -> bool {
         matches!(self, Payload::None)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum FuncNode {
+    Def(&'static ast::StmtFunctionDef),
+    Lambda(&'static ast::ExprLambda),
+}
+
+impl FuncNode {
+    pub(in crate::interp) fn params(&self) -> Option<&'static ast::Parameters> {
+        match self {
+            FuncNode::Def(f) => Some(&f.parameters),
+            FuncNode::Lambda(l) => l.parameters.as_deref(),
+        }
+    }
+    pub(in crate::interp) fn node(&self) -> Node {
+        match self {
+            FuncNode::Def(f) => frontend::node(*f),
+            FuncNode::Lambda(l) => frontend::node(*l),
+        }
+    }
+    pub(in crate::interp) fn addr(&self) -> usize {
+        match self {
+            FuncNode::Def(f) => *f as *const _ as usize,
+            FuncNode::Lambda(l) => *l as *const _ as usize,
+        }
+    }
+    pub(in crate::interp) fn body(&self) -> &'static [ast::Stmt] {
+        match self {
+            FuncNode::Def(f) => &f.body,
+            FuncNode::Lambda(_) => &[],
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FuncInfo {
+    pub node: FuncNode,
+    pub name: String,
+    pub qualname: String,
+    pub module: ObjId,
+    pub scope: usize,
+    /// free name -> cell oid
+    pub closure: IndexMap<StrId, ObjId>,
+    pub defaults: IndexMap<StrId, Value>,
+    /// defining class oid
+    pub cls: Option<ObjId>,
+    pub is_property: Cell<bool>,
+    pub is_static: Cell<bool>,
+    pub is_classmethod: Cell<bool>,
+    /// decorated with `contextlib.contextmanager`
+    pub is_contextmanager: Cell<bool>,
+    /// `functools.cached_property`: the first access stores the value on the instance
+    pub is_cached: Cell<bool>,
+    /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
+    pub is_memo: Cell<bool>,
+}
+
+impl FuncInfo {
+    /// The qualified name as Python spells it (no `class ` markers): `Conn.__init__`.
+    pub fn py_qualname(&self) -> String {
+        self.qualname.replace("class ", "")
+    }
+}
+
+#[derive(Debug)]
+pub struct ClassInfo {
+    pub name: String,
+    pub node: &'static ast::StmtClassDef,
+    pub bases: Vec<ObjId>,
+    pub module: ObjId,
+    /// inherits from something we do not see
+    pub open_base: bool,
+    pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
+    /// what its direct library bases make of it (`dict`, `TypedDict`, `NamedTuple`, pydantic's
+    /// `BaseModel`, `nn.Module`, …)
+    pub lib: crate::models::ClassBase,
+    /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
+    pub pyd_dataclass: std::cell::Cell<bool>,
+    /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
+    pub dc_frozen: std::cell::Cell<bool>,
+    pub dc_kw_only: std::cell::Cell<bool>,
+    /// `@dataclass(order=True)`: instances of the class compare their fields as tuples
+    pub dc_order: std::cell::Cell<bool>,
+    pub any_fields: RefCell<Option<FxHashSet<String>>>,
+}
+
+impl ClassInfo {
+    pub fn has_fields(&self) -> bool {
+        self.dataclass_fields.borrow().is_some()
+    }
+    pub fn fields(&self) -> Vec<(String, Option<&'static ast::Expr>)> {
+        self.dataclass_fields.borrow().clone().unwrap_or_default()
+    }
+}
+
+#[derive(Debug)]
+pub struct ModuleInfo {
+    pub name: String,
+    pub path: Option<String>,
+    /// the dotted package the module belongs to (its own name for an `__init__.py`), the
+    /// base of its relative imports
+    pub pkg: String,
+    pub idx: u32,
+    pub tree: &'static ast::ModModule,
+    pub scopes: Scopes,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct EnumKind {
+    pub mixed: bool,
+    pub repr_value: bool,
+    pub flag: bool,
+    /// str-based (`auto()` is the lower-cased name in a StrEnum)
+    pub is_str: bool,
+}
+
+impl EnumKind {
+    pub fn join(&mut self, o: EnumKind) {
+        (self.mixed, self.repr_value, self.flag, self.is_str) = (self.mixed | o.mixed, self.repr_value | o.repr_value, self.flag | o.flag, self.is_str | o.is_str);
     }
 }
 

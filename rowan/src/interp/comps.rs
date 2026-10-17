@@ -3,13 +3,14 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, KeysOf, Ns, Value, BOT};
+use crate::domain::{KeyVal, KeysOf, Ns, ObjId, Value, BOT};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
+use crate::syntax::{is_constant, names_in};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, ObjId, Payload, UNROLL_MAX};
+use super::{Analyzer, Payload, UNROLL_MAX};
 
 impl Analyzer {
     // comprehensions ---------------------------------------------------------

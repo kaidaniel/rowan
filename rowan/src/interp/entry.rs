@@ -12,12 +12,13 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{debug_enabled, dotted_last, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
+use super::{debug_enabled, Analyzer, ClassInfo, FuncInfo, FuncNode, Frame, FrameKind, Payload};
 use crate::domain::{Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
 use crate::state::{Kind, State};
+use crate::syntax::dotted_last;
 
 /// Requirements per input (`State::reqs`).
 type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;

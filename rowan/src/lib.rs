@@ -7,5 +7,6 @@ pub mod layered;
 pub mod models;
 pub use interp::report;
 pub mod scopes;
+pub mod syntax;
 
 pub mod state;

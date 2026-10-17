@@ -1,7 +1,6 @@
 //! Keys: the key a value stands for in a record (numbers equal across int / float / bool,
 //! Enum members, identity-hashed objects, frozen dataclass instances), and back (`unkey`).
 
-
 use crate::domain::{KeyVal, Ns, Value};
 use crate::intern::{self, key_str_lit, KeyId, KeySet};
 use crate::state::{Kind, State};

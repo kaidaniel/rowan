@@ -8,8 +8,9 @@ use crate::domain::{Ns, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
+use crate::syntax::{collect_assigned, contains_jump};
 
-use super::{Finally, Handler, contains_jump, Analyzer, FuncNode, Payload};
+use super::{Finally, Handler, Analyzer, FuncNode, Payload};
 
 impl Analyzer {
 
@@ -630,7 +631,7 @@ impl Analyzer {
         }
         // (setting the module code up for runs on demand: the calls of the main module's
         // `if __name__ == "__main__":` block — a script's work, often a demo — run no body)
-        if self.entry.main_block_unrun && !self.budget.skip_calls && self.cx.frames.len() == 1 && is_main_test(test) {
+        if self.entry.main_block_unrun && !self.budget.skip_calls && self.cx.frames.len() == 1 && crate::syntax::is_main_test(test) {
             self.budget.skip_calls = true;
             self.stmt_if(test, body, rest, state);
             self.budget.skip_calls = false;
@@ -783,7 +784,7 @@ impl Analyzer {
         if text.is_empty() {
             return None;
         }
-        let names: Vec<intern::StrId> = super::names_in(inner).iter().map(|n| s(n)).collect();
+        let names: Vec<intern::StrId> = crate::syntax::names_in(inner).iter().map(|n| s(n)).collect();
         Some((s(&format!("{}@{}", text, self.frame().func.unwrap_or(0))), pos, names))
     }
 
@@ -852,27 +853,6 @@ impl Analyzer {
 
 }
 
-/// A `return` somewhere in these statements (not inside nested functions or classes).
-pub(super) fn contains_return(body: &[ast::Stmt]) -> bool {
-    body.iter().any(|s| match s {
-        ast::Stmt::Return(_) => true,
-        ast::Stmt::If(i) => contains_return(&i.body) || i.elif_else_clauses.iter().any(|c| contains_return(&c.body)),
-        ast::Stmt::For(f) => contains_return(&f.body) || contains_return(&f.orelse),
-        ast::Stmt::While(w) => contains_return(&w.body) || contains_return(&w.orelse),
-        ast::Stmt::With(w) => contains_return(&w.body),
-        ast::Stmt::Try(t) => {
-            contains_return(&t.body)
-                || contains_return(&t.orelse)
-                || contains_return(&t.finalbody)
-                || t.handlers.iter().any(|h| {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    contains_return(&h.body)
-                })
-        }
-        ast::Stmt::Match(m) => m.cases.iter().any(|c| contains_return(&c.body)),
-        _ => false,
-    })
-}
 
 /// Facts of a join on test `key` (positive `pos`): the then-branch rows when it holds, the
 /// else-branch rows when not, for every row the branches leave different.
@@ -968,35 +948,6 @@ pub(super) fn add_facts(st: &mut State, new: Vec<std::sync::Arc<crate::state::Co
     st.facts = std::sync::Arc::new(all);
 }
 
-/// Plain names a statement (and the blocks inside it) assigns.
-pub(super) fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
-    let add = |t: &ast::Expr, out: &mut Vec<intern::StrId>| {
-        for n in super::names_in(t) {
-            let id = s(&n);
-            if !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    };
-    match st {
-        ast::Stmt::Assign(a) => a.targets.iter().for_each(|t| add(t, out)),
-        ast::Stmt::AnnAssign(a) => add(&a.target, out),
-        ast::Stmt::AugAssign(a) => add(&a.target, out),
-        ast::Stmt::If(i) => {
-            i.body.iter().for_each(|x| collect_assigned(x, out));
-            i.elif_else_clauses.iter().for_each(|c| c.body.iter().for_each(|x| collect_assigned(x, out)));
-        }
-        ast::Stmt::Try(t) => {
-            t.body.iter().chain(t.orelse.iter()).chain(t.finalbody.iter()).for_each(|x| collect_assigned(x, out));
-            for h in &t.handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = h;
-                h.body.iter().for_each(|x| collect_assigned(x, out));
-            }
-        }
-        ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
-        _ => {}
-    }
-}
 
 thread_local! {
     /// per function body: how often it tests each text (`Analyzer::tested`)
@@ -1050,12 +1001,3 @@ fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMa
     }
 }
 
-/// `__name__ == "__main__"` (either way round).
-fn is_main_test(test: &ast::Expr) -> bool {
-    let ast::Expr::Compare(c) = test else { return false };
-    let [op] = &c.ops[..] else { return false };
-    let [right] = &c.comparators[..] else { return false };
-    let name = |e: &ast::Expr| matches!(e, ast::Expr::Name(n) if n.id.as_str() == "__name__");
-    let main = |e: &ast::Expr| matches!(e, ast::Expr::StringLiteral(s) if s.value.to_str() == "__main__");
-    *op == ast::CmpOp::Eq && ((name(&c.left) && main(right)) || (main(&c.left) && name(right)))
-}

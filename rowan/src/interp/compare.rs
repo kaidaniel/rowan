@@ -4,12 +4,12 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, ObjSet, Row, Value, DATA};
+use crate::domain::{KeyVal, Ns, ObjId, ObjSet, Row, Value, DATA};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, KeyId};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, ObjId, Payload, ViewKind};
+use super::{Analyzer, Payload, ViewKind};
 
 impl Analyzer {
     /// `a < b < c`: the chained comparisons (`compare`) joined by `and`.

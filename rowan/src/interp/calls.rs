@@ -4,14 +4,13 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_values, Ns, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{chain_extend, join_values, Ns, ObjId, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::state::{Kind, State};
-use crate::domain::ObjId;
+use crate::syntax::is_generator;
 
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_CLONES};
-
+use super::{Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_CLONES};
 
 impl Analyzer {
     // ---------------------------------------------------------------- calls
@@ -194,7 +193,7 @@ impl Analyzer {
                 None
             }
             _ => {
-                let q = match call_ast.and_then(|c| super::chain_text(&c.func)) {
+                let q = match call_ast.and_then(|c| crate::syntax::chain_text(&c.func)) {
                     Some(text) => format!("call of {}", text),
                     None => format!("call of {}", self.heap.obj(unknown[0]).label),
                 };

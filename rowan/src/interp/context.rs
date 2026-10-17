@@ -11,10 +11,75 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::Frame;
 use crate::domain::{ObjId, Row, Value};
 use crate::intern::{KeyId, StrId};
-use crate::state::Kind;
+use crate::state::{Kind, State};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameKind {
+    Module,
+    Function,
+    Class,
+}
+
+#[derive(Debug)]
+pub struct Frame {
+    pub kind: FrameKind,
+    pub scope: usize,
+    pub module: ObjId,
+    pub ctx: String,
+    pub single: bool,
+    /// `single` ignoring loops: with the recency abstraction an allocation inside a loop is
+    /// a strong "recent" object when this holds
+    pub single_nl: bool,
+    pub func: Option<ObjId>,
+    /// the function's code (`FuncNode::addr`), whose statements count against its budget
+    pub code: usize,
+    pub cells: IndexMap<StrId, ObjId>,
+    pub class_oid: Option<ObjId>,
+    /// the variables of the running comprehensions (innermost last): their values are in the
+    /// state's names, the enclosing ones' put back when the comprehension ends
+    pub comp_names: Vec<Vec<StrId>>,
+    pub loop_depth: u32,
+    pub label: String,
+    /// indices of the enclosing unrolled loop iterations (part of the call context)
+    pub unroll: Vec<usize>,
+    /// a call: the objects allocated from here on are its own, and the state before
+    /// it (a `return` drops its own objects nothing can reach any more)
+    pub pre_call: Option<PreCall>,
+}
+
+/// (see `Frame::pre_call`)
+#[derive(Clone)]
+pub struct PreCall(pub u64, pub std::rc::Rc<State>);
+
+impl std::fmt::Debug for PreCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PreCall({})", self.0)
+    }
+}
+
+impl Frame {
+    pub fn new(kind: FrameKind, scope: usize, module: ObjId, ctx: &str, single: bool, label: &str) -> Frame {
+        Frame {
+            kind,
+            scope,
+            module,
+            ctx: ctx.to_string(),
+            single,
+            single_nl: single,
+            func: None,
+            code: 0,
+            cells: IndexMap::new(),
+            class_oid: None,
+            comp_names: Vec::new(),
+            loop_depth: 0,
+            label: label.to_string(),
+            unroll: Vec::new(),
+            pre_call: None,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Context {

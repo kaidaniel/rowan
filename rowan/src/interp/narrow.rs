@@ -4,12 +4,13 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_exclude, kv_literals, kv_restrict, KeyVal, Ns, ObjSet, Value};
+use crate::domain::{kv_exclude, kv_literals, kv_restrict, KeyVal, Ns, ObjId, ObjSet, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
+use crate::syntax::{chain_text, contains_call, names_in};
 
-use super::{chain_text, contains_call, names_in, Analyzer, StoreTarget};
+use super::Analyzer;
 
 enum NarrowTarget {
     Name(String),
@@ -23,6 +24,14 @@ pub struct Split {
     pub t: State,
     pub f: State,
     pub ops: Option<(Value, Value)>,
+}
+
+/// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
+#[derive(Clone)]
+pub enum StoreTarget {
+    Name(StrId),
+    Narrowed(StrId),
+    Slot(ObjId, Ns, KeyId),
 }
 
 impl Analyzer {

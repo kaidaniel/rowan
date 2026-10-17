@@ -13,9 +13,10 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
-use crate::interp::{dotted_last, Analyzer, Call, FuncNode, Payload};
+use crate::interp::{Analyzer, Call, FuncNode, Payload};
 use crate::models::pydantic::{Ann, DumpOpts};
 use crate::state::{Kind, State};
+use crate::syntax::dotted_last;
 
 #[derive(Clone, Debug)]
 pub struct FaRoute {
@@ -654,7 +655,7 @@ fn fa_call_dep(an: &mut Analyzer, g: &Value, req: Option<&Req>, state: &mut Stat
                 let fi = an.heap.func_info(o);
                 let r = an.call_user(o, None, vec![], kwargs, vec![], vec![], state, node, false);
                 let is_gen = match &fi.node {
-                    FuncNode::Def(f) => crate::interp::is_generator(&f.body),
+                    FuncNode::Def(f) => crate::syntax::is_generator(&f.body),
                     _ => false,
                 };
                 if is_gen {
@@ -710,7 +711,7 @@ pub fn fa_yield_deps(an: &mut Analyzer, func: ObjId, state: &mut State) -> Vec<O
             }
             if let Some(o) = g.single().filter(|o| an.heap.kind(*o) == Kind::Function) {
                 let gi = an.heap.func_info(o);
-                if matches!(&gi.node, FuncNode::Def(d) if crate::interp::is_generator(&d.body)) && !out.contains(&o) {
+                if matches!(&gi.node, FuncNode::Def(d) if crate::syntax::is_generator(&d.body)) && !out.contains(&o) {
                     out.push(o);
                 }
             }

@@ -17,7 +17,6 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Verdict {
     pub line: u32,

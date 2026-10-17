@@ -2,13 +2,11 @@
 //! the inputs that provide a key, and running an access once per receiver. The accesses
 //! themselves: `items.rs` (keys, positions, elements), `attrs.rs` (attributes), `keys.rs`.
 
-use ruff_python_ast as ast;
-
 use crate::domain::{Classification, Ns, ObjId, Row, Value};
 use crate::intern::{self, KeyId};
 use crate::state::State;
 
-use super::{Analyzer, ATTR_GUARDS, ITEM_GUARDS};
+use super::Analyzer;
 
 /// The attributes every instance has (`object`'s, and its class's `__module__` / `__doc__`;
 /// `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there).
@@ -16,10 +14,30 @@ pub const OBJECT_ATTRS: &[&str] = &[
     "__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__", "__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__", "__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__", "__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__", "__subclasshook__", "__module__", "__dict__", "__weakref__",
 ];
 
+/// The exception names a handler must catch to guard a read that fails with a `KeyError` /
+/// `IndexError` (an item), a `ValueError` or a pydantic `ValidationError` (a model's item
+/// read, `Unwind::item_exc`), or an `AttributeError` (an attribute); `*` is a bare `except:`.
+pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
+pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
+pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
+pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
+
 impl Analyzer {
+    /// The handler names that guard a failing read in namespace `ns` here.
+    fn guard_names(&self, ns: Ns) -> &'static [&'static str] {
+        if ns != Ns::Item {
+            return ATTR_GUARDS;
+        }
+        match self.unwind.item_exc {
+            Some("ValueError") => VALUE_GUARDS,
+            Some("ValidationError") => VALIDATION_GUARDS,
+            _ => ITEM_GUARDS,
+        }
+    }
+
     /// The innermost handler that catches this namespace's error re-raises it.
     pub(in crate::interp) fn guard_reraises(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { match self.unwind.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want = self.guard_names(ns);
         for g in self.guards().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
@@ -36,7 +54,7 @@ impl Analyzer {
                 .map(|ci| {
                     let user: Vec<String> = ci.bases.iter().filter_map(|b| self.heap.class_info_opt(*b).map(|x| x.name.clone())).collect();
                     ci.node.arguments.as_ref().map(|a| a.args.iter().any(|e| {
-                        let n = super::dotted_last(e);
+                        let n = crate::syntax::dotted_last(e);
                         super::exprs::is_exception_name(&n) && !user.contains(&n)
                     })).unwrap_or(false)
                 })
@@ -45,7 +63,7 @@ impl Analyzer {
     }
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { match self.unwind.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want = self.guard_names(ns);
         self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
@@ -85,7 +103,6 @@ impl Analyzer {
             }
         }
     }
-
 
     /// A receiver of several objects (or objects and a scalar) some of which run user code for
     /// the operation (`dispatch`): those are alternatives, one state each (the second must not
@@ -128,47 +145,4 @@ impl Analyzer {
         }
         Some(crate::domain::join_values(outs))
     }
-
-
-
-}
-
-/// All statements nested in a body (ast.walk restricted to statements).
-/// builtin container classes a field may be declared with (they select a model family)
-
-pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
-    let mut out: Vec<&'static ast::Stmt> = Vec::new();
-    fn go(s: &'static ast::Stmt, out: &mut Vec<&'static ast::Stmt>) {
-        out.push(s);
-        match s {
-            ast::Stmt::FunctionDef(f) => f.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::ClassDef(c) => c.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::For(f) => {
-                f.body.iter().for_each(|x| go(x, out));
-                f.orelse.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::While(w) => {
-                w.body.iter().for_each(|x| go(x, out));
-                w.orelse.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::If(i) => {
-                i.body.iter().for_each(|x| go(x, out));
-                i.elif_else_clauses.iter().for_each(|c| c.body.iter().for_each(|x| go(x, out)));
-            }
-            ast::Stmt::With(w) => w.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::Try(t) => {
-                t.body.iter().for_each(|x| go(x, out));
-                for h in &t.handlers {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    h.body.iter().for_each(|x| go(x, out));
-                }
-                t.orelse.iter().for_each(|x| go(x, out));
-                t.finalbody.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::Match(m) => m.cases.iter().for_each(|c| c.body.iter().for_each(|x| go(x, out))),
-            _ => {}
-        }
-    }
-    body.iter().for_each(|x| go(x, &mut out));
-    out
 }

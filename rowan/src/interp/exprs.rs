@@ -50,7 +50,7 @@ impl Analyzer {
             }
             ast::Expr::Attribute(a) => {
                 if !state.narrowed.is_empty() {
-                    if let Some(key) = super::chain_text(node) {
+                    if let Some(key) = crate::syntax::chain_text(node) {
                         if let Some(hit) = state.narrowed.get(&s(&key)) {
                             return hit.clone();
                         }

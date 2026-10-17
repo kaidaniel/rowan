@@ -8,10 +8,14 @@ use crate::domain::{ObjId, KeyVal, Ns, Row, Value};
 use crate::frontend::{self};
 use crate::intern::{self, s};
 use crate::state::{Kind, State};
+use crate::syntax::{collect_assigned, contains_jump, is_constant};
 
-use super::{contains_jump, is_constant, Analyzer, LoopCtx, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{Analyzer, LoopCtx, UNROLL_MAX};
+
+/// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
+pub const LOOP_MAX_ITER: usize = 40;
 use super::funcs::Elem;
-use super::stmts::{add_facts, collect_assigned, cond_facts_for};
+use super::stmts::{add_facts, cond_facts_for};
 
 impl Analyzer {
     pub(super) fn stmt_while(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
@@ -23,7 +27,7 @@ impl Analyzer {
         // that takes a few items sees exactly those; only outside other loops and unrolled
         // iterations, as nested unrolling multiplies: email's `_parsegen` nests such loops)
         let outermost = self.frame().loop_depth == 0 && self.frame().unroll.is_empty();
-        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.heap.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false);
+        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.heap.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::syntax::is_generator(&d.body))).unwrap_or(false);
         if !is_constant(&w.test) || gen_body {
             let mut idx = 0usize;
             loop {
@@ -479,10 +483,10 @@ impl Analyzer {
             _ => None,
         }).collect();
         let scope = self.heap.module_info(self.frame().module).scopes.get(self.frame().scope).cells.clone();
-        let target_names = super::names_in(&f.target);
+        let target_names = crate::syntax::names_in(&f.target);
         for l in appended {
             let name = l.id.as_str();
-            if scope.contains(name) || target_names.iter().any(|t| t == name) || body_mentions(&f.body, name) != 1 {
+            if scope.contains(name) || target_names.iter().any(|t| t == name) || crate::syntax::body_mentions(&f.body, name) != 1 {
                 continue;
             }
             let Some(o) = self.name_value(pre, s(name)).and_then(|v| v.single().filter(|_| v.kv.is_bot())) else { continue };
@@ -559,7 +563,7 @@ impl Analyzer {
         if self.cx.recent_stack.is_empty() {
             return out;
         }
-        for n in super::names_in(target) {
+        for n in crate::syntax::names_in(target) {
             let sid = intern::s(&n);
             let Some(v) = self.name_value(state, sid).filter(|v| v.pts.len() == 1) else { continue };
             let o = v.pts.iter().next().unwrap();
@@ -684,7 +688,7 @@ impl Analyzer {
     /// Whether nothing but the list `l` (and the loop `target`'s names) holds `s` in `state`
     /// (a walk from the roots that does not enter `l`; a long one answers no).
     fn held_only_by(&self, s: ObjId, l: ObjId, target: &ast::Expr, state: &State) -> bool {
-        let skip: Vec<intern::StrId> = super::names_in(target).iter().map(|n| intern::s(n)).collect();
+        let skip: Vec<intern::StrId> = crate::syntax::names_in(target).iter().map(|n| intern::s(n)).collect();
         let mut work: Vec<ObjId> = Vec::new();
         for fr in &self.cx.frames {
             work.push(fr.module);
@@ -725,23 +729,3 @@ impl Analyzer {
     }
 }
 
-/// How many times the plain name `name` occurs in these statements (nested functions too).
-pub(crate) fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
-    struct V<'n>(&'n str, usize);
-    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
-        fn visit_expr(&mut self, e: &'a ast::Expr) {
-            if let ast::Expr::Name(n) = e {
-                if n.id.as_str() == self.0 {
-                    self.1 += 1;
-                }
-            }
-            ast::visitor::source_order::walk_expr(self, e);
-        }
-    }
-    use ast::visitor::source_order::SourceOrderVisitor;
-    let mut v = V(name, 0);
-    for st in body {
-        v.visit_stmt(st);
-    }
-    v.1
-}

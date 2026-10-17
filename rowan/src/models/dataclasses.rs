@@ -173,8 +173,8 @@ pub fn dc_specs(an: &Analyzer, cls: u32) -> Vec<DcSpec> {
             let ast::Stmt::AnnAssign(a) = st else { continue };
             let ast::Expr::Name(n) = &*a.target else { continue };
             let ann_name = match &*a.annotation {
-                ast::Expr::Subscript(sb) => crate::interp::dotted_last(&sb.value),
-                other => crate::interp::dotted_last(other),
+                ast::Expr::Subscript(sb) => crate::syntax::dotted_last(&sb.value),
+                other => crate::syntax::dotted_last(other),
             };
             if ann_name == "KW_ONLY" {
                 kw_only = true;
@@ -189,7 +189,7 @@ pub fn dc_specs(an: &Analyzer, cls: u32) -> Vec<DcSpec> {
             let mut init = true;
             let mut fkw = kw_only;
             if let Some(ast::Expr::Call(fc)) = default {
-                if crate::interp::dotted_last(&fc.func) == "field" {
+                if crate::syntax::dotted_last(&fc.func) == "field" {
                     for k in fc.arguments.keywords.iter() {
                         match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
                             (Some("init"), ast::Expr::BooleanLiteral(b)) => init = b.value,
@@ -232,7 +232,7 @@ pub fn dataclass_default(an: &mut Analyzer, d: &'static ast::Expr, node: &Node, 
 
 fn dataclass_default_here(an: &mut Analyzer, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
     if let ast::Expr::Call(c) = d {
-        if crate::interp::dotted_last(&c.func) == "field" {
+        if crate::syntax::dotted_last(&c.func) == "field" {
             for kw in c.arguments.keywords.iter() {
                 let Some(arg) = &kw.arg else { continue };
                 match arg.id.as_str() {
@@ -272,7 +272,7 @@ pub fn abstract_unimplemented(an: &Analyzer, cls: u32) -> bool {
     let mro = an.heap.mro(cls);
     let is_abc = mro.iter().any(|c| {
         an.heap.class_info_opt(*c).map(|ci| {
-            ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::interp::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::interp::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
+            ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::syntax::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::syntax::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
         }).unwrap_or(false)
     });
     if !is_abc {
@@ -299,7 +299,7 @@ pub fn abstract_unimplemented(an: &Analyzer, cls: u32) -> bool {
                 continue;
             }
             seen.push(name);
-            if decos.iter().any(|d| crate::interp::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if crate::interp::dotted_last(&cl.func) == "abstractmethod")) {
+            if decos.iter().any(|d| crate::syntax::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if crate::syntax::dotted_last(&cl.func) == "abstractmethod")) {
                 return true;
             }
         }
@@ -362,8 +362,8 @@ pub fn declared_fields(c: &'static ast::StmtClassDef, pydantic: bool) -> Vec<(St
         let ast::Stmt::AnnAssign(a) = st else { continue };
         let ast::Expr::Name(n) = &*a.target else { continue };
         let ann = |name: &str, sub: bool| match &*a.annotation {
-            ast::Expr::Subscript(sb) => sub && crate::interp::dotted_last(&sb.value) == name,
-            other => !sub && crate::interp::dotted_last(other) == name,
+            ast::Expr::Subscript(sb) => sub && crate::syntax::dotted_last(&sb.value) == name,
+            other => !sub && crate::syntax::dotted_last(other) == name,
         };
         let skipped = ann("ClassVar", true) || ann("ClassVar", false) || ann("InitVar", true) || ann("KW_ONLY", false);
         if skipped || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
@@ -524,7 +524,7 @@ pub fn dataclass_order(an: &Analyzer, x: u32, y: u32, state: &State) -> Option<s
         return None;
     }
     let compared = |d: &Option<&'static ast::Expr>| match d {
-        Some(ast::Expr::Call(fc)) if crate::interp::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
+        Some(ast::Expr::Call(fc)) if crate::syntax::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
         _ => true,
     };
     let fields: Vec<KeyId> = dataclass_fields_mro(an, cx).iter().filter(|(_, d)| compared(d)).map(|(f, _)| key_str_lit(f)).collect();

@@ -4898,7 +4898,7 @@ fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             ast::Expr::Tuple(t) => {
                 let Some(ast::Expr::StringLiteral(n)) = t.elts.first() else { return fallback(an, st, c) };
                 let d: Option<&'static ast::Expr> = match t.elts.get(2) {
-                    Some(ast::Expr::Call(fc)) if crate::interp::dotted_last(&fc.func) == "field" => fc.arguments.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str() == "default").unwrap_or(false)).map(|k| &k.value),
+                    Some(ast::Expr::Call(fc)) if crate::syntax::dotted_last(&fc.func) == "field" => fc.arguments.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str() == "default").unwrap_or(false)).map(|k| &k.value),
                     Some(other) => Some(other),
                     None => None,
                 };

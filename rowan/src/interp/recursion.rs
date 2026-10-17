@@ -10,7 +10,13 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, FuncInfo, FuncNode, MAX_ACTIVE, REC_MAX_ITER};
+use super::{Analyzer, FuncInfo, FuncNode};
+
+/// Running activations of one function past which a call with other literal arguments joins
+/// one of them (`activation_for`).
+pub const MAX_ACTIVE: usize = 4;
+/// Rounds an activation runs again until its result and state are stable; then widened.
+pub const REC_MAX_ITER: usize = 8;
 use crate::domain::{KeyVal, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, StrId};

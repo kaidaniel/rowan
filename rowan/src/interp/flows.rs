@@ -284,7 +284,7 @@ impl<'a> Flow<'a> {
     /// statement binds the same name).
     pub fn scan(mut self, params: &[StrId], first: Option<StrId>, body: &'static [Stmt], lambda: Option<&'static Expr>) -> CodeUses {
         self.first = first;
-        for st in super::access::walk_stmts(body) {
+        for st in crate::syntax::walk_stmts(body) {
             match st {
                 Stmt::Import(i) => {
                     for a in &i.names {

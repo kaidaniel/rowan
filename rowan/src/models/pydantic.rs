@@ -15,8 +15,9 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::interp::{dotted_last, Analyzer, Call, Payload};
+use crate::interp::{Analyzer, Call, Payload};
 use crate::state::{Kind, State};
+use crate::syntax::dotted_last;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Extra {

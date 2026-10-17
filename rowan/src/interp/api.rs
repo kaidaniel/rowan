@@ -34,12 +34,45 @@
 //!     and the driver's `run`.
 
 use indexmap::IndexMap;
+use ruff_python_ast as ast;
 
 use super::{Analyzer, CmHook, ExcNames, Frame, FrameKind, FuncInfo, Names};
 use crate::domain::{ObjId, Value};
 use crate::frontend::Node;
-use crate::intern::{KeyId, StrId};
+use crate::intern::{s, KeyId, StrId};
 use crate::state::State;
+
+/// Everything a model needs about a call.
+#[derive(Clone)]
+pub struct Call {
+    pub qual: String,
+    pub recv: Option<Value>,
+    pub args: Vec<Value>,
+    pub kwargs: IndexMap<StrId, Value>,
+    pub star_args: Vec<Value>,
+    pub star_kwargs: Vec<Value>,
+    pub node: Node,
+    pub call_ast: Option<&'static ast::ExprCall>,
+    pub site: String,
+    pub line: u32,
+}
+
+impl Call {
+    pub fn arg(&self, i: usize, name: Option<&str>) -> Option<Value> {
+        if i < self.args.len() {
+            return Some(self.args[i].clone());
+        }
+        if let Some(n) = name {
+            if let Some(v) = self.kwargs.get(&s(n)) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+    pub fn kw(&self, name: &str) -> Option<Value> {
+        self.kwargs.get(&s(name)).cloned()
+    }
+}
 
 impl Analyzer {
     // ------------------------------------------------------------ the program
@@ -205,29 +238,8 @@ impl Analyzer {
     /// What the running function's own code assigns to local `name` (`name = e`, `name &= e`:
     /// each `e`; not in nested functions); empty at module level.
     pub fn local_assignments(&self, name: &str) -> Vec<&'static ruff_python_ast::Expr> {
-        use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-        use ruff_python_ast::{Expr, Stmt};
-        struct V<'n>(&'n str, Vec<&'static Expr>);
-        impl SourceOrderVisitor<'static> for V<'_> {
-            fn visit_stmt(&mut self, st: &'static Stmt) {
-                let name = self.0;
-                let named = |t: &Expr| matches!(t, Expr::Name(n) if n.id.as_str() == name);
-                match st {
-                    Stmt::FunctionDef(_) | Stmt::ClassDef(_) => return,
-                    Stmt::Assign(a) if a.targets.iter().any(named) => self.1.push(&a.value),
-                    Stmt::AugAssign(a) if named(&a.target) => self.1.push(&a.value),
-                    Stmt::AnnAssign(a) if named(&a.target) => self.1.extend(a.value.as_deref()),
-                    _ => {}
-                }
-                walk_stmt(self, st);
-            }
-        }
         let Some(fi) = self.frame().func.and_then(|f| self.heap.func_info_opt(f)) else { return vec![] };
-        let mut v = V(name, Vec::new());
-        for st in fi.node.body() {
-            v.visit_stmt(st);
-        }
-        v.1
+        crate::syntax::assignments_to(fi.node.body(), name)
     }
 
     // ------------------------------------------------------------ exceptions
