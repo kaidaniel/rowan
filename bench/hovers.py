@@ -18,6 +18,11 @@ HERE = Path(__file__).resolve().parent
 GUARD = HERE.parent / ".guard" / "run"
 
 
+def guarded(t: int) -> list[str]:
+    """The guard's prefix on the owner's Mac (.guard/run, not in the repository); none elsewhere (CI)."""
+    return [str(GUARD), "-t", str(t)] if GUARD.exists() else []
+
+
 def pct(xs, p):
     xs = sorted(xs)
     return xs[min(len(xs) - 1, int(round(p * (len(xs) - 1))))] if xs else 0.0
@@ -36,7 +41,7 @@ def main() -> None:
     env.pop("ROWAN_DEBUG", None)
     if a.limits:
         env["ROWAN_LIMITS"] = a.limits
-    procs = [subprocess.Popen([str(GUARD), "-t", "0", a.rowan, "hovers", setup_file, "--part", f"{i}/{a.j}"], stdout=subprocess.PIPE, text=True, env=env) for i in range(a.j)]
+    procs = [subprocess.Popen(guarded(0) + [a.rowan, "hovers", setup_file, "--part", f"{i}/{a.j}"], stdout=subprocess.PIPE, text=True, env=env) for i in range(a.j)]
     setups, rows, rebuilds = [], [], []
     for p in procs:
         out, _ = p.communicate()
