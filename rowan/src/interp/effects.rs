@@ -75,6 +75,8 @@ pub struct ClosureWalk {
     names_seen: FxHashMap<StrId, (bool, Option<Flags>, bool)>,
     /// per attribute name, the classes met that have it
     by_name: FxHashMap<KeyId, Vec<ObjId>>,
+    /// the names whose use the code walked since the classes were last looked at may have grown
+    dirty: Vec<StrId>,
 }
 
 impl ClosureWalk {
@@ -529,7 +531,7 @@ impl Analyzer {
     /// since: the closure is the same whatever order the code is met in).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
-        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name } = w;
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
@@ -539,6 +541,10 @@ impl Analyzer {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
                         self.function_closure(&fi, state, out, attrs, reads, class_stores, work);
+                        // (the names whose use it may have grown)
+                        let u = self.code_uses(&fi);
+                        dirty.extend(u.attrs.keys().chain(u.reads.iter()).chain(u.class_stores.iter()).copied());
+                        dirty.extend(u.class_stores_result.iter().map(|(_, a)| *a).chain(u.uses.iter().filter_map(|x| x.attr)));
                     }
                     (Kind::Module, _) => {
                         // (a module used as a value: any of its globals)
@@ -569,10 +575,12 @@ impl Analyzer {
             // and their attributes it may change or rebind: of a class met before, by the names
             // whose use grew since (newly read, changed in more ways, or stored)
             let mut fresh_keys: Vec<KeyId> = Vec::new();
-            for n in reads.iter().chain(attrs.keys()).chain(class_stores.iter()) {
-                let now = (reads.contains(n), attrs.get(n).copied(), class_stores.contains(n));
-                if names_seen.insert(*n, now) != Some(now) {
-                    fresh_keys.push(key_str_lit(&str_get(*n)));
+            dirty.sort_unstable();
+            dirty.dedup();
+            for n in dirty.drain(..) {
+                let now = (reads.contains(&n), attrs.get(&n).copied(), class_stores.contains(&n));
+                if names_seen.insert(n, now) != Some(now) {
+                    fresh_keys.push(key_str_lit(&str_get(n)));
                 }
             }
             fresh_keys.sort_unstable();
