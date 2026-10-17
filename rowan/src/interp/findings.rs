@@ -138,6 +138,8 @@ impl Fact {
         }
         for (sym, desc) in legend {
             match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
+                // (`X | ?` is `?`: anything)
+                Some((_, d)) if *d == "?" || desc == "?" => *d = "?".into(),
                 Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
                 Some(_) => {}
                 None => self.legend.push((sym, desc)),

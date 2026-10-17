@@ -442,10 +442,13 @@ function renderHover(name, facts, verdicts) {
     }
     const own = value === name && !legend.length;
     // (the argument of the parameter of this name, perhaps beside its default: `18 | min_age`)
-    const argument = unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `));
+    // (one object each argument passed, also several runs' for any call: an `__init__`'s own and
+    // the one its instances for other methods' runs were made with)
+    const argument = unknown.length > 0 && unknown.every((o) => (o.from || []).some((t) => t.startsWith(`argument \`${name}\` of `)));
     const withDefault = !own && argument && alternatives(value).includes(name) && !legend.some(([sym]) => sym !== name);
     let tag = null;
-    if (f.param || (own && argument) || withDefault) {
+    // (the name itself, its argument: other names the calls' values mention do not make it one)
+    if (f.param || ((own || value === name) && argument) || withDefault) {
       // a parameter: what any call may pass, when something is known of it
       tag = "(parameter)";
       value = paramValue(value, name, f.type);

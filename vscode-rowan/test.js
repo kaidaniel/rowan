@@ -182,6 +182,9 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
     const h = hover(idx, src, line, "cfg");
     assert(h.includes('**Requirements**\n- `cfg["name"]`\n\n'), h);
   }
+  // (a parameter in its body is one, also beside a call's input: was `cfg = cfg`, and
+  // `{"name": cfg["name"], **?} | ?` where two runs for any call each had their object)
+  for (const line of [15, 23]) assert(hover(idx, src, line, "cfg").startsWith("```python\ncfg = (parameter)\n```"), hover(idx, src, line, "cfg"));
 }
 // ---- values of a known builtin type: a range's items, enumerate's index, input() and what follows
 // (they were `?`)
