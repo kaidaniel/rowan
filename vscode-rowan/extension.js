@@ -502,6 +502,16 @@ function renderHover(name, facts, verdicts) {
 }
 
 /**
+ * The facts of the hovered occurrence of a name on its line (`start`: its column in UTF-16
+ * units): a name read several times on a line has a value at each (in `row["a"] + row["b"]` the
+ * second `row` has `"a"`); a word no fact is recorded at (a keyword argument's name), all of them.
+ */
+function factsAt(facts, start) {
+  const here = facts.filter((f) => (f.cols || []).includes(start));
+  return here.length ? here : facts;
+}
+
+/**
  * The accesses of `name` on its line: those whose text covers the hovered word (columns in
  * UTF-16 units, as the editor counts them), else any whose text mentions the name as a word.
  */
@@ -796,7 +806,7 @@ function runEngine(bin, file, extraArgs, timeoutSeconds) {
 }
 
 /**
- * Index a --facts document: facts by line then name; verdicts by line; `run`, how the analysis
+ * Index a --facts document: facts by line and name (one per occurrence on the line, `factsAt`); verdicts by line; `run`, how the analysis
  * that made it was cut (`runNote`; null when it ran whole), shared by its facts: a function run
  * on demand (`span`; `parent`: the run of the document it is merged into), a module code's
  * document (`on_demand`, while the whole program's analysis runs: `pending`, or after it was
@@ -977,7 +987,7 @@ function activate(context) {
           }
           await od.pending.get(line);
         }
-        const facts = idx.facts.get(`${line}:${name}`) || [];
+        const facts = factsAt(idx.facts.get(`${line}:${name}`) || [], wordRange.start.character);
         const verdicts = verdictsForWord(idx.verdicts.get(line) || [], name, wordRange.start.character, wordRange.end.character);
         const md = renderHover(name, facts, verdicts);
         if (!md) return null;
@@ -1008,5 +1018,5 @@ function deactivate() {
 }
 
 module.exports = {
-  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary,
+  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, factsAt, diagnosticMessage, findBinary,
   binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers, serverEvents };

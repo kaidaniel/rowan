@@ -1069,7 +1069,8 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             }
         }
     }
-    // an unknown joined with literals: the unknown, of its type if they are of it too
+    // an unknown joined with literals: the unknown, of its type if they are of it too; one
+    // named by an expression no longer is that expression (`max(0, n - 1)` is not `n - 1`)
     for (d, l) in [(a, b), (b, a)] {
         if let KeyVal::Data(x) = d {
             let t = str_get(*x);
@@ -1078,8 +1079,15 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
                 return DATA;
             }
-            let fits = label_type(&t).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
-            return if fits || !l.is_literal() { d.clone() } else { untyped(*x) };
+            if !l.is_literal() {
+                return d.clone();
+            }
+            let expr = label_name(&t).starts_with("expr:");
+            return match label_type(&t) {
+                Some(ty) if kv_literals(l).iter().all(|k| key_type(k, ty)) => if expr { KeyVal::data(&typed_label(ty, "")) } else { d.clone() },
+                _ if expr => DATA,
+                _ => untyped(*x),
+            };
         }
     }
     DATA

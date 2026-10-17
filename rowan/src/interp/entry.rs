@@ -98,7 +98,7 @@ pub struct Entries {
 /// facts and verdicts recorded by then, and whether the deadline cut it.
 struct ModuleEnd {
     state: State,
-    facts: IndexMap<(u32, StrId), super::Fact>,
+    facts: IndexMap<super::findings::FactKey, super::Fact>,
     verdicts: usize,
     cut: bool,
 }
@@ -552,6 +552,28 @@ impl Analyzer {
                 // attributes — each subclass's `__init__` run for any call made its methods' runs
                 // slow; a whole run makes each once)
                 let many = self.entry.on_demand && subs.len() > MANY_SUBCLASSES;
+                // (`__init__`'s is new, as constructing the class makes it: not one an earlier
+                // `__init__` set up — an attribute it reads before setting is missing; with
+                // subclasses, `self` is several objects whose stores are weak: instances they made)
+                let user_new = |an: &Analyzer| an.class_lookup(cls, "__new__").is_some_and(|o| an.heap.class_attr(o, "__new__").pts.iter().any(|f| an.heap.kind(f) == Kind::Function));
+                if fi.name == "__init__" && subs == [cls] && !user_new(self) {
+                    let ci = self.heap.class_info(cls);
+                    // (a run with verdicts still makes the instance with the defaults, as a caller
+                    // that passes nothing: that `__init__` run's verdicts, the instance other
+                    // methods' runs take; this run's values are not those of the defaults)
+                    if !self.entry.any_instance && !self.entry.instances.contains_key(&cls) {
+                        let used = self.entry.used_defaults;
+                        let i = self.fresh_instance(cls, state, &format!("entry:{}", ci.name));
+                        self.entry.instances.insert(cls, i);
+                        self.entry.used_defaults = used;
+                    }
+                    let home = if self.entry.any_instance && !plain { &mut *base } else { &mut *state };
+                    let inst = self.new_instance(cls, &ci, home, &format!("entry:new:{}", ci.name));
+                    if !params.is_empty() {
+                        params.remove(0);
+                    }
+                    return Some(Value::obj(inst));
+                }
                 for c in subs {
                     // (the instance made with the defaults is made too, whichever run needs a
                     // receiver first: its `__init__` run's verdicts carry much of a library's
@@ -753,10 +775,9 @@ impl Analyzer {
         )
     }
 
-    /// The instance an entry run's method takes as `self`: open when the class's attributes are
-    /// not all its own; its declared fields present; its `__init__` run with its parameters'
-    /// defaults or annotations (None when that `__init__` cannot complete).
-    fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
+    /// An instance of `cls_oid` as `__new__` makes it, before its `__init__` runs: open when the
+    /// class's attributes are not all its own; its declared fields present.
+    fn new_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
         let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
         // a class that never initialises its own attributes is only used through subclasses
@@ -785,6 +806,14 @@ impl Analyzer {
             }
             order.extend(cinfo.bases.iter().copied());
         }
+        inst
+    }
+
+    /// The instance an entry run's method takes as `self`: `new_instance`, its `__init__` run
+    /// with its parameters' defaults or annotations (None when that `__init__` cannot complete).
+
+    fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
+        let inst = self.new_instance(cls_oid, ci, state, ctx);
         let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
             let inits = self.heap.class_attr(init_cls, "__init__");

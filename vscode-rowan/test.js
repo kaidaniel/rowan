@@ -9,33 +9,35 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents } = require("./extension.js");
+const { renderHover, factsAt, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
 const facts = (file, ...args) => JSON.parse(execFileSync(bin, [file, "--facts", ...args], { maxBuffer: 64 * 1024 * 1024 }).toString());
 
-/** Every hover of a file, as the editor shows it (the word at its first place on the line). */
+/** Every hover of a file, as the editor shows it (each place of a name on a line it has facts at). */
 function allHovers(file) {
   const res = facts(file);
-  const src = fs.readFileSync(file, "utf8").split("\n");
   const idx = indexResult(res);
   const out = [];
-  for (const [key, fs_] of idx.facts) {
+  for (const [key, all] of idx.facts) {
     const [line, name] = [Number(key.split(":")[0]), key.split(":").slice(1).join(":")];
-    const m = new RegExp(`(^|[^A-Za-z0-9_])(${name})($|[^A-Za-z0-9_])`).exec(src[line - 1] || "");
-    const start = m ? m.index + m[1].length : 0;
-    const h = renderHover(name, fs_, verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
-    if (h) out.push({ line, name, h, facts: fs_ });
+    for (const start of new Set(all.flatMap((f) => f.cols || []))) {
+      const fs_ = factsAt(all, start);
+      const h = renderHover(name, fs_, verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
+      if (h) out.push({ line, name, h, facts: fs_ });
+    }
   }
   return { res, hovers: out };
 }
 
-/** The hover of `name` on `line` of an indexed document. */
-function hover(idx, src, line, name) {
-  const m = new RegExp(`(^|[^A-Za-z0-9_])(${name})($|[^A-Za-z0-9_])`).exec(src[line - 1] || "");
+/** The hover of `name` on `line` of an indexed document, at its `nth` place on the line (0: the first). */
+function hover(idx, src, line, name, nth = 0) {
+  const re = new RegExp(`(^|[^A-Za-z0-9_])(${name})(?=$|[^A-Za-z0-9_])`, "g");
+  let m;
+  for (let i = 0; (m = re.exec(src[line - 1] || "")) && i < nth; i++);
   const start = m ? m.index + m[1].length : 0;
-  return renderHover(name, idx.facts.get(`${line}:${name}`) || [], verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
+  return renderHover(name, factsAt(idx.facts.get(`${line}:${name}`) || [], start), verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
 }
 
 // ---- a dict with a key set on some paths, a typo, an unknown argument
@@ -54,6 +56,27 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
   assert.strictEqual(hover(idx, src, 8, "x"), "```python\nx = 2\n```");
   assert.strictEqual(hover(idx, src, 10, "name"), '```python\nname = "Ada"\n```');
   assert.strictEqual(hover(idx, src, 12, "items"), "```python\nitems = [1, 2, 3]\n```");
+}
+// ---- a name at several places on a line: each place's own value (the second `cfg` has "host",
+// the first does not; was `{**?} | {"host": ?, **?}` at both), the read in `x = x + 1` is 1
+{
+  const z628 = path.join(root, "tests", "cases", "z628_each_place_of_a_name_has_its_value.py");
+  const src = fs.readFileSync(z628, "utf8").split("\n");
+  const idx = indexResult(facts(z628));
+  assert(hover(idx, src, 12, "cfg").startsWith("```python\ncfg = {**?}\n```"), hover(idx, src, 12, "cfg"));
+  assert(hover(idx, src, 12, "cfg", 1).startsWith('```python\ncfg = {"host": ?, **?}\n```'), hover(idx, src, 12, "cfg", 1));
+  assert.strictEqual(hover(idx, src, 15, "x"), "```python\nx = 2\n```");
+  assert.strictEqual(hover(idx, src, 15, "x", 1), "```python\nx = 1\n```");
+}
+// ---- an unknown named by an expression, joined with a literal, is no longer that expression
+// (`limit = max(1, y)` was `limit = retries - 1`)
+{
+  const z630 = path.join(root, "tests", "cases", "z630_joined_expression_is_not_the_expression.py");
+  const src = fs.readFileSync(z630, "utf8").split("\n");
+  const idx = indexResult(facts(z630));
+  assert(hover(idx, src, 11, "y").startsWith("```python\ny = retries - 1\n```"), hover(idx, src, 11, "y"));
+  assert(hover(idx, src, 12, "limit").startsWith("```python\nlimit = int(?)\n```"), hover(idx, src, 12, "limit"));
+  assert(hover(idx, src, 14, "t").startsWith("```python\nt = int(?)\n```"), hover(idx, src, 14, "t"));
 }
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
@@ -330,7 +353,7 @@ assert.strictEqual(hover(ki, ksrc, 4, "argparse"), null);
 const vq = (ki.verdicts.get(12) || []).find((v) => v.text === "d['q']");
 assert(vq && vq.col === ksrc[11].indexOf("d['q']"), JSON.stringify(vq));
 const dq = ksrc[11].indexOf("d['q']");
-const hd = renderHover("d", ki.facts.get("12:d"), verdictsForWord(ki.verdicts.get(12), "d", dq, dq + 1));
+const hd = renderHover("d", factsAt(ki.facts.get("12:d"), dq), verdictsForWord(ki.verdicts.get(12), "d", dq, dq + 1));
 assert(hd.includes('```python\nd = {"k": 1}\n```') && !hd.includes("✗") && diagnosticMessage(vq) === 'key "q" is never set', hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));

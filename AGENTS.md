@@ -11,7 +11,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
-  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators).
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
@@ -78,7 +78,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     end after any of the program's functions ran (`follow_code` over all, a result as its callers
     use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
     module code's calls (`note_call`); parameters as annotated (`annotations.rs`: `list[dict[str, int]]`'s parts too, `Heap::ann`; a dataclass's, NamedTuple's, TypedDict's or pydantic model's instance has its fields, bases' too, each as annotated, a part annotated with one such an instance), a method on any instance (on demand, of a subclass past 64
-    of them: any attributes), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
+    of them: any attributes; `__init__` of a class without subclasses on a new one, `new_instance`), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's context; a consumer of item
   *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
   joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
@@ -129,7 +129,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (`(parameter) int(?)`; on a line that assigns it, the value assigned), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 

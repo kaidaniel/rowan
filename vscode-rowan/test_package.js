@@ -97,7 +97,7 @@ assert(found && fs.realpathSync(found) === fs.realpathSync(bin), `the extension 
     const hover = (line, name) => {
       const m = new RegExp(`(^|[^A-Za-z0-9_])(${name})($|[^A-Za-z0-9_])`).exec(src[line - 1]);
       const start = m ? m.index + m[1].length : 0;
-      return extension.renderHover(name, idx.facts.get(`${line}:${name}`) || [], extension.verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
+      return extension.renderHover(name, extension.factsAt(idx.facts.get(`${line}:${name}`) || [], start), extension.verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
     };
     const r2 = hover(2, "r");
     assert(r2 && r2.includes('```python\nr = {"a": 1, "b": 2}\n```'), `hover of r on line 2:\n${r2}`);
