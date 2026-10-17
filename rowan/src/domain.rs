@@ -488,6 +488,20 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// These keys may have been removed (by code that is not unknown): no longer definite nor
+    /// likely.
+    pub fn may_remove(&self, keys: &[KeyId]) -> Row {
+        if !keys.iter().any(|k| self.likely.contains(*k) || self.definite.contains(*k)) {
+            return self.clone();
+        }
+        let mut d = self.data();
+        for &k in keys {
+            d.likely = d.likely.remove(k);
+            d.definite = d.definite.remove(k);
+        }
+        Row::from_data(d)
+    }
+
     /// `mutate` of the keys `like` names only: unknown code may have stored such keys (new
     /// ones too) or removed them; the others are as they were.
     pub fn mutate_like(&self, site: StrId, like: &dyn Fn(KeyId) -> bool) -> Row {

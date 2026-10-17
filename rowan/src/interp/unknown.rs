@@ -6,6 +6,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::flows::Removes;
 use super::{Analyzer, Args, Heap, NOEFFECT_METHOD_NAMES, Payload};
 use crate::domain::{join_rows, kv_join, DATA, KeyVal, Ns, ObjId, Row, TYPE_NAMES, Value};
 use crate::frontend::Node;
@@ -428,7 +429,8 @@ impl Analyzer {
                 let objs = objs(locs, values, state);
                 self.havoc.edit(&mut self.heap, &objs, change, site, state);
             }
-            may_have_removed(&objs(&cl.removed_locs, &cl.removed_values, state), state);
+            let removed: Vec<(ObjId, Removes)> = cl.removed_locs.iter().map(|((o, ns, k), r)| (state.slot(*o, *ns, *k), *r)).chain(cl.removed_values.iter().cloned()).flat_map(|(v, r)| v.pts.iter().map(move |o| (o, r)).collect::<Vec<_>>()).collect();
+            may_have_removed(&self.heap, &removed, state);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
@@ -486,11 +488,16 @@ fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work:
 #[allow(clippy::too_many_arguments)]
 /// The program's own code not run may have removed items of `objs` (dicts, lists, sets changed
 /// in place: `Flags::removes`): no key of theirs is there for sure, nor likely.
-pub(super) fn may_have_removed(objs: &[ObjId], state: &mut State) {
-    for &o in objs {
+pub(super) fn may_have_removed(heap: &Heap, objs: &[(ObjId, Removes)], state: &mut State) {
+    for &(o, rm) in objs {
+        // (a dict's or set's keys, an instance's attributes, by key; a list's positions shift)
+        let keys = rm.keys().filter(|_| matches!(heap.kind(o), Kind::Dict | Kind::Set | Kind::Instance));
         for ns in [Ns::Item, Ns::Attr] {
             if let Some(r0) = state.rows.get(&(o, ns)) {
-                let r = r0.may_remove_any();
+                let r = match keys {
+                    Some(ks) => r0.may_remove(ks),
+                    None => r0.may_remove_any(),
+                };
                 if r != r0 {
                     state.set_row(o, ns, r);
                 }

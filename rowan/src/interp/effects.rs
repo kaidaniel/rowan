@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Slot};
+use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -116,8 +116,8 @@ pub struct Closure {
     pub edited_locs: Vec<Loc>,
     pub edited_values: Vec<Value>,
     /// among those, the ones whose items it may remove (`Flags::removes`)
-    pub removed_locs: Vec<Loc>,
-    pub removed_values: Vec<Value>,
+    pub removed_locs: Vec<(Loc, Removes)>,
+    pub removed_values: Vec<(Value, Removes)>,
     pub iterated_locs: Vec<Loc>,
     pub iterated_values: Vec<Value>,
 }
@@ -186,7 +186,7 @@ impl Analyzer {
         let (by_name, stored) = (&uses.0, &uses.1);
         let mut work: Vec<ObjId> = vec![inst];
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        let (mut walk, mut edited, mut removed): (Vec<Value>, Vec<ObjId>, Vec<ObjId>) = Default::default();
+        let (mut walk, mut edited, mut removed): (Vec<Value>, Vec<ObjId>, Vec<(ObjId, Removes)>) = Default::default();
         while let Some(inst) = work.pop() {
             if !seen.insert(inst) {
                 continue;
@@ -210,8 +210,8 @@ impl Analyzer {
                 // in place: its items)
                 if self.edited(&f, &v, state).0 {
                     edited.extend(v.pts.iter());
-                    if f.removes {
-                        removed.extend(v.pts.iter());
+                    if f.removes.any() {
+                        removed.extend(v.pts.iter().map(|o| (o, f.removes)));
                     }
                 }
                 let mut objs: Vec<ObjId> = Vec::new();
@@ -241,7 +241,7 @@ impl Analyzer {
         let w = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
         self.havoc.edit(&mut self.heap, &edited, true, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
@@ -619,16 +619,14 @@ impl Analyzer {
         let by_names = !effs.is_empty();
         // (arguments whose items its code may remove: not `likely` after, `may_have_removed`)
         let bound = usize::from(self_v.is_some());
-        let mut removed: Vec<ObjId> = Vec::new();
+        let mut removed: Vec<(ObjId, Removes)> = Vec::new();
         for (i, v) in args.iter().enumerate() {
-            if self.param_flags(foid, Slot::Pos(i + bound)).removes {
-                removed.extend(v.pts.iter());
-            }
+            let rm = self.param_flags(foid, Slot::Pos(i + bound)).removes;
+            removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
         }
         for (k, v) in kwargs.iter() {
-            if self.param_flags(foid, Slot::Kw(*k)).removes {
-                removed.extend(v.pts.iter());
-            }
+            let rm = self.param_flags(foid, Slot::Kw(*k)).removes;
+            removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
         }
         let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
@@ -641,7 +639,7 @@ impl Analyzer {
         roots.extend(effs.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -703,18 +701,16 @@ impl Analyzer {
         self.gens.force_at = None;
         let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
-        let mut removed: Vec<ObjId> = Vec::new();
+        let mut removed: Vec<(ObjId, Removes)> = Vec::new();
         for (f, r) in fns {
             let bound = usize::from(r.is_some());
             for (i, v) in a.pos.iter().enumerate() {
-                if self.param_flags(*f, Slot::Pos(i + bound)).removes {
-                    removed.extend(v.pts.iter());
-                }
+                let rm = self.param_flags(*f, Slot::Pos(i + bound)).removes;
+                removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
             }
             for (k, v) in a.kw.iter() {
-                if self.param_flags(*f, Slot::Kw(*k)).removes {
-                    removed.extend(v.pts.iter());
-                }
+                let rm = self.param_flags(*f, Slot::Kw(*k)).removes;
+                removed.extend(v.pts.iter().filter(|_| rm.any()).map(|o| (o, rm)));
             }
         }
         let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), a, state, node);
@@ -724,7 +720,7 @@ impl Analyzer {
         roots.append(&mut self.havoc.code);
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        super::unknown::may_have_removed(&removed, state);
+        super::unknown::may_have_removed(&self.heap, &removed, state);
         self.flag_may_raise(state);
         let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
         join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
@@ -810,7 +806,7 @@ impl Analyzer {
                 match self.edited(f, v, state) {
                     (true, _) => {
                         out.edited_values.push(v.clone());
-                        out.removed_values.extend(f.removes.then(|| v.clone()));
+                        out.removed_values.extend(f.removes.any().then(|| (v.clone(), f.removes)));
                     }
                     (false, true) => out.iterated_values.push(v.clone()),
                     _ => {}
@@ -864,7 +860,7 @@ impl Analyzer {
                 }
                 // (`n.append(…)`: n changes in place as a container, if it is one)
                 let edit = f.called && super::flows::CONTAINER_MUTATORS.contains(&&*str_get(a));
-                let removes = f.called && super::flows::CONTAINER_REMOVERS.contains(&&*str_get(a));
+                let removes = if f.called && super::flows::CONTAINER_REMOVERS.contains(&&*str_get(a)) { if f.removes.any() { f.removes } else { Removes::Any } } else { Removes::No };
                 f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, removes, held: f.changes || f.methods || f.held || f.held2 || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
@@ -1151,9 +1147,9 @@ impl Analyzer {
             out.held2_locs.push(loc);
         }
         match self.edited(f, &v, state) {
-            (true, _) if f.removes => {
+            (true, _) if f.removes.any() => {
                 out.edited_locs.push(loc);
-                out.removed_locs.push(loc);
+                out.removed_locs.push((loc, f.removes));
             }
             (true, _) => out.edited_locs.push(loc),
             (false, true) => out.iterated_locs.push(loc),

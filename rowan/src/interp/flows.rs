@@ -87,13 +87,59 @@ pub struct Flags {
     /// a dict, list or set changes its items, not what they are
     pub edits: bool,
     /// among those changes, its items may be removed (`del v[k]`, `v.pop(…)`, `v.clear()`): the
-    /// program's own code, not code rowan cannot see, so its keys are not `likely` after
-    pub removes: bool,
+    /// program's own code, not code rowan cannot see, so those keys are not `likely` after
+    pub removes: Removes,
+}
+
+/// Which items code may remove from a container (`Flags::removes`): none, those under a few
+/// literal keys (`del v["k"]`, `v.pop("k")`), or any.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Removes {
+    #[default]
+    No,
+    Keys([KeyId; 3], u8),
+    Any,
+}
+
+impl Removes {
+    /// One removal: of key `k`, or of any item (None).
+    pub fn of(k: Option<KeyId>) -> Removes {
+        k.map_or(Removes::Any, |k| Removes::Keys([k; 3], 1))
+    }
+
+    pub fn join(self, o: Removes) -> Removes {
+        match (self, o) {
+            (Removes::No, x) | (x, Removes::No) => x,
+            (Removes::Keys(a, n), Removes::Keys(b, m)) => {
+                let mut ks = a[..n as usize].to_vec();
+                ks.extend(b[..m as usize].iter().filter(|k| !a[..n as usize].contains(k)));
+                if ks.len() > 3 {
+                    return Removes::Any;
+                }
+                let mut out = [ks[0]; 3];
+                out[..ks.len()].copy_from_slice(&ks);
+                Removes::Keys(out, ks.len() as u8)
+            }
+            _ => Removes::Any,
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        *self != Removes::No
+    }
+
+    /// The keys it removes, None for any.
+    pub fn keys(&self) -> Option<&[KeyId]> {
+        match self {
+            Removes::Keys(a, n) => Some(&a[..*n as usize]),
+            _ => None,
+        }
+    }
 }
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false, removes: false };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false, removes: Removes::No };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
@@ -112,7 +158,7 @@ impl Flags {
         self.rebinds |= o.rebinds;
         self.methods |= o.methods;
         self.edits |= o.edits;
-        self.removes |= o.removes;
+        self.removes = self.removes.join(o.removes);
     }
 }
 
@@ -131,8 +177,8 @@ enum Pos {
     Method,
     /// changed in place as a container
     Edit,
-    /// changed in place as a container, items removed
-    Remove,
+    /// changed in place as a container, items removed (those under a literal key, or any)
+    Remove(Option<KeyId>),
 }
 
 /// A name the code reads that it does not bind, with an attribute read on it (`m.x`).
@@ -517,9 +563,9 @@ impl<'a> Flow<'a> {
                 (Pos::Call, Level::Own) => f.called = true,
                 (Pos::Method, Level::Own) => f.methods = true,
                 (Pos::Edit, Level::Own) => f.edits = true,
-                (Pos::Remove, Level::Own) => {
+                (Pos::Remove(k), Level::Own) => {
                     f.edits = true;
-                    f.removes = true;
+                    f.removes = f.removes.join(Removes::of(k));
                 }
             }
         }
@@ -779,6 +825,11 @@ impl<'a> Flow<'a> {
                         self.name(s(n.id.as_str()), Some(s(m)));
                         if !pure {
                             self.mark(&[(Origin::NameAttr(s(n.id.as_str()), s(m)), Level::Own)], Pos::Call);
+                            // (`CFG.pop("k")`: what it removes, if CFG is a container)
+                            if CONTAINER_REMOVERS.contains(&m) {
+                                let f = self.flags.entry(Origin::NameAttr(s(n.id.as_str()), s(m))).or_default();
+                                f.removes = f.removes.join(Removes::of(remover_key(m, c)));
+                            }
                             return self.pass_args((s(n.id.as_str()), Some(s(m))), c);
                         }
                     }
@@ -790,7 +841,7 @@ impl<'a> Flow<'a> {
                     }
                     v => {
                         let recv = self.srcs(v);
-                        self.mark(&recv, if pure { Pos::Read } else if CONTAINER_REMOVERS.contains(&m) { Pos::Remove } else if CONTAINER_MUTATORS.contains(&m) { Pos::Edit } else { Pos::Method });
+                        self.mark(&recv, if pure { Pos::Read } else if CONTAINER_REMOVERS.contains(&m) { Pos::Remove(remover_key(m, c)) } else if CONTAINER_MUTATORS.contains(&m) { Pos::Edit } else { Pos::Method });
                         self.expr(v, Pos::Read);
                         // (a module's function called through a local, say: its result is not followed)
                         self.out.untracked.insert(s(m));
@@ -963,7 +1014,7 @@ impl<'a> Flow<'a> {
             }
             Expr::Subscript(x) => {
                 let base = self.srcs(&x.value);
-                self.mark(&base, if deleting { Pos::Remove } else { Pos::Edit });
+                self.mark(&base, if deleting { Pos::Remove(const_key(&x.slice)) } else { Pos::Edit });
                 self.expr(&x.value, Pos::Read);
                 self.expr(&x.slice, Pos::Read);
             }
@@ -1244,4 +1295,22 @@ impl ast::visitor::Visitor<'static> for NameUses {
         }
         ast::visitor::walk_expr(self, e);
     }
+}
+
+/// The key a literal expression is (`"k"`, `3`, `-1`), None for others.
+fn const_key(e: &Expr) -> Option<KeyId> {
+    match e {
+        Expr::StringLiteral(x) => Some(crate::intern::key_str_lit(x.value.to_str())),
+        Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => Some(crate::intern::key_int(i.as_i64()?)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The key a call of a container's remover takes out: `v.pop("k")`, `v.discard("k")`,
+/// `v.remove("k")`; None for any (`v.clear()`, `v.pop()`).
+fn remover_key(m: &str, c: &ast::ExprCall) -> Option<KeyId> {
+    matches!(m, "pop" | "remove" | "discard").then(|| c.arguments.args.first().and_then(const_key)).flatten()
 }
