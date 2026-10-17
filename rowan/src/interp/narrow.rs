@@ -243,7 +243,7 @@ impl Analyzer {
             }
             if fname == "hasattr" && args.len() == 2 {
                 let (Some(kv), Some(mut rec)) = (self.traced(&args[1]), self.traced(&args[0])) else { return };
-                if let Some(k) = kv.kv.as_lit() {
+                if let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) {
                     // (an attribute row describes instances and namespaces; a builtin
                     // container's attributes are its type's: decided by the type, or not)
                     let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
@@ -389,7 +389,8 @@ impl Analyzer {
             // (numbers too: `1 == 1.0 == True` though their keys differ)
             let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)));
             let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
-            if !ks.is_empty() && !by_value {
+            // (beside objects — an unknown, an instance with its `__eq__` — b may equal anything)
+            if !ks.is_empty() && !by_value && rv.pts.is_empty() {
                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
             }
         } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {
@@ -643,7 +644,7 @@ impl Analyzer {
             if let ast::Expr::Attribute(a) = &*c.func {
                 if a.attr.id.as_str() == "get" && !c.arguments.args.is_empty() {
                     let (Some(kv), Some(rec)) = (self.traced(&c.arguments.args[0]), self.traced(&a.value)) else { return };
-                    if let Some(k) = kv.kv.as_lit() {
+                    if let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) {
                         // only a dict-like receiver: a user instance's `get` is its own method
                         if rec.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace)) {
                             return;

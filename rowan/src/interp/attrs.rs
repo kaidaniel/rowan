@@ -43,6 +43,21 @@ impl Analyzer {
         }
     }
 
+    /// `class_resolves` on this path: a class attribute stored on some paths only (`if c: Cls.x =
+    /// 1`) may be missing on this one.
+    pub(crate) fn class_resolves_on_path(&self, oid: u32, name: &str, state: &State) -> bool {
+        if !self.class_resolves(oid, name) {
+            return false;
+        }
+        if self.heap.kind(oid) != Kind::Instance || OBJECT_ATTRS.contains(&name) {
+            return true;
+        }
+        match self.heap.instance_class(oid) {
+            Some(c) if self.class_lookup(c, "__getattr__").is_none() && self.class_lookup(c, "__getattribute__").is_none() => self.class_lookup_on_path(c, name, state).1,
+            _ => true,
+        }
+    }
+
     /// The attribute names `__slots__` allows on instances of `cls`, when every class of its MRO
     /// declares them (literally) and none gives a `__dict__`.
     pub(in crate::interp) fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
@@ -604,7 +619,7 @@ impl Analyzer {
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
                         let strong = self.heap.obj(oid).single;
-                        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &r, strong, node, state);
+                        self.store_key(oid, Ns::Attr, &Value::lit(key_str_lit(name)), &r, strong, node, state);
                     }
                     outs.push(r);
                 } else if fi.is_static.get() {
@@ -668,6 +683,11 @@ impl Analyzer {
         if !code && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
             return Some(out.join(&Value::data(&format!("L{}", node.line))));
         }
+        // (stored under a name not known, `setattr(o, name, v)`: the instance may hold it, over the
+        // class's)
+        if let Some(star) = self.data_stored(oid, nk, row, state).filter(|_| !code) {
+            return Some(out.join(&star));
+        }
         Some(out)
     }
 
@@ -697,6 +717,10 @@ impl Analyzer {
             if !row.mutators.is_empty() && !row.definite.contains(nk) && cls_of.is_some_and(|c| self.hierarchy_closed(c)) {
                 v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
             }
+            // (on the paths that did not store it, a store under a name not known may have)
+            if let Some(star) = self.data_stored(oid, nk, &row, state) {
+                v = v.join(&star);
+            }
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail where the class surely has it)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).map(|c| self.class_lookup_on_path(c, name, state));
@@ -719,7 +743,7 @@ impl Analyzer {
                 let cls = classify(&row, nk);
                 self.attr_verdict(node, nk, &cls, oid, guarded);
                 // (there on some paths only: an AttributeError the enclosing try handles)
-                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves(oid, name) {
+                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely) && !self.class_resolves_on_path(oid, name, state) {
                     self.may_raise_here("AttributeError", state);
                 }
                 if let Some(c) = cls_of {
@@ -747,7 +771,7 @@ impl Analyzer {
         } else {
             self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
             // (a read that cannot fail, `getattr(o, k, None)`, raises nothing; a try-guarded one may)
-            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) {
+            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely) {
                 // an AttributeError the enclosing try handles
                 if cls.tier == Tier::Missing && single_target && !self.class_resolves(oid, name) {
                     self.raise_here("AttributeError", state);
@@ -846,14 +870,15 @@ impl Analyzer {
             if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
-                    if !row.present.contains(nk) {
+                    let by_data = self.data_stored(oid, nk, &row, state);
+                    if !row.present.contains(nk) && by_data.is_none() {
                         return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
                     }
                     // (set on some paths: `__getattr__` runs on the others only — when it raises
                     // there, the paths that have the attribute go on)
                     let mut missing = state.copy();
                     let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
-                    let own = state.slot(oid, Ns::Attr, nk);
+                    let own = state.slot(oid, Ns::Attr, nk).join(&by_data.unwrap_or_default());
                     if missing.reachable {
                         let j = state.join(&mut missing);
                         state.replace_with(j);
@@ -863,6 +888,15 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    /// What stores under names not known (`setattr(o, name, v)`) may have put under `nk` of an
+    /// instance that does not surely have it: the `*` slot.
+    fn data_stored(&self, oid: ObjId, nk: KeyId, row: &Row, state: &State) -> Option<Value> {
+        if row.definite.contains(nk) || row.absent.contains(nk) || !row.sources.iter().any(|(s, _)| crate::source::source_is_data(s)) {
+            return None;
+        }
+        state.slot_opt(oid, Ns::Attr, crate::intern::STAR)
     }
 
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable.

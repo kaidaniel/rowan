@@ -255,7 +255,7 @@ impl Analyzer {
             an.check_hashable(&k, st);
             let v = an.eval(val_e, st);
             let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth && an.cx.comp_maybe == 0;
-            an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
+            an.store_key(oid, Ns::Item, &k, &v, strong, &nd, st);
         };
         let limit = comp_unroll_limit(&dc.generators, &[key_e, val_e], self.is_torch_module(self.frame().module));
         self.comp(&dc.generators, limit, state, &mut body, oid);

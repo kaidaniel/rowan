@@ -551,7 +551,7 @@ pub(super) fn m_simplenamespace(an: &mut Analyzer, st: &mut State, c: &Call) -> 
         an.copy_into(oid, Ns::Attr, sk, st, true, &KeySet::new());
     }
     for (k, v) in c.kwargs.iter() {
-        an.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(&intern::str_get(*k))), v, true, &c.node, st);
+        an.store_key(oid, Ns::Attr, &Value::lit(key_str_lit(&intern::str_get(*k))), v, true, &c.node, st);
     }
     Value::obj(oid)
 }
@@ -687,7 +687,7 @@ pub(super) fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
             let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
             for f in &fields {
                 let v = st.slot(o, Ns::Attr, key_str_lit(f));
-                an.store_key(d, Ns::Item, &KeyVal::Lit(key_str_lit(f)), &v, true, &c.node, st);
+                an.store_key(d, Ns::Item, &Value::lit(key_str_lit(f)), &v, true, &c.node, st);
             }
             outs.push(Value::obj(d));
         } else {
@@ -700,7 +700,7 @@ pub(super) fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
             for (k, v) in c.kwargs.iter() {
                 let name = intern::str_get(*k);
                 if fields.iter().any(|f| *f == *name) {
-                    an.store_key(n, Ns::Attr, &KeyVal::Lit(key_str_lit(&name)), v, true, &c.node, st);
+                    an.store_key(n, Ns::Attr, &Value::lit(key_str_lit(&name)), v, true, &c.node, st);
                 }
             }
             outs.push(Value::obj(n));
@@ -823,7 +823,7 @@ pub(super) fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         if an.heap.kind(o) == Kind::Instance {
             let nid = an.copy_object(o, &c.node, st, false, &mut IndexMap::new());
             for (k, v) in c.kwargs.iter() {
-                an.store_key(nid, Ns::Attr, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
+                an.store_key(nid, Ns::Attr, &Value::lit(intern::key_of_str(*k)), v, true, &c.node, st);
             }
             outs.push(Value::obj(nid));
         }
@@ -925,7 +925,7 @@ pub(super) fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
         }
     }
     for (k, v) in c.kwargs.iter() {
-        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
+        an.store_key(oid, Ns::Item, &Value::lit(intern::key_of_str(*k)), v, true, &c.node, st);
     }
     Value::obj(oid)
 }

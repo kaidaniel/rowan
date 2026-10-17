@@ -754,7 +754,7 @@ impl Analyzer {
                     }
                 };
                 let key = if key.as_lit().is_some() { key } else { crate::domain::DATA };
-                self.store_key(d, Ns::Item, &key, v, false, node, state);
+                self.store_key(d, Ns::Item, &Value::kv_only(key), v, false, node, state);
             }
         }
         for (v, _, returned) in kept {

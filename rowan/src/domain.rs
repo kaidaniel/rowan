@@ -385,6 +385,9 @@ impl Row {
     /// The row after keys not known, from `src`, are stored (`d[unknown] = v`): open through it.
     pub fn data_store(&self, src: SourceId) -> Row {
         let mut d = self.data();
+        // (the key not known may be one removed before)
+        d.absent = KeySet::new();
+        d.absent_likely = KeySet::new();
         d.sources = cap_sources(d.sources.insert((src, EMPTY_LENS)));
         Row::from_data(d)
     }

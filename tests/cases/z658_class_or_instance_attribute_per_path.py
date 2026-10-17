@@ -21,4 +21,4 @@ try:
 except AttributeError:
     pass
 p0 = r
-#@todo value p0: includes={0, 1, 3} (rowan gives {1, 3}: the joined read takes the class's u or the instance's for granted)
+#@value p0: exactly={0, 1, 3}

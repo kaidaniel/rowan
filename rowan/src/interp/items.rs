@@ -92,8 +92,9 @@ impl Analyzer {
     /// sequence's position, an unknown's placeholder, … joined; a requirement one of several
     /// receivers records is only sometimes needed.
     pub(super) fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
-        // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
-        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown)) && !obj.pts.is_empty() {
+        // (objects in the key: an unknown key — of a list or tuple, a position not known; frames
+        // and Series are indexed by their own rules: a column list, a mask)
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown | Kind::List | Kind::Tuple)) && !obj.pts.is_empty() {
             self.opaque_key(key, state)
         } else {
             key.clone()
@@ -693,7 +694,7 @@ impl Analyzer {
         // defaultdict's or Counter's read put its default there — holds what any key not known
         // does, and nothing else)
         let stored = own_map && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.site.starts_with("store@L")));
-        let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.present.contains(k));
+        let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.definite.contains(k));
         if from_map {
             v = v.join(&star);
         } else if !star.pts.is_empty() && !stored {
@@ -922,7 +923,7 @@ impl Analyzer {
                         let insts: Vec<u32> = inst.pts.iter().collect();
                         for i in &insts {
                             let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single;
-                            self.store_key(*i, Ns::Attr, &key.kv, v, s1, node, state);
+                            self.store_key(*i, Ns::Attr, &key, v, s1, node, state);
                         }
                     }
                     continue;
@@ -932,20 +933,20 @@ impl Analyzer {
                     let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                     for m in self.record_objects(&first) {
                         let s1 = strong && first.pts.len() == 1 && self.heap.obj(m).single;
-                        self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
+                        self.store_key(m, Ns::Item, &key, v, s1, node, state);
                     }
                     if self.m.chainmaps[&oid].len() > 1 {
                         self.refresh_chainmap(oid, state);
                     } else {
                         let s1 = strong && self.heap.obj(oid).single;
-                        self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
+                        self.store_key(oid, Ns::Item, &key, v, s1, node, state);
                     }
                 }
                 Kind::Dict if self.m.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
                     let inst = self.m.attr_mirrors[&oid];
                     let s1 = strong && self.heap.obj(inst).single;
-                    self.store_key(inst, Ns::Attr, &key.kv, v, s1, node, state);
+                    self.store_key(inst, Ns::Attr, &key, v, s1, node, state);
                 }
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.heap.instance_class(oid) {
@@ -962,33 +963,40 @@ impl Analyzer {
                 }
                 _ => {}
             }
-            self.store_key(oid, ns, &key.kv, v, strong, node, state);
+            self.store_key(oid, ns, &key, v, strong, node, state);
         }
     }
 
-    /// Stores `v` under key `kv` of record `oid`: a literal key into the row and slot; several
+    /// Stores `v` under `key` of record `oid`: a literal key into the row and slot; several
     /// literals weakly; one of another object's keys (`for k in d: out[k] = …`) copies those
     /// keys (definite when the loop covers them all); a key not known opens the row through a
     /// `store` data source (the value in the `*` slot and any key's). Into the shared unknown
     /// object, the value escapes to unknown code.
-    pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
+    pub fn store_key(&mut self, oid: u32, ns: Ns, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
         // a store into what unknown code holds (the shared unknown object): the value goes to
         // unknown code, as if given to it; the shared object stays "anything"
         if self.is_any(oid) {
             self.escape(v, &format!("store into unknown@L{}", node.line), state);
             return;
         }
-        let kv = &self.canon_kv(oid, ns, kv, state);
+        // (a key that may be an object — an unknown call's result beside a literal — is a key
+        // not known, its literals possible keys: no strong store)
+        let beside = if key.pts.is_empty() { None } else { Some(self.keyify_in(key, state)).filter(|k| !k.pts.is_empty() && k.kv.is_literal()).map(|k| self.canon_kv(oid, ns, &k.kv, state)) };
+        let kv = &self.canon_kv(oid, ns, &self.opaque_key(key, state).kv, state);
         let row = state.row(oid, ns);
         match kv {
             KeyVal::Lit(k) => {
                 state.store_key_row(oid, ns, *k, strong);
-                state.set_slot(oid, ns, *k, v.clone(), strong);
+                if strong {
+                    state.set_slot(oid, ns, *k, v.clone(), true);
+                } else {
+                    weak_store(state, oid, ns, *k, v);
+                }
             }
             KeyVal::Lits(ks) => {
                 state.set_row(oid, ns, row.store_many(ks));
                 for k in ks.iter() {
-                    state.set_slot(oid, ns, k, v.clone(), false);
+                    weak_store(state, oid, ns, k, v);
                 }
             }
             KeyVal::KeysOf(ko) => {
@@ -1001,7 +1009,7 @@ impl Analyzer {
                             continue;
                         }
                         if let Some(k2) = lens_apply(ko.chain, k) {
-                            state.set_slot(oid, ns, k2, v.clone(), false);
+                            weak_store(state, oid, ns, k2, v);
                         }
                     }
                 }
@@ -1021,6 +1029,13 @@ impl Analyzer {
                 for k in keys {
                     state.set_slot(oid, ns, k, v.clone(), false);
                 }
+            }
+        }
+        if let Some(ks) = beside {
+            let ks = kv_literals(&ks);
+            state.set_row(oid, ns, state.row(oid, ns).store_many(&ks));
+            for k in ks.iter() {
+                weak_store(state, oid, ns, k, v);
             }
         }
     }
@@ -1075,7 +1090,11 @@ impl Analyzer {
         }
         for (k, val) in vals {
             let sure = strong && self.heap.obj(oid).single && k != intern::STAR && srcrow.definite.contains(k) && recs.iter().all(|x| state.row(*x, ns_of(self, *x)).definite.contains(k));
-            state.set_slot(oid, ns, k, val, sure);
+            if sure {
+                state.set_slot(oid, ns, k, val, true);
+            } else {
+                weak_store(state, oid, ns, k, &val);
+            }
         }
     }
 
@@ -1166,11 +1185,13 @@ impl Analyzer {
                     }
                 }
             }
-            let ckey = Value::with_kv(key.pts.clone(), self.canon_kv(oid, ns, &key.kv, state));
+            // (a key that may be an object: a key not known, no literal of it surely removed)
+            let okey = self.opaque_key(key, state);
+            let ckey = Value::with_kv(okey.pts.clone(), self.canon_kv(oid, ns, &okey.kv, state));
             let key = &ckey;
             let mut row = state.row(oid, ns);
-            let is_lit = matches!(key.kv, KeyVal::Lit(_));
-            let mut raise: Option<(bool, KeyId)> = None;
+            let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
+            let mut raise: Option<(bool, Value)> = None;
             for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
                 let cls = classify(&row, k);
                 if report && !self.is_guarded(ns) {
@@ -1179,10 +1200,11 @@ impl Analyzer {
                         self.require_providers_k(&cls, &row, false, state, Some(k), ns);
                     }
                 }
-                // (a `del` of a key that is not there raises KeyError)
-                if !matches!(cls.tier, Tier::Proven | Tier::Map) {
+                // (a `del` of a key that is not there raises KeyError; one of a mapping built from
+                // data may not be there)
+                if cls.tier != Tier::Proven {
                     let surely = cls.tier == Tier::Missing && is_lit && strong;
-                    raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
+                    raise = Some((surely || raise.as_ref().is_some_and(|r| r.0), Value::lit(k)));
                 }
                 row = row.delete(k, strong && is_lit);
                 // (one of several objects, or one of several keys: the value may still be there)
@@ -1194,12 +1216,17 @@ impl Analyzer {
             // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
             let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
             let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
-            let raise = raise.map(|(surely, k)| (surely && !cls.is_some_and(|c| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state))), k));
-            if let Some((surely, k)) = raise.filter(|_| (ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises) {
+            // (a key not known: it may be none of the record's keys)
+            if !key.kv.is_literal() {
+                raise = Some((false, key.clone()));
+            }
+            let raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
+            // (not reported: a model's removal, `pop` with a default, raises on its own terms)
+            if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
                 if !self.unwind.tries.is_empty() {
-                    let e = crate::models::exceptions::exception_object(self, exc, vec![Value::lit(k)], node, state);
+                    let e = crate::models::exceptions::exception_object(self, exc, vec![kv], node, state);
                     self.unwind.cur_exc = Some(e);
                 }
                 if surely {
@@ -1343,4 +1370,14 @@ fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
         }
     }
     state.reqs = reqs;
+}
+
+/// A store that may not happen of `v` under `k`: a key with no value of its own yet may hold
+/// what a store under a key not known put there (the `*` slot).
+fn weak_store(state: &mut State, oid: ObjId, ns: Ns, k: KeyId, v: &Value) {
+    let v = match (state.slot_opt(oid, ns, k), state.slot_opt(oid, ns, STAR)) {
+        (None, Some(star)) => star.join(v),
+        _ => v.clone(),
+    };
+    state.set_slot(oid, ns, k, v, false);
 }

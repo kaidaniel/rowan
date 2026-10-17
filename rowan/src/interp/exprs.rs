@@ -138,7 +138,7 @@ impl Analyzer {
                 Some(k) => {
                     let kv = self.eval_key(k, state);
                     self.check_hashable(&kv, state);
-                    self.store_key(oid, Ns::Item, &kv.kv, &val, true, &nd, state);
+                    self.store_key(oid, Ns::Item, &kv, &val, true, &nd, state);
                 }
             }
         }

@@ -39,7 +39,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
                             for item in items {
                                 let parts = an.unpack(&item, 2, st, &c.node);
-                                an.store_key(oid, Ns::Item, &parts[0].kv, &parts[1], true, &c.node, st);
+                                an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                             }
                             continue;
                         }
@@ -68,7 +68,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             st.set_row(oid, Ns::Item, row);
                         } else {
                             let kel = an.elem_of(&ks, &c.node, st);
-                            an.store_key(oid, Ns::Item, &kel.kv, &vel, false, &c.node, st);
+                            an.store_key(oid, Ns::Item, &kel, &vel, false, &c.node, st);
                         }
                     }
                     Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate => {
@@ -77,10 +77,10 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             (_, Some(items)) => {
                                 for item in items {
                                     let parts = an.unpack(item, 2, st, &c.node);
-                                    an.store_key(oid, Ns::Item, &parts[0].kv, &parts[1], true, &c.node, st);
+                                    an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                                 }
                             }
-                            (Elem::Pair(k, v), None) => an.store_key(oid, Ns::Item, &k.kv, v, false, &c.node, st),
+                            (Elem::Pair(k, v), None) => an.store_key(oid, Ns::Item, &k, v, false, &c.node, st),
                             _ => {
                                 let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
                                 st.set_row(oid, Ns::Item, r);
@@ -100,7 +100,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     for (k, v) in c.kwargs.iter() {
-        an.store_key(oid, Ns::Item, &KeyVal::Lit(intern::key_of_str(*k)), v, true, &c.node, st);
+        an.store_key(oid, Ns::Item, &Value::lit(intern::key_of_str(*k)), v, true, &c.node, st);
     }
     for sk in &c.star_kwargs {
         an.copy_into(oid, Ns::Item, sk, st, true, &KeySet::new());
@@ -135,7 +135,7 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.set_row(oid, Ns::Item, row);
     } else {
         let el = an.elem_of(a, &c.node, st);
-        an.store_key(oid, Ns::Item, &el.kv, &val, false, &c.node, st);
+        an.store_key(oid, Ns::Item, &el, &val, false, &c.node, st);
     }
     Value::obj(oid)
 }
@@ -1039,7 +1039,7 @@ pub(super) fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         an.call_method_with(&Value::obj(o), "__setattr__", vec![c.args[1].clone(), c.args[2].clone()], &c.node, st);
                         continue;
                     }
-                    an.store_key(o, Ns::Attr, &c.args[1].kv, &c.args[2], strong, &c.node, st);
+                    an.store_key(o, Ns::Attr, &c.args[1], &c.args[2], strong, &c.node, st);
                 }
             }
         }
@@ -1163,8 +1163,10 @@ pub(super) fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
 
 pub(super) fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.args.len() >= 2 {
-        if let Some(name) = c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) {
-            an.delete_item(&c.args[0], Ns::Attr, &Value::lit(key_str_lit(&name)), &c.node, st, true);
+        match c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) {
+            Some(name) => an.delete_item(&c.args[0], Ns::Attr, &Value::lit(key_str_lit(&name)), &c.node, st, true),
+            // (a name not known: any attribute may be the one removed)
+            None => an.delete_item(&c.args[0], Ns::Attr, &c.args[1], &c.node, st, true),
         }
     }
     an.none_v.clone()
@@ -1238,7 +1240,8 @@ pub(super) const STR_ATTRS: &[&str] = &[
 ];
 
 pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let unknown = Value::data("hasattr");
+    // (undecided: a bool all the same)
+    let unknown = Value::data(&crate::domain::typed_label("bool", ""));
     if c.args.len() < 2 {
         return unknown;
     }
@@ -1343,7 +1346,7 @@ pub(super) fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 let fv = st.slot(o, Ns::Attr, fk);
                 let cv = conv(an, st, c, &fv, depth + 1);
-                an.store_key(d, Ns::Item, &KeyVal::Lit(fk), &cv, row.definite.contains(fk), &c.node, st);
+                an.store_key(d, Ns::Item, &Value::lit(fk), &cv, row.definite.contains(fk), &c.node, st);
             }
             out = out.join(&Value::obj(d));
         }
@@ -1371,7 +1374,7 @@ pub(super) fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
         let row = Row::with_source(Source::new("dataclasses.Field", SourceKind::Data));
         let fo = an.alloc_at(Kind::Namespace, &c.node, st, &format!("Field {}", f), Payload::None, Some(row), Ns::Attr, None, None);
         an.frame_mut().unroll.pop();
-        an.store_key(fo, Ns::Attr, &KeyVal::Lit(key_str_lit("name")), &Value::lit(key_str_lit(f)), true, &c.node, st);
+        an.store_key(fo, Ns::Attr, &Value::lit(key_str_lit("name")), &Value::lit(key_str_lit(f)), true, &c.node, st);
         vals.push(Value::obj(fo));
     }
     an.alloc_positional(Kind::Tuple, &c.node, Some(vals), Value::new(), DATA, st)

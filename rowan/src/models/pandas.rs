@@ -6033,7 +6033,7 @@ pub fn loc_set(an: &mut Analyzer, lo: u32, key: &Value, v: &Value, node: &Node, 
                 if !state.row(foid, Ns::Item).definite.contains(label.unwrap()) {
                     set_nrows(state, foid, None);
                 }
-                an.store_key(foid, Ns::Item, &key.kv, v, single, node, state);
+                an.store_key(foid, Ns::Item, &key, v, single, node, state);
             }
             None => {
                 for k in state.row(foid, Ns::Item).present.iter() {

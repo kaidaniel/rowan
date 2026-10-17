@@ -615,7 +615,7 @@ pub fn construct_library(an: &mut Analyzer, cls: u32, inst: u32, a: Args, state:
             }
         }
         for (k, v) in kwargs.iter() {
-            an.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key_of_str(*k)), v, true, node, state);
+            an.store_key(inst, Ns::Item, &Value::lit(intern::key_of_str(*k)), v, true, node, state);
         }
         for sk in star_kwargs {
             an.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());
@@ -636,6 +636,6 @@ pub fn exception_init(an: &mut Analyzer, cls: u32, inst: u32, args: &[Value], no
     let name = an.heap.class_info(cls).name.clone();
     let t = an.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), crate::domain::DATA, state);
     let strong = an.heap.obj(inst).single;
-    an.store_key(inst, Ns::Attr, &crate::domain::KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+    an.store_key(inst, Ns::Attr, &Value::lit(key_str_lit("args")), &t, strong, node, state);
     an.m.exc_objs.insert(inst, name);
 }

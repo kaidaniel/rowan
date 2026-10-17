@@ -3361,7 +3361,7 @@ pub fn t_layer_new(an: &mut Analyzer, ty: &str, c: &Call, st: &mut State) -> Val
     let o = an.alloc_at(Kind::Namespace, &node, st, &format!("{}@L{}", ty, node.line), Payload::Str(format!("torch.nn.{}", ty)), Some(crate::domain::Row::new()), Ns::Attr, None, None);
     let strong = an.heap.obj(o).single;
     let set = |an: &mut Analyzer, st: &mut State, name: &str, v: Value| {
-        an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &v, strong, &node, st);
+        an.store_key(o, Ns::Attr, &Value::lit(key_str_lit(name)), &v, strong, &node, st);
     };
     let given: Vec<Value> = c.args.clone();
     t_mark_ints(an, &given, st);
