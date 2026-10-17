@@ -4084,7 +4084,8 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 d.sources = base.sources.clone();
                 r = Row::from_data(d);
             }
-            let t = an.alloc(Kind::Namespace, &site, st, &format!("row@L{}", c.line), Payload::None, Some(r.clone()), Ns::Attr, Some(false), None);
+            let tname = c.kw("name").and_then(|v| lit_key(&Some(v))).and_then(intern::key_as_str).map(|n| format!(":{}", n)).unwrap_or_default();
+            let t = an.alloc(Kind::Namespace, &site, st, &format!("row@L{}{}", c.line, tname), Payload::None, Some(r.clone()), Ns::Attr, Some(false), None);
             for ((k, _), col) in fields.iter().zip(&cols) {
                 let v = cell(st, *col).unwrap_or_else(|| unknown_cell(*k));
                 st.set_slot(t, Ns::Attr, *k, v, false);

@@ -137,9 +137,13 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             let row = state.row(o, Ns::Attr);
             // (attribute bags: argparse's and types' namespaces, a request's `state`; other model
             // objects keep their attributes for the model's own use)
-            let bag = ["args@", "namespace@", "request.state"].iter().any(|p| label.starts_with(p));
+            let bag = ["args@", "namespace@", "request.state", "row@"].iter().any(|p| label.starts_with(p));
             if bag && row.present.iter().any(|k| !is_internal_key(k)) {
-                let shown = name.trim_matches(|c| c == '<' || c == '>');
+                // (a frame's row from `itertuples`: the namedtuple it names, "Pandas" by default)
+                let shown = match label.strip_prefix("row@") {
+                    Some(rest) => rest.split_once(':').map(|x| x.1).unwrap_or("Pandas"),
+                    None => name.trim_matches(|c| c == '<' || c == '>'),
+                };
                 if depth >= max_depth {
                     return format!("{}(…)", shown);
                 }
