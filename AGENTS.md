@@ -36,7 +36,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join;
   a pure test's branch rows come back when it recurs (`CondFact`: tests a function repeats, until a write).
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
-  others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
+  others run to a fixpoint (40 rounds, then widened; verdicts and hover values are the last round's), making
   summaries; a target bound to one of the records a summary (or an input's element) stands for
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
   running `try` (`TryCtx`) records the state at every point of its body and callees that may
@@ -50,9 +50,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; to library functions that only read, given no code: nothing, `read_only_library`; a dict, list or set changed
-  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: no key `likely`, `Flags::removes`), a local aliasing what it is bound to; class attributes by name, rebound
+  in place, unpacked or copied (`{**d}`, `dict(d)`): its items; one its code may remove items of, `del d[k]`, `pop`: those keys, any if not named, not `likely`, `Flags::removes`), a local aliasing what it is bound to; class attributes by name, rebound
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
-  `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
+  `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class).
@@ -110,7 +110,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `getattr` by a name not known reads every attribute
-  of the program's objects, quietly (known in part, an f-string's: those whose names fit, `Payload::Affix`; a container's, or past a wide
+  of the program's objects, quietly (known in part, an f-string's or a name a template makes, `"_on_%s" % m` also through a local: those whose names fit, `Payload::Affix`, `template_affixes`; a container's, or past a wide
   read: one method per call site, unknown code on them when called); `exec`, `setattr` with unknown names on a class, metaclasses and
   monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
   unknown code does not shadow a class attribute on an instance of a library-based class; an unknown beside objects is no instance
