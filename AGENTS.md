@@ -17,14 +17,16 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
   *merged* object (stores only join). Garbage collection at returns, loop and try exits drops
-  the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches.
+  the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches
+  (side tables' young targets: a remembered set by age, `Heap::push_copy_roots`).
   An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a
   read on more than 8 objects (`wide_read`) makes one per key there (weak; a library object's attribute: one unknown per name).
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements (scalars in
   `elems`, objects in the `Elem` slot: written together, `add_elem` / `set_positions`; missing: unknown),
   lengths (one writer, `set_lens`; a tensor dim after `T` rounds of one append each, `sym_lens`),
-  and the requirements recorded so far. The maps are persistent Patricia tries (`layered.rs`): a copy is O(1), a join or diff costs what two states differ in.
+  and the requirements recorded so far. The maps are persistent Patricia tries (`layered.rs`): a copy is O(1), a join or diff costs what two states differ in; joins keep
+  either side's equal subtrees and a write of the value already there copies nothing (`MapValue`: a row only if the same one), so states stay shared.
 * **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file each
   (`interp/README.md`); models, the report and the driver see the `Heap`, their `m` and `api.rs`. Its doc sorts
   them for a call memo: running context (a key), state changed outside `State`, output, caches.
@@ -188,8 +190,8 @@ are the domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.7 / ~2.7 / ~8.7 / ~6.0 s; 0.13 / 0.07 / 0.18 / 0.10 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.4 / ~24 / ~13.5 / ~5.9 s; 0.31 / 0.80 / 0.29 / 0.34 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~6.5 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.7 / ~15 / ~11.9 / ~6.1 s; 0.27 / 0.79 / 0.27 / 0.35 GB |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.23 / 8.7 / 5.0 / 28 s; per function p50 ≤ 7.6 ms, p99 0.16-0.45 s, max 0.5 / 0.5 / 0.7 / 3.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 3.7 / 0.2 s, max 1.2 / 4.8 / 3.8 / 1.1 s; `rowan serve` on each timm model file ≤ 0.9 GB |
 
 ## Known problems and next steps
