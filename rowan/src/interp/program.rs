@@ -50,6 +50,8 @@ pub struct Program {
     pub user_classes: Vec<ObjId>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     rel_files: RefCell<FxHashMap<u32, String>>,
+    /// module index -> whether it is the program's own (`is_local_idx`: paths canonicalized once)
+    local: RefCell<FxHashMap<u32, bool>>,
 }
 
 impl Program {
@@ -113,7 +115,12 @@ impl Program {
     /// Is module `idx` (not the main one) the program's own: in the main file's directory or
     /// below, not in site-packages?
     pub fn is_local_idx(&self, idx: u32) -> bool {
-        frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false)
+        if let Some(l) = self.local.borrow().get(&idx) {
+            return *l;
+        }
+        let l = frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false);
+        self.local.borrow_mut().insert(idx, l);
+        l
     }
 }
 

@@ -1027,7 +1027,7 @@ impl Analyzer {
             state.set_row(oid, Ns::Attr, r);
             state.set_slot(oid, Ns::Attr, nk, v.clone(), strong);
             if kind == Kind::Class {
-                self.heap.cls_slots.insert((oid, Ns::Attr, nk), v.clone());
+                self.heap.set_cls_slot((oid, Ns::Attr, nk), v.clone());
                 self.heap.cls_late.insert((oid, nk));
             }
         }

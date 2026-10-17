@@ -210,7 +210,8 @@ impl Analyzer {
         if v.pts.is_empty() && !(self.in_try() && kv_hashing(&v.kv) == Hashing::Maybe) {
             return;
         }
-        let hs: Vec<Hashing> = v.pts.iter().map(|o| self.obj_hashing(o, state, 0)).collect();
+        let mut memo = rustc_hash::FxHashMap::default();
+        let hs: Vec<Hashing> = v.pts.iter().map(|o| self.obj_hashing(o, state, 0, &mut memo)).collect();
         let worst = hs.iter().copied().max().unwrap_or(Hashing::Hashable).max(kv_hashing(&v.kv));
         if worst == Hashing::Hashable || (worst == Hashing::Maybe && !self.in_try()) {
             return;
@@ -223,15 +224,25 @@ impl Analyzer {
     }
 
     /// Can object `o` be hashed (a dict key, a set member)? Lists, dicts and sets cannot; a tuple
-    /// as its items; others can.
-    fn obj_hashing(&self, o: u32, state: &State, depth: usize) -> Hashing {
+    /// as its items; others can. (`memo`: per object and depth, a tuple whose items may be many
+    /// tuples is asked once, not once per path to it.)
+    fn obj_hashing(&self, o: u32, state: &State, depth: usize, memo: &mut rustc_hash::FxHashMap<(u32, usize), Hashing>) -> Hashing {
+        if let Some(h) = memo.get(&(o, depth)) {
+            return *h;
+        }
+        let h = self.obj_hashing_once(o, state, depth, memo);
+        memo.insert((o, depth), h);
+        h
+    }
+
+    fn obj_hashing_once(&self, o: u32, state: &State, depth: usize, memo: &mut rustc_hash::FxHashMap<(u32, usize), Hashing>) -> Hashing {
         let ob = self.heap.obj(o);
         match ob.kind {
             Kind::List | Kind::Dict if !ob.iterator => Hashing::Unhashable,
             Kind::Set if !ob.iterator && !ob.label.starts_with("frozenset") => Hashing::Unhashable,
             Kind::Tuple if depth < 3 => {
-                let item = |v: &Value| {
-                    let hs: Vec<Hashing> = v.pts.iter().map(|x| self.obj_hashing(x, state, depth + 1)).collect();
+                let mut item = |v: &Value| {
+                    let hs: Vec<Hashing> = v.pts.iter().map(|x| self.obj_hashing(x, state, depth + 1, memo)).collect();
                     match hs.iter().copied().max() {
                         Some(Hashing::Unhashable) if v.kv.is_bot() && hs.iter().all(|h| *h == Hashing::Unhashable) => Hashing::Unhashable,
                         Some(Hashing::Hashable) | None => kv_hashing(&v.kv),

@@ -58,10 +58,11 @@ pub struct RecvEffects {
 type Loc = (ObjId, Ns, KeyId);
 
 /// A closure's walk (`walk_closure`): the closure so far, the code still to walk, the names the
-/// code walked uses, the classes met (those up to `classes_seen` looked at for the names in
-/// `names_seen`: read, or changed), the class attributes followed or changed.
+/// code walked uses, the classes met (those up to `classes_seen` looked at for the names as
+/// `names_seen` says they were used then, found by `by_name`), the class attributes followed,
+/// and those changed with the flags applied to them.
 #[derive(Default)]
-struct ClosureWalk {
+pub struct ClosureWalk {
     out: Closure,
     work: Vec<ObjId>,
     attrs: FxHashMap<StrId, Flags>,
@@ -69,21 +70,34 @@ struct ClosureWalk {
     class_stores: FxHashSet<StrId>,
     classes: Vec<ObjId>,
     done: FxHashSet<(ObjId, KeyId)>,
-    done_attrs: FxHashSet<(ObjId, KeyId)>,
+    done_attrs: FxHashMap<(ObjId, KeyId), Flags>,
     classes_seen: usize,
-    names_seen: FxHashSet<(bool, StrId)>,
-    /// grown again later (the library's): a class met before is looked at for new names only
-    incremental: bool,
+    names_seen: FxHashMap<StrId, (bool, Option<Flags>, bool)>,
+    /// per attribute name, the classes met that have it
+    by_name: FxHashMap<KeyId, Vec<ObjId>>,
+    /// the names whose use the code walked since the classes were last looked at may have grown
+    dirty: Vec<StrId>,
 }
 
 impl ClosureWalk {
-    /// The closure walked so far, its slots sorted.
+    /// The closure walked so far, its slots sorted (a slot whose flags grew as the walk went
+    /// on is where each of its flags put it: a value that may change keeps what it holds that
+    /// may, a walk from it does not reach all of that).
     fn finished(&self) -> Closure {
         let mut c = self.out.clone();
-        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound] {
+        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs] {
             l.sort_unstable();
             l.dedup();
         }
+        let mut removed: Vec<(Loc, Removes)> = Vec::new();
+        for (l, r) in std::mem::take(&mut c.removed_locs) {
+            match removed.iter_mut().find(|(m, _)| *m == l) {
+                Some(e) => e.1 = e.1.join(r),
+                None => removed.push((l, r)),
+            }
+        }
+        removed.sort_unstable_by_key(|(l, _)| *l);
+        c.removed_locs = removed;
         c
     }
 }
@@ -463,8 +477,9 @@ impl Analyzer {
     /// change (mutable defaults, bound receivers). Computed once per set of roots: the code a
     /// name holds is taken as fixed (rebinding a function or class is monkey-patching), and
     /// methods called by a computed name are not followed; the code in the data those values
-    /// hold is followed where the call is (`skipped_call`).
-    pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], state: &State) -> std::rc::Rc<Closure> {
+    /// hold is followed where the call is (`skipped_call`). `from`: the walk of a subset of the
+    /// roots, resumed (and left there), unless the closure is cached.
+    pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
         let whole = self.effects.whole.is_some();
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
@@ -475,7 +490,6 @@ impl Analyzer {
         let library = roots.iter().any(|r| self.heap.func_info_opt(*r).is_some_and(|fi| self.heap.module_info(fi.module).library));
         if library && !whole {
             let mut lib = std::mem::take(&mut self.effects.library);
-            lib.walk.incremental = true;
             let fresh: Vec<ObjId> = roots.iter().copied().filter(|r| !lib.walk.out.code.contains(r)).collect();
             if !fresh.is_empty() || lib.closure.is_none() {
                 lib.walk.work.extend(fresh);
@@ -486,9 +500,13 @@ impl Analyzer {
             self.effects.library = lib;
             return c;
         }
-        let mut w = ClosureWalk { work: roots.to_vec(), ..Default::default() };
+        // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
+        // code the last one's data held)
+        let mut w = from.take().unwrap_or_default();
+        w.work.extend_from_slice(roots);
         self.walk_closure(&mut w, state);
         let c = std::rc::Rc::new(w.finished());
+        *from = Some(w);
         // (a cache of what the program's code reaches, by root set: on large programs the root
         // sets rarely repeat, so it is emptied past a bound on what it holds)
         if whole {
@@ -505,10 +523,11 @@ impl Analyzer {
     }
 
     /// Walk the code `w.work` holds into `w`'s closure (resumable: code already in it is not
-    /// walked again; a class already met is looked at again only for the names met since).
+    /// walked again; a class already met is looked at again only for the names whose use grew
+    /// since: the closure is the same whatever order the code is met in).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
-        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, incremental } = w;
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
@@ -518,6 +537,10 @@ impl Analyzer {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
                         self.function_closure(&fi, state, out, attrs, reads, class_stores, work);
+                        // (the names whose use it may have grown)
+                        let u = self.code_uses(&fi);
+                        dirty.extend(u.attrs.keys().chain(u.reads.iter()).chain(u.class_stores.iter()).copied());
+                        dirty.extend(u.class_stores_result.iter().map(|(_, a)| *a).chain(u.uses.iter().filter_map(|x| x.attr)));
                     }
                     (Kind::Module, _) => {
                         // (a module used as a value: any of its globals)
@@ -546,32 +569,43 @@ impl Analyzer {
             }
             // the methods of the classes reached that the code reads (dunders run implicitly),
             // and their attributes it may change or rebind: of a class met before, by the names
-            // met since
-            let fresh_keys: Vec<KeyId> = if *incremental && *classes_seen > 0 {
-                // (a name newly read, or newly changed: either asks the classes again)
-                let fresh: FxHashSet<StrId> = reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))).filter(|p| !names_seen.contains(p)).map(|(_, n)| n).collect();
-                fresh.iter().map(|n| key_str_lit(&str_get(*n))).collect()
-            } else {
-                Vec::new()
-            };
-            if *incremental {
-                names_seen.extend(reads.iter().map(|n| (true, *n)).chain(attrs.keys().chain(class_stores.iter()).map(|n| (false, *n))));
+            // whose use grew since (newly read, changed in more ways, or stored)
+            let mut fresh_keys: Vec<KeyId> = Vec::new();
+            dirty.sort_unstable();
+            dirty.dedup();
+            for n in dirty.drain(..) {
+                let now = (reads.contains(&n), attrs.get(&n).copied(), class_stores.contains(&n));
+                if names_seen.insert(n, now) != Some(now) {
+                    fresh_keys.push(key_str_lit(&str_get(n)));
+                }
             }
-            for (i, &c) in classes.iter().enumerate() {
-                let slots: Vec<(KeyId, Value)> = if !*incremental || i >= *classes_seen {
-                    state.obj_slots(c, Ns::Attr)
-                } else {
-                    fresh_keys.iter().filter_map(|&k| state.slot_opt(c, Ns::Attr, k).map(|v| (k, v))).collect()
-                };
-                for (k, v) in slots {
-                    let name = intern::key_str_id(k);
-                    if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
-                        code(self, &v, work);
-                    }
-                    let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
-                    if (flags.is_some() || rebinds) && done_attrs.insert((c, k)) {
-                        let mut f = flags.unwrap_or_default();
-                        f.rebinds = rebinds;
+            fresh_keys.sort_unstable();
+            fresh_keys.dedup();
+            // (a class met before: its attributes under those names, by the index of the names
+            // the classes have; a class met now: all of them, indexed)
+            let mut slots: Vec<(ObjId, KeyId, Value)> = Vec::new();
+            for &k in &fresh_keys {
+                for &c in by_name.get(&k).map(|v| v.as_slice()).unwrap_or_default() {
+                    slots.extend(state.slot_opt(c, Ns::Attr, k).map(|v| (c, k, v)));
+                }
+            }
+            for &c in &classes[*classes_seen..] {
+                for (k, v) in state.obj_slots(c, Ns::Attr) {
+                    by_name.entry(k).or_default().push(c);
+                    slots.push((c, k, v));
+                }
+            }
+            for (c, k, v) in slots {
+                let name = intern::key_str_id(k);
+                if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
+                    code(self, &v, work);
+                }
+                let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
+                if flags.is_some() || rebinds {
+                    let mut f = flags.unwrap_or_default();
+                    f.rebinds = rebinds;
+                    // (again when its flags grew: the walk met more code changing it)
+                    if done_attrs.insert((c, k), f) != Some(f) {
                         self.apply_flags(&f, (c, Ns::Attr, k), state, out);
                     }
                 }

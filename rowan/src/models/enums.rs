@@ -219,7 +219,7 @@ pub(crate) fn make_enum_members(an: &mut Analyzer, c: &'static ast::StmtClassDef
             } else {
                 Value::lit(crate::intern::key_int(last_int + 1))
             };
-            an.heap.cls_slots.insert((coid, Ns::Attr, nk), av);
+            an.heap.set_cls_slot((coid, Ns::Attr, nk), av);
         }
         let Some(v) = an.heap.cls_slots.get(&(coid, Ns::Attr, nk)).cloned() else { continue };
         if v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Class)) {
@@ -231,7 +231,7 @@ pub(crate) fn make_enum_members(an: &mut Analyzer, c: &'static ast::StmtClassDef
         // a value an earlier member has: an alias of that member (not iterated)
         let vlit = v.kv.as_lit().filter(|_| v.pts.is_empty());
         if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m) {
-            an.heap.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
+            an.heap.set_cls_slot((coid, Ns::Attr, nk), Value::obj(prev));
             state.set_slot(coid, Ns::Attr, nk, Value::obj(prev), true);
             an.m.enum_aliases.entry(coid).or_default().push((name, prev));
             continue;
@@ -244,7 +244,7 @@ pub(crate) fn make_enum_members(an: &mut Analyzer, c: &'static ast::StmtClassDef
             state.set_slot(mid, Ns::Attr, kk, val, true);
         }
         state.set_row(mid, Ns::Attr, row);
-        an.heap.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(mid));
+        an.heap.set_cls_slot((coid, Ns::Attr, nk), Value::obj(mid));
         state.set_slot(coid, Ns::Attr, nk, Value::obj(mid), true);
         let mval = if ek.mixed { v.kv.as_lit().filter(|_| v.pts.is_empty()) } else { None };
         let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);

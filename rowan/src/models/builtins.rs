@@ -148,6 +148,21 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
+    // `iter(it)` of an iterator (a generator, another `iter`'s) is `it`: none of a generator's
+    // body runs before its items are taken
+    if let (true, [a]) = (c.qual == "builtins.iter" && c.kwargs.is_empty(), c.args.as_slice()) {
+        let is_it = |an: &Analyzer, o: ObjId| an.heap.obj(o).iterator && an.heap.kind(o) == Kind::List;
+        let its = a.pts.filter(|o| is_it(an, o));
+        if !its.is_empty() {
+            let rest = Value { pts: a.pts.filter(|o| !is_it(an, o)), kv: a.kv.clone() };
+            if rest.pts.is_empty() && rest.kv.is_bot() {
+                return a.clone();
+            }
+            let mut c2 = c.clone();
+            c2.args = vec![rest];
+            return m_list(an, st, &c2).join(&Value::objs(its));
+        }
+    }
     let kind = match c.qual.as_str() {
         "builtins.tuple" => Kind::Tuple,
         "builtins.set" | "builtins.frozenset" => Kind::Set,
@@ -1524,14 +1539,14 @@ pub(super) fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
                         let v = st.slot(ns, Ns::Item, k);
-                        an.heap.cls_slots.insert((cls, Ns::Attr, k), v.clone());
+                        an.heap.set_cls_slot((cls, Ns::Attr, k), v.clone());
                         st.set_slot(cls, Ns::Attr, k, v, true);
                         let r = st.row(cls, Ns::Attr).store(k, row.definite.contains(k));
                         st.set_row(cls, Ns::Attr, r);
                     }
                     if lit_name.is_none() {
                         for k in ["__name__", "__qualname__"] {
-                            an.heap.cls_slots.insert((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
+                            an.heap.set_cls_slot((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
                         }
                     }
                 }
