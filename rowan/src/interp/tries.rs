@@ -534,6 +534,16 @@ impl Analyzer {
         }).collect()
     }
 
+    /// The exceptions of a raise (`x`) a handler of classes `hc` may bind: those of a class it
+    /// does not surely miss. None: only exceptions it misses.
+    fn exceptions_caught(&self, x: &Value, hc: &(FxHashSet<String>, bool)) -> Option<Value> {
+        let keep: Vec<ObjId> = x.pts.iter().filter(|o| handler_matches(hc, &self.exc_value_names(&Value::obj(*o))) != Some(false)).collect();
+        if keep.len() == x.pts.len() {
+            return Some(x.clone());
+        }
+        (!keep.is_empty() || !x.kv.is_bot()).then(|| Value::with_kv(crate::domain::ObjSet::from_vec(keep), x.kv.clone()))
+    }
+
     /// Raises no handler surely catches go on to the enclosing try (or out of the call),
     /// through the finally.
     fn reraise_uncaught(&mut self, recs: &mut [crate::interp::RaiseRec], hclasses: &[(FxHashSet<String>, bool)], fin: &std::rc::Rc<Finally>) {
@@ -569,6 +579,9 @@ impl Analyzer {
                     if handler_matches(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
                         continue;
                     }
+                    // (a raise of one of several exceptions, `raise` of a handler's: the handler
+                    // binds those of its classes; none of them: it catches none of this raise)
+                    let Some(x) = self.exceptions_caught(x, &hclasses[hi]) else { continue };
                     let mut r = st.copy();
                     e = if e.reachable { e.join(&mut r) } else { r };
                     let x = if x.pts.is_empty() { unknown.clone() } else { x.clone() };
