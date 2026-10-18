@@ -147,7 +147,7 @@ uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink] 
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py [-j N]: vs whole runs; bench/first_hover.py (same arguments, rich): rowan serve's first hover in a file
-uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/)
+uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/); --uncapped: also no allowance (fanout), no bounds
 ```
 
 Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`, every push and PR): build, `cargo test`, golden (`--pending` informational), snapshots,
@@ -191,7 +191,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | --- | --- |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.7 / ~5.5 s; 0.10 / 0.06 / 0.10 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.5 / ~1.0 / ~3.6 / ~4.8 s; 0.27 / 0.22 / 0.21 / 0.30 GB |
-| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 1800 / 3.9 / > 1800 s (importing scipy.special alone: 4.2 s) |
+| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.39 / 0.21 (0.06) / 0.70 / 0.21 / 1.7 s; 31 / 29 (14) / 70 / 75 / 358 MB (none: < 0.01 s, 10 MB); hover facts gained 6 / 30 / 13 / 13 / 0; no allowance (`fanout` off): 0.38 / 0.22 / 20 / 2.1 / > 300 s; no bounds: 0.52 / 0.22 / > 300 / 3.9 / > 300 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps
