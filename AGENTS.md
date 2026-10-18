@@ -68,7 +68,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
     the program's functions (given its instances, their changing dunders may run: `library_dunders`; `random.choice` / `sample` give back the items); several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
-    per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
+    per function when it would not run, or on demand, and one for its merged receivers; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
     sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
