@@ -149,7 +149,7 @@ impl Analyzer {
             if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
                 self.cx.summary_items.insert(own, items.len());
             }
-            if items.len() <= limit && !same {
+            if (items.len() <= limit || (limit != SUMMARY && self.distinct_objects(items))) && !same {
                 let unordered = it.unordered;
                 self.cx.comp_unordered += usize::from(unordered);
                 let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();

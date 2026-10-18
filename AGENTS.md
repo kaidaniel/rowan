@@ -35,7 +35,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Statements.** A test is evaluated once into the states where it is true and false
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join;
   a pure test's branch rows come back when it recurs (`CondFact`: tests a function repeats, until a write).
-  Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
+  Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64; items each one distinct object: 256, `distinct_objects`, else every round runs the body once per object);
   others run to a fixpoint (40 rounds, then widened; verdicts and hover values are the last round's), making
   summaries; a target bound to one of the records a summary (or an input's element) stands for
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A

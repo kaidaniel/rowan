@@ -70,6 +70,9 @@ pub use crate::models::tables::*;
 /// A `for` over at most this many known items is unrolled (each iteration straight-line code);
 /// a comprehension that calls nothing per item, up to four times as many (`comps.rs`).
 pub const UNROLL_MAX: usize = 16;
+/// Past `UNROLL_MAX`, known items that are each one distinct object are unrolled up to this many
+/// (`distinct_objects`).
+pub const RECEIVERS_MAX: usize = 256;
 /// A call of a value that may be more than this many of the program's functions is one call
 /// none of which runs (`budget_skipped`).
 pub const PICK_MAX: usize = 64;

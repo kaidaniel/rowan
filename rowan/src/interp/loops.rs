@@ -13,7 +13,7 @@ use crate::source::{source_is_data, SourceId};
 
 use super::iter::{Elem, Iteration};
 use super::stmts::{add_facts, cond_facts_for};
-use super::{Analyzer, LoopCtx, UNROLL_MAX};
+use super::{Analyzer, LoopCtx, RECEIVERS_MAX, UNROLL_MAX};
 
 /// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
 pub const LOOP_MAX_ITER: usize = 40;
@@ -306,7 +306,7 @@ impl Analyzer {
     /// one-shot iterator a `break` may leave, and where it stood. False: not unrolled.
     fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, state: &mut State) -> bool {
         let unrolled = match &it.ordered_items() {
-            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
+            Some(items) if (items.len() <= UNROLL_MAX || self.distinct_objects(items)) && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
             None => self.maybe_dict_items(itv, state).map(|items| (items, None)),
             _ => None,
         };
@@ -712,6 +712,16 @@ impl Analyzer {
     /// iterations cannot be told apart, they run as a loop.
     pub(super) fn identical_summaries(&self, items: &[Value]) -> bool {
         items.len() > 1 && !items[0].pts.is_empty() && items[0].kv.is_bot() && items.iter().all(|v| *v == items[0]) && items[0].pts.iter().all(|o| !self.heap.obj(o).single)
+    }
+
+    /// Known items past the unrolling bound that are each one distinct object (up to
+    /// `RECEIVERS_MAX`): a fixpoint over their join would run what the body calls on the element
+    /// once per object in every round (one alternative per receiver), the first and the
+    /// confirming round at least; unrolled, each runs once, on its own object.
+    pub(super) fn distinct_objects(&self, items: &[Value]) -> bool {
+        items.len() <= RECEIVERS_MAX
+            && items.iter().all(|v| v.kv.is_bot() && v.pts.len() == 1 && v.pts.iter().all(|o| self.heap.obj(o).single))
+            && crate::intern::IdSet::from_vec(items.iter().flat_map(|v| v.pts.iter()).collect()).len() == items.len()
     }
 
     /// Whether nothing but the list `l` (and the loop `target`'s names) holds `s` in `state`
