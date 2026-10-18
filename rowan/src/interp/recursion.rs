@@ -274,7 +274,6 @@ impl Analyzer {
                 st.exits = None;
             }
             self.fold_call_recent(&mut st, &entry_state, &mut ret);
-            st.ret = Some(ret.clone());
             st.reachable = completed;
             if self.recursion.widened.contains(key) {
                 self.recursion.widened.remove(key);

@@ -230,11 +230,14 @@ impl Analyzer {
     }
 
     /// Recency per call, the return's step (`call_recent`): the call's recent objects fold into
-    /// their summaries in its end state `st` (from `head`, its start) and its result.
+    /// their summaries in its end state `st` (from `head`, its start) and its result `ret`,
+    /// which `st` then holds.
     pub(in crate::interp) fn fold_call_recent(&mut self, st: &mut State, head: &State, ret: &mut Value) {
         let recs = std::mem::take(&mut self.frame_mut().recent);
-        let Some(super::PreCall(mark, _)) = self.frame().pre_call.clone() else { return };
-        self.fold_recent_in(st, head, mark, recs, ret, false);
+        if let Some(super::PreCall(mark, _)) = self.frame().pre_call.clone() {
+            self.fold_recent_in(st, head, mark, recs, ret, false);
+        }
+        st.ret = Some(ret.clone());
     }
 
     /// The recent objects `recs` of calls fold into their summaries in `st` (from `head` and the
