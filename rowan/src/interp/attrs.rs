@@ -124,12 +124,63 @@ impl Analyzer {
         runs
     }
 
+    /// A read of a property on several receivers: those whose property would not run (out of
+    /// its budget, past the work a run may do) make one call for all of them, as a method's call
+    /// on several receivers does (`skipped_calls`); the rest are read apart. None: fewer than
+    /// two would not run.
+    fn skipped_properties(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Option<Value> {
+        if obj.pts.len() < 2 {
+            return None;
+        }
+        let past = self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) || self.budget.over_hard_deadline() || self.budget.past_library_work(self.library_work());
+        let (mut fns, mut rest, mut n): (Vec<(ObjId, Option<Value>)>, Vec<ObjId>, usize) = (Vec::new(), Vec::new(), 0);
+        for o in obj.pts.iter() {
+            match self.property_of(o, name).filter(|f| past || self.out_of_budget(*f)) {
+                Some(f) => {
+                    n += 1;
+                    match fns.iter_mut().find(|(g, _)| *g == f) {
+                        Some((_, r)) => *r = Some(r.take().unwrap_or_default().join(&Value::obj(o))),
+                        None => fns.push((f, Some(Value::obj(o)))),
+                    }
+                }
+                None => rest.push(o),
+            }
+        }
+        if n < 2 {
+            return None;
+        }
+        let mut st = state.copy();
+        let mut outs = vec![self.skipped_calls(&fns, Args::pos(&[]), &mut st, node, None)];
+        if !rest.is_empty() || !obj.kv.is_bot() {
+            let mut others = Value::objs(crate::domain::ObjSet::from_vec(rest));
+            others.kv = obj.kv.clone();
+            let mut st2 = state.copy();
+            outs.push(self.load_attr(&others, name, node, &mut st2, report));
+            st = st.join(&mut st2);
+        }
+        state.replace_with(st);
+        Some(join_values(outs))
+    }
+
+    /// The property (not cached) reading `name` of instance `o` runs, when nothing else does.
+    fn property_of(&self, o: ObjId, name: &str) -> Option<ObjId> {
+        let c = self.user_class_of(o)?;
+        if ["__getattr__", "__getattribute__"].iter().any(|h| self.class_lookup(c, h).is_some()) {
+            return None;
+        }
+        let cv = self.heap.class_attr(self.class_lookup(c, name)?, name);
+        cv.single().filter(|f| cv.kv.is_bot() && self.heap.kind(*f) == Kind::Function && self.heap.func_info(*f).is_property.get() && !self.heap.func_info(*f).is_cached.get())
+    }
+
     // ---------------------------------------------------------- attributes
     /// A read `obj.name`: per receiver when one runs code for it (a property, a descriptor,
     /// `__getattr__`), else on each object by its kind — an instance (`load_instance_attr`), a
     /// class, a module, an unknown (`load_unknown_attr`), a library object (its method or
     /// attribute model) — with a verdict where a record may lack the name.
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        if let Some(v) = self.skipped_properties(obj, name, node, state, report) {
+            return v;
+        }
         if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
             return v;
         }
