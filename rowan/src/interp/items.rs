@@ -1073,15 +1073,19 @@ impl Analyzer {
             }
         }
         // (a source with keys not known — an input — may replace the value under any key the
-        // record has: its value there joins in)
-        for k in state.slot_keys(oid, ns) {
-            if kill.contains(k) || vals.contains_key(&k) {
+        // record or another source has: its value there joins in, beside the other sources')
+        let mut keys = state.slot_keys(oid, ns);
+        keys.extend(vals.keys().copied().filter(|k| *k != intern::STAR));
+        keys.sort_unstable();
+        keys.dedup();
+        for k in keys {
+            if kill.contains(k) {
                 continue;
             }
             for &x in &recs {
                 let xns = ns_of(self, x);
                 let xr = state.row(x, xns);
-                if xr.open() && !xr.lacks(k) {
+                if xr.open() && !xr.lacks(k) && state.slot_opt(x, xns, k).is_none() {
                     let part = self.path_placeholder_value(x, xns, k, &xr, state);
                     let cur = vals.entry(k).or_default();
                     *cur = cur.join(&part);

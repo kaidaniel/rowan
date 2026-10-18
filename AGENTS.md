@@ -35,7 +35,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Statements.** A test is evaluated once into the states where it is true and false
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join;
   a pure test's branch rows come back when it recurs (`CondFact`: tests a function repeats, until a write).
-  Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
+  Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64; items each one distinct object: 256, `distinct_objects`, else every round runs the body once per object);
   others run to a fixpoint (40 rounds, then widened; verdicts and hover values are the last round's), making
   summaries; a target bound to one of the records a summary (or an input's element) stands for
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
@@ -55,7 +55,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened. An activation is a call site in its context (4 deep, then the innermost); with literal arguments, its place, receiver and literals (40 deep); a call of itself with nothing but the innermost one's arguments or data from outside: the innermost past one level (`recursion_without_progress`).
-  * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class).
+  * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class); where that code may have removed an attribute, the class's `__getattr__` there is a call that does not run.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
@@ -67,7 +67,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
-    the program's functions (given its instances, their changing dunders may run: `library_dunders`; `random.choice` / `sample` give back the items); several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
+    the program's functions (not `inspect.getdoc` & co., which only look at them: `LOOKS_AT_CODE`; given its instances, their changing dunders may run: `library_dunders`; `random.choice` / `sample` give back the items); several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
     per function when it would not run, or on demand, and one for its merged receivers; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
@@ -189,10 +189,10 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 
 | input | time |
 | --- | --- |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.9 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~1.0 / ~4.2 / ~4.6 s; 0.27 / 0.22 / 0.20 / 0.35 GB |
-| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 300 / 3.9 / > 300 s |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.42 / 0.47 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.7 / ~5.5 s; 0.10 / 0.06 / 0.10 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.5 / ~1.0 / ~3.6 / ~4.8 s; 0.27 / 0.22 / 0.21 / 0.30 GB |
+| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 1800 / 3.9 / > 1800 s (importing scipy.special alone: 4.2 s) |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps
 
