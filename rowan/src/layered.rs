@@ -333,6 +333,11 @@ fn merge<K: Clone, V: Clone + PartialEq>(s: &Tree<K, V>, t: &Tree<K, V>, g: &mut
 /// Calls `f` with every key whose value differs between the trees (present in one only, or
 /// unequal); `f` returns false to stop. Returns false when stopped.
 fn diff<K: Clone, V: PartialEq>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, f: &mut dyn FnMut(&K) -> bool) -> bool {
+    diff_by(s, t, &|a: &V, b: &V| a == b, f)
+}
+
+/// `diff` with values equal when `eq` says so.
+fn diff_by<K: Clone, V>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, eq: &dyn Fn(&V, &V) -> bool, f: &mut dyn FnMut(&K) -> bool) -> bool {
     let (s, t) = match (s, t) {
         (None, None) => return true,
         (Some(x), None) | (None, Some(x)) => return all_keys(x, f),
@@ -348,7 +353,7 @@ fn diff<K: Clone, V: PartialEq>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, 
             let ok = all_keys_where(t, &mut |kk, hh, w| {
                 if hh == *h {
                     seen = true;
-                    if w == v { true } else { f(kk) }
+                    if eq(w, v) { true } else { f(kk) }
                 } else {
                     f(kk)
                 }
@@ -361,21 +366,21 @@ fn diff<K: Clone, V: PartialEq>(s: Option<&Tree<K, V>>, t: Option<&Tree<K, V>>, 
             }
             true
         }
-        (_, Node::Leaf { .. }) => diff(Some(t), Some(s), f),
+        (_, Node::Leaf { .. }) => diff_by(Some(t), Some(s), eq, f),
         (Node::Branch { p, m, l: s0, r: s1 }, Node::Branch { p: q, m: n, l: t0, r: t1 }) => {
             if m == n && p == q {
-                diff(Some(s0), Some(t0), f) && diff(Some(s1), Some(t1), f)
+                diff_by(Some(s0), Some(t0), eq, f) && diff_by(Some(s1), Some(t1), eq, f)
             } else if m > n && match_prefix(*q, *p, *m) {
                 if zero_bit(*q, *m) {
-                    diff(Some(s0), Some(t), f) && all_keys(s1, f)
+                    diff_by(Some(s0), Some(t), eq, f) && all_keys(s1, f)
                 } else {
-                    all_keys(s0, f) && diff(Some(s1), Some(t), f)
+                    all_keys(s0, f) && diff_by(Some(s1), Some(t), eq, f)
                 }
             } else if m < n && match_prefix(*p, *q, *n) {
                 if zero_bit(*p, *n) {
-                    diff(Some(s), Some(t0), f) && all_keys(t1, f)
+                    diff_by(Some(s), Some(t0), eq, f) && all_keys(t1, f)
                 } else {
-                    all_keys(t0, f) && diff(Some(s), Some(t1), f)
+                    all_keys(t0, f) && diff_by(Some(s), Some(t1), eq, f)
                 }
             } else {
                 all_keys(s, f) && all_keys(t, f)
@@ -522,6 +527,17 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
     /// Keys whose value differs between self and base.
     pub fn diff_keys(&self, base: &LayerMap<K, V>) -> Vec<K> {
         self.diff_upto(base, usize::MAX).unwrap_or_default()
+    }
+
+    /// The keys whose value one of the two maps wrote since they shared it (`MapValue::same_write`:
+    /// a row written equal to the other's counts), or None once more than `limit` do.
+    pub fn written_upto(&self, base: &LayerMap<K, V>, limit: usize) -> Option<Vec<K>> {
+        let mut out = Vec::new();
+        let done = diff_by(self.root.as_ref(), base.root.as_ref(), &|a: &V, b: &V| a.same_write(b), &mut |k| {
+            out.push(k.clone());
+            out.len() <= limit
+        });
+        done.then_some(out)
     }
 
     /// `diff_keys`, or None once more than `limit` keys differ.
@@ -834,6 +850,29 @@ mod tests {
         d.sort();
         assert_eq!(d, vec![2, 3]);
         let ac = a.clone(); assert!(a.same(&ac));
+    }
+
+    #[test]
+    fn written_counts_equal_writes() {
+        #[derive(Clone, PartialEq)]
+        struct W(Arc<u32>);
+        impl MapValue for W {
+            fn same_write(&self, o: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &o.0)
+            }
+        }
+        let mut m: LayerMap<u32, W> = LayerMap::new();
+        for i in 0..20 {
+            m.insert(i, W(Arc::new(i)));
+        }
+        let mut a = m.clone();
+        a.insert(3, W(Arc::new(3)));
+        a.insert(25, W(Arc::new(25)));
+        assert_eq!(a.diff_keys(&m), vec![25]);
+        let mut w = a.written_upto(&m, 10).unwrap();
+        w.sort();
+        assert_eq!(w, vec![3, 25]);
+        assert!(a.written_upto(&m, 1).is_none());
     }
 
     #[test]

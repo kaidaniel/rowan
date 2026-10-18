@@ -253,6 +253,7 @@ impl Analyzer {
     fn method_calls(&self, v: &Value, names: &[&str]) -> (Vec<(ObjId, ObjId)>, Value) {
         let mut calls = Vec::new();
         let mut rest = Value::kv_only(v.kv.clone());
+        let mut others = Vec::new();
         for o in v.pts.iter() {
             let cls = self.heap.instance_class(o).filter(|_| self.heap.kind(o) == Kind::Instance);
             let found = cls.and_then(|c| names.iter().find_map(|n| Some((self.class_lookup(c, n)?, *n))));
@@ -261,9 +262,10 @@ impl Analyzer {
                     let fv = self.heap.class_attr(m, n);
                     calls.extend(fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).map(|f| (o, f)));
                 }
-                None => rest.pts = rest.pts.insert(o),
+                None => others.push(o),
             }
         }
+        rest.pts = crate::intern::IdSet::from_vec(others);
         (calls, rest)
     }
 

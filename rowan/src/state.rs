@@ -509,11 +509,19 @@ impl State {
     /// two differ in: a write on one of them, though the join may give back an equal row).
     fn fresh_facts(&self, o: &State) -> Vec<Arc<CondFact>> {
         let mut out = Vec::new();
-        for f in self.facts.iter().filter(|f| o.facts.iter().any(|g| Arc::ptr_eq(f, g))) {
-            let same = |k: &(ObjId, Ns)| match (self.rows.get(k), o.rows.get(k)) {
-                (Some(a), Some(b)) => a.same_ptr(&b),
-                (None, None) => true,
-                _ => false,
+        let shared: Vec<&Arc<CondFact>> = self.facts.iter().filter(|f| o.facts.iter().any(|g| Arc::ptr_eq(f, g))).collect();
+        // the rows one of the two states wrote, when fewer than the facts' rows (costs what they
+        // differ in), else each row looked up in both
+        let looked: usize = shared.iter().map(|f| f.rows.len() + f.guards.len()).sum();
+        let differ: Option<rustc_hash::FxHashSet<(ObjId, Ns)>> = self.rows.written_upto(&o.rows, looked).map(|v| v.into_iter().collect());
+        for f in shared {
+            let same = |k: &(ObjId, Ns)| match &differ {
+                Some(d) => !d.contains(k),
+                None => match (self.rows.get(k), o.rows.get(k)) {
+                    (Some(a), Some(b)) => a.same_ptr(&b),
+                    (None, None) => true,
+                    _ => false,
+                },
             };
             if f.rows.iter().all(|(k, _, _)| same(k)) && f.guards.iter().all(|(k, _)| same(k)) {
                 out.push(f.clone());
