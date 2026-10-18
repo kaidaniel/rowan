@@ -14,7 +14,7 @@ impl Analyzer {
     /// Run `body` as one entry of the program's code into a followed library's code: within its
     /// allowance it is the result; past it (or past all entries' allowance) the state is as
     /// before, the modules and classes it made are forgotten, and it is None.
-    pub(super) fn library_entry<T>(&mut self, state: &mut State, body: impl FnOnce(&mut Analyzer, &mut State) -> T) -> Option<T> {
+    pub(super) fn library_entry<T>(&mut self, what: impl Fn() -> String, state: &mut State, body: impl FnOnce(&mut Analyzer, &mut State) -> T) -> Option<T> {
         if self.budget.lib_entry.is_some() {
             return Some(body(self, state));
         }
@@ -31,6 +31,9 @@ impl Analyzer {
         let r = body(self, state);
         self.budget.lib_entry = None;
         self.budget.lib_work += self.library_work() - w0;
+        if super::debug_enabled() {
+            eprintln!("library entry {}: work {}{}", what(), self.library_work() - w0, if self.budget.lib_abort { ", undone" } else { "" });
+        }
         if !std::mem::take(&mut self.budget.lib_abort) {
             return Some(r);
         }
@@ -44,8 +47,10 @@ impl Analyzer {
 
     /// The work done so far, as an entry's allowance counts it: statements, objects, havoc and
     /// reachability visits, and row joins (a library's merges of large values cost in joins).
+    /// Not definitions (functions, classes, modules): the statement making one pays for it, and
+    /// an import makes one per `def` of the code it loads.
     pub(super) fn library_work(&self) -> usize {
-        self.hover_work() + crate::domain::row_joins() + crate::state::fp_visits() / 16
+        self.hover_work() - self.heap.defs + crate::domain::row_joins() + crate::state::fp_visits() / 16
     }
 
     /// The result of a call into a library (an entry): an unknown scalar is named by the call as
@@ -67,7 +72,7 @@ impl Analyzer {
     /// `import name` of a followed library from the program's code: one entry
     /// (`library_entry`); undone, the module is unknown (and so is its parent's attribute).
     pub(super) fn import_library(&mut self, name: &str, node: &crate::frontend::Node, state: &mut State) -> Value {
-        if let Some(v) = self.library_entry(state, |an, st| an.import_module(name, node, st)) {
+        if let Some(v) = self.library_entry(|| format!("import {}", name), state, |an, st| an.import_module(name, node, st)) {
             return v;
         }
         let ext = self.external_module(name);

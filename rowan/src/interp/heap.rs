@@ -324,6 +324,9 @@ pub struct Heap {
     main_clones: FxHashMap<String, usize>,
     /// allocations so far (`Obj::born`): the collectors' marks
     serial: u64,
+    /// the functions, classes and modules made so far (definitions: the statement making one
+    /// pays for it, `Analyzer::library_work`)
+    pub defs: usize,
     /// keys standing for objects
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
@@ -353,7 +356,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, defs: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
@@ -473,6 +476,7 @@ impl Heap {
             ty: None,
         });
         self.serial += 1;
+        self.defs += usize::from(matches!(kind, Kind::Function | Kind::Class | Kind::Module));
         self.index.insert(key, oid);
         oid
     }

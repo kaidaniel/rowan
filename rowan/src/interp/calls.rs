@@ -222,26 +222,52 @@ impl Analyzer {
     /// A method on several receivers is one call with all of them as the receiver, not one per
     /// receiver, when the call would not run (past the function's budget, no recursion of it
     /// running) or in a run on demand (a base class's method run for the instances of every
-    /// subclass): the groups (function, receivers, how many), and the other callees.
+    /// subclass); and its receivers that each stand for several objects (`merged`: stores into
+    /// them only join) are one call, as a run for each of them would be no more exact where it
+    /// stores, while nested calls on several receivers would multiply. The groups (function,
+    /// receivers, how many), and the other callees.
     #[allow(clippy::type_complexity)]
     fn receiver_groups(&self, targets: Vec<ObjId>) -> (Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
         let on_demand = self.budget.hover.is_some();
         let skips = |an: &Analyzer, f: ObjId| an.out_of_budget(f);
-        let mut groups: Vec<(ObjId, Value, usize)> = Vec::new();
-        for &o in &targets {
-            if let (Kind::Bound, Payload::Bound(f, r)) = (self.heap.kind(o), &self.heap.obj(o).payload) {
-                match groups.iter_mut().find(|g| g.0 == *f) {
-                    Some(g) => {
-                        g.1 = g.1.join(r);
-                        g.2 += 1;
+        let bound = |o: ObjId| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Bound, Payload::Bound(f, r)) => Some((*f, r.clone())),
+            _ => None,
+        };
+        let merged = |r: &Value| !r.pts.is_empty() && r.pts.iter().all(|o| !self.heap.obj(o).single);
+        // per function: all its receivers, and those that stand for several objects
+        let mut all: Vec<(ObjId, Value, usize, Value, usize)> = Vec::new();
+        for (f, r) in targets.iter().filter_map(|o| bound(*o)) {
+            let m = merged(&r);
+            match all.iter_mut().find(|g| g.0 == f) {
+                Some(g) => {
+                    g.1 = g.1.join(&r);
+                    g.2 += 1;
+                    if m {
+                        g.3 = g.3.join(&r);
+                        g.4 += 1;
                     }
-                    None => groups.push((*f, r.clone(), 1)),
                 }
+                None => all.push((f, r.clone(), 1, if m { r } else { Value::new() }, usize::from(m))),
             }
         }
-        groups.retain(|g| g.2 > 1 && (on_demand || skips(self, g.0)));
-        let targets: Vec<ObjId> = targets.into_iter().filter(|o| !matches!(&self.heap.obj(*o).payload, Payload::Bound(f, _) if self.heap.kind(*o) == Kind::Bound && groups.iter().any(|g| g.0 == *f))).collect();
-        (groups, targets)
+        // (whole: every receiver of the function in the group; else its merged ones)
+        let mut groups: Vec<(ObjId, Value, usize, bool)> = Vec::new();
+        for (f, r, n, mr, mn) in all {
+            if n > 1 && (on_demand || skips(self, f)) {
+                groups.push((f, r, n, true));
+            } else if mn > 1 {
+                groups.push((f, mr, mn, false));
+            }
+        }
+        let targets: Vec<ObjId> = targets
+            .into_iter()
+            .filter(|o| match bound(*o) {
+                Some((f, r)) => !groups.iter().any(|g| g.0 == f && (g.3 || merged(&r))),
+                None => true,
+            })
+            .collect();
+        (groups.into_iter().map(|(f, r, n, _)| (f, r, n)).collect(), targets)
     }
 
     /// A callee that is a plain function (not a class's) or a bound method: the function and
@@ -720,7 +746,8 @@ impl Analyzer {
         // within its allowance or not at all (`library_entry`); within one, past the allowance,
         // the entry stops
         if library && self.budget.lib_entry.is_none() {
-            let r = self.library_entry(state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
+            let q = self.heap.func_info(foid).qualname.clone();
+            let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
             return r.map(|r| self.named_by_call(r, node)).unwrap_or_else(|| {
                 self.gens.force_at = None;
                 let q = self.heap.func_info(foid).qualname.clone();
@@ -765,7 +792,15 @@ impl Analyzer {
         // own; what it deletes or gives unknown code voids the caller's)
         let names = std::mem::take(&mut state.name_keys);
         let drops = NAME_KEY_DROPS.with(|c| c.get());
+        let tally = super::debug_enabled().then(|| {
+            let fi = self.heap.func_info(foid);
+            let name = || format!("{} ({})", fi.qualname, self.heap.module_info(fi.module).name);
+            (fi.node.addr(), self.budget.tally_begin(fi.node.addr(), name))
+        });
         let r = self.call_user_inner(foid, self_v, a, state, node, entry);
+        if let Some((code, t)) = tally {
+            self.budget.tally_end(code, t);
+        }
         state.name_keys = if NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {
@@ -799,7 +834,7 @@ impl Analyzer {
             None => self.callee_site(node),
         };
         self.entry.analysed.insert(foid);
-        let key = self.activation_key(foid, &site, entry, a);
+        let key = self.activation_key(foid, &site, entry, self_v.as_ref(), a, state);
         if self.recursion.is_active(&key) {
             return self.recursive_call(&key, &self_v, &args, &kwargs, state);
         }

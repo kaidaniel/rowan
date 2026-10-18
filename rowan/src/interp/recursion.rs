@@ -1,5 +1,7 @@
 //! Recursion: a call of a running activation (same function and call site; literal arguments
-//! that differ from the running ones' make another, up to a depth) does not run the body
+//! that differ from the running ones' make another, up to a depth, keyed by the call's place
+//! and receiver rather than its context; past one level, a function's call of itself with
+//! nothing known but the innermost activation's arguments is that one's) does not run the body
 //! again. It takes the activation's partial result, and widens the activation's entry with
 //! its arguments and heap; the activation then runs again until its result and state are
 //! stable (`REC_MAX_ITER` rounds), else they are widened.
@@ -19,6 +21,9 @@ use crate::state::{Footprint, State};
 /// Running activations of one function past which a call with other literal arguments joins
 /// one of them (`activation_for`).
 pub const MAX_ACTIVE: usize = 4;
+/// Running activations of one function past which a call whose arguments are those of the
+/// innermost one or input joins it (`activation_key`).
+pub const UNKNOWN_ACTIVE: usize = 2;
 /// Rounds an activation runs again until its result and state are stable; then widened.
 pub const REC_MAX_ITER: usize = 8;
 
@@ -80,8 +85,9 @@ impl Recursion {
 
 impl Analyzer {
     /// The activation a call of `foid` at `site` runs as. Past `MAX_ACTIVE` running activations
-    /// of the function, the innermost one (the call is then recursive).
-    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, a: Args) -> ActKey {
+    /// of the function, or a recursion that makes no progress through known data
+    /// (`recursion_without_progress`), the innermost one (the call is then recursive).
+    pub(super) fn activation_key(&self, foid: ObjId, site: &str, entry: bool, self_v: Option<&Value>, a: Args, state: &State) -> ActKey {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let mut key = (foid, if !entry { site.to_string() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
@@ -108,14 +114,51 @@ impl Analyzer {
                 .collect();
             let depth = self.recursion.depth(foid);
             if let Some(ls) = lits.filter(|_| depth < 40) {
-                key.1 = format!("{}|{}", key.1, ls.join(","));
+                // (by the call's place in the code, not its context: a call from where a running
+                // activation was called, with its literals, is that activation's recursive call
+                // however the chain of contexts grew, `__getattr__("x")` reading `self.x` again)
+                let place = site.rsplit('/').next().unwrap_or(site);
+                // (and its receiver: a wrapper's call of the same method of the object it wraps is not
+                // recursive)
+                let recv = self_v.map(|v| v.pts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(".")).unwrap_or_default();
+                key.1 = format!("{}|{}|{}", place.split('#').next().unwrap_or(place), recv, ls.join(","));
                 lit_key = true;
             }
         }
-        if !self.recursion.active.contains(&key) && self.recursion.depth(foid) >= MAX_ACTIVE && !lit_key {
+        if !self.recursion.active.contains(&key) && !lit_key && (self.recursion.depth(foid) >= MAX_ACTIVE || self.recursion_without_progress(foid, self_v, args, kwargs, state)) {
             key = self.recursion.by_func[&foid].last().unwrap().clone();
         }
         key
+    }
+
+    /// A function's call of itself (not a generator's) inside `UNKNOWN_ACTIVE` running
+    /// activations of it, each argument the innermost one's or input (`input_like`): no step
+    /// through known data — a shorter list, a child node — that could end the recursion where it
+    /// is known. Another activation would only nest its fixpoint (and its loops' rounds) inside
+    /// the one above, at every call site of the recursion: it is the innermost one's recursive
+    /// call.
+    fn recursion_without_progress(&self, foid: ObjId, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> bool {
+        if self.recursion.depth(foid) < UNKNOWN_ACTIVE || self.frame().func != Some(foid) || matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if crate::syntax::is_generator(&f.body)) {
+            return false;
+        }
+        let Some((e_self, e_args, e_kw)) = self.recursion.by_func.get(&foid).and_then(|v| v.last()).and_then(|k| self.recursion.entry.get(k)) else { return false };
+        let same_or_input = |v: &Value, e: Option<&Value>| e == Some(v) || self.input_like(v, state);
+        self_v.is_none_or(|v| same_or_input(v, e_self.as_ref())) && args.iter().enumerate().all(|(i, v)| same_or_input(v, e_args.get(i))) && kwargs.iter().all(|(k, v)| same_or_input(v, e_kw.get(k)))
+    }
+
+    /// Is the value only input or unknown: no literal, its objects (if any) unknown or open
+    /// through data from outside the program?
+    fn input_like(&self, v: &Value, state: &State) -> bool {
+        if v.kv.as_lit().is_some() || matches!(v.kv, KeyVal::Lits(_)) {
+            return false;
+        }
+        v.pts.iter().all(|o| {
+            self.heap.kind(o) == crate::state::Kind::Unknown
+                || [crate::domain::Ns::Item, crate::domain::Ns::Attr].iter().any(|ns| state.has_row(o, *ns) && {
+                    let r = state.row(o, *ns);
+                    r.top || (!r.sources.is_empty() && r.sources.iter().all(|(s, _)| crate::source::source_is_outside(s)))
+                })
+        })
     }
 
     /// A recursive call of the running activation `key`: its entry widens with this call's

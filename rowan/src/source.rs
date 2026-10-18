@@ -477,6 +477,12 @@ pub fn source_is_data(s: SourceId) -> bool {
     with_source(s, |src| src.kind == SourceKind::Data)
 }
 
+/// Is it data from outside the program (an external input, a library call's result, keys
+/// computed from data), not a parameter or an instance rowan may not see all of?
+pub fn source_is_outside(s: SourceId) -> bool {
+    with_source(s, |src| matches!(src.kind, SourceKind::External | SourceKind::Call | SourceKind::Data))
+}
+
 pub fn source_label(s: SourceId) -> String {
     with_source(s, |src| src.label())
 }

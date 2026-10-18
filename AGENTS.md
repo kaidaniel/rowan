@@ -54,7 +54,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
-  * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
+  * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened. An activation is a call site in its context (4 deep, then the innermost); with literal arguments, its place, receiver and literals (40 deep); a call of itself with nothing but the innermost one's arguments or data from outside: the innermost past one level (`recursion_without_progress`).
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class).
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
@@ -68,7 +68,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
     known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their arguments (`random.shuffle`) or get
     the program's functions (given its instances, their changing dunders may run: `library_dunders`; `random.choice` / `sample` give back the items); several callees: `alternatives` (unknown values: one unknown call; a method on several receivers: one call
-    per function when it would not run, or on demand; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
+    per function when it would not run, or on demand, and one for its merged receivers; those none of which runs — out of budget, past on-demand work or the deadline — one `skipped_calls`, also a dunder's on several receivers, `run_dunder`; more than 64 of the program's functions, `PICK_MAX`: one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict, set, keys / items view, or an instance whose class
     sets `__hash__ = None` or defines `__eq__` alone (`check_hashable`). Models, operators and subscripts on literals beside objects
@@ -108,7 +108,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   (`__main__` block's calls skipped) together; the latter answers unless the former completes within `EARLY` (1 s), whose
   document then follows as an event. A changed file, a newer `analyse` of it or a `cancel` (the extension's, when a
   request times out) cuts the analyses running for it as the deadline does (`Budget::cancel`, read on its own thread).
-* **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`; no per-function budgets)
+* **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`, definitions not counted; no per-function budgets)
   or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators; an unknown the program gives a dataclass's, NamedTuple's or TypedDict's field annotated `str` / `Optional[int]` is one, `field_as_annotated`, `float` only validated: an int passes; a pydantic field's validated unknown is of its type). `getattr` by a name not known reads every attribute
@@ -165,7 +165,7 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower), each library entry's work, the functions doing most (runs, own statements, units and ms of outermost runs). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
   Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
@@ -191,7 +191,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | --- | --- |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.9 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~1.0 / ~4.2 / ~4.6 s; 0.27 / 0.22 / 0.20 / 0.35 GB |
-| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.05) / 0.39 / 0.08 / 0.30 s; 29 / 30 (14) / 54 / 63 / 44 MB (none: < 0.01 s, 10 MB); flask's and sklearn's imports undone; allowance off: 0.45 / 0.20 / > 600 / 12 / > 600 s |
+| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 300 / 3.9 / > 300 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.42 / 0.47 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps

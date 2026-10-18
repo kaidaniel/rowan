@@ -252,6 +252,9 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     let deps = deps_of(&an, file);
     if std::env::var("ROWAN_DEBUG").is_ok() {
         eprintln!("{}", an.work_line());
+        for l in an.tally_lines() {
+            eprintln!("{}", l);
+        }
         let [m, l, sm, sl] = rowan::frontend::loaded_counts();
         eprintln!("loaded: {} modules, {} lines (site-packages: {} modules, {} lines), parsing {} ms", m, l, sm, sl, rowan::frontend::parse_time().as_millis());
         eprintln!("library entries (run, undone, refused): {:?}, work {}", an.library_counts().0, an.library_counts().1);
