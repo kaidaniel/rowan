@@ -28,3 +28,11 @@ b.v = 1
 f.v = 2
 w = b.v
 #@value w: includes={2}
+class Acc:
+    def last(self):
+        return 7
+def apply(acc):
+    return acc.last()
+warm3 = apply(Acc())
+m = apply(Acc()) + 1
+#@value m: includes={8}

@@ -680,11 +680,7 @@ impl Analyzer {
             }
         };
         let mut returned: Vec<Value> = uses.kept_returned.iter().map(|p| given(*p)).collect();
-        for (o, l) in uses.returns_params.iter() {
-            if let (Origin::Param(p), Level::Own) = (o, l) {
-                returned.push(given(*p));
-            }
-        }
+        returned.extend(uses.returns_params.iter().map(|p| given(*p)));
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
         let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
