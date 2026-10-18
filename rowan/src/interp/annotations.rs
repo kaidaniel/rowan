@@ -254,6 +254,17 @@ impl Analyzer {
         any.then_some(v)
     }
 
+    /// What iterating unknown `oid` gives when it follows a dict annotation (`dict[str, V]`):
+    /// a key, of the annotation's key type; None for anything else (an element, `oid[*]`).
+    pub(in crate::interp) fn annotated_key(&mut self, oid: ObjId, state: &mut State) -> Option<Value> {
+        let &(ann, module) = self.heap.ann.get(&oid)?;
+        let ast::Expr::Subscript(sub) = ann else { return None };
+        let ast::Expr::Tuple(t) = &*sub.slice else { return None };
+        let (Some(("dict", _)), [kt, _]) = (builtin_annotation(ann), t.elts.as_slice()) else { return None };
+        let depth = self.heap.obj(oid).depth;
+        Some(self.field_value(kt, module, false, &format!("{}.keys", oid), false, depth, state))
+    }
+
     /// The fields of a class whose instances hold its declared fields and nothing else: a
     /// dataclass's, NamedTuple's or TypedDict's (its bases' too), a pydantic model's (not a root
     /// model's); each with its annotation and the module it is written in (none for a field
@@ -402,9 +413,7 @@ pub(in crate::interp) fn part_annotation(ann: &'static ast::Expr, k: KeyId) -> O
     };
     match (builtin_annotation(ann)?.0, args.as_slice()) {
         ("list" | "set" | "frozenset", [e]) => Some(e),
-        // (any key's value and an element share one unknown, `d[*]`: typed only when both are
-        // of one type)
-        ("dict", [kt, vt]) if k == intern::STAR => (annotation_text(kt) == annotation_text(vt)).then_some(*vt),
+        // (any key's value; its keys, what iterating it gives, are `annotated_key`)
         ("dict", [_, vt]) => Some(vt),
         ("tuple", [e, ast::Expr::EllipsisLiteral(_)]) => Some(e),
         ("tuple", ts) => intern::key_as_int(k).and_then(|i| ts.get(usize::try_from(i).ok()?).copied()),

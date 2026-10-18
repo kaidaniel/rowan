@@ -541,7 +541,12 @@ impl Analyzer {
         }
         if row.open() {
             let p = self.path_placeholder_value(oid, ns, STAR, &row, state);
+            // (an annotated part, `dict[str, V]`'s value: of its type, besides what was stored)
+            let typed = !p.pts.is_empty() && p.kv.is_bot() && p.pts.iter().all(|o| self.heap.obj(o).ty.is_some());
             v = v.join(&p);
+            if typed {
+                return v;
+            }
         }
         Value::with_kv(v.pts, DATA)
     }

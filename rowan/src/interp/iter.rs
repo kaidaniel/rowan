@@ -549,7 +549,12 @@ impl Analyzer {
             acc.elems.push(Value::data("deep"));
             return;
         }
-        // (an element annotated with a class of the program: an instance of it)
+        // (a dict annotated `dict[str, V]`: its keys; an element annotated with a class of the
+        // program: an instance of it)
+        if let Some(v) = self.annotated_key(oid, state) {
+            acc.elems.push(v);
+            return;
+        }
         if let Some(v) = self.part_instance(oid, STAR, state) {
             acc.elems.push(v);
             return;
