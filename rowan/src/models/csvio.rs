@@ -57,7 +57,7 @@ fn text_of_value(v: &Value) -> Text {
             Some(s) => Text::Lit(s.to_string()),
             None => Text::Unknown,
         },
-        KeyVal::Data(d) => {
+        KeyVal::Data(d, _) => {
             let t = intern::str_get(*d);
             match t.strip_prefix("csvhdr:") {
                 Some(rest) => {

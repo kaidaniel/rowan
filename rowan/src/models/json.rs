@@ -407,7 +407,7 @@ pub fn compact_json_text(an: &Analyzer, st: &State, v: &Value) -> Option<String>
 /// The snapshots a `json.dumps` / `pickle.dumps` text stands for.
 pub(super) fn dumped_snapshots(v: &Value, json: bool) -> Vec<u32> {
     let mut out = Vec::new();
-    if let (true, KeyVal::Data(d)) = (v.pts.is_empty(), &v.kv) {
+    if let (true, KeyVal::Data(d, _)) = (v.pts.is_empty(), &v.kv) {
         let t = intern::str_get(*d);
         if let Some(rest) = t.strip_prefix(if json { "pyjsontext:" } else { "pickletext:" }) {
             out.extend(rest.split(',').filter_map(|x| x.parse::<u32>().ok()));

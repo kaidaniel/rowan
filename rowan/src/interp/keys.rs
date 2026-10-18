@@ -310,7 +310,7 @@ impl Analyzer {
 /// An unknown of no known type may be anything, a list too; literals and keys hash.
 fn kv_hashing(kv: &KeyVal) -> Hashing {
     match kv {
-        KeyVal::Data(l) if label_type(&intern::str_get(*l)).is_none() => Hashing::Maybe,
+        KeyVal::Data(l, _) if label_type(&intern::str_get(*l)).is_none() => Hashing::Maybe,
         _ => Hashing::Hashable,
     }
 }

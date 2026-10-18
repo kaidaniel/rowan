@@ -11,7 +11,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
-  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins (`result_type`; a range's items, `enumerate`'s index, `os.environ`'s values, `read_text`, a str's items), operators; the keys of some objects: `State::keys_type`, from typed stores' sources `store@L4:str`). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`).
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins (`result_type`; a range's items, `enumerate`'s index, `os.environ`'s values, `read_text`, a str's items), operators; the keys of some objects: `State::keys_type`, from typed stores' sources `store@L4:str`). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`); the label still covers the value, and `Data`'s hint keeps the literals (up to 8, then saturated: `hint_sat`) as ones it may be (`8080 | ?`; code ignoring it stays sound): operators, `try_pure` calls (`pure_hint`) and narrowing carry them (`split_hinted`; also literals beside unknown objects).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
@@ -158,7 +158,7 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
 * **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, ~1200 programs; library suites have `small/`, `models/` (torch `playground/`: the owner's), `PENDING`.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
-  `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
+  `#@value NAME: exactly= | unknown | includes= | shows=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 13 areas (lists, dicts, attributes, try, generators, formatting, calls, insertion order, control flow…; positions, keys and names also beside an unknown object: `lx`, `kx`, `ax`); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro).
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.

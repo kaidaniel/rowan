@@ -1,6 +1,6 @@
 """Hypothesis: an unknown named by the expression it comes from (`retries - 1`), joined with a
 literal (`max(1, retries - 1)`, `0 if flag else y`), is no longer that expression: its hover is
-`int(?)`, not `limit = retries - 1` (which reads as an equation and hides the literal). Values
+`1 | int(?)`, not `limit = retries - 1` (which reads as an equation and hides the literal). Values
 stay the same: comparisons with the expression are undecided. vscode-rowan/test.js checks the
 hovers.
 

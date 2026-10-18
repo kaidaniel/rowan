@@ -32,7 +32,8 @@ fields — and the **values** of names when they follow from the program text.
   on every path; `absent`: surely not there (a key named here that the row has not seen counts
   when reading it there would surely fail); `closed`: nothing else possible, `open`: other
   keys may exist (data from input, unknown code, `**kwargs` of unknown origin).
-* `#@value NAME: exactly={…}` (one of these literals) / `includes={…}` / `unknown` /
+* `#@value NAME: exactly={…}` (one of these literals) / `includes={…}` / `unknown` / `shows={…}`
+  (exactly these literals are named as possible, beside an unknown too: `8080 | ?`; not checked by the oracle) /
   `types={int,str}` (every unknown part is known to be of one of these types: `int(?)`; the
   oracle checks the runtime value's type) / `untyped` (some unknown part's type is not known).
 * `#@general NAME: …` (the same clauses): NAME's value for **any** call of the function the line

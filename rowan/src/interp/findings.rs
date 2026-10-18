@@ -566,6 +566,8 @@ impl Analyzer {
             info.lits = kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
+            // (and the literals it is known it may be: `8080 | ?`)
+            info.lits = v.kv.hint().iter().collect();
             let ty = match &v.kv {
                 KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
                 kv => kv.data_site().and_then(|l| label_type(&intern::str_get(l))),

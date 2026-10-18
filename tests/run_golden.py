@@ -14,7 +14,8 @@ unless unknown code added it", is a hedged and true statement), fails (no `ok` v
 access may fail; the fuzzer's floor, as `sound` is).
 Values: `#@value NAME: exactly={12}` (the value is one of these literals and nothing else),
 `#@value NAME: unknown` (rowan claims no specific value), `#@value NAME: includes={1,100}`
-(floor: unknown, or a set holding these); several names on one line separated by `;`.
+(floor: unknown, or a set holding these), `shows={8080}` (exactly these literals are named as
+possible, beside an unknown too: `8080 | ?`); several names on one line separated by `;`.
 These check the program's calls of the function the line is in (joined; an uncalled function's
 run with open parameters counts too). `#@general NAME: …` (same clauses) checks the value for
 any call: the function's general run, with open parameters of their annotated types.
@@ -495,6 +496,11 @@ def value_checks(rows: List[Dict[str, Any]], exp: Dict[int, List[Tuple[str, Dict
                 lost = {key_str(k) for k in spec["includes"] if key_str(k) not in got["lits"] and not (got["unknown"] and admits(k))}
                 if lost:
                     prob = f"value {desc} leaves out {sorted(lost)}"
+            if "shows" in spec:
+                # (the literals rowan names as possible, beside an unknown too: `8080 | ?`)
+                want = {key_str(k) for k in spec["shows"]}
+                if got["lits"] != want:
+                    prob = f"value {desc}, want it to show exactly {sorted(want)}"
             out.append((ln, f"{what} of {name}", spec, prob))
     return out
 

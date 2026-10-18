@@ -338,8 +338,11 @@ pub fn series_values(st: &State, sid: u32, line: u32) -> (Option<Vec<Value>>, Va
     let mut elem = known.as_ref().map(|k| Value::kv_only(KeyVal::lits(k.may.clone()))).unwrap_or_default();
     for k in idx.present.iter() {
         let v = st.slot(sid, Ns::Item, k);
-        if known.is_none() || v != unknown_cell(k) {
+        // (a cell that is one of the known values, or literals stored there: those)
+        if known.is_none() || Value::with_kv(v.pts.clone(), v.kv.unhinted()) != unknown_cell(k) {
             elem = elem.join(&v);
+        } else if !v.kv.hint().is_empty() {
+            elem = elem.join(&Value::kv_only(KeyVal::lits(v.kv.hint())));
         }
     }
     if let Some(e) = st.slot_opt(sid, Ns::Meta, mk("elem")) {
@@ -1484,7 +1487,7 @@ fn closed_ordered(ks: &[KeyId]) -> Row {
 
 /// Known bounds of a slice value (`slice[lo:hi:step]@L…`); None = unknown.
 fn slice_bounds(v: &Value) -> Option<(Option<i64>, Option<i64>, Option<i64>)> {
-    let KeyVal::Data(s) = &v.kv else { return None };
+    let KeyVal::Data(s, _) = &v.kv else { return None };
     if !v.pts.is_empty() {
         return None;
     }
@@ -1499,7 +1502,7 @@ fn slice_bounds(v: &Value) -> Option<(Option<i64>, Option<i64>, Option<i64>)> {
 }
 
 fn is_slice(v: &Value) -> bool {
-    matches!(&v.kv, KeyVal::Data(s) if v.pts.is_empty() && intern::str_get(*s).starts_with("slice"))
+    matches!(&v.kv, KeyVal::Data(s, _) if v.pts.is_empty() && intern::str_get(*s).starts_with("slice"))
 }
 
 /// Python's slice of n positions.
@@ -1596,7 +1599,7 @@ fn to_json(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn json_texts(v: &Value) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let ks: Vec<crate::intern::StrId> = match &v.kv {
-        KeyVal::Data(s0) => vec![*s0],
+        KeyVal::Data(s0, _) => vec![*s0],
         _ => Vec::new(),
     };
     for s0 in ks {

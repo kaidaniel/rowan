@@ -40,13 +40,49 @@ impl Analyzer {
         !v.pts.is_empty() && v.kv.is_literal() && kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
     }
 
+    /// The literals a value may be beside what is not known of it: an unknown's (`8080 | ?`),
+    /// those beside unknown objects (`8080` of a slot an unknown update may have changed).
+    pub(in crate::interp) fn literals_beside(&self, v: &Value) -> intern::KeySet {
+        if v.kv.is_literal() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown) {
+            kv_literals(&v.kv)
+        } else {
+            v.kv.hint()
+        }
+    }
+
     /// An operation on values of which one is `mixed`: on its objects and on its literals, each
     /// on a copy of the state; the results and the states joined. None: no such value.
     pub(in crate::interp) fn split_mixed(&mut self, vs: &[&Value], state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &[Value], &mut State) -> Value) -> Option<Value> {
         let i = vs.iter().position(|v| self.mixed(v))?;
+        self.run_parts(vs, i, vec![Value::objs(vs[i].pts.clone()), Value::kv_only(vs[i].kv.clone())], state, f)
+    }
+
+    /// `split_mixed`, and also on an unknown that may be some literals (`8080 | ?`, literals
+    /// beside an unknown object; against values without objects): on them and on the unknown,
+    /// which the result keeps as literals it may be (`8081 | port + 1`).
+    pub(in crate::interp) fn split_hinted(&mut self, vs: &[&Value], state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &[Value], &mut State) -> Value) -> Option<Value> {
+        if let Some(r) = self.split_mixed(vs, state, f) {
+            return Some(r);
+        }
+        // (only against values without objects: the literals beside objects would run their
+        // dunders once more, and beside unknown objects those decide which dunders run)
+        let scalars = |i: usize| vs.iter().enumerate().all(|(j, w)| j == i || w.pts.is_empty());
+        let i = (0..vs.len()).find(|&i| !self.literals_beside(vs[i]).is_empty() && scalars(i))?;
+        let v = vs[i];
+        let parts = if v.kv.is_literal() {
+            vec![Value::objs(v.pts.clone()), Value::kv_only(v.kv.clone())]
+        } else {
+            vec![Value::with_kv(v.pts.clone(), v.kv.unhinted()), Value::kv_only(KeyVal::lits(v.kv.hint()))]
+        };
+        self.run_parts(vs, i, parts, state, f)
+    }
+
+    /// `f` run with argument `i` replaced by each of `parts`, on a copy of the state each; the
+    /// results and the states joined.
+    fn run_parts(&mut self, vs: &[&Value], i: usize, parts: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &[Value], &mut State) -> Value) -> Option<Value> {
         let mut out = Value::new();
         let mut acc: Option<State> = None;
-        for part in [Value::objs(vs[i].pts.clone()), Value::kv_only(vs[i].kv.clone())] {
+        for part in parts {
             let mut st = state.copy();
             let mut args: Vec<Value> = vs.iter().map(|v| (*v).clone()).collect();
             args[i] = part;
@@ -70,17 +106,18 @@ impl Analyzer {
         let nd = frontend::node(node);
         let r = self.binop(b.op, &a, &c, &nd, state);
         // an unknown result is named by the expression (`1 + b`), of its type when known
-        if let (true, KeyVal::Data(l)) = (r.pts.is_empty(), &r.kv) {
-            let l = intern::str_get(*l);
+        if let (true, KeyVal::Data(l, _)) = (r.pts.is_empty(), &r.kv) {
+            let (l, h) = (intern::str_get(*l), r.kv.hint());
             let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
             if !l.starts_with('\u{1}') && !text.is_empty() && text.len() <= 60 {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
                 let name = format!("expr:{}:{}", scope, text);
-                return Value::data(&match label_type(&l) {
+                let label = match label_type(&l) {
                     Some(t) => typed_label(t, &name),
                     None => name,
-                });
+                };
+                return Value::kv_only(KeyVal::Data(intern::s(&label), h));
             }
         }
         r
@@ -104,7 +141,7 @@ impl Analyzer {
         }
         match &v.kv {
             KeyVal::Bot => {}
-            KeyVal::Data(l) => add(label_type(&intern::str_get(*l)))?,
+            KeyVal::Data(l, _) => add(label_type(&intern::str_get(*l)))?,
             KeyVal::Lit(_) | KeyVal::Lits(_) => {
                 for k in kv_literals(&v.kv).iter() {
                     add(TYPE_NAMES.iter().copied().find(|t| key_type(k, t)))?;
@@ -118,7 +155,7 @@ impl Analyzer {
     /// `v`, an unknown of type `ty` when it is an unknown scalar (named as it is, unless `named`
     /// is false: its name is what it was made from, not what it is).
     pub fn as_type(&self, v: Value, ty: Option<&'static str>, named: bool) -> Value {
-        let (Some(t), true, KeyVal::Data(l)) = (ty, v.pts.is_empty() && !self.m.torch_on, &v.kv) else { return v };
+        let (Some(t), true, KeyVal::Data(l, _)) = (ty, v.pts.is_empty() && !self.m.torch_on, &v.kv) else { return v };
         let l = intern::str_get(*l);
         let name = label_name(&l);
         // (labels that carry more than a name — a JSON text, a shape, a pattern — are the
@@ -128,7 +165,9 @@ impl Analyzer {
             return v;
         }
         let keep = (named && !matches!(name, "str" | "int" | "bool")) || name == "len";
-        Value::data(&typed_label(t, if keep { name } else { "" }))
+        // (the literals it may be: those of the type)
+        let hint = v.kv.hint().iter().filter(|k| key_type(*k, t)).collect();
+        Value::kv_only(KeyVal::Data(intern::s(&typed_label(t, if keep { name } else { "" })), hint))
     }
 
     /// `-x`, `+x`, `~x`, `not x`.
@@ -208,7 +247,7 @@ impl Analyzer {
     /// Is `v` literals and builtin containers only (no unknown, no instance whose methods an
     /// operator may run)?
     pub(in crate::interp) fn builtin_operand(&self, v: &Value) -> bool {
-        !matches!(v.kv, KeyVal::Data(_) | KeyVal::KeysOf(_)) && !crate::models::pandas::is_seriesish(self, v) && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Dict | Kind::Tuple | Kind::Set | Kind::View))
+        !matches!(v.kv, KeyVal::Data(_, _) | KeyVal::KeysOf(_)) && !crate::models::pandas::is_seriesish(self, v) && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Dict | Kind::Tuple | Kind::Set | Kind::View))
     }
 
     /// `a op b`: each part on its own (literals beside objects), CPython's result on known
@@ -228,7 +267,7 @@ impl Analyzer {
                 return if first { self.binop(op, &rest, y, node, state) } else { self.binop(op, y, &rest, node, state) };
             }
         }
-        if let Some(r) = self.split_mixed(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
+        if let Some(r) = self.split_hinted(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
             return r;
         }
         let r = self.binop_untyped(op, a, b, node, state);
@@ -485,7 +524,7 @@ impl Analyzer {
         // lists (tuples) of any length times a count: one of the same kind, of their elements
         let kind = seq.pts.first().map(|o| self.heap.kind(o)).filter(|k| matches!(k, Kind::List | Kind::Tuple))?;
         let count = match &cnt.kv {
-            KeyVal::Data(l) => label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
+            KeyVal::Data(l, _) => label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
             kv if kv.is_literal() => kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
             _ => false,
         };
@@ -530,7 +569,7 @@ impl Analyzer {
         }
         // (two unknowns — sequences, texts, numbers, arrays: as sequences, the elements of
         // either; a slice or concatenation stands for its sequences)
-        let unknowns = |v: &Value| !v.pts.is_empty() && matches!(v.kv, KeyVal::Bot | KeyVal::Data(_)) && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown && !self.is_any(o));
+        let unknowns = |v: &Value| !v.pts.is_empty() && matches!(v.kv, KeyVal::Bot | KeyVal::Data(_, _)) && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown && !self.is_any(o));
         if unknowns(a) && unknowns(b) {
             let bases: Vec<u32> = both.iter().flat_map(|o| self.slice_base(o).map(|s| s.to_vec()).unwrap_or_else(|| vec![o])).collect();
             let sid = self.elems_of(&crate::domain::ObjSet::from_vec(bases), "", state);
@@ -593,7 +632,7 @@ impl Analyzer {
                 // (an operand that is no instance of the program's classes may have its own
                 // method, run first, whose result may be anything; a known builtin's is not one
                 // for the program's instance)
-                let open = !a.pts.is_empty() || (matches!(a.kv, KeyVal::Data(_)) && self.value_type(a).is_none());
+                let open = !a.pts.is_empty() || (matches!(a.kv, KeyVal::Data(_, _)) && self.value_type(a).is_none());
                 (if open { r.join(&Value::data(&format!("L{}", node.line))) } else { r }, None)
             }
         };
@@ -610,7 +649,7 @@ impl Analyzer {
                     let ni = not_impl(self, &back);
                     r = r.join(&Value::with_kv(back.pts.filter(|o| !ni.contains(&o)), back.kv.clone()));
                 }
-                None if !b.pts.is_empty() || matches!(b.kv, KeyVal::Data(_)) => r = r.join(&Value::data(&format!("L{}", node.line))),
+                None if !b.pts.is_empty() || matches!(b.kv, KeyVal::Data(_, _)) => r = r.join(&Value::data(&format!("L{}", node.line))),
                 None => {}
             }
         }
@@ -629,6 +668,7 @@ impl Analyzer {
         let mut kv = match kv {
             KeyVal::Lit(k) => KeyVal::Lit(to_str(*k)),
             KeyVal::Lits(ks) => KeyVal::Lits(ks.iter().map(to_str).collect()),
+            KeyVal::Data(l, _) => KeyVal::Data(*l, kv.hint().iter().map(to_str).collect()),
             kv => kv.clone(),
         };
         for (f, t) in [(FnKind::Prefix, pre), (FnKind::Suffix, post)] {

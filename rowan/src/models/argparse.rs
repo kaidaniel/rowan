@@ -261,7 +261,7 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
         },
     };
     let none = an.none_v.clone();
-    let suppress_v = |v: &Value, an: &Analyzer| v.pts.iter().any(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o).ends_with("SUPPRESS")) || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("SUPPRESS")) || lit_str(v).as_deref() == Some("==SUPPRESS==");
+    let suppress_v = |v: &Value, an: &Analyzer| v.pts.iter().any(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o).ends_with("SUPPRESS")) || matches!(&v.kv, KeyVal::Data(d, _) if intern::str_get(*d).contains("SUPPRESS")) || lit_str(v).as_deref() == Some("==SUPPRESS==");
     let (default, has_default, suppress) = match c.kw("default") {
         Some(d) => {
             let sup = suppress_v(&d, an);

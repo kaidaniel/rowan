@@ -370,7 +370,7 @@ fn unknown_path(an: &mut Analyzer, st: &mut State, node: &Node, cls: &str, ctx: 
 fn str_or_path(an: &Analyzer, v: &Value) -> bool {
     let str_kv = match &v.kv {
         KeyVal::Bot => !v.pts.is_empty(),
-        KeyVal::Data(l) => crate::domain::label_type(&intern::str_get(*l)) == Some("str"),
+        KeyVal::Data(l, _) => crate::domain::label_type(&intern::str_get(*l)) == Some("str"),
         KeyVal::Lit(_) | KeyVal::Lits(_) => crate::domain::kv_literals(&v.kv).iter().all(|k| intern::key_as_str(k).is_some()),
         _ => false,
     };
@@ -471,7 +471,7 @@ pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     match r.kv {
-        KeyVal::Data(_) => Value::with_kv(r.pts.clone(), KeyVal::data(&crate::domain::typed_label(ty, ""))),
+        KeyVal::Data(_, _) => Value::with_kv(r.pts.clone(), KeyVal::data(&crate::domain::typed_label(ty, ""))),
         _ => r,
     }
 }

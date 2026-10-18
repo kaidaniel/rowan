@@ -30,7 +30,7 @@ struct ItemRead<'a> {
 
 /// The bounds of a slice key as written (`[1:]`, `[…]` when not known); None: not a slice.
 fn slice_text(kv: &KeyVal) -> Option<String> {
-    let KeyVal::Data(d) = kv else { return None };
+    let KeyVal::Data(d, _) = kv else { return None };
     let t = intern::str_get(*d);
     let rest = t.strip_prefix("slice")?;
     let b = rest.rsplit_once('@').map(|(b, _)| b).unwrap_or(rest);
@@ -337,14 +337,14 @@ impl Analyzer {
     /// known after appends of unknown count, the last appended), a slice (known positions or the same
     /// elements), else any element (may raise IndexError). True: the read is done.
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
-        let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
+        let is_slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
         // known positions: a slice with known bounds (`xs[1:3]`, `xs[slice(0, n)]`), or one from
         // the start to a bound not known (`xs[:n]`: each position it has is xs's, its length one
         // of 0..=len(xs))
         let known = match (is_slice && kind != Kind::Set && single_target, self.heap.llen(oid, state)) {
             (true, Some(n)) => match Self::slice_label_bounds(&key.kv) {
                 Some((lo, hi, step)) if step != Some(0) => Some((crate::interp::exprs::slice_positions(n as i64, lo, hi, step.unwrap_or(1)), None)),
-                None if n < 16 && matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice-prefix@")) => Some(((0..n as i64).collect(), Some(((1u32 << (n + 1)) - 1) as u16))),
+                None if n < 16 && matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice-prefix@")) => Some(((0..n as i64).collect(), Some(((1u32 << (n + 1)) - 1) as u16))),
                 _ => None,
             },
             _ => None,
@@ -530,7 +530,7 @@ impl Analyzer {
             self.may_raise_here(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
         }
         if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
-            let k = key_str_lit(&format!("<data {}>", kv));
+            let k = key_str_lit(&format!("<data {}>", kv.unhinted()));
             self.verdict(node, k, &Classification::with_note(Tier::DataKey, "is computed from data and may not be one of this object's keys"), oid, ns, None, None);
         }
         let mut v = self.all_values(oid, ns, state);
@@ -641,7 +641,7 @@ impl Analyzer {
     /// `seq[i] = v`: the position (from either end, of each length it may have; any known one
     /// when i is not known); `seq[a:b] = items`: positions and length not known any more.
     fn store_in_sequence(&mut self, oid: ObjId, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
-        if matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice")) {
+        if matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice")) {
             // known bounds (step 1) on a known length, known items: the list spliced
             let it = self.iterate(v, node, state);
             if let (Some((lo, hi, None | Some(1))), Some(n), Some(items), true) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state), it.items.as_ref(), strong) {
@@ -712,7 +712,7 @@ impl Analyzer {
         // (a key of an open record stored on some paths only: on the others its value is
         // the input's, or what unknown code put there, which a slot one path made does not cover)
         let partly_stored = !v.empty() && (row0.has_input() || !row0.mutators.is_empty()) && !(row0.definite.contains(k) && row0.stored.contains(k));
-        if !from_map && !(stored && !star.empty()) && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
+        if !from_map && !(stored && !star.empty()) && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_, _) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
             let p = self.path_placeholder_value(oid, ns, k, row, state);
             v = v.join(&p);
             if is_lit {

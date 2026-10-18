@@ -84,7 +84,7 @@ impl Analyzer {
             }
         }
         // (tensor-model values — shapes, dims — join differing dims into `?` atoms already)
-        let shape_like = |v: &Value| matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).starts_with('\u{1}'));
+        let shape_like = |v: &Value| matches!(&v.kv, KeyVal::Data(d, _) if intern::str_get(*d).starts_with('\u{1}'));
         let widen = |v: &Value| if shape_like(v) { v.clone() } else { v.join(&Value::data("loop")) };
         let names: Vec<intern::StrId> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| *k).collect();
         for n in names {
@@ -102,7 +102,7 @@ impl Analyzer {
             }
         }
         for o in fp.elems {
-            let shape_elem = matches!(head.elems.get(&o), Some(KeyVal::Data(d)) if intern::str_get(d).starts_with('\u{1}'));
+            let shape_elem = matches!(head.elems.get(&o), Some(KeyVal::Data(d, _)) if intern::str_get(d).starts_with('\u{1}'));
             if !shape_elem {
                 head.elems.insert(o, DATA);
             }

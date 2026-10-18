@@ -535,7 +535,7 @@ pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, sta
     if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
         return an.method_value(&format!("str.{}", name), obj);
     }
-    if let KeyVal::Data(d) = &obj.kv {
+    if let KeyVal::Data(d, _) = &obj.kv {
         let label = intern::str_get(*d);
         if matches!(&*label, "datetime" | "date" | "time" | "timedelta" | "timezone") && crate::models::chrono::NAMES.contains(&name) {
             return match crate::models::chrono::attr(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, 0, crate::models::chrono::NAIVE), name) {
@@ -1723,7 +1723,7 @@ pub(super) fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         let mut out = if a.kv.is_bot() { Value::new() } else { Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str))) };
         // (a text not known: a string all the same, its str methods apply)
-        if matches!(out.kv, KeyVal::Data(_)) {
+        if matches!(out.kv, KeyVal::Data(_, _)) {
             out = Value::data("str");
         }
         // the objects' part (an unknown value, an instance's __str__, …): some string
@@ -2002,7 +2002,7 @@ pub(super) fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         return out;
     }
     match &out.kv {
-        KeyVal::Data(_) | KeyVal::Bot => Value::data("str"),
+        KeyVal::Data(_, _) | KeyVal::Bot => Value::data("str"),
         _ => out,
     }
 }
