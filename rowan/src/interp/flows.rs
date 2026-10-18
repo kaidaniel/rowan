@@ -324,6 +324,10 @@ pub struct CodeUses {
     /// a `return` may give back something else that may be a class: a parameter, an attribute,
     /// `type(x)` (not only names' values, calls' results and new values)
     pub returns_other: bool,
+    /// the parameters (or what they hold, `return xs[0]`) its `return`s give back beside other
+    /// values (`return a or b`; one returned alone is `kept_returned`): a skipped call's result
+    /// may be them
+    pub returns_params: Vec<Src>,
     /// names and calls' results it gives to calls by name
     pub passes: Vec<Pass>,
     /// the attribute names it calls on what is not a name it does not bind (`x.f(…)` of a
@@ -1387,6 +1391,8 @@ impl<'a> Flow<'a> {
                     // (names' values and calls' results go to the callers)
                     Some(v) if self.depth == 0 => {
                         self.out.returns_other |= self.srcs(v).iter().any(|(o, _)| !matches!(o, Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..)));
+                        let ps: Vec<Src> = self.srcs(v).into_iter().filter(|(o, _)| matches!(o, Origin::Param(_))).collect();
+                        self.out.returns_params.extend(ps);
                         let mut srcs = Vec::new();
                         self.give(v, &mut srcs);
                         self.out.returns.extend(srcs);
