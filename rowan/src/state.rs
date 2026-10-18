@@ -421,6 +421,10 @@ impl State {
     pub fn set_lens(&mut self, oid: ObjId, v: LenFact) {
         self.lens.insert(oid, v);
         self.drop_sym_len(oid);
+        // (a new length: the last element known is no longer known, an append sets it after)
+        if self.lasts.iter().any(|(o, _)| *o == oid) {
+            self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
+        }
     }
 
     /// The list's length is not known any more.
