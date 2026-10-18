@@ -821,11 +821,17 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let it = an.iterate(a, &c.node, st);
+    // (an item is surely there: known items, or a list longer than its cursor on every path)
+    let has_item = matches!(&it.items, Some(items) if !items.is_empty())
+        || a.single().filter(|g| matches!(an.heap.kind(*g), Kind::List | Kind::Tuple)).is_some_and(|g| match an.cursor_of(g, st) {
+            Some(cur) => an.heap.prefix(g, st).is_some_and(|p| p > cur) || an.heap.len_alts(g, st).is_some_and(|ls| ls.iter().all(|l| *l > cur)),
+            None => false,
+        });
     // (a generator at a position not known: it ran to one of its yields at least)
     if let Some(g) = a.single() {
         an.gen_took_item(g, st);
     }
-    match it.elem {
+    let item = match it.elem {
         Elem::Pair(k, v) => {
             let ctx = an.frame().ctx.clone();
             let pid = an.heap.alloc_raw(Kind::Pair, &format!("pair:{}", c.site), &ctx, true, "pair", Payload::Pair(k, v));
@@ -835,6 +841,15 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(items) if !items.is_empty() => items[0].clone(),
             _ => elem,
         },
+    };
+    // (it may have ended: the default, else StopIteration)
+    match c.args.get(1) {
+        _ if has_item => item,
+        Some(d) => item.join(d),
+        None => {
+            an.may_raise_here("StopIteration", st);
+            item
+        }
     }
 }
 

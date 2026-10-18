@@ -392,6 +392,16 @@ impl Analyzer {
             // (beside objects — an unknown, an instance with its `__eq__` — b may equal anything)
             if !ks.is_empty() && !by_value && rv.pts.is_empty() {
                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
+            } else if by_value && rv.pts.is_empty() && lv0.pts.is_empty() && lv0.kv.is_literal() && (eq || ks.len() == 1) {
+                // known numbers on both sides: those equal (or not) by value stay
+                let lits = kv_literals(&lv0.kv);
+                let Some(keep) = lits.iter().map(|l| Some((l, ks.iter().map(|k| value_eq(l, k)).collect::<Option<Vec<bool>>>()?.contains(&true) == eq))).collect::<Option<Vec<_>>>() else { return };
+                let keep = KeySet::from_iter(keep.into_iter().filter(|(_, k)| *k).map(|(l, _)| l));
+                if keep.is_empty() {
+                    state.reachable = false;
+                } else if keep.len() < lits.len() {
+                    self.rebind_name(s(l.id.as_str()), Value::kv_only(KeyVal::lits(keep)), state);
+                }
             }
         } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {
             // `obj.attr == lit` on one object whose attribute holds known
@@ -1010,4 +1020,28 @@ pub fn is_structural_qual(q: &str) -> bool {
 fn closed_keys(recs: &[u32], state: &State) -> Option<KeySet> {
     let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
     rows.iter().all(|r| r.closed()).then(|| rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present)))
+}
+
+/// Whether two literals are equal in Python (`1 == 1.0 == True`), when that is plain: ints,
+/// bools, floats, str, bytes and None; None for any other (a tuple, a Decimal, an Enum member).
+fn value_eq(a: KeyId, b: KeyId) -> Option<bool> {
+    let num = |k: KeyId| {
+        intern::with_key(k, |kk| match kk {
+            intern::Key::Int(i) => Some(Some(*i as f64)),
+            intern::Key::Bool(x) => Some(Some(*x as i64 as f64)),
+            intern::Key::Float(bits) => Some(Some(f64::from_bits(*bits))),
+            intern::Key::Str(_) | intern::Key::None | intern::Key::Bytes(_) | intern::Key::Ellipsis => None,
+            _ => Some(None),
+        })
+    };
+    match (num(a), num(b)) {
+        (Some(None), _) | (_, Some(None)) => None,
+        (Some(Some(x)), Some(Some(y))) => {
+            // (ints past 2**53 do not compare exactly as floats)
+            let exact = |k: KeyId| intern::key_as_int(k).map_or(true, |i| i.unsigned_abs() < (1 << 53));
+            (exact(a) && exact(b)).then_some(x == y)
+        }
+        (None, None) => Some(a == b),
+        _ => Some(false),
+    }
 }
