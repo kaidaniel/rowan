@@ -416,6 +416,11 @@ impl Analyzer {
         (self.budget.lib_counts, self.budget.lib_work)
     }
 
+    /// `ROWAN_DEBUG` only: the function codes that did the most work (`Budget::tally_lines`).
+    pub fn tally_lines(&self) -> Vec<String> {
+        self.budget.tally_lines(40)
+    }
+
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
         format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited)

@@ -720,7 +720,8 @@ impl Analyzer {
         // within its allowance or not at all (`library_entry`); within one, past the allowance,
         // the entry stops
         if library && self.budget.lib_entry.is_none() {
-            let r = self.library_entry(state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
+            let q = self.heap.func_info(foid).qualname.clone();
+            let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
             return r.map(|r| self.named_by_call(r, node)).unwrap_or_else(|| {
                 self.gens.force_at = None;
                 let q = self.heap.func_info(foid).qualname.clone();
@@ -765,7 +766,15 @@ impl Analyzer {
         // own; what it deletes or gives unknown code voids the caller's)
         let names = std::mem::take(&mut state.name_keys);
         let drops = NAME_KEY_DROPS.with(|c| c.get());
+        let tally = super::debug_enabled().then(|| {
+            let fi = self.heap.func_info(foid);
+            let name = || format!("{} ({})", fi.qualname, self.heap.module_info(fi.module).name);
+            (fi.node.addr(), self.budget.tally_begin(fi.node.addr(), name))
+        });
         let r = self.call_user_inner(foid, self_v, a, state, node, entry);
+        if let Some((code, t)) = tally {
+            self.budget.tally_end(code, t);
+        }
         state.name_keys = if NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {

@@ -78,6 +78,11 @@ pub struct Budget {
     pub lib_abort: bool,
     /// entries into followed libraries: run, undone, refused (the `ROWAN_DEBUG` `loaded:` line)
     pub lib_counts: [usize; 3],
+    /// `ROWAN_DEBUG` only: per function code, its name, body runs, statements of its own, and
+    /// the work units and microseconds of its outermost runs (callees included; `tally_lines`)
+    pub tally: FxHashMap<usize, (String, [usize; 4])>,
+    /// `ROWAN_DEBUG` only: the function codes running, how many times each
+    pub tally_active: FxHashMap<usize, usize>,
 }
 
 impl Budget {
@@ -86,7 +91,44 @@ impl Budget {
         self.statements += 1;
         if code != 0 {
             *self.spent.entry(code).or_default() += 1;
+            if let Some((_, t)) = self.tally.get_mut(&code) {
+                t[1] += 1;
+            }
         }
+    }
+
+    /// `ROWAN_DEBUG` only: a body run of function code `code` (named `name`) begins; it returns
+    /// what `tally_end` needs.
+    pub fn tally_begin(&mut self, code: usize, name: impl FnOnce() -> String) -> (usize, std::time::Instant) {
+        let e = self.tally.entry(code).or_insert_with(|| (name(), [0; 4]));
+        e.1[0] += 1;
+        *self.tally_active.entry(code).or_default() += 1;
+        (self.work_units(), std::time::Instant::now())
+    }
+
+    /// `ROWAN_DEBUG` only: the body run `tally_begin` began ended (an outermost one adds its work).
+    pub fn tally_end(&mut self, code: usize, (w0, t0): (usize, std::time::Instant)) {
+        let n = self.tally_active.get_mut(&code).unwrap();
+        *n -= 1;
+        if *n == 0 {
+            let (w, us) = (self.work_units() - w0, t0.elapsed().as_micros() as usize);
+            let t = &mut self.tally.get_mut(&code).unwrap().1;
+            t[2] += w;
+            t[3] += us;
+        }
+    }
+
+    /// `ROWAN_DEBUG` only: the function codes that did the most work, by their own statements
+    /// and by their outermost runs' time.
+    pub fn tally_lines(&self, n: usize) -> Vec<String> {
+        let mut v: Vec<&(String, [usize; 4])> = self.tally.values().collect();
+        let mut out = vec![format!("functions by statements of their own (runs, statements, units incl., ms incl.):")];
+        v.sort_by_key(|(_, t)| std::cmp::Reverse(t[1]));
+        out.extend(v.iter().take(n).map(|(q, t)| format!("  {:>7} {:>8} {:>9} {:>7} {}", t[0], t[1], t[2], t[3] / 1000, q)));
+        out.push("functions by time of their outermost runs:".to_string());
+        v.sort_by_key(|(_, t)| std::cmp::Reverse(t[3]));
+        out.extend(v.iter().take(n).map(|(q, t)| format!("  {:>7} {:>8} {:>9} {:>7} {}", t[0], t[1], t[2], t[3] / 1000, q)));
+        out
     }
 
     /// Has function code `code` run past its budget?
