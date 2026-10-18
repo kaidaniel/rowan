@@ -236,6 +236,7 @@ impl Analyzer {
         self.findings.facts.retain(|_, f| {
             f.rows.clear();
             f.calls.clear();
+            f.main_sites.clear();
             !f.general.is_empty()
         });
     }
