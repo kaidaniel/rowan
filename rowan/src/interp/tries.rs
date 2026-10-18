@@ -535,9 +535,21 @@ impl Analyzer {
     }
 
     /// The exceptions of a raise (`x`) a handler of classes `hc` may bind: those of a class it
-    /// does not surely miss. None: only exceptions it misses.
+    /// does not surely miss (each class looked at once; past 64 objects, all). None: only
+    /// exceptions it misses.
     fn exceptions_caught(&self, x: &Value, hc: &(FxHashSet<String>, bool)) -> Option<Value> {
-        let keep: Vec<ObjId> = x.pts.iter().filter(|o| handler_matches(hc, &self.exc_value_names(&Value::obj(*o))) != Some(false)).collect();
+        if x.pts.is_empty() || x.pts.len() > 64 {
+            return Some(x.clone());
+        }
+        let mut misses: rustc_hash::FxHashMap<ObjId, bool> = Default::default();
+        let mut missed = |o: ObjId| {
+            let miss = |an: &Analyzer| handler_matches(hc, &an.exc_value_names(&Value::obj(o))) == Some(false);
+            match self.heap.instance_class(o) {
+                Some(c) => *misses.entry(c).or_insert_with(|| miss(self)),
+                None => miss(self),
+            }
+        };
+        let keep: Vec<ObjId> = x.pts.iter().filter(|o| !missed(*o)).collect();
         if keep.len() == x.pts.len() {
             return Some(x.clone());
         }
