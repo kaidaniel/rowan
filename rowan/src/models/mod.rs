@@ -411,11 +411,18 @@ fn m_ordered_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// The model of a library function known to change nothing it is given: an unknown result
 /// (a call given the program's functions is an unknown call all the same: it may call them).
+/// Library functions that look at the functions they are given (their names, text, docs,
+/// signatures, types) without calling them.
+const LOOKS_AT_CODE: &[&str] = &[
+    "inspect.is", "inspect.getdoc", "inspect.getsourcefile", "inspect.getfile", "inspect.getmodule", "inspect.getsource", "inspect.getsourcelines",
+    "inspect.getcomments", "inspect.signature", "inspect.getfullargspec",
+];
+
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (a library function given the program's functions may call them: `inspect.getmembers(x,
     // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
     let code = |v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
-    if !c.qual.starts_with("builtins.") && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
+    if !c.qual.starts_with("builtins.") && !LOOKS_AT_CODE.iter().any(|p| c.qual.starts_with(p)) && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
         return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
     }
     // (it may run the dunders of the program's instances it is given: `os.fspath(p)`, `logging`'s
