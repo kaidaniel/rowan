@@ -9,7 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, factsAt, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents } = require("./extension.js");
+const { renderHover, factsAt, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents, followArgs, sitePackagesOf } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -751,8 +751,32 @@ async function early() {
   return `module code at ${first} ms, whole program at ${ev.ms} ms`;
 }
 
+// ---- installed packages followed from an interpreter's site-packages (`rowan.followPackages`):
+// the interpreter is asked for its site-packages, `rowan serve` gets `--follow` and
+// `--site-packages`, and a name an installed package defines is known (unknown otherwise)
+async function follow() {
+  assert.deepStrictEqual(followArgs([], ["/s"]), []);
+  assert.deepStrictEqual(followArgs(["*"], ["/a", "/b"]), ["--follow", "*", "--site-packages", "/a", "--site-packages", "/b"]);
+  assert.deepStrictEqual(followArgs(["a", " ", "b"], []), ["--follow", "a,b"]);
+  const site = path.join(root, "tests", "cases", "n99_libbudget", "site");
+  // (an interpreter stand-in printing what `sysconfig` would: a directory that does not exist is left out)
+  const py = path.join(tmp, "python-stand-in");
+  fs.writeFileSync(py, `#!/bin/sh\necho '${JSON.stringify([site, path.join(tmp, "no-such-dir")])}'\n`, { mode: 0o755 });
+  const dirs = await sitePackagesOf(py);
+  assert.deepStrictEqual(dirs, [site]);
+  assert.deepStrictEqual(await sitePackagesOf(path.join(tmp, "no-such-python")), []);
+  const f = path.join(site, "..", "n99_lib_budgets.py");
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const on = hover(indexResult(await runEngineServer(bin, f, followArgs(["partlib"], dirs), 60, [])), src, 14, "name");
+  assert.strictEqual(on, '```python\nname = "partlib"\n```');
+  const off = hover(indexResult(await runEngineServer(bin, f, [], 60, [])), src, 14, "name");
+  // (not followed: a library's attribute, which the hover leaves to the language server)
+  assert(!(off || "").includes('"partlib"'), off);
+}
+
 onDemand().then(async ({ m, d5 }) => {
 const e = await early();
+await follow();
 stopServers();
 console.log(`early answer: ${e}`);
 fs.rmSync(tmp, { recursive: true, force: true });

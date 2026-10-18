@@ -135,7 +135,20 @@ shape.
 
 Besides Python's builtins and standard library, rowan models PyTorch, numpy, pandas, pydantic
 and FastAPI. Your own modules are followed through their imports; other installed packages are
-taken to do anything to what they are given.
+taken to do anything to what they are given, unless you list them in **`rowan.followPackages`**:
+
+```jsonc
+"rowan.followPackages": ["acme_billing"]   // or ["*"]: every installed package rowan has no model of
+```
+
+rowan then reads them from the site-packages of the Python interpreter you selected in VS Code
+(the Python extension's choice; or `rowan.pythonPath`; else `python.defaultInterpreterPath`, a
+`$VIRTUAL_ENV` or a `.venv` above the file) and runs them like your own code, each function
+within a budget of work: past it, and past the work one call or import into a package may do,
+their calls count as code rowan cannot see, so hovers stay sound. Following pays most for your
+own company's packages (plain business code): `settings = load_settings(...)` shows its keys
+instead of `?`. Large frameworks cost time and memory (an import of scikit-learn: about 1.5 s and
+350 MB) and mostly stay unknown. It is off by default.
 
 Files are analysed when opened or saved, or with **Rowan: Analyse current file**. When a whole
 file takes longer than a second, rowan answers each function when you first hover in it, for

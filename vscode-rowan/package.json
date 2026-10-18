@@ -47,6 +47,17 @@
           "default": true,
           "description": "Re-analyse a Python file whenever it is saved (and when it is opened)."
         },
+        "rowan.followPackages": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Installed packages rowan analyses from the selected Python interpreter's site-packages, like your own code (each function within a budget; past it, as unknown code): [] none (calls into them are unknown code), [\"*\"] every one rowan has no model of, or names such as [\"acme_billing\"]."
+        },
+        "rowan.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "The Python interpreter whose site-packages rowan.followPackages reads. Empty: the Python extension's selected interpreter, else python.defaultInterpreterPath, else $VIRTUAL_ENV or a .venv above the file."
+        },
         "rowan.timeoutSeconds": {
           "type": "number",
           "default": 60,

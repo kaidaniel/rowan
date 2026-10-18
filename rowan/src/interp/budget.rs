@@ -191,10 +191,9 @@ impl Budget {
     }
 
     /// The work a function's run on demand, or an entry into a followed library, may do before
-    /// the calls under it are unknown: `FANOUT` budgets (each at least 64 statements: with
-    /// `budget=0` a small library still runs, as each function's first call does).
+    /// the calls under it are unknown: `FANOUT` budgets.
     pub fn fanout_limit() -> usize {
-        limit("fanout", FANOUT).saturating_mul(limit("budget", FN_BUDGET).max(64))
+        limit("fanout", FANOUT).saturating_mul(limit("budget", FN_BUDGET))
     }
 
     /// A call of user code within an entry into a followed library, with the work done so far
