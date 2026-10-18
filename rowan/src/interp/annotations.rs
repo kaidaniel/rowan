@@ -133,7 +133,14 @@ impl Analyzer {
     fn annotated_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
         let ci = self.heap.class_info(cls);
         let Some((fields, extra, validated)) = self.declared_fields(cls, state) else {
-            return self.fresh_instance(cls, state, &format!("entry:{}", path)).map(Value::obj);
+            // (a part's, `list[B]`'s element: made once per path, as one with declared fields —
+            // made again, the earlier one still in use, it would be no single object, its
+            // `__init__`'s stores weak)
+            let ctx = format!("entry:{}", path);
+            if let Some(o) = self.made_instance(cls, &ctx, state).filter(|_| param.is_none()) {
+                return Some(Value::obj(o));
+            }
+            return self.fresh_instance(cls, state, &ctx).map(Value::obj);
         };
         let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
         let mut names: KeySet = KeySet::from_iter(fields.iter().map(|(f, _)| key_str_lit(f)));

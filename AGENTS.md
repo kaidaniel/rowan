@@ -79,7 +79,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
     end after any of the program's functions ran (`follow_code` over all, a result as its callers
     use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
-    module code's calls (`note_call`); parameters as annotated (`annotations.rs`: `list[dict[str, int]]`'s parts too, `Heap::ann`; a dataclass's, NamedTuple's, TypedDict's or pydantic model's instance has its fields, bases' too, each as annotated, a part annotated with one such an instance), a method on any instance (on demand, of a subclass past 64
+    module code's calls (`note_call`); parameters as annotated (`annotations.rs`: `list[dict[str, int]]`'s parts too, a dict's keys iterated, `Heap::ann`; a dataclass's, NamedTuple's, TypedDict's or pydantic model's instance has its fields, bases' too, each as annotated, a part annotated with one such an instance), a method on any instance (on demand, of a subclass past 64
     of them: any attributes; `__init__` of a class without subclasses on a new one, `new_instance`), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`; `iter()` gives one back, running nothing), in the creating call's context; a consumer of item
   *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
