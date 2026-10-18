@@ -15,7 +15,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
-  *merged* object (stores only join); past 256 objects a site's summary (calls the main file's own code makes: 16 more, `MAIN_CLONES`). Garbage collection at returns, loop and try exits drops
+  *merged* object (stores only join); past 256 objects a site's summary (calls the main file's own code makes: 16 more, `MAIN_CLONES`). An instance a call makes where the object is a summary is a strong *recent* one per call depth until the call returns or a raise leaves it (`call_recent`), then folded into the summary (nothing holding it: dropped). Garbage collection at returns, loop and try exits drops
   the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches
   (side tables' young targets: a remembered set by age, `Heap::push_copy_roots`).
   An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a

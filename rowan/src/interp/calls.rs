@@ -889,7 +889,7 @@ impl Analyzer {
         self.recursion.begin(&key, (self_v.clone(), args.to_vec(), kwargs.clone()), pre_rc.clone(), born_mark);
         if gen_id.is_none() {
             if let Some(fr) = self.cx.frames.last_mut() {
-                fr.pre_call = Some(super::PreCall(self.heap.serial(), pre_rc));
+                fr.pre_call = Some(super::PreCall(self.heap.mark(), pre_rc));
             }
         }
         let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len());
@@ -923,6 +923,9 @@ impl Analyzer {
         self.cx.call_chain = saved_chain;
         self.cx.call_files = saved_files;
         self.cx.frames.pop();
+        if self.cx.frames.len() <= 1 && self.cx.recent_stack.is_empty() {
+            self.heap.forget_repaid();
+        }
         self.give_back(caller, state);
         ret
     }

@@ -1,7 +1,8 @@
 //! Allocation policy: which object an allocation at a site gives in the running context —
 //! a strong object, a strong *recent* one inside a loop (folded into the site's summary at the
 //! back-edge, `rename_recent`), a variant while the site's earlier object is still live, or the
-//! merged summary. The objects themselves are the `Heap` (`interp/heap.rs`).
+//! merged summary (an instance a call makes there: the call's recent one, `call_recent`). The
+//! objects themselves are the `Heap` (`interp/heap.rs`).
 
 use rustc_hash::FxHashSet;
 
@@ -104,8 +105,48 @@ impl Analyzer {
             }
             oid
         };
+        let oid = if single && !recent { self.call_recent(kind, oid, &label, state).unwrap_or(oid) } else { oid };
         self.born_facts(oid, kind, state, row, ns);
         oid
+    }
+
+    /// Recency per call: an instance a call makes where its site's object is a summary (merged,
+    /// or past the site's `MAX_CLONES`) is a strong *recent* object of the call's own, folded
+    /// into the summary when the call returns (`fold_call_recent`): what the call stores is
+    /// there for sure until then, and joins the summary with every key it got. Not while the
+    /// recent object is in use: made by a running call or held on a path, or an identity key. Instances of the program's classes only (no
+    /// side tables of models hold them).
+    fn call_recent(&mut self, kind: Kind, oid: ObjId, label: &str, state: &State) -> Option<ObjId> {
+        if kind != Kind::Instance || self.heap.obj(oid).single || self.budget.over_hard_deadline() {
+            return None;
+        }
+        let fr = self.frame();
+        if fr.kind != super::FrameKind::Function || fr.pre_call.is_none() || fr.loop_depth > 0 {
+            return None;
+        }
+        let (site, ctx, payload) = {
+            let o = self.heap.obj(oid);
+            (o.site.to_string(), o.ctx.to_string(), o.payload.clone())
+        };
+        let Payload::Cls(c) = payload else { return None };
+        if self.heap.class_info_opt(c).is_none_or(|ci| ci.open_base) {
+            return None;
+        }
+        // (one per call depth: a recursive call's own)
+        let rsite = format!("{}#call", site);
+        let rctx = format!("{}#{}", ctx, self.cx.frames.len());
+        if let Some(r) = self.heap.find(kind, &rsite, &rctx) {
+            let in_use = self.has_facts(r, state) || self.cx.frames.iter().any(|f| f.recent.iter().any(|x| x.0 == r)) || self.heap.keys.identity_keys.borrow().contains_key(&r);
+            if in_use {
+                return None;
+            }
+        }
+        let r = self.heap.alloc_raw(kind, &rsite, &rctx, true, label, payload);
+        if !self.heap.obj(r).single {
+            return None;
+        }
+        self.frame_mut().recent.push((r, kind, site, ctx));
+        Some(r)
     }
 
     /// A strong *recent* object of the site in the running loop iteration (folded into the

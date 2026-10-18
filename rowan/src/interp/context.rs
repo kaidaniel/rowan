@@ -61,15 +61,18 @@ pub struct Frame {
     /// a call: the objects allocated from here on are its own, and the state before
     /// it (a `return` drops its own objects nothing can reach any more)
     pub pre_call: Option<PreCall>,
+    /// the call's own recent objects (object, kind, and its summary's site and context): made
+    /// at a site whose object is a summary, folded into it when the call returns (`call_recent`)
+    pub recent: Vec<(ObjId, Kind, String, String)>,
 }
 
-/// The start of a call: the heap's serial then and the state before it (`Frame::pre_call`).
+/// The start of a call: the heap then and the state before it (`Frame::pre_call`).
 #[derive(Clone)]
-pub struct PreCall(pub u64, pub std::rc::Rc<State>);
+pub struct PreCall(pub super::heap::HeapMark, pub std::rc::Rc<State>);
 
 impl std::fmt::Debug for PreCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PreCall({})", self.0)
+        write!(f, "PreCall({})", self.0.serial)
     }
 }
 
@@ -92,6 +95,7 @@ impl Frame {
             label: label.to_string(),
             unroll: Vec::new(),
             pre_call: None,
+            recent: Vec::new(),
         }
     }
 }

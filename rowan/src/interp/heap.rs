@@ -23,6 +23,13 @@ use crate::state::{mark_merged, Kind, State};
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
 /// onto one context-free summary object.
 pub const MAX_CLONES: usize = 256;
+
+/// A point in the heap's history (`Heap::mark`): its objects then, and its serial.
+#[derive(Clone, Copy, Debug)]
+pub struct HeapMark {
+    pub len: ObjId,
+    pub serial: u64,
+}
 /// Objects of a site made past `MAX_CLONES` in calls the main file's own code makes
 /// (`Heap::from_main`): a registry's helper the main file calls once more keeps its result.
 pub const MAIN_CLONES: usize = 16;
@@ -324,6 +331,8 @@ pub struct Heap {
     main_clones: FxHashMap<String, usize>,
     /// allocations so far (`Obj::born`): the collectors' marks
     serial: u64,
+    /// objects made earlier given a payload again, by serial then (`rename_payloads`)
+    repaid: Vec<(u64, ObjId)>,
     /// the functions, classes and modules made so far (definitions: the statement making one
     /// pays for it, `Analyzer::library_work`)
     pub defs: usize,
@@ -356,7 +365,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, defs: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
@@ -402,6 +411,17 @@ impl Heap {
         self.serial
     }
 
+    /// Where the heap is now: what is made or given a payload from here on is younger.
+    pub fn mark(&self) -> HeapMark {
+        HeapMark { len: self.objects.len() as ObjId, serial: self.serial }
+    }
+
+    /// Forget the payloads given since the last call of the module's code returned (no mark
+    /// of a running call is older).
+    pub fn forget_repaid(&mut self) {
+        self.repaid.clear();
+    }
+
     /// Was `o` made (or made new) before `mark`?
     /// Records that `copy` is a copy of `root`.
     pub fn set_copy_root(&mut self, copy: ObjId, root: ObjId) {
@@ -444,7 +464,26 @@ impl Heap {
             let o = &mut self.objects[oid as usize];
             o.single = o.single && single;
             if !payload.is_none() {
+                // (a payload holding a recent object: a rename of recent objects looks at it)
+                let mut objs: Vec<ObjId> = Vec::new();
+                match &payload {
+                    Payload::Method(_, v) | Payload::Bound(_, v) | Payload::Super(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(&mut objs),
+                    Payload::Zip(a, b) | Payload::Pair(a, b) => {
+                        a.push_objs(&mut objs);
+                        b.push_objs(&mut objs);
+                    }
+                    Payload::Partial(f, args, kw) => {
+                        f.push_objs(&mut objs);
+                        args.iter().chain(kw.values()).for_each(|v| v.push_objs(&mut objs));
+                    }
+                    _ => {}
+                }
+                let holds = objs.iter().any(|x| self.objects.get(*x as usize).is_some_and(|x| x.site.ends_with("#recent") || x.site.ends_with("#call")));
+                let o = &mut self.objects[oid as usize];
                 o.payload = payload;
+                if holds && self.repaid.last() != Some(&(self.serial, oid)) {
+                    self.repaid.push((self.serial, oid));
+                }
             }
             return oid;
         }
@@ -693,11 +732,16 @@ impl Heap {
         c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
     }
 
-    /// The objects made since `mark` refer to the summary objects of `map` instead of the
+    /// The objects made or given a payload since `mark`.
+    pub fn payloads_since(&self, mark: HeapMark) -> Vec<ObjId> {
+        let older = self.repaid.iter().rev().take_while(|(s, _)| *s >= mark.serial).map(|(_, o)| *o).filter(|o| *o < mark.len);
+        older.chain(mark.len..self.len() as ObjId).collect()
+    }
+
+    /// The objects made (or given a payload) since `mark` refer to the summary objects of `map` instead of the
     /// recent ones (payloads, `derived_from`).
-    pub fn rename_payloads(&mut self, mark: ObjId, rename: &dyn Fn(&Value) -> Option<Value>, map: &FxHashMap<ObjId, ObjId>) {
-        let n = self.len() as ObjId;
-        for oid in mark..n {
+    pub fn rename_payloads(&mut self, mark: HeapMark, rename: &dyn Fn(&Value) -> Option<Value>, map: &FxHashMap<ObjId, ObjId>) {
+        for oid in self.payloads_since(mark) {
             let o = self.obj_mut(oid);
             if let Some(d) = o.derived_from {
                 if let Some(&sd) = map.get(&d) {

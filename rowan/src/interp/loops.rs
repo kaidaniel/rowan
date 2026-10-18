@@ -152,7 +152,7 @@ impl Analyzer {
             self.findings.fact_round_restart();
             vmark = self.findings.mark();
             let mut body_s = head.copy();
-            let mark = self.heap.len() as u32;
+            let mark = self.heap.mark();
             self.cx.recent_stack.push(Vec::new());
             self.unwind.loop_stack.push(LoopCtx::default());
             round(self, &mut body_s);

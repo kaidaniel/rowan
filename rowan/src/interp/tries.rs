@@ -211,7 +211,7 @@ impl Analyzer {
     /// running try: its handlers and finally start from this state (with the try frame's
     /// locals when the raise is inside a callee). False: no try is running.
     pub(in crate::interp) fn record_raise_state(&mut self, state: &mut State) -> bool {
-        let exc = self.unwind.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        let mut exc = self.unwind.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
         let cls = self.unwind.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         let Some(t) = self.unwind.tries.last() else { return false };
         let (fl, el) = (t.frames, t.envs);
@@ -232,6 +232,14 @@ impl Analyzer {
             here.narrowed = t.pre.narrowed.clone();
             here.ret = t.pre.ret.clone();
             here.exits = t.pre.exits.clone();
+        }
+        // (the recent objects of the calls the raise leaves join their summaries here: they
+        // are other calls' once these return, `call_recent`)
+        if let Some(i) = self.cx.frames.iter().skip(fl).position(|f| !f.recent.is_empty()) {
+            if let Some(super::PreCall(mark, pre)) = self.cx.frames[fl + i].pre_call.clone() {
+                let recs: Vec<_> = self.cx.frames[fl + i..].iter().flat_map(|f| f.recent.iter().cloned()).collect();
+                self.fold_recent_in(&mut here, &pre, mark, recs, &mut exc, true);
+            }
         }
         let Some(t) = self.unwind.tries.last() else { return false };
         // (the same state, class and exception as the last raise recorded in this try — a loop
