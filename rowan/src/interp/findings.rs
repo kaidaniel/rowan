@@ -28,8 +28,9 @@ pub struct Verdict {
     pub tier: Tier,
     /// the object's label (`dict@L4`)
     pub obj: String,
-    /// call sites (lines) active when the access ran
+    /// call sites (lines) active when the access ran, and their modules
     pub chain: Chain,
+    pub chain_files: Vec<u32>,
     /// why, in words (`is only set on some paths`)
     pub note: String,
     /// the inputs that may provide the key
@@ -46,10 +47,13 @@ pub struct Verdict {
     pub guarded: bool,
 }
 
+/// What makes two verdicts the same record: file, line, column, key, tier, object, chain.
+pub(in crate::interp) type VerdictKey = (String, u32, u32, String, Tier, ObjId, Chain, Vec<u32>);
+
 impl Verdict {
     /// What makes two verdicts the same record (`Findings::add`).
-    pub(in crate::interp) fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
-        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
+    pub(in crate::interp) fn dedupe_key(&self) -> VerdictKey {
+        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone(), self.chain_files.clone())
     }
 }
 
@@ -198,7 +202,7 @@ pub struct ValueInfo {
 pub struct Findings {
     /// the access verdicts in the order recorded, without repeats (`keys`)
     verdicts: Vec<Verdict>,
-    keys: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)>,
+    keys: FxHashSet<VerdictKey>,
     notes: Vec<String>,
     notes_set: FxHashSet<String>,
     /// per (function, call context or "entry"): the last run's result and its records' rows
@@ -255,7 +259,7 @@ impl Findings {
     }
 
     /// Record the verdict `make` builds, unless one with the same key is recorded.
-    pub(in crate::interp) fn add(&mut self, key: (String, u32, u32, String, Tier, ObjId, Chain), make: impl FnOnce() -> Verdict) {
+    pub(in crate::interp) fn add(&mut self, key: VerdictKey, make: impl FnOnce() -> Verdict) {
         if self.keys.contains(&key) {
             return;
         }
@@ -369,8 +373,8 @@ impl Analyzer {
             Some(f) => f.to_string(),
             None => self.file_of_frame(),
         };
-        let chain = self.cx.call_chain.clone();
-        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone());
+        let (chain, chain_files) = (self.cx.call_chain.clone(), self.cx.call_files.clone());
+        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone(), chain_files.clone());
         let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.mode.verdict_guarded);
         self.findings.add(dk, || Verdict {
             line: node.line,
@@ -379,6 +383,7 @@ impl Analyzer {
             tier: cls.tier,
             obj,
             chain,
+            chain_files,
             note: cls.note.clone(),
             providers: cls.providers.iter().map(|(s, _)| *s).collect(),
             mutators: { let mut m: Vec<String> = cls.mutators.iter().map(|m| intern::str_get(*m).to_string()).collect(); m.sort(); m },
@@ -433,7 +438,7 @@ impl Analyzer {
         if self.no_facts_here(general) {
             return;
         }
-        let call = if general { None } else { Some((self.cx.call_file, self.cx.call_chain.last().copied().unwrap_or(0))) };
+        let call = if general { None } else { Some((self.cx.call_files.last().copied().unwrap_or(0), self.cx.call_chain.last().copied().unwrap_or(0))) };
         // (an assignment's value is what the hover shows, not the read of its target: `x += 1`)
         let writing = std::mem::take(&mut self.findings.fact_write);
         if !writing && self.findings.facts.get(&(node.line, node.col, name)).is_some_and(|e| e.written) {
@@ -517,8 +522,9 @@ impl Analyzer {
             self.findings.touch_fact((node.line, node.col, name));
             let Some(f) = self.findings.facts.get_mut(&(node.line, node.col, name)) else { continue };
             f.param_of = Some(foid);
-            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, m, _)| *c == self.cx.call_chain && *m == self.cx.call_file) {
-                f.passed.push((self.cx.call_chain.clone(), self.cx.call_file, v.pts.to_vec()));
+            let file = self.cx.call_files.last().copied().unwrap_or(0);
+            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, m, _)| *c == self.cx.call_chain && *m == file) {
+                f.passed.push((self.cx.call_chain.clone(), file, v.pts.to_vec()));
             }
         }
     }

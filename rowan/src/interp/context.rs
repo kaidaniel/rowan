@@ -105,8 +105,8 @@ pub struct Context {
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// the call sites (lines) of the running calls, innermost last (the verdicts' chain)
     pub call_chain: Vec<u32>,
-    /// the module of the innermost call site (the file of `call_chain`'s last line)
-    pub call_file: u32,
+    /// the modules of `call_chain`'s sites
+    pub call_files: Vec<u32>,
     /// branches and loops the running code is inside of (`if` / `try` / boolean operators /
     /// loops): a requirement recorded inside one is "sometimes"
     pub cond_depth: i32,

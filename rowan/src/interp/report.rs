@@ -22,9 +22,9 @@ pub use super::render::VALUE_DEPTH;
 /// be on are combined (all proven: proven; some missing: possibly, saying on which objects);
 /// each finding is kept under its shortest few call chains.
 pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
-    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns, String, bool), Vec<&Verdict>> = IndexMap::new();
+    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Vec<u32>, Ns, String, bool), Vec<&Verdict>> = IndexMap::new();
     for v in verdicts {
-        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.ns, v.text.clone(), v.guarded)).or_default().push(v);
+        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.chain_files.clone(), v.ns, v.text.clone(), v.guarded)).or_default().push(v);
     }
     let mut out: Vec<Verdict> = Vec::new();
     for (_, vs) in groups {
@@ -101,6 +101,7 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
             tier,
             obj: object_list(names.values()),
             chain: first.chain.clone(),
+            chain_files: first.chain_files.clone(),
             // (no object lacks it: the note of the least sure one — unknown code ran, an input)
             note: if breakdown.is_empty() { by_obj.values().max_by_key(|v| v.tier.rank()).map(|v| v.note.clone()).unwrap_or_default() } else { format!("is not on every object this may be ({})", breakdown.join("; ")) },
             providers: provs,
@@ -221,7 +222,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         };
         errs.sort_by_key(|e| (e.module != an.program.main_idx, e.module, e.line, e.chain.len()));
         errs.dedup_by(|a, b| (a.module, a.line, &a.text) == (b.module, b.line, &b.text));
-        shapes.extend(errs.iter().map(|e| format!("  {} ✗  shape mismatch: {}{}", at(e), e.text, via_text(&e.chain, 0))));
+        shapes.extend(errs.iter().map(|e| format!("  {} ✗  shape mismatch: {}{}", at(e), e.text, via_text(an, &e.chain, &[], 0))));
         let mut reqs: Vec<(bool, u32, u32, String, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.module != an.program.main_idx, r.module, r.line, at(r), r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
@@ -300,10 +301,10 @@ fn problem_lines(an: &Analyzer, vs: &[Verdict]) -> Vec<String> {
         }
         let (mark, msg) = mm.split_once('\u{0}').unwrap();
         // (reached directly: no call path to show)
-        let mut chains: Vec<&Vec<u32>> = vs.iter().map(|v| &v.chain).collect();
+        let mut chains: Vec<(&Vec<u32>, &Vec<u32>)> = vs.iter().map(|v| (&v.chain, &v.chain_files)).collect();
         chains.sort();
         chains.dedup();
-        let via = if vs.iter().any(|v| v.chain.is_empty()) { String::new() } else { via_text(&vs[0].chain, chains.len() - 1) };
+        let via = if vs.iter().any(|v| v.chain.is_empty()) { String::new() } else { via_text(an, &vs[0].chain, &vs[0].chain_files, chains.len() - 1) };
         let text = if text.chars().count() > width { format!("{}…", text.chars().take(width - 1).collect::<String>()) } else { text };
         let indent = if file_now.is_empty() { "  " } else { "    " };
         out.push(format!("{}{:<5} {:<2} {:<w$}  {}{}", indent, format!("L{}", line), mark, text, msg, via, w = width));
@@ -311,18 +312,36 @@ fn problem_lines(an: &Analyzer, vs: &[Verdict]) -> Vec<String> {
     out
 }
 
-/// `  via L5→L9 (+2 more)`: the calls (by line) through which an access was reached.
-fn via_text(chain: &[u32], more: usize) -> String {
+/// `  via L5→pkg/io.py:L9→L12 (+2 more)`: the calls through which an access was reached
+/// (`via_path`), and how many other paths reach it.
+fn via_text(an: &Analyzer, chain: &[u32], files: &[u32], more: usize) -> String {
     if chain.is_empty() {
         return String::new();
     }
-    let mut path: Vec<String> = chain.iter().map(|c| format!("L{}", c)).collect();
-    // (a long path: its first call and the last two)
-    if path.len() > 4 {
-        path = vec![path[0].clone(), "…".into(), path[path.len() - 2].clone(), path[path.len() - 1].clone()];
-    }
     let more = if more > 0 { format!(" (+{} more)", more) } else { String::new() };
-    format!("  via {}{}", path.join("→"), more)
+    format!("  via {}{}", via_path(an, chain, files, true), more)
+}
+
+/// `L5→pkg/io.py:L9→L12`: call sites by line, a file named where the path enters it (`files`:
+/// the modules of the lines; the main file's at the start unnamed); `elide`: a long path as
+/// its first call and the last two.
+pub(super) fn via_path(an: &Analyzer, chain: &[u32], files: &[u32], elide: bool) -> String {
+    let n = chain.len();
+    let shown: Vec<usize> = if elide && n > 4 { vec![0, n - 2, n - 1] } else { (0..n).collect() };
+    let main = an.program.main_idx;
+    let file = |m: u32| if m == main { an.program.filename.rsplit('/').next().unwrap_or("").to_string() } else { an.program.rel_file(m) };
+    let mut path: Vec<String> = Vec::new();
+    for (j, &i) in shown.iter().enumerate() {
+        let before = if j == 0 { Some(main) } else { files.get(shown[j - 1]).copied() };
+        match files.get(i) {
+            Some(&m) if Some(m) != before => path.push(format!("{}:L{}", file(m), chain[i])),
+            _ => path.push(format!("L{}", chain[i])),
+        }
+        if shown.len() < n && j == 0 {
+            path.push("…".into());
+        }
+    }
+    path.join("→")
 }
 
 /// What a verdict says, in words: `key "role" is only set on some paths`.
@@ -764,6 +783,7 @@ pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {
         "guarded": v.guarded,
         "object": v.obj,
         "chain": v.chain,
+        "via": via_path(an, &v.chain, &v.chain_files, false),
         "note": v.note,
         "providers": v.providers.iter().map(|p| source_label(*p)).collect::<Vec<_>>(),
         "text": v.text,

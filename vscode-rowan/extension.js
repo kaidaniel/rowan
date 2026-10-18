@@ -549,9 +549,12 @@ function severityFor(tier) {
   }
 }
 
-/** A diagnostic's message: the finding in words and the calls it was reached through. */
+/**
+ * A diagnostic's message: the finding in words and the calls it was reached through (`via`:
+ * the engine's path, a file named where the path enters it: `L5→pkg/io.py:L9`).
+ */
 function diagnosticMessage(v) {
-  const chain = v.chain && v.chain.length ? ` (via ${v.chain.map((c) => "L" + c).join("→")})` : "";
+  const chain = v.via ? ` (via ${v.via})` : v.chain && v.chain.length ? ` (via ${v.chain.map((c) => "L" + c).join("→")})` : "";
   return `${v.message || v.tier}${chain}`;
 }
 
