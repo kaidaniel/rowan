@@ -379,7 +379,7 @@ fn code_list(an: &Analyzer, sites: &[String]) -> String {
 pub fn site_text(an: &Analyzer, site: &str) -> String {
     let in_file = |m: u32, line: u32| {
         let f = an.program.rel_file(m);
-        if f.is_empty() { format!("line {}", line) } else { format!("{} line {}", f, line) }
+        if f.is_empty() { format!("line {}", line) } else { format!("line {} in {}", line, f) }
     };
     if let Some((text, m, line)) = an.names.site_names.get(&intern::s(site)) {
         let t: String = if text.chars().count() > 50 { format!("{}…", text.chars().take(49).collect::<String>()) } else { text.clone() };

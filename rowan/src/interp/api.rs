@@ -277,6 +277,17 @@ impl Analyzer {
         &self.names
     }
 
+    /// The input a library call opens (`json.loads@L9`: `tag` at the call's line), named for
+    /// people by the call as written and its file (`json.loads(text)` (line 9 in io.py)).
+    pub fn call_source(&mut self, tag: &str, c: &Call) -> crate::intern::SourceId {
+        let site = format!("{}@L{}", tag, c.line);
+        if c.call_ast.is_some() {
+            let text = crate::frontend::text_at(&c.node).split_whitespace().collect::<Vec<_>>().join(" ");
+            self.names.site_names.entry(s(&site)).or_insert((text, c.node.module, c.node.line));
+        }
+        crate::source::Source::new(&site, crate::source::SourceKind::External)
+    }
+
     /// Object `oid` is printed as `sym` (in function `scope`'s names; 0: module level).
     pub fn set_symbol(&mut self, oid: ObjId, sym: String, scope: u32) {
         self.names.set(oid, sym, scope);

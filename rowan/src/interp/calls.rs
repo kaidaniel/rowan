@@ -863,6 +863,7 @@ impl Analyzer {
         let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
         self.cx.call_chain = chain_extend(&saved_chain, &[node.line]);
+        let saved_file = std::mem::replace(&mut self.cx.call_file, node.module);
         let pre_bind = state.copy();
         // (objects made from here on, by birth: a run again of code makes them anew)
         let born_mark = self.heap.serial();
@@ -902,6 +903,7 @@ impl Analyzer {
         // cleanup
         self.recursion.end(&key);
         self.cx.call_chain = saved_chain;
+        self.cx.call_file = saved_file;
         self.cx.frames.pop();
         self.give_back(caller, state);
         ret

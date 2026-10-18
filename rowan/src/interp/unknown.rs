@@ -349,7 +349,7 @@ impl Analyzer {
             self.names.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
             let scope = self.frame().func.unwrap_or(0);
             self.names.set(rid, t.clone(), scope);
-            self.names.origins.insert(rid, (t, node.line, given));
+            self.names.origins.insert(rid, (t, (node.module, node.line), given));
         }
     }
 

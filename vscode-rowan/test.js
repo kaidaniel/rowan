@@ -293,6 +293,23 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
+// ---- calls and unknowns from another file name it: a method of the hovered file that another
+// module calls (`r.render(…)` on its line 5), an unknown made there (`json.loads(…)` on its line 9)
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rowan-files-"));
+  const f = path.join(dir, "main.py");
+  fs.writeFileSync(path.join(dir, "helper.py"), ["import json", "", "", "def run(r):", '    return r.render({"title": "t"})', "", "", "def load():", "    return json.loads(input())", ""].join("\n"));
+  fs.writeFileSync(f, ["import helper", "", "", "class Report:", "    def render(self, payload):", '        return payload["title"]', "", "", "def show(x):", "    return x", "", "", "helper.run(Report())", "show(helper.load())", ""].join("\n"));
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const idx = indexResult(facts(f));
+  const payload = hover(idx, src, 5, "payload");
+  assert(payload.includes('- `{"title": "t"}` on line 5 in helper.py.'), payload);
+  assert(hover(idx, src, 5, "self").includes("- `Report()` on line 5 in helper.py."), hover(idx, src, 5, "self"));
+  const x = hover(idx, src, 9, "x");
+  assert(x.includes("- `?` on line 14.") && x.includes("- `?`: unknown (the result of `json.loads(input())` on line 9 in helper.py)"), x);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
 {
   const z440 = path.join(root, "tests", "cases", "z440_past_budget_changes_globals.py");

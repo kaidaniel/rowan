@@ -69,9 +69,9 @@ pub struct Fact {
     pub general_rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     /// the values (`render::render_value`) the general run recorded, distinct texts
     pub general: Vec<String>,
-    /// the values the program's calls recorded, distinct texts, each with the lines of the
+    /// the values the program's calls recorded, distinct texts, each with the sites of the
     /// calls (of the function the line is in) that gave it
-    pub calls: Vec<(String, Vec<u32>)>,
+    pub calls: Vec<(String, Vec<CallSite>)>,
     /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
@@ -80,10 +80,13 @@ pub struct Fact {
     /// `x += 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
     /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
-    /// call chain into the function, the objects given; at most `PASSED`)
+    /// call chain into the function, the file of its last call, the objects given; at most `PASSED`)
     pub param_of: Option<ObjId>,
-    pub passed: Vec<(Chain, Vec<ObjId>)>,
+    pub passed: Vec<(Chain, u32, Vec<ObjId>)>,
 }
+
+/// A call's site: its module (`frontend`'s index) and line.
+pub type CallSite = (u32, u32);
 
 /// The calls' arguments a parameter's fact keeps (`Fact::passed`).
 const PASSED: usize = 32;
@@ -114,18 +117,18 @@ impl Fact {
         }
     }
 
-    /// Has the set a recording goes to (`call`: the line of the call, None: general) all the
+    /// Has the set a recording goes to (`call`: the site of the call, None: general) all the
     /// texts it shows?
-    fn full(&self, call: Option<u32>) -> bool {
+    fn full(&self, call: Option<CallSite>) -> bool {
         match call {
             None => self.general.len() >= FACT_TEXTS,
             Some(_) => self.calls.len() >= FACT_TEXTS,
         }
     }
 
-    /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the line of the call
+    /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the site of the call
     /// it was made in, None: the general run) and its legend (a symbol's descriptions joined).
-    fn add_text(&mut self, text: String, call: Option<u32>, legend: Vec<(String, String)>) {
+    fn add_text(&mut self, text: String, call: Option<CallSite>, legend: Vec<(String, String)>) {
         match call {
             None if !self.general.contains(&text) && self.general.len() < FACT_TEXTS => self.general.push(text),
             None => {}
@@ -430,7 +433,7 @@ impl Analyzer {
         if self.no_facts_here(general) {
             return;
         }
-        let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
+        let call = if general { None } else { Some((self.cx.call_file, self.cx.call_chain.last().copied().unwrap_or(0))) };
         // (an assignment's value is what the hover shows, not the read of its target: `x += 1`)
         let writing = std::mem::take(&mut self.findings.fact_write);
         if !writing && self.findings.facts.get(&(node.line, node.col, name)).is_some_and(|e| e.written) {
@@ -514,8 +517,8 @@ impl Analyzer {
             self.findings.touch_fact((node.line, node.col, name));
             let Some(f) = self.findings.facts.get_mut(&(node.line, node.col, name)) else { continue };
             f.param_of = Some(foid);
-            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, _)| *c == self.cx.call_chain) {
-                f.passed.push((self.cx.call_chain.clone(), v.pts.to_vec()));
+            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, m, _)| *c == self.cx.call_chain && *m == self.cx.call_file) {
+                f.passed.push((self.cx.call_chain.clone(), self.cx.call_file, v.pts.to_vec()));
             }
         }
     }

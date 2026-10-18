@@ -934,7 +934,7 @@ pub(super) fn m_dictreader(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     let fields = c.kw("fieldnames").and_then(|f| an.lit_keys(&f, st));
     let row = match fields {
         Some(f) => Row::closed_with(f),
-        None => Row::with_source(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
+        None => Row::with_source(an.call_source("csv.DictReader", c)),
     };
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row), Ns::Item, Some(false), None);
     an.heap.obj_mut(rid).iter_elem = true;

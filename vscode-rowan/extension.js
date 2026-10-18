@@ -297,7 +297,7 @@ function paramValue(text, name, type) {
 function requirementLines(f) {
   const objs = [...(f.objects || []), ...(f.general_unknowns || [])];
   const param = f.param || objs.some((o) => o.kind === "unknown" && (o.from || []).some((t) => t.startsWith(`argument \`${f.name}\` of `)));
-  const input = objs.some((o) => (o.origin && o.origin.line === f.line) || (o.from || []).some((t) => t.endsWith(`(line ${f.line})`)));
+  const input = objs.some((o) => (o.origin && !o.origin.file && o.origin.line === f.line) || (o.from || []).some((t) => t.endsWith(`(line ${f.line})`)));
   if (!param && !input) return [];
   const reads = (f.param ? f.contract : f.required) || [];
   const rank = (r) => (r.always ? 0 : r.only_if ? 1 : 2);
@@ -310,8 +310,9 @@ function requirementLines(f) {
 
 /**
  * What the program's own calls gave, apart from the value for any call: "`3` on line 5.", values
- * the cut makes alike once with all their lines; a parameter's: what fails in the function for
- * what they pass, the worst mark first (`✗ \`row["since"]\``), nothing when it all works.
+ * the cut makes alike once with all their lines (calls in other files: "on line 83 in dp/api.py");
+ * a parameter's: what fails in the function for what they pass, the worst mark first
+ * (`✗ \`row["since"]\``), nothing when it all works.
  */
 function callLines(f, marks) {
   const merged = new Map();
@@ -320,8 +321,9 @@ function callLines(f, marks) {
     // annotated type, else `?`)
     const text = f.param ? [...new Set(alternatives(c.text).map((a) => (a === f.name ? (f.type ? typeText(f.type) : "?") : a)))].join(" | ") : c.text;
     const t = shorten(text, VALUE_WIDTH);
-    const m = merged.get(t) || { lines: [], check: null };
+    const m = merged.get(t) || { lines: [], files: {}, check: null };
     m.lines = m.lines.concat((c.lines || []).filter((l) => !m.lines.includes(l)));
+    for (const [file, ls] of Object.entries(c.files || {})) m.files[file] = (m.files[file] || []).concat(ls.filter((l) => !(m.files[file] || []).includes(l)));
     if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
     merged.set(t, m);
   }
@@ -332,7 +334,8 @@ function callLines(f, marks) {
     const fails = c.fails.slice(0, 3).map((x) => "`" + x + "`").join(", ") + (c.fails.length > 3 ? ` and ${c.fails.length - 3} more` : "");
     return `: ${mark}` + (fails ? " " + fails : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
   };
-  return [...merged].map(([t, m]) => "`" + t + "`" + (m.lines.length ? " " + onLines(m.lines) : "") + check(m.check));
+  const where = (m) => [m.lines.length ? onLines(m.lines) : null, ...Object.entries(m.files).map(([file, ls]) => `${onLines(ls)} in ${file}`)].filter(Boolean).join("; ");
+  return [...merged].map(([t, m]) => "`" + t + "`" + (where(m) ? " " + where(m) : "") + check(m.check));
 }
 
 /** "on line 5", "on lines 5, 9, 12 and 2 more" */
@@ -438,7 +441,7 @@ function renderHover(name, facts, verdicts) {
     const legend = (f.legend || []).filter(([, d]) => d !== "?");
     // (the unknowns of the value shown: the objects are the calls' when there are some)
     const unknown = (f.general_unknowns || objs).filter((o) => o.kind === "unknown");
-    const origin = (o) => (o.origin ? `the result of \`${o.origin.text}\` on line ${o.origin.line}` : (o.from || []).length ? o.from.map(fromText).join(" or ") : null);
+    const origin = (o) => (o.origin ? `the result of \`${o.origin.text}\` on line ${o.origin.line}${o.origin.file ? ` in ${o.origin.file}` : ""}` : (o.from || []).length ? o.from.map(fromText).join(" or ") : null);
     // (an unknown named by itself, with what is known of it: that is its value)
     const self = legend.findIndex(([sym]) => sym === name);
     let value = text;
@@ -459,6 +462,8 @@ function renderHover(name, facts, verdicts) {
       tag = "(parameter)";
       value = paramValue(value, name, f.type);
       if (/(^| )\?$/.test(value)) add(origins, ["whatever a call passes"]);
+      // (where the unknowns the program's calls passed come from: `json.loads(…)` on line 9)
+      add(origins, objs.filter((o) => o.kind === "unknown" && !(o.from || []).some((t) => t.startsWith(`argument \`${name}\` of `))).map(origin).filter(Boolean).slice(0, 2));
     } else if (own && f.type) {
       value = typeText(f.type);
     } else if (own && !objs.length) {

@@ -11,7 +11,6 @@ use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit};
 use crate::interp::{Analyzer, Args, Call, Payload, ViewKind};
-use crate::source::{Source, SourceKind};
 use crate::state::{Kind, State};
 
 /// The slot holding a StringIO's text.
@@ -754,11 +753,11 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut r = Row::closed_with(intern::KeySet::from_iter(g.iter().map(|x| key_str_lit(x))));
             match rk {
                 Some(k) => r = r.store(k, false),
-                None => r = r.data_store(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
+                None => r = r.data_store(an.call_source("csv.DictReader", c)),
             }
             r
         }
-        _ => Row::with_source(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
+        _ => Row::with_source(an.call_source("csv.DictReader", c)),
     };
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, Some(false), None);
     an.heap.obj_mut(rid).iter_elem = true;
