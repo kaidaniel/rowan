@@ -77,6 +77,9 @@ pub struct Fact {
     /// the values the program's calls recorded, distinct texts, each with the sites of the
     /// calls (of the function the line is in) that gave it
     pub calls: Vec<(String, Vec<CallSite>)>,
+    /// the sites of `calls` the main run recorded: an entry run's text at one of them (its
+    /// caller's run for any call) is not another call there
+    pub main_sites: Vec<CallSite>,
     /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
@@ -133,16 +136,21 @@ impl Fact {
 
     /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the site of the call
     /// it was made in, None: the general run) and its legend (a symbol's descriptions joined).
-    fn add_text(&mut self, text: String, call: Option<CallSite>, legend: Vec<(String, String)>) {
+    /// `entry`: recorded in an entry run.
+    fn add_text(&mut self, text: String, call: Option<CallSite>, legend: Vec<(String, String)>, entry: bool) {
         match call {
             None if !self.general.contains(&text) && self.general.len() < FACT_TEXTS => self.general.push(text),
             None => {}
+            Some(line) if entry && self.main_sites.contains(&line) => return,
             Some(line) => match self.calls.iter().position(|(t, _)| *t == text) {
                 Some(i) if !self.calls[i].1.contains(&line) => self.calls[i].1.push(line),
                 Some(_) => {}
                 None if self.calls.len() < FACT_TEXTS => self.calls.push((text, vec![line])),
                 None => {}
             },
+        }
+        if let Some(line) = call.filter(|l| !entry && !self.main_sites.contains(l)) {
+            self.main_sites.push(line);
         }
         for (sym, desc) in legend {
             match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
@@ -480,6 +488,7 @@ impl Analyzer {
             e.written = true;
             e.general.clear();
             e.calls.clear();
+            e.main_sites.clear();
             e.legend.clear();
             e.rows.clear();
             e.general_rows.clear();
@@ -492,7 +501,7 @@ impl Analyzer {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        e.add_text(text, call, legend);
+        e.add_text(text, call, legend, self.entry.run.is_some());
         e.join_rows(rows, general);
     }
 

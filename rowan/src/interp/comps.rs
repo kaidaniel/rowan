@@ -85,7 +85,7 @@ impl Analyzer {
         let mark0 = self.heap.serial();
         let vmark = self.findings.mark();
         // (one pass stands for every item: what it makes is one object per item, a summary)
-        let hmark = self.heap.len() as u32;
+        let hmark = self.heap.mark();
         self.frame_mut().loop_depth += 1;
         self.cx.recent_stack.push(Vec::new());
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);

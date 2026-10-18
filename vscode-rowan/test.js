@@ -96,6 +96,12 @@ assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```\n\n**Allocation Si
   const h = hover(indexResult(facts(b001)), fs.readFileSync(b001, "utf8").split("\n"), 51, "short3");
   assert(h.includes("**Allocation Sites**\n- created on line 14 in shop/repo.py"), h);
 }
+// (a call site the main run records is listed once: not again from its caller's run for any call)
+{
+  const c001 = path.join(root, "tests", "apps", "large", "c001_platform_pkg", "c001_platform.py");
+  const h = hover(indexResult(facts(c001)), fs.readFileSync(c001, "utf8").split("\n"), 29, "payload");
+  assert(h.split("\n").filter((l) => l.endsWith(" on line 83 in dp/api.py.")).length === 1, h);
+}
 // (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
 // entry, not two alike)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");

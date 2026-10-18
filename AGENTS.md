@@ -15,7 +15,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
-  *merged* object (stores only join); past 256 objects a site's summary (calls the main file's own code makes: 16 more, `MAIN_CLONES`). Garbage collection at returns, loop and try exits drops
+  *merged* object (stores only join); past 256 objects a site's summary (calls the main file's own code makes: 16 more, `MAIN_CLONES`). An instance a call makes where the object is a summary is a strong *recent* one per call depth until the call returns or a raise leaves it (`call_recent`), then folded into the summary (nothing holding it: dropped). Garbage collection at returns, loop and try exits drops
   the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches
   (side tables' young targets: a remembered set by age, `Heap::push_copy_roots`).
   An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a
@@ -40,8 +40,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   summaries; a target bound to one of the records a summary (or an input's element) stands for
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
   running `try` (`TryCtx`) records the state at every point of its body and callees that may
-  raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`), joined
-  per class (an object a raise leaves half-built is dropped there unless held, `drop_unreached`);
+  raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`; with the try's frame's names and
+  possibly-unbound ones), joined per class (an object a raise leaves half-built, also in a with body, is dropped there unless this path holds it, `drop_unreached`);
   handlers start from the raises they may catch (binding those of their classes), the rest go on through the `finally` to the
   enclosing try. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in a
@@ -131,7 +131,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code and a model's inputs by the call as written, with its file when another). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls (`on line 83 in dp/api.py` when in another file), Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code and a model's inputs by the call as written, with its file when another). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls (`on line 83 in dp/api.py` when in another file; a site the main run gives: not again from an entry run), Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 

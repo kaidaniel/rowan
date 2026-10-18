@@ -185,9 +185,9 @@ pub struct Gens {
     /// a `with` over a `@contextmanager` call: its body runs at the generator's yield
     pub cm_hook: Option<CmHook>,
     /// `@contextmanager` generators whose with body is running: (their frame depth, their env
-    /// at the yield, the env stack's length then), so a try in the generator around the
-    /// yield sees its own names when the body raises
-    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
+    /// at the yield, the env stack's length then, their possibly-unbound names then), so a try
+    /// in the generator around the yield sees its own names when the body raises
+    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize, std::sync::Arc<Vec<StrId>>)>,
     /// generators stored into a module's global (watched after the call that started them)
     pub global_held: FxHashSet<ObjId>,
 }
@@ -624,7 +624,7 @@ impl Analyzer {
         if let Some(t) = h.target {
             self.bind_target(t, &v, state);
         }
-        self.gens.cm_frames.push((self.cx.frames.len() + 1, callee_env.clone(), self.cx.env_stack.len()));
+        self.gens.cm_frames.push((self.cx.frames.len() + 1, callee_env.clone(), self.cx.env_stack.len(), state.unbound.clone()));
         match h.then.take() {
             Some(f) => f(self, v, state),
             None => self.exec_block(h.body, state),

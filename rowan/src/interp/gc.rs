@@ -5,6 +5,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::heap::HeapMark;
 use super::{Analyzer, Payload};
 use crate::domain::{kv_join, KeyVal, KeysOf, Ns, ObjId, Value};
 use super::FrameKind;
@@ -157,13 +158,16 @@ impl Analyzer {
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
-    /// objects (those still in use are reachable from the names). `since`: a collector after
+    /// objects (those still in use are reachable from the names) nor other raises' exceptions. `since`: a collector after
     /// that mark, which expands only objects born since (older ones may be left out).
     pub(in crate::interp) fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>, since: Option<u64>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
         self.heap.push_copy_roots(since, work);
-        for v in self.unwind.cur_exc.iter().chain(self.unwind.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        // (a raise state is one path: the exceptions other raises took to the running tries are
+        // other paths')
+        let recorded = self.unwind.tries.iter().filter(|_| unwind.is_none()).flat_map(|t| t.recs.iter().map(|r| &r.2));
+        for v in self.unwind.cur_exc.iter().chain(recorded).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -182,7 +186,7 @@ impl Analyzer {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
-        for (_, env, _) in &self.gens.cm_frames {
+        for (_, env, _, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
         for cells in &self.cx.comp_cells {
@@ -207,9 +211,9 @@ impl Analyzer {
     /// Recency abstraction, back-edge step: the recent objects allocated during a loop
     /// iteration are folded into their weak per-site summary objects, and every reference
     /// to them written during the iteration is re-pointed to the summary object.
-    pub(in crate::interp) fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: ObjId) {
+    pub(in crate::interp) fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: HeapMark) -> FxHashMap<ObjId, ObjId> {
         if recs.is_empty() {
-            return;
+            return FxHashMap::default();
         }
         let (map, keep_pos) = self.summary_objects(back, &recs);
         fold_recent_facts(back, &map, &keep_pos);
@@ -222,6 +226,88 @@ impl Analyzer {
         for (k, nv) in ups {
             self.heap.set_cls_slot(k, nv);
         }
+        map
+    }
+
+    /// Recency per call, the return's step (`call_recent`): the call's recent objects fold into
+    /// their summaries in its end state `st` (from `head`, its start) and its result `ret`,
+    /// which `st` then holds.
+    pub(in crate::interp) fn fold_call_recent(&mut self, st: &mut State, head: &State, ret: &mut Value) {
+        let recs = std::mem::take(&mut self.frame_mut().recent);
+        if let Some(super::PreCall(mark, _)) = self.frame().pre_call.clone() {
+            self.fold_recent_in(st, head, mark, recs, ret, false);
+        }
+        st.ret = Some(ret.clone());
+    }
+
+    /// The recent objects `recs` of calls fold into their summaries in `st` (from `head` and the
+    /// heap's `mark`, before they were made) and in `v`: at a call's return, and in the state a raise takes out of
+    /// the calls. One nothing refers to (a value written since `head`, `v`, a payload, a class
+    /// attribute; `names`: the state's names, else they are the returning call's) is garbage:
+    /// its facts go without joining its summary.
+    pub(in crate::interp) fn fold_recent_in(&mut self, st: &mut State, head: &State, mark: HeapMark, recs: Vec<(ObjId, Kind, String, String)>, v: &mut Value, names: bool) {
+        if recs.is_empty() {
+            return;
+        }
+        let rs: Vec<ObjId> = recs.iter().map(|r| r.0).collect();
+        let held = self.referred(st, head, &rs, v, mark, names);
+        let (recs, garbage): (Vec<_>, Vec<_>) = recs.into_iter().partition(|r| held.contains(&r.0));
+        for (r, ..) in garbage {
+            for ns in [Ns::Item, Ns::Attr] {
+                st.rows.remove(&(r, ns));
+            }
+            st.drop_obj(r);
+            st.elems.remove(&r);
+            st.forget_len(&r);
+        }
+        let map = self.rename_recent(st, head, recs, mark);
+        for r in map.keys() {
+            st.forget_len(r);
+        }
+        if let Some(nv) = rename_value(v, &map) {
+            *v = nv;
+        }
+        // (a list's last item, as the summary; a test's facts on them go: they are other
+        // objects' when made again)
+        if st.lasts.iter().any(|(_, x)| rename_value(x, &map).is_some()) {
+            st.lasts = std::sync::Arc::new(st.lasts.iter().map(|(o, x)| (*o, rename_value(x, &map).unwrap_or_else(|| x.clone()))).collect());
+        }
+        let mentions = |f: &crate::state::CondFact| f.deps.iter().any(|(_, x)| rs.iter().any(|r| x.pts.contains(*r))) || f.rows.iter().any(|((o, _), _, _)| rs.contains(o)) || f.guards.iter().any(|((o, _), _)| rs.contains(o));
+        if st.facts.iter().any(|f| mentions(f)) {
+            st.facts = std::sync::Arc::new(st.facts.iter().filter(|f| !mentions(f)).cloned().collect());
+        }
+    }
+
+    /// Which of `rs` (made since `mark`) a value refers to: `v`, the names (`names`), a slot or
+    /// elements written since `head`, a payload given since `mark`, a class attribute.
+    fn referred(&self, st: &State, head: &State, rs: &[ObjId], v: &Value, mark: HeapMark, names: bool) -> FxHashSet<ObjId> {
+        if !self.heap.cls_slots_with(rs).is_empty() {
+            return rs.iter().copied().collect();
+        }
+        let mut work: Vec<ObjId> = Vec::new();
+        v.push_objs(&mut work);
+        for x in st.env.values().chain(st.narrowed.values()).chain(st.ret.iter()).filter(|_| names) {
+            x.push_objs(&mut work);
+        }
+        for (_, x) in st.lasts.iter() {
+            x.push_objs(&mut work);
+        }
+        let fp = st.footprint(head);
+        for (o, sk) in fp.slots.iter() {
+            if let Some(x) = st.slots.get(o, sk) {
+                x.push_objs(&mut work);
+            }
+        }
+        for o in fp.elems.iter() {
+            if let Some(KeyVal::KeysOf(ko)) = st.elems.get(o) {
+                work.extend(ko.objs.iter());
+            }
+        }
+        let empty = State::bottom();
+        for o in self.heap.payloads_since(mark) {
+            self.obj_edges(o, &empty, &mut work);
+        }
+        work.into_iter().filter(|o| rs.contains(o)).collect()
     }
 
     /// The weak per-site summary object of each recent object (`recs`), with its length; the
@@ -279,7 +365,8 @@ impl Analyzer {
     /// lets the join of the exits keep what the other paths say of them (a record returned
     /// on another path keeps that path's keys).
     pub(super) fn drop_garbage_at_return(&mut self, v: &Value, state: &mut State) {
-        let Some(crate::interp::PreCall(mark, pre)) = self.frame().pre_call.clone() else { return };
+        let Some(crate::interp::PreCall(hm, pre)) = self.frame().pre_call.clone() else { return };
+        let mark = hm.serial;
         if !matches!(self.frame().kind, FrameKind::Function) {
             return;
         }

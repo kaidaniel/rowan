@@ -373,7 +373,7 @@ impl Analyzer {
     }
 
     /// A list, tuple or set display: a container of its elements, by position when no starred
-    /// element makes their positions unknown.
+    /// element of items not known makes their positions unknown.
     fn container(&mut self, node: &'static ast::Expr, kind: Kind, elts: &'static [ast::Expr], state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
@@ -383,14 +383,20 @@ impl Analyzer {
         let mut size_parts: Option<Vec<Result<Value, Value>>> = if self.m.torch_on && elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) { Some(Vec::new()) } else { None };
         for e in elts {
             if let ast::Expr::Starred(st) = e {
-                literal = false;
                 let inner = self.eval(&st.value, state);
                 if let Some(p) = size_parts.as_mut() {
                     p.push(Err(inner.clone()));
                 }
                 let en = frontend::node(e);
                 let it = self.iterate(&inner, &en, state);
-                vals.push(self.elem_value(&it.elem, &en, "star"));
+                // (the items when known, in order: their positions are known too)
+                match it.ordered_items().filter(|_| size_parts.is_none()) {
+                    Some(items) => vals.extend(items),
+                    None => {
+                        literal = false;
+                        vals.push(self.elem_value(&it.elem, &en, "star"));
+                    }
+                }
             } else {
                 let v = self.eval(e, state);
                 if let Some(p) = size_parts.as_mut() {
