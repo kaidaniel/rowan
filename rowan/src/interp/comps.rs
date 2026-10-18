@@ -250,15 +250,22 @@ impl Analyzer {
         let base_depth = self.cx.cond_depth;
         let key_e: &'static ast::Expr = &dc.key;
         let val_e: &'static ast::Expr = &dc.value;
+        // (items in an order Python does not promise: the keys' order is not known either)
+        let mut unordered = false;
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let k = an.eval_key(key_e, st);
             an.check_hashable(&k, st);
             let v = an.eval(val_e, st);
             let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth && an.cx.comp_maybe == 0;
             an.store_key(oid, Ns::Item, &k, &v, strong, &nd, st);
+            unordered |= an.cx.comp_unordered > 0;
         };
         let limit = comp_unroll_limit(&dc.generators, &[key_e, val_e], self.is_torch_module(self.frame().module));
         self.comp(&dc.generators, limit, state, &mut body, oid);
+        if unordered {
+            let row = state.row(oid, Ns::Item).with_order(Vec::new());
+            state.set_row(oid, Ns::Item, row);
+        }
         self.cx.summary_items.remove(&oid);
         Value::obj(oid)
     }
