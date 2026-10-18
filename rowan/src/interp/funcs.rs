@@ -250,7 +250,7 @@ impl Analyzer {
 
     /// The (receiver, function) pairs of the instances among `v` whose class defines one of
     /// `names` (the first defined, in order), and the rest of `v`.
-    fn method_calls(&self, v: &Value, names: &[&str]) -> (Vec<(ObjId, ObjId)>, Value) {
+    pub(in crate::interp) fn method_calls(&self, v: &Value, names: &[&str]) -> (Vec<(ObjId, ObjId)>, Value) {
         let mut calls = Vec::new();
         let mut rest = Value::kv_only(v.kv.clone());
         let mut others = Vec::new();

@@ -874,6 +874,19 @@ impl Analyzer {
                     if !row.present.contains(nk) && by_data.is_none() {
                         return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
                     }
+                    // (there unless unknown code removed it: on the path where it did, what
+                    // `__getattr__` does follows from that code's doing — a call that does not
+                    // run, its result unknown, as any attribute that code may have replaced; it
+                    // ran there for every read, nested in its own read of what it delegates to)
+                    if row.likely.contains(nk) && by_data.is_none() {
+                        let own = state.slot(oid, Ns::Attr, nk);
+                        let mut fallback = Value::new();
+                        for (o, f) in self.method_calls(&Value::obj(oid), &["__getattr__"]).0 {
+                            let q = self.heap.func_info(f).qualname.clone();
+                            fallback = fallback.join(&self.skipped_call(f, &q, Some(&Value::obj(o)), Args::pos(&[Value::lit(nk)]), state, node));
+                        }
+                        return Some(own.join(&fallback));
+                    }
                     // (set on some paths: `__getattr__` runs on the others only — when it raises
                     // there, the paths that have the attribute go on)
                     let mut missing = state.copy();
