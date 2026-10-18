@@ -47,13 +47,14 @@ pub struct Verdict {
     pub guarded: bool,
 }
 
-/// What makes two verdicts the same record: file, line, column, key, tier, object, chain.
-pub(in crate::interp) type VerdictKey = (String, u32, u32, String, Tier, ObjId, Chain, Vec<u32>);
+/// What makes two verdicts the same record: file, line, column, key, tier, object, chain, and
+/// whether a handler guards it (a guarded one is no finding: an unguarded one beside it is).
+pub(in crate::interp) type VerdictKey = (String, u32, u32, String, Tier, ObjId, Chain, Vec<u32>, bool);
 
 impl Verdict {
     /// What makes two verdicts the same record (`Findings::add`).
     pub(in crate::interp) fn dedupe_key(&self) -> VerdictKey {
-        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone(), self.chain_files.clone())
+        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone(), self.chain_files.clone(), self.guarded)
     }
 }
 
@@ -374,8 +375,8 @@ impl Analyzer {
             None => self.file_of_frame(),
         };
         let (chain, chain_files) = (self.cx.call_chain.clone(), self.cx.call_files.clone());
-        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone(), chain_files.clone());
         let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.mode.verdict_guarded);
+        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone(), chain_files.clone(), guarded);
         self.findings.add(dk, || Verdict {
             line: node.line,
             col: node.col,
