@@ -719,7 +719,7 @@ impl Analyzer {
         // a fresh generator list (no yield yet in this activation) starts empty
         let fresh = !state.has_slot(gid, Ns::Elem, STAR);
         // (lengths that were one of a few: one more each, after this item)
-        let alts_before = if fresh { 0 } else { state.lens.get(&gid).filter(|l| l.0.is_none()).map(|l| l.2).unwrap_or(0) };
+        let mut alts_before = if fresh { 0 } else { state.lens.get(&gid).filter(|l| l.0.is_none()).map(|l| l.2).unwrap_or(0) };
         state.set_slot(gid, Ns::Elem, STAR, v.clone(), false);
         let cur = state.elems.get(&gid).unwrap_or_else(|| v.kv.clone());
         state.elems.insert(gid, kv_join(&cur, &v.kv));
@@ -757,8 +757,25 @@ impl Analyzer {
             (_, Some(n)) if n > 0 => {
                 self.heap.set_prefix(gid, state, n);
             }
-            _ if self.heap.prefix(gid, state).is_some() => {}
+            // one of a few lengths, every position known: the item at each one's end (as the
+            // appends of `list.append` do)
+            (true, None) if alts_before != 0 && (0..15 - alts_before.leading_zeros() as usize).all(|p| state.has_slot(gid, Ns::Pos, key_int(p as i64))) => {
+                for n in (0..16).filter(|i| alts_before & (1 << i) != 0) {
+                    state.set_slot(gid, Ns::Pos, key_int(n as i64), v.clone(), false);
+                }
+                // (the lengths, one more each, below)
+                let p = self.heap.prefix(gid, state).unwrap_or(0);
+                self.heap.set_prefix(gid, state, p);
+            }
+            // (else the lengths it may have are not known: positions are read under the
+            // shortest one only, and this item may be at any of them)
+            _ if self.heap.prefix(gid, state).is_some() => {
+                alts_before = 0;
+                let p = self.heap.prefix(gid, state).unwrap_or(0);
+                self.heap.set_prefix(gid, state, p);
+            }
             _ => {
+                alts_before = 0;
                 self.heap.set_llen(gid, state, None);
                 state.drop_obj_ns(gid, Ns::Pos);
             }
