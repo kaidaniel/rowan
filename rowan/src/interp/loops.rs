@@ -694,7 +694,8 @@ impl Analyzer {
 /// `state` joined with `other` (its replacement when `state` is unreachable).
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {
     if let Some(mut o) = other {
-        let j = if state.reachable { state.join(&mut o) } else { o };
+        // (a state that is unreachable still gives its returns: a loop's `else: return`)
+        let j = state.join(&mut o);
         state.replace_with(j);
     }
 }
