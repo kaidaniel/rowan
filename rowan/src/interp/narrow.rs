@@ -99,7 +99,7 @@ impl Analyzer {
             } else if stop.reachable {
                 // (what ends it here is a value of that truth: `x and y` is x only when x is
                 // falsy; a bool is that bool)
-                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || label_type(&intern::str_get(d)) == Some("bool"));
+                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d, _) if &*intern::str_get(d) == "bool" || label_type(&intern::str_get(d)) == Some("bool"));
                 v = v.join(&if is_bool { Value::lit(intern::key_bool(!is_and)) } else { truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v) });
             }
             if stop.reachable {
@@ -151,8 +151,9 @@ impl Analyzer {
             // first element / is empty (this path's length only, not the object's)
             ast::Expr::Name(n) => self.narrow_name(n, truth, state),
             // `if obj.attr:` — the attribute chain's literals of the other truth are not it here
+            // (not an unknown's it may be: a narrowed chain's later reads are not reads of it)
             ast::Expr::Attribute(_) => {
-                if let (Some(key), Some(v)) = (chain_text(test), self.traced(test)) {
+                if let (Some(key), Some(v)) = (chain_text(test), self.traced(test).filter(|v| !matches!(v.kv, KeyVal::Data(..)))) {
                     if let Some(nv) = truth_narrowed(&v, truth) {
                         if nv.empty() {
                             state.reachable = false;
@@ -349,7 +350,7 @@ impl Analyzer {
                     // the name is None / is not None
                     if let ast::Expr::Name(l) = left {
                         let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX));
+                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || cur.kv.hint().contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX));
                         if has_none || is_none {
                             self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
                         }
@@ -762,7 +763,7 @@ impl Analyzer {
                 }
                 // an unknown key (data, or an unknown value's object) in closed dicts of string
                 // keys: one of those keys
-                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
+                KeyVal::KeysOf(_) | KeyVal::Data(_, _) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
                     if let Some(may) = closed_keys(&recs, state) {
                         if !may.is_empty() && may.iter().all(intern::key_is_str) {
                             self.narrow_key_expr(left, &lv, &may, &may, false, state);
@@ -994,8 +995,14 @@ impl Analyzer {
 /// Classes whose isinstance checks go by structure (ABCs with subclass hooks, protocols):
 /// an unrelated user class may pass them.
 /// A value on the path where a truth test of it was `truth`: without its literals of the
-/// other truth (None, 0, "" on the true path). None: nothing to remove.
+/// other truth (None, 0, "" on the true path; an unknown's it may be too). None: nothing to
+/// remove.
 pub fn truth_narrowed(v: &Value, truth: bool) -> Option<Value> {
+    if let KeyVal::Data(l, _) = &v.kv {
+        let h = v.kv.hint();
+        let keep: KeySet = h.iter().filter(|k| crate::models::pyvalues::truthy(*k) != Some(!truth)).collect();
+        return (keep.len() < h.len()).then(|| Value::with_kv(v.pts.clone(), KeyVal::Data(*l, keep)));
+    }
     let lits = kv_literals(&v.kv);
     if !v.kv.is_literal() || lits.is_empty() {
         return None;

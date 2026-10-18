@@ -493,6 +493,7 @@ impl Analyzer {
             Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::builtins::str_method_type(&qual, t), false),
             _ => r,
         };
+        let r = self.pure_hint(&call, r, state);
         if call_ast.is_some() {
             crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
         }
@@ -530,7 +531,8 @@ impl Analyzer {
         }
         if let Some(m) = self.program.models.lookup(&qual) {
             let r = self.run_model(m, state, &call);
-            return self.as_type(r, crate::models::builtins::result_type(self, &qual, args), false);
+            let r = self.as_type(r, crate::models::builtins::result_type(self, &qual, args), false);
+            return self.pure_hint(&call, r, state);
         }
         let r = self.unknown_call(&qual, None, a, state, node);
         // (`input()`: a str all the same)
@@ -540,6 +542,48 @@ impl Analyzer {
             }
         }
         r
+    }
+
+    /// A call computed exactly on literals (`try_pure`) whose receiver or one argument is an
+    /// unknown that may be some literals (`str(port)`, `port` `8080 | ?`): its unknown result
+    /// (a scalar, or unknown objects) may be what the call gives on those (`"8080" | ?`). (Run
+    /// on a copy of the state: the result the call gave on the unknown covers what it does on
+    /// them.)
+    fn pure_hint(&mut self, call: &Call, r: Value, state: &State) -> Value {
+        let scalar = r.pts.is_empty() && matches!(r.kv, crate::domain::KeyVal::Data(..));
+        if !scalar && !(r.kv.is_bot() && !r.pts.is_empty() && r.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown)) {
+            return r;
+        }
+        let hinted: Vec<usize> = call.recv.iter().chain(call.args.iter()).enumerate().filter(|(_, v)| !self.literals_beside(v).is_empty()).map(|(i, _)| i).collect();
+        let [i] = hinted[..] else { return r };
+        fn at(c: &mut Call, i: usize) -> &mut Value {
+            match (&mut c.recv, i) {
+                (Some(r), 0) => r,
+                (Some(_), _) => &mut c.args[i - 1],
+                (None, _) => &mut c.args[i],
+            }
+        }
+        let mut c = call.clone();
+        // (a method of an unknown receiver that may be some texts: the str method on them)
+        if let Some(m) = c.qual.strip_prefix("unknown.").filter(|m| super::STR_METHOD_NAMES.contains(m)) {
+            c.qual = format!("str.{}", m);
+        }
+        let hint = self.literals_beside(at(&mut c, i));
+        let mut out = r.kv.hint();
+        for k in hint.iter() {
+            *at(&mut c, i) = Value::lit(k);
+            let mut st = state.copy();
+            let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, &mut st, &c)) else { continue };
+            if !v.pts.is_empty() || !v.kv.is_literal() {
+                return r;
+            }
+            out = out.union(&kv_literals(&v.kv));
+        }
+        match &r.kv {
+            _ if out.is_empty() || out.len() > crate::domain::HINT_MAX => r,
+            crate::domain::KeyVal::Data(l, _) => Value::kv_only(crate::domain::KeyVal::Data(*l, out)),
+            _ => Value::with_kv(r.pts.clone(), crate::domain::KeyVal::lits(out)),
+        }
     }
 
     /// A model call: objects it allocates at one site stay distinct from each other (one

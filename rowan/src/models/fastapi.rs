@@ -891,7 +891,7 @@ fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, no
         }
         if plain {
             let set: Vec<Value> = out_resps.iter().map(|o| state.slot(*o, Ns::Attr, sk)).collect();
-            let unset = |v: &Value| v.empty() || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("unset_status"));
+            let unset = |v: &Value| v.empty() || matches!(&v.kv, KeyVal::Data(d, _) if intern::str_get(*d).contains("unset_status"));
             let mut route_default = set.is_empty();
             for v in &set {
                 if unset(v) {
@@ -1366,7 +1366,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             fa_obj(an, st, &c.node, "fastapi.depends", g, &format!("dep{}", c.site))
         }
         "Query" | "Path" | "Header" | "Cookie" | "Body" | "Form" | "File" => {
-            let d = c.arg(0, Some("default")).filter(|v| !(v.pts.is_empty() && matches!(&v.kv, KeyVal::Data(_)) && v.kv.data_site().map(|x| intern::str_get(x).contains("Ellipsis")).unwrap_or(false))).unwrap_or_default();
+            let d = c.arg(0, Some("default")).filter(|v| !(v.pts.is_empty() && matches!(&v.kv, KeyVal::Data(_, _)) && v.kv.data_site().map(|x| intern::str_get(x).contains("Ellipsis")).unwrap_or(false))).unwrap_or_default();
             let d = if is_ellipsis_value(c) { Value::new() } else { d };
             let mut tag = format!("fastapi.param.{}", last);
             if last == "Body" && matches!(c.kwargs.get(&s("embed")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(true)) {

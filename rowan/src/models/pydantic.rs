@@ -1774,7 +1774,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                 // (`len(x)`, a frame's row count: ints)
                 let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows") || matches!(crate::domain::label_type(d), Some("int" | "bool"));
                 let of_type = |d: &str| d == t || crate::domain::label_type(d) == Some(t) || (t == "float" && int_label(d)) || (t == "int" && int_label(d)) || d.starts_with('\u{1}');
-                let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d) if of_type(&intern::str_get(*d)));
+                let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d, _) if of_type(&intern::str_get(*d)));
                 let obj_part = val.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Unknown));
                 if data_part || obj_part {
                     let loc = an.m.pyd_field;
@@ -1787,7 +1787,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     if t == "int" {
                         pyd_err(an, loc, "int_from_float", false, false);
                     }
-                    let known_str = matches!(&val.kv, KeyVal::Data(d) if crate::domain::label_type(&intern::str_get(*d)) == Some("str")) && !obj_part;
+                    let known_str = matches!(&val.kv, KeyVal::Data(d, _) if crate::domain::label_type(&intern::str_get(*d)) == Some("str")) && !obj_part;
                     if data_part && !known_str {
                         let tcode = match t {
                             "int" => "int_type",
@@ -2121,7 +2121,7 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
 /// (`float(?)` from an int too), named as it was; a model's label (a tensor dim) stays.
 fn validated_kv(t: &str, kv: &KeyVal) -> KeyVal {
     match kv {
-        KeyVal::Data(l) if crate::domain::TYPE_NAMES.contains(&t) => {
+        KeyVal::Data(l, _) if crate::domain::TYPE_NAMES.contains(&t) => {
             let l = intern::str_get(*l);
             if l.starts_with('\u{1}') || crate::domain::label_type(&l) == Some(t) {
                 return kv.clone();
@@ -3252,7 +3252,7 @@ pub fn adapter_call(an: &mut Analyzer, st: &mut State, idx: usize, method: &str,
 /// The ids of the models a `model_dump_json()` text holds.
 pub fn json_models(v: &Value) -> Vec<ObjId> {
     let mut out = Vec::new();
-    if let KeyVal::Data(s0) = &v.kv {
+    if let KeyVal::Data(s0, _) = &v.kv {
         let t = intern::str_get(*s0);
         if let Some(rest) = t.strip_prefix("pydjson:") {
             out.extend(rest.split(',').filter_map(|x| x.parse::<u32>().ok()));

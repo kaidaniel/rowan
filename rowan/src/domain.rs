@@ -1,7 +1,8 @@
 //! The abstract domains, over interned ids (`intern.rs`):
 //!
 //! * `Value`: what a name or slot may hold, a set of objects plus a scalar part (`KeyVal`: a
-//!   literal, up to `MAX_LITS` literals, the keys of some objects, or a labelled unknown).
+//!   literal, up to `MAX_LITS` literals, the keys of some objects, or a labelled unknown,
+//!   with literals it is known it may be: `8080 | ?`).
 //! * `Row`: what is known of the keys of one object in one namespace on one path (present ⊇
 //!   likely ⊇ definite, absent, the open inputs and unknown calls that may add keys), with its
 //!   transfers (store, delete, copy, rename, unknown code) and its join. The inputs and the
@@ -20,6 +21,8 @@ use crate::source::{lens_add_kill, lens_apply, lens_concat, lens_provides, lens_
 
 /// Literals a `KeyVal` holds at most; a join with more is an unknown.
 pub const MAX_LITS: usize = 64;
+/// Literals an unknown keeps as those it may be (`KeyVal::Data`'s); a join with more: `SAT`.
+pub const HINT_MAX: usize = 8;
 /// Lenses a row keeps per source; past that the source is kept without one (`cap_sources`).
 pub const MAX_LENSES: usize = 6;
 /// Call sites a verdict's chain keeps (`chain_extend`).
@@ -881,14 +884,16 @@ pub enum KeyVal {
     /// one of the keys of some objects
     KeysOf(KeysOf),
     /// an unknown, named by its label ("" = unnamed): where it comes from (`row["id"]`), a
-    /// tensor shape, a builtin type (`typed_label`)
-    Data(StrId),
+    /// tensor shape, a builtin type (`typed_label`). The label alone covers the value; the
+    /// set is literals it may be among others (`8080 | ?`, from joins: at most `HINT_MAX`, else
+    /// `hint_sat()`, which no join extends), so code that ignores them stays sound.
+    Data(StrId, KeySet),
     /// nothing: the value is only its objects (or no value at all)
     Bot,
 }
 
 /// An unnamed unknown.
-pub const DATA: KeyVal = KeyVal::Data(intern::EMPTY_STR);
+pub const DATA: KeyVal = KeyVal::Data(intern::EMPTY_STR, KeySet::EMPTY);
 /// No scalar.
 pub const BOT: KeyVal = KeyVal::Bot;
 
@@ -898,7 +903,21 @@ impl KeyVal {
         if site.is_empty() {
             DATA
         } else {
-            KeyVal::Data(intern::s(site))
+            KeyVal::Data(intern::s(site), KeySet::EMPTY)
+        }
+    }
+    /// The literals an unknown is known it may be (`KeyVal::Data`'s, not a saturated set's).
+    pub fn hint(&self) -> KeySet {
+        match self {
+            KeyVal::Data(_, h) if !h.contains(intern::STAR) => h.clone(),
+            _ => KeySet::new(),
+        }
+    }
+    /// This unknown without the literals it may be (`self` when it is no unknown).
+    pub fn unhinted(&self) -> KeyVal {
+        match self {
+            KeyVal::Data(l, h) if !h.is_empty() => KeyVal::Data(*l, KeySet::EMPTY),
+            _ => self.clone(),
         }
     }
     /// One of these literals (`Lit` for one).
@@ -932,7 +951,7 @@ impl KeyVal {
     }
     pub fn data_site(&self) -> Option<StrId> {
         match self {
-            KeyVal::Data(s) => Some(*s),
+            KeyVal::Data(s, _) => Some(*s),
             _ => None,
         }
     }
@@ -954,12 +973,16 @@ impl fmt::Display for KeyVal {
                 }
                 Ok(())
             }
-            KeyVal::Data(s) => {
+            KeyVal::Data(s, h) => {
                 if *s == intern::EMPTY_STR {
-                    f.write_str("data")
+                    f.write_str("data")?;
                 } else {
-                    write!(f, "data({})", s)
+                    write!(f, "data({})", s)?;
                 }
+                if !h.is_empty() {
+                    write!(f, "|{}", keys_str(h.iter()))?;
+                }
+                Ok(())
             }
             KeyVal::Bot => f.write_str("⊥"),
         }
@@ -1011,7 +1034,7 @@ pub fn key_type(k: KeyId, ty: &str) -> bool {
 fn untyped(label: StrId) -> KeyVal {
     let l = str_get(label);
     if label_type(&l).is_none() {
-        return KeyVal::Data(label);
+        return KeyVal::Data(label, KeySet::EMPTY);
     }
     let name = label_name(&l);
     if name == &*l { DATA } else { KeyVal::data(name) }
@@ -1019,8 +1042,77 @@ fn untyped(label: StrId) -> KeyVal {
 
 /// The scalar on either of two paths: literals union (past `MAX_LITS`, an unknown); the keys
 /// of more objects; two unknowns an unknown (of their type, or a joined tensor shape); an
-/// unknown and literals the unknown (typed only when the literals are of its type).
+/// unknown and literals the unknown (typed only when the literals are of its type), which
+/// keeps the literals as those it may be (`KeyVal::Data`'s hint: a plain label's only, not a
+/// tensor's or a text's that says what it holds).
 pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
+    if a == b {
+        return a.clone();
+    }
+    match kv_join_unhinted(a, b) {
+        KeyVal::Data(l, _) if hintable(&str_get(l)) => {
+            let sat = |x: &KeyVal| matches!(x, KeyVal::Data(_, h) if h.contains(intern::STAR));
+            let part = |x: &KeyVal| if x.is_literal() { kv_literals(x) } else { x.hint() };
+            let h = part(a).union(&part(b));
+            KeyVal::Data(l, if sat(a) || sat(b) || h.len() > HINT_MAX { hint_sat() } else { h })
+        }
+        r => r,
+    }
+}
+
+/// The hint of an unknown that was joined with more literals than `HINT_MAX`: none shown, and
+/// joins keep it so (a loop's head grows monotonically).
+pub fn hint_sat() -> KeySet {
+    KeySet::one(intern::STAR)
+}
+
+/// Whether an unknown with this label may carry the literals it may be: a plain or typed
+/// name's, not a tensor's or shape's, nor a text's whose label says what it holds.
+fn hintable(label: &str) -> bool {
+    !label.starts_with('\u{1}') && !["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| label.starts_with(p))
+}
+
+/// A tensor's or symbolic dim's label `t` (of unknown `d`) joined with literals `l`: a dim
+/// joined with a literal is an unknown dim (not "anything": the literal stays possible); a
+/// tensor joined with a number: rank 0 possible. None: `t` is neither.
+fn join_shape_literal(d: &KeyVal, t: &str, l: &KeyVal) -> Option<KeyVal> {
+    if crate::models::shape::parse_dim_label(t).is_some() {
+        let lits = kv_literals(l);
+        // (a dim or None, or a str: no dim)
+        if !lits.iter().all(key_is_number) {
+            return Some(DATA);
+        }
+        let same = crate::models::shape::parse_dim_label(t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| key_as_int(k) == Some(n))).unwrap_or(false);
+        return Some(if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) });
+    }
+    if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(t).unwrap_or(t)) {
+        // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
+        // or anything else: an unknown (the literal stays possible)
+        let lits = kv_literals(l);
+        let none = key_none();
+        let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| key_is_number(*k));
+        if !rest.is_empty() {
+            return Some(DATA);
+        }
+        let mut out = t.to_string();
+        if !nums.is_empty() {
+            let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
+            out = crate::models::shape::tensor_label(crate::models::shape::shape_id(s));
+            if crate::models::shape::strip_optional(t).is_some() {
+                out = crate::models::shape::optional_label(&out);
+            }
+        }
+        if lits.contains(none) {
+            out = crate::models::shape::optional_label(&out);
+        }
+        return Some(KeyVal::data(&out));
+    }
+    None
+}
+
+/// `kv_join` without the literals an unknown may be.
+fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
+    let (a, b) = (&a.unhinted(), &b.unhinted());
     if a == b {
         return a.clone();
     }
@@ -1043,7 +1135,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             return KeyVal::KeysOf(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1 });
         }
     }
-    if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
+    if let (KeyVal::Data(x, _), KeyVal::Data(y, _)) = (a, b) {
         let (lx, ly) = (str_get(*x), str_get(*y));
         if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
@@ -1054,48 +1146,17 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             _ => DATA,
         };
     }
-    // a symbolic dim joined with a literal: an unknown dim (not "anything": the literal stays
-    // possible); a tensor joined with a number: rank 0 possible
     for (d, l) in [(a, b), (b, a)] {
-        if let (KeyVal::Data(x), true) = (d, l.is_literal()) {
-            let t = str_get(*x);
-            if crate::models::shape::parse_dim_label(&t).is_some() {
-                let lits = kv_literals(l);
-                // (a dim or None, or a str: no dim)
-                if !lits.iter().all(key_is_number) {
-                    return DATA;
-                }
-                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| key_as_int(k) == Some(n))).unwrap_or(false);
-                return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
-            }
-            if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(&t).unwrap_or(&t)) {
-                // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
-                // or anything else: an unknown (the literal stays possible)
-                let lits = kv_literals(l);
-                let none = key_none();
-                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| key_is_number(*k));
-                if !rest.is_empty() {
-                    return DATA;
-                }
-                let mut out = t.to_string();
-                if !nums.is_empty() {
-                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
-                    out = crate::models::shape::tensor_label(crate::models::shape::shape_id(s));
-                    if crate::models::shape::strip_optional(&t).is_some() {
-                        out = crate::models::shape::optional_label(&out);
-                    }
-                }
-                if lits.contains(none) {
-                    out = crate::models::shape::optional_label(&out);
-                }
-                return KeyVal::data(&out);
+        if let (KeyVal::Data(x, _), true) = (d, l.is_literal()) {
+            if let Some(r) = join_shape_literal(d, &str_get(*x), l) {
+                return r;
             }
         }
     }
     // an unknown joined with literals: the unknown, of its type if they are of it too; one
     // named by an expression no longer is that expression (`max(0, n - 1)` is not `n - 1`)
     for (d, l) in [(a, b), (b, a)] {
-        if let KeyVal::Data(x) = d {
+        if let KeyVal::Data(x, _) = d {
             let t = str_get(*x);
             // (a label that says what the text is — a JSON or pickle text of known parts, a CSV
             // text of known header — is no longer that)
@@ -1148,6 +1209,11 @@ pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
             ko2.chain = lens_push(ko.chain, Step::RenameFn(step.clone()));
             KeyVal::KeysOf(ko2)
         }
+        // (the texts it may be, mapped too)
+        KeyVal::Data(l, _) => {
+            let h = kv.hint();
+            KeyVal::Data(*l, if h.iter().any(|k| !intern::key_is_str(k) || step.out_len(k) > TEXT_MAX) { KeySet::EMPTY } else { h.map(|k| step.apply(k)) })
+        }
         _ => kv.clone(),
     }
 }
@@ -1176,7 +1242,9 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             Some(KeyVal::KeysOf(ko2))
         }
         // a tensor or None, not None: the tensor
-        KeyVal::Data(l) if keys.contains(key_none()) => {
+        // (an unknown that may be some literals: not these)
+        KeyVal::Data(l, h) if !kv.hint().is_empty() => Some(KeyVal::Data(*l, h.difference(keys))),
+        KeyVal::Data(l, _) if keys.contains(key_none()) => {
             let t = str_get(*l);
             Some(crate::models::shape::strip_optional(&t).map(KeyVal::data).unwrap_or_else(|| kv.clone()))
         }

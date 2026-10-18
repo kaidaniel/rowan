@@ -481,7 +481,7 @@ impl Analyzer {
 
     /// The label of a slice with known bounds (`slice[1:3:]@L5`): its bounds (None: omitted).
     pub fn slice_label_bounds(kv: &KeyVal) -> Option<(Option<i64>, Option<i64>, Option<i64>)> {
-        let KeyVal::Data(d) = kv else { return None };
+        let KeyVal::Data(d, _) = kv else { return None };
         let t = intern::str_get(*d);
         let inner = t.strip_prefix("slice[")?.split(']').next()?.to_string();
         let parts: Vec<&str> = inner.split(':').collect();

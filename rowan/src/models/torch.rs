@@ -37,7 +37,7 @@ pub struct ShapeNote {
 
 fn label(v: &Value) -> Option<std::sync::Arc<str>> {
     match &v.kv {
-        KeyVal::Data(l) if *l != intern::EMPTY_STR => Some(intern::str_get(*l)),
+        KeyVal::Data(l, _) if *l != intern::EMPTY_STR => Some(intern::str_get(*l)),
         _ => None,
     }
 }
@@ -116,7 +116,7 @@ pub fn t_shape(an: &Analyzer, v: &Value, st: &State) -> Option<Shape> {
         })
     };
     match &v.kv {
-        KeyVal::Data(l) => {
+        KeyVal::Data(l, _) => {
             let t = intern::str_get(*l);
             if let Some(id) = sh::parse_tensor_label(&t) {
                 add(sh::shape_get(id));
@@ -176,7 +176,7 @@ pub fn t_dim(an: &Analyzer, v: &Value, st: &State) -> Option<DimId> {
                 }
             }
         }
-        KeyVal::Data(l) => {
+        KeyVal::Data(l, _) => {
             let t = intern::str_get(*l);
             if let Some(d) = sh::parse_dim_label(&t) {
                 put(d);
@@ -656,7 +656,7 @@ pub fn t_print_ctx_at(an: &Analyzer, scope: u32, env: &IndexMap<StrId, Value>, s
                             ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
                             continue;
                         }
-                        if let KeyVal::Data(l) = &v.kv {
+                        if let KeyVal::Data(l, _) = &v.kv {
                             if let Some(sy) = expr_sym(&intern::str_get(*l)) {
                                 ctx.sym_alias.entry(sy).or_insert_with(|| p.clone());
                             }
@@ -961,7 +961,7 @@ pub fn t_binop(an: &mut Analyzer, op: ruff_python_ast::Operator, a: &Value, b: &
     let classify = |an: &Analyzer, v: &Value| -> Option<K> {
         // a join of a named unknown and a tensor (a loop variable): the tensor counts
         if !v.pts.is_empty() {
-            if let KeyVal::Data(l) = &v.kv {
+            if let KeyVal::Data(l, _) = &v.kv {
                 let t = intern::str_get(*l);
                 if t.starts_with(sh::TENSOR_PREFIX) && v.pts.iter().all(|o| t_sym_of_obj(an, o).is_some()) {
                     return Some(if sh::dual_dim(&t).is_some() { K::Dual } else { K::Tensor });
@@ -970,7 +970,7 @@ pub fn t_binop(an: &mut Analyzer, op: ruff_python_ast::Operator, a: &Value, b: &
         }
         if v.pts.is_empty() {
             match &v.kv {
-                KeyVal::Data(l) => {
+                KeyVal::Data(l, _) => {
                     let t = intern::str_get(*l);
                     if t.starts_with(sh::TENSOR_PREFIX) {
                         return Some(if sh::dual_dim(&t).is_some() { K::Dual } else { K::Tensor });
@@ -1245,7 +1245,7 @@ pub fn t_getattr(an: &mut Analyzer, obj: &Value, name: &str, node: &Node, st: &m
         return None;
     }
     // `torch.finfo(dt).min` & co.: numbers
-    if obj.pts.is_empty() && matches!(&obj.kv, KeyVal::Data(l) if &*intern::str_get(*l) == sh::NUM_LABEL) {
+    if obj.pts.is_empty() && matches!(&obj.kv, KeyVal::Data(l, _) if &*intern::str_get(*l) == sh::NUM_LABEL) {
         return Some(num_value());
     }
     // layer objects / return tuples
@@ -1296,8 +1296,8 @@ pub fn t_getattr(an: &mut Analyzer, obj: &Value, name: &str, node: &Node, st: &m
     // none, `mask=None` used as a tensor; a tensor is one, `h = x` joined with a layer's)
     let no_scalar = obj.kv.is_bot()
         || (obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()))
-        || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}'));
-    let unknown_tensorish = !tensor && an.m.torch_on && obj.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
+        || matches!(&obj.kv, KeyVal::Data(l, _) if intern::str_get(*l).starts_with('\u{1}'));
+    let unknown_tensorish = !tensor && an.m.torch_on && obj.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l, _) if intern::str_get(*l).starts_with("expr:")));
     if !tensor && !unknown_tensorish {
         return None;
     }
@@ -2703,7 +2703,7 @@ fn t_literal_tensor(an: &mut Analyzer, data: Option<&Value>, len: Option<DimId>,
             return match &v.kv {
                 KeyVal::Lit(k) if number(k) => Some(vec![]),
                 KeyVal::Lits(ks) if !ks.is_empty() && ks.iter().all(|k| number(&k)) => Some(vec![]),
-                KeyVal::Data(l) if is_number_label(&intern::str_get(*l)) => Some(vec![]),
+                KeyVal::Data(l, _) if is_number_label(&intern::str_get(*l)) => Some(vec![]),
                 _ => None,
             };
         }
@@ -4445,7 +4445,7 @@ pub const QUOT_PREFIX: &str = "\u{1}Q";
 /// them as unknown data), else plain data.
 pub fn elem_kv(kv: &KeyVal) -> KeyVal {
     match kv {
-        KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}') => kv.clone(),
+        KeyVal::Data(l, _) if intern::str_get(*l).starts_with('\u{1}') => kv.clone(),
         _ => DATA,
     }
 }
@@ -4747,7 +4747,7 @@ pub fn t_name_number(an: &mut Analyzer, name: StrId, v: &Value) -> Option<Value>
     if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || an.entry_function().is_some() || !v.pts.is_empty() {
         return None;
     }
-    let KeyVal::Data(l) = &v.kv else { return None };
+    let KeyVal::Data(l, _) = &v.kv else { return None };
     let l = intern::str_get(*l);
     // (a dim of a tensor the module bound, `n = len(train)`: it keeps its value, printed `n`)
     if let Some(d) = sh::parse_dim_label(&l) {

@@ -59,8 +59,9 @@ pub fn join_alternatives(texts: &[String]) -> String {
 pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
     let mut parts: Vec<String> = Vec::new();
     // literals
-    let lits = kv_literals(&v.kv);
-    if v.kv.is_literal() && !lits.is_empty() {
+    // (an unknown's literals it may be: `8080 | ?`)
+    let lits = if v.kv.is_literal() { kv_literals(&v.kv) } else { v.kv.hint() };
+    if !lits.is_empty() {
         let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| short_literal(key_display(*k))).collect();
         if ls.len() > 4 {
             ls.truncate(4);
@@ -382,7 +383,7 @@ pub fn in_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
 /// An unknown value computed by an expression rowan names it by (`1 + b`), when that
 /// expression is in the scope being printed.
 pub fn data_expr(kv: &KeyVal) -> Option<String> {
-    let KeyVal::Data(s) = kv else { return None };
+    let KeyVal::Data(s, _) = kv else { return None };
     let label = intern::str_get(*s);
     let rest = label_name(&label).strip_prefix("expr:")?;
     let (scope, text) = rest.split_once(':')?;

@@ -113,7 +113,7 @@ impl Analyzer {
         let has_ph = a.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown);
         let known_lits = a.kv.is_literal() || a.kv.is_bot();
         // an unknown length against 0 (or a negative number): `len(xs) >= 0` holds
-        if let (true, KeyVal::Data(d), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
+        if let (true, KeyVal::Data(d, _), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
             if label_name(&intern::str_get(*d)) == "len" {
                 if let ast::Number::Int(i) = &nl.value {
                     if let Some(n) = i.as_i64() {

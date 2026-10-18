@@ -75,8 +75,8 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
   const src = fs.readFileSync(z630, "utf8").split("\n");
   const idx = indexResult(facts(z630));
   assert(hover(idx, src, 11, "y").startsWith("```python\ny = retries - 1\n```"), hover(idx, src, 11, "y"));
-  assert(hover(idx, src, 12, "limit").startsWith("```python\nlimit = int(?)\n```"), hover(idx, src, 12, "limit"));
-  assert(hover(idx, src, 14, "t").startsWith("```python\nt = int(?)\n```"), hover(idx, src, 14, "t"));
+  assert(hover(idx, src, 12, "limit").startsWith("```python\nlimit = 1 | int(?)\n```"), hover(idx, src, 12, "limit"));
+  assert(hover(idx, src, 14, "t").startsWith("```python\nt = 0 | int(?)\n```"), hover(idx, src, 14, "t"));
 }
 // ---- a loop's line shows the value the loop's fixpoint gives, not each round's as alternatives
 // (`counts` was `{} | dict[?, 1] | dict[?, int(?)]`)
@@ -84,7 +84,7 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
   const a04 = path.join(root, "tests", "cases", "a04_loop_keys.py");
   const src = fs.readFileSync(a04, "utf8").split("\n");
   const idx = indexResult(facts(a04));
-  assert(hover(idx, src, 10, "counts").startsWith("```python\ncounts = dict[?, int(?)]\n```"), hover(idx, src, 10, "counts"));
+  assert(hover(idx, src, 10, "counts").startsWith("```python\ncounts = dict[?, 1 | int(?)]\n```"), hover(idx, src, 10, "counts"));
 }
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
@@ -206,7 +206,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const z643 = path.join(root, "tests", "cases", "z643_keys_of_a_builtin_type.py");
   const src3 = fs.readFileSync(z643, "utf8").split("\n");
   const idx3 = indexResult(facts(z643));
-  assert(hover(idx3, src3, 14, "counts").startsWith("```python\ncounts = dict[str(?), int(?)]\n```"), hover(idx3, src3, 14, "counts"));
+  assert(hover(idx3, src3, 14, "counts").startsWith("```python\ncounts = dict[str(?), 1 | int(?)]\n```"), hover(idx3, src3, 14, "counts"));
   assert(hover(idx3, src3, 15, "k").startsWith("```python\nk = str(?)\n```"), hover(idx3, src3, 15, "k"));
 }
 // ---- a function's value for any call, apart from what the program's calls give (with their lines)

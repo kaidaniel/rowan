@@ -447,6 +447,8 @@ impl<T: Copy + Ord> Default for IdSet<T> {
 }
 
 impl<T: Copy + Ord> IdSet<T> {
+    /// The empty set, as a constant.
+    pub const EMPTY: Self = IdSet(None);
     pub fn new() -> Self {
         Self::default()
     }

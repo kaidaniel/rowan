@@ -206,7 +206,7 @@ impl Analyzer {
         let special = |an: &Analyzer, o: ObjId| an.m.t_numbers.contains_key(&o);
         let unknown_objs: Vec<ObjId> = v.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Unknown && self.heap.obj(*o).ty.is_none() && !special(self, *o)).collect();
         let scalar = match &v.kv {
-            KeyVal::Data(l) => {
+            KeyVal::Data(l, _) => {
                 let l = intern::str_get(*l);
                 (crate::domain::label_type(&l).is_none() && !l.starts_with('\u{1}')).then(|| crate::domain::label_name(&l).to_string())
             }

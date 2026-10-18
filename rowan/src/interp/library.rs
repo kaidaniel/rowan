@@ -46,7 +46,7 @@ impl Analyzer {
     /// The result of a call into a library (an entry): an unknown scalar is named by the call as
     /// written (`parser.parse(text)`), as a call rowan does not follow names its result.
     pub(super) fn named_by_call(&self, r: Value, node: &crate::frontend::Node) -> Value {
-        let (true, KeyVal::Data(l)) = (r.pts.is_empty(), &r.kv) else { return r };
+        let (true, KeyVal::Data(l, _)) = (r.pts.is_empty(), &r.kv) else { return r };
         let l = intern::str_get(*l);
         let text = crate::frontend::text_at(node).split_whitespace().collect::<Vec<_>>().join(" ");
         if l.starts_with('\u{1}') || text.is_empty() || text.len() > 60 {
