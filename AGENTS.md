@@ -42,7 +42,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   running `try` (`TryCtx`) records the state at every point of its body and callees that may
   raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`), joined
   per class (an object a raise leaves half-built is dropped there unless held, `drop_unreached`);
-  handlers start from the raises they may catch, the rest go on through the `finally` to the
+  handlers start from the raises they may catch (binding those of their classes), the rest go on through the `finally` to the
   enclosing try. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in a
   context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
@@ -90,8 +90,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
-  read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not);
-  one on one of several objects needs each one's only sometimes (an element's: per element).
+  read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not; a catch-all, `except Exception:`, guards only
+  reads in its own function: `is_guarded`; a caller's still gets the raise, `catches`); one on one of several objects needs each one's only sometimes (an element's: per element).
   A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`): `proven`, `possibly`,
   `missing`, `input` are sound; `likely` / `likely-missing` optimistic (unknown code removed nothing). In one of
@@ -131,7 +131,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls, Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+  (`report::site_text` names unknown code and a model's inputs by the call as written, with its file when another). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls (`on line 83 in dp/api.py` when in another file), Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 
