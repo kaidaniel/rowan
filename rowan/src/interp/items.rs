@@ -701,6 +701,11 @@ impl Analyzer {
         let from_map = own_map && !star.empty() && (v.empty() || stored && !row0.definite.contains(k));
         if from_map {
             v = v.join(&star);
+            // (kept under the key: a read narrows it in, and a path that stores it later
+            // joins with this value, not with nothing)
+            if is_lit {
+                state.set_slot_found(oid, ns, k, v.clone(), false);
+            }
         } else if !star.pts.is_empty() && !stored {
             v = v.join(&Value::with_kv(star.pts.clone(), DATA));
         }
