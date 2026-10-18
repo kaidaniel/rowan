@@ -16,7 +16,7 @@ except KeyError:
     r = -2
 p1 = r
 #@value p1: includes={-2}
-#@todo value p1: exactly={-2} (an empty dict: the del of any key fails)
+#@value p1: exactly={-2}
 # `kk == kx` does not narrow kk to "m": kx may be another text
 f = {"k": 1, "m": 2}
 for kk in list(f):
