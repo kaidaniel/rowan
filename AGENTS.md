@@ -189,10 +189,10 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 
 | input | time |
 | --- | --- |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.9 / ~5.7 s; 0.12 / 0.07 / 0.11 / 0.11 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.4 / ~1.0 / ~4.2 / ~4.6 s; 0.27 / 0.22 / 0.20 / 0.35 GB |
-| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 300 / 3.9 / > 300 s |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.42 / 0.47 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.7 / ~5.5 s; 0.10 / 0.06 / 0.10 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.5 / ~1.0 / ~3.6 / ~4.8 s; 0.27 / 0.22 / 0.21 / 0.30 GB |
+| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 1800 / 3.9 / > 1800 s (importing scipy.special alone: 4.2 s) |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps
 
