@@ -11,7 +11,7 @@ expectations written by hand.
 
     uv run --no-project python tests/fuzz.py [KIND…] [--seed S] [-n N] [-j J] [--out DIR] [--shrink]
 
-KIND: lists, objects, calls, scalars (default: all of them). Run it under `.guard/run`;
+KIND: lists, objects, calls, scalars, dicts, attrs, tries, gens, comps, formats, funcs, order, flow (default: all). Run it under `.guard/run`;
 `FUZZ_TRACE=1` (with `-j 1`) names each program before its check, to find one that a guard killed.
 """
 from __future__ import annotations
@@ -705,9 +705,140 @@ def funcs_program():
     return FUNCS_HEAD.split("\n"), block(funcs_op, 0, random.randrange(4, 12), conds), probes
 
 
+# ---------------------------------------------------------------- insertion order of dicts, OrderedDicts and sets
+OK = ['"k"', '"m"', '"z"', "kx"]
+ORDER_HEAD = """import sys
+from collections import OrderedDict
+n = len(sys.argv)
+kx = "m" if n > 2 else (sys.argv[0][:0] + "Z").lower()
+d = {"k": 0, "m": 1}
+od = OrderedDict(a=1, b=2)
+s = {"x"}
+r = 0"""
+
+
+def order_op() -> list:
+    k, k2, v = random.choice(OK), random.choice(OK), random.choice(["0", "1", "2", "None"])
+    ka = random.choice(['"a"', '"b"', '"c"'])
+    return random.choice([
+        [f"d[{k}] = {v}"], [f"if {k} in d:", f"    del d[{k}]", f"    d[{k}] = {v}"], [f"d.pop({k}, None)"], ["r = d.popitem()[0] if d else -1"],
+        ["for _i in range(n):", f"    d.setdefault({k}, _i)"], ["for _i in range(n):", "    d[_i % 3] = _i"], ["d = {kk: d[kk] for kk in sorted(d, key=str)}"],
+        ["d = dict(reversed(list(d.items())))"], [f"d = {{**{{{k}: {v}}}, **d}}"], [f"d = {{**d, {k}: {v}}}"], ["d.update(od)"], [f"d |= {{{k2}: {v}}}"],
+        [f"if {ka} in od:", f"    od.move_to_end({ka})"], [f"if {ka} in od:", f"    od.move_to_end({ka}, last=False)"], [f"od[{ka}] = {v}"],
+        ["r = od.popitem(last=False)[0] if od else -1"], ["r = od.popitem()[0] if od else -1"], ["r = next(iter(od), -1)"], [f"od.pop({ka}, None)"],
+        [f"s.add({k})"], [f"s.discard({k})"], ["r = sorted(s)[0] if s else -1"], ["r = len(s & set(d))"], ["s = {kk for kk in d if isinstance(kk, str)}"],
+        ["r = [kk for kk in d for _ in range(2)][-1] if d else -1"], [f"r = len({{kk: [j for j in range(n) if j != vv] for kk, vv in d.items() if isinstance(vv, int)}}.get({k}, []))"],
+        ["r = list(d)[-1] if d else -1"], ["d = dict.fromkeys(d, 0)"], ["d = {vv if isinstance(vv, str) else kk: kk for kk, vv in d.items()}"],
+        ["for kk in list(d):", f"    if kk != {k}:", "        d[kk] = d.pop(kk)"], [f"d.setdefault({k}, {v})", f"r = list(d).index({k})"],
+        ["try:", f"    d[{k}] = d[{k2}]", "except KeyError:", f"    d[{k2}] = {v}"], ["r = ','.join(str(kk) for kk in d)"], ["r = ','.join(od)"],
+        ["e = dict(d)", "e.clear()", "e.update(d)", "d = e"], [f"d = {{kk: vv for kk, vv in d.items() if kk != {k}}}"],
+    ])
+
+
+def order_program():
+    probes = ["r", "list(d)[0] if d else -9", "list(d)[-1] if d else -9", "len(d)", 'd.get("k", -1)', '"z" in d', "list(od)[0] if od else -9",
+              "list(od)[-1] if od else -9", "len(od)", "len(s)", "','.join(map(str, d))", ("row", "d")]
+    return ORDER_HEAD.split("\n"), block(order_op, 0, random.randrange(4, 12)), probes
+
+
+# ---------------------------------------------------------------- control flow: early returns, finally, with, loop else, class state
+FLOW_HEAD = """import sys
+log = []
+class Cfg:
+    level = 0
+    names = []
+class Ctx:
+    def __init__(self, tag):
+        self.tag = tag
+    def __enter__(self):
+        log.append(self.tag)
+        return self
+    def __exit__(self, t, e, tb):
+        log.append(-1)
+        return t is not None and issubclass(t, KeyError)
+def early(v):
+    try:
+        if v > 1:
+            return 7
+        log.append(v)
+    finally:
+        log.append(9)
+    return 8
+def override(v):
+    try:
+        return v
+    finally:
+        if v == 2:
+            return -2
+def in_with(v):
+    with Ctx(v):
+        if v:
+            return v * 10
+        {}[v]
+    return -1
+def search(xs, t):
+    for i, w in enumerate(xs):
+        if w == t:
+            break
+    else:
+        return -1
+    return i
+def countdown(k):
+    while k > 0:
+        k -= 1
+        if k == 5:
+            break
+    else:
+        return 0
+    return 1
+def counter():
+    c = 0
+    def inc():
+        nonlocal c
+        c += 1
+        return c
+    return inc
+def gen_ret(k):
+    total = yield k
+    return total
+def bump():
+    Cfg.level += 1
+    return Cfg.level
+n = len(sys.argv)
+x = 0
+y = 1
+xs = [1, 2, 3]
+inc = counter()"""
+
+
+def flow_op() -> list:
+    x, y, v = random.choice("xy"), random.choice("xy"), random.choice(["0", "1", "2", "3"])
+    return random.choice([
+        [f"{x} = early({y})"], [f"{x} = override({y})"], [f"{x} = in_with({y})"], [f"{x} = search(xs, {v})"], [f"{x} = countdown({x} % 8)"],
+        [f"{x} = inc()"], ["inc = counter()"], ["for _i in range(n):", "    Cfg.level += 1"], ["for _i in range(n):", "    Cfg.names.append(_i)"],
+        ["for _i in range(n):", "    Cfg.level = _i"], [f"{x} = Cfg.level"], [f"{x} = len(Cfg.names)"], [f"{x} = bump()"], ["Cfg.names = []"],
+        ["with Ctx(" + v + ") as c:", f"    {x} = c.tag"], ["try:", f"    with Ctx({v}):", f"        {x} = 1 // {y}", "except ZeroDivisionError:", f"    {x} = -3"],
+        ["for w in xs:", f"    if w == {v}:", f"        {x} = w", "        break", "else:", f"    {x} = -4"],
+        [f"while {x} < 3:", f"    {x} += 1", "else:", f"    {y} = {x}"], [f"xs.append({x})"], ["xs = xs[1:]"], [f"{x} = xs[-1] if xs else -5"],
+        [f"g = gen_ret({v})", f"{x} = next(g)", "try:", f"    g.send({y})", "except StopIteration as e:", f"    {x} = e.value"],
+        [f"{x} = len(log)"], [f"{x} = log[-1] if log else -6"], [f"def local(v={x}):", "    return v + 1", f"{y} = local()"],
+        [f"{x} = (lambda: {y})()"], ["for _i in range(n):", "    try:", f"        if _i == {v}:", "            break", "    finally:", "        log.append(_i)"],
+        ["def fin(v):", "    for w in range(v):", "        try:", "            if w == 1:", "                return w", "        finally:", "            log.append(w)",
+         "    return -7", f"{x} = fin({y} + 1)"],
+        ["with Ctx(1):", "    with Ctx(2):", f"        {x} = len(log)"], ["try:", f"    with Ctx({v}):", "        raise KeyError(1)", "except KeyError:", f"    {x} = -8"],
+        [f"{x} = {x} % 50"],
+    ])
+
+
+def flow_program():
+    probes = ["x", "y", "len(log)", "log[-1] if log else -9", "log[0] if log else -9", "Cfg.level", "len(Cfg.names)", "len(xs)", "xs[0] if xs else -9"]
+    conds = COND + ["if x > 1:", "if xs:"]
+    return FLOW_HEAD.split("\n"), block(flow_op, 0, random.randrange(4, 12), conds), probes
+
+
 KINDS = {"lists": lists_program, "objects": objects_program, "calls": calls_program, "scalars": scalars_program, "dicts": dicts_program,
          "attrs": attrs_program, "tries": tries_program, "gens": gens_program, "comps": comps_program, "formats": formats_program,
-         "funcs": funcs_program}
+         "funcs": funcs_program, "order": order_program, "flow": flow_program}
 
 
 # ---------------------------------------------------------------- running and checking
