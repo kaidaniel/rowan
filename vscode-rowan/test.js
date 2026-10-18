@@ -9,7 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, factsAt, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents, followArgs, sitePackagesOf } = require("./extension.js");
+const { renderHover, factsAt, indexResult, prettyValue, hoverValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents, followArgs, sitePackagesOf } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -351,6 +351,13 @@ assert.strictEqual(diagnosticMessage({ message: "m", chain: [5, 9], via: "L5→h
 // small ones, and calls with one argument, stay whole
 const repo = 'Repo(events=[{"key": 1, "op": "add"}, {"key": 2, "op": "add"}, {"key": 3, "op": "add"}], index_fns={"tier": <lambda on line 43>}, indexes={"tier": {"basic": […], "gold": […], "silver": […]}}, items={1: Customer(address={…}, cid=1, name="Ann", orders=[…], tier="gold"), 2: Customer(address={…}, cid=2, name="Bob", orders=[…], tier="basic"), 3: Customer(address={…}, cid=3, name="Cy", orders=[…], tier="silver")}, name="customers")';
 const lines = prettyValue(repo, 40);
+// (a field's alternatives that cutting made alike — `BadParameter(…)` of different arguments — once)
+{
+  const errs = Array.from({ length: 30 }, (_, i) => `BadParameter(ctx=?, message="bad value number ${i} for the option", param=?)`).join(" | ");
+  const res = `Result(exception=Abort() | ${errs} | KeyError("k") | None, exit_code=0 | 1 | ?, output=str(?), ${Array.from({ length: 12 }, (_, i) => `f${i}=${i}`).join(", ")})`;
+  const hv = hoverValue(res).join("\n");
+  assert(hv.includes("exception=Abort() | BadParameter(…) | KeyError(…) | None") && !hv.includes("BadParameter(…) | BadParameter(…)"), hv);
+}
 assert(lines.length > 10, lines.join("\n"));
 for (const l of lines) assert(l.length <= 40, `too wide: ${JSON.stringify(l)}`);
 assert.strictEqual(lines[0], "Repo(");

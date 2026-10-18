@@ -187,8 +187,10 @@ function prettyValue(text, width = VALUE_WIDTH) {
 
 /** `text` with brackets nested deeper than `depth` cut to `{…}` / `[…]` / `(…)`. */
 function cutDepth(text, depth) {
+  // (an item's alternatives that cutting made alike, `E(…) | E(…)`: once)
+  const once = (s) => [...new Set(alternatives(s))].join(" | ");
   const flat = (parts, d) =>
-    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => flat(i, d + 1)).join(", ") + (p.trail ? "," : "") + p.close)).join("");
+    parts.map((p) => (typeof p === "string" ? p : p.items.length && d >= depth ? p.open + "…" + p.close : p.open + p.items.map((i) => once(flat(i, d + 1))).join(", ") + (p.trail ? "," : "") + p.close)).join("");
   return parseValue(text).map((i) => flat(i, 0)).join(", ");
 }
 
