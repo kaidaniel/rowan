@@ -535,10 +535,9 @@ impl Analyzer {
     }
 
     /// The exceptions of a raise (`x`) a handler of classes `hc` may bind: those of a class it
-    /// does not surely miss (each class looked at once; past 64 objects, all). None: only
-    /// exceptions it misses.
+    /// does not surely miss (each class looked at once). None: only exceptions it misses.
     fn exceptions_caught(&self, x: &Value, hc: &(FxHashSet<String>, bool)) -> Option<Value> {
-        if x.pts.is_empty() || x.pts.len() > 64 {
+        if x.pts.is_empty() {
             return Some(x.clone());
         }
         let mut misses: rustc_hash::FxHashMap<ObjId, bool> = Default::default();
