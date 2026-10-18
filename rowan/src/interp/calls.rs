@@ -936,6 +936,7 @@ impl Analyzer {
     fn take_caller(&mut self, fi: &FuncInfo, state: &mut State) -> Caller {
         let env = std::mem::take(&mut state.env);
         self.cx.env_stack.push(env.clone());
+        self.cx.unbound_stack.push(state.unbound.clone());
         let path = state.path.clone();
         let own = s(&format!("param {}.", fi.py_qualname()));
         if state.path.iter().any(|(o, _)| *o == own) {
@@ -948,6 +949,7 @@ impl Analyzer {
     /// returns go, its exits replace the caller's when the caller had some.
     fn give_back(&mut self, c: Caller, state: &mut State) {
         self.cx.env_stack.pop();
+        self.cx.unbound_stack.pop();
         state.env = c.env;
         state.unbound = c.unbound;
         state.path = c.path;
@@ -993,12 +995,14 @@ impl Analyzer {
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
         self.cx.env_stack.push(saved_env.clone());
+        self.cx.unbound_stack.push(saved_unbound.clone());
         self.cx.frames.push(new_fr);
         let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
         self.bind_params(&fi, &Some(self_v), Args::pos(&args), state, &fake);
         f(self, state);
         self.cx.frames.pop();
         self.cx.env_stack.pop();
+        self.cx.unbound_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
     }

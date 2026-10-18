@@ -107,6 +107,8 @@ pub struct Context {
     pub frames: Vec<Frame>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
+    /// their possibly-unbound names then (`State::unbound`), beside `env_stack`
+    pub unbound_stack: Vec<std::sync::Arc<Vec<StrId>>>,
     /// the call sites (lines) of the running calls, innermost last (the verdicts' chain)
     pub call_chain: Vec<u32>,
     /// the modules of `call_chain`'s sites

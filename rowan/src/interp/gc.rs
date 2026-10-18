@@ -158,13 +158,16 @@ impl Analyzer {
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
-    /// objects (those still in use are reachable from the names). `since`: a collector after
+    /// objects (those still in use are reachable from the names) nor other raises' exceptions. `since`: a collector after
     /// that mark, which expands only objects born since (older ones may be left out).
     pub(in crate::interp) fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>, since: Option<u64>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
         self.heap.push_copy_roots(since, work);
-        for v in self.unwind.cur_exc.iter().chain(self.unwind.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        // (a raise state is one path: the exceptions other raises took to the running tries are
+        // other paths')
+        let recorded = self.unwind.tries.iter().filter(|_| unwind.is_none()).flat_map(|t| t.recs.iter().map(|r| &r.2));
+        for v in self.unwind.cur_exc.iter().chain(recorded).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -183,7 +186,7 @@ impl Analyzer {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
-        for (_, env, _) in &self.gens.cm_frames {
+        for (_, env, _, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
         for cells in &self.cx.comp_cells {

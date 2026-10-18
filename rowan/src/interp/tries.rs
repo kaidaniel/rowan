@@ -218,17 +218,24 @@ impl Analyzer {
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names
-        let in_cm = self.gens.cm_frames.iter().rev().find(|(d, _, el0)| *d == fl && el <= *el0).map(|(_, env, _)| env.clone());
-        if let Some(env) = in_cm {
+        let in_cm = self.gens.cm_frames.iter().rev().find(|(d, _, el0, _)| *d == fl && el <= *el0).map(|(_, env, _, ub)| (env.clone(), ub.clone()));
+        // (the raise leaves the code it is in: a callee of the try's frame, or the with body
+        // of the generator the try is in, at any depth)
+        let leaves = in_cm.is_some() || self.cx.frames.len() != fl;
+        // (with their possibly-unbound names, not those of the code the raise leaves)
+        if let Some((env, ub)) = in_cm {
             here.env = env;
+            here.unbound = ub;
             here.narrowed = Default::default();
         } else if self.cx.frames.len() < fl {
-            if let Some((_, env, _)) = self.gens.cm_frames.iter().rev().find(|(d, _, _)| *d == fl) {
+            if let Some((_, env, _, ub)) = self.gens.cm_frames.iter().rev().find(|(d, _, _, _)| *d == fl) {
                 here.env = env.clone();
+                here.unbound = ub.clone();
                 here.narrowed = Default::default();
             }
         } else if self.cx.frames.len() > fl {
             here.env = self.cx.env_stack.get(el).cloned().unwrap_or_else(|| t.pre.env.clone());
+            here.unbound = self.cx.unbound_stack.get(el).cloned().unwrap_or_else(|| t.pre.unbound.clone());
             here.narrowed = t.pre.narrowed.clone();
             here.ret = t.pre.ret.clone();
             here.exits = t.pre.exits.clone();
@@ -253,7 +260,7 @@ impl Analyzer {
         // (an object whose constructor the raise leaves, made in the try, is garbage in this
         // raise state unless what the try's frame reaches holds it: it is not the object a
         // later raise point holds once built)
-        if self.cx.frames.len() > fl {
+        if leaves {
             let mark = self.unwind.tries.last().unwrap().mark;
             let half: Vec<ObjId> = self.cx.fresh_init.iter().filter(|(o, b)| !b.held && !self.heap.born_before(**o, mark)).map(|(o, _)| *o).collect();
             for o in half {
