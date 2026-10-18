@@ -47,8 +47,10 @@ impl Analyzer {
 
     /// The work done so far, as an entry's allowance counts it: statements, objects, havoc and
     /// reachability visits, and row joins (a library's merges of large values cost in joins).
+    /// Not definitions (functions, classes, modules): the statement making one pays for it, and
+    /// an import makes one per `def` of the code it loads.
     pub(super) fn library_work(&self) -> usize {
-        self.hover_work() + crate::domain::row_joins() + crate::state::fp_visits() / 16
+        self.hover_work() - self.heap.defs + crate::domain::row_joins() + crate::state::fp_visits() / 16
     }
 
     /// The result of a call into a library (an entry): an unknown scalar is named by the call as
