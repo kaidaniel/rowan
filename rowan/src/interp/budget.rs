@@ -200,7 +200,7 @@ impl Budget {
     /// A call of user code within an entry into a followed library, with the work done so far
     /// `work`: past the work one entry may do (`fanout_limit`), it does not run (`lib_cut`).
     pub fn past_library_work(&self, work: usize) -> bool {
-        let past = self.lib_entry.is_some_and(|w0| work - w0 > Self::fanout_limit());
+        let past = self.lib_entry.is_some_and(|w0| work.saturating_sub(w0) > Self::fanout_limit());
         if past {
             self.lib_cut.set(true);
         }
