@@ -54,7 +54,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
-  * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
+  * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened. An activation is a call site in its context (4 deep, then the innermost); with literal arguments, its place, receiver and literals (40 deep); a call of itself with nothing but the innermost one's arguments or data from outside: the innermost past one level (`recursion_without_progress`).
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class).
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
