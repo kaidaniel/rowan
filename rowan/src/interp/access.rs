@@ -22,6 +22,8 @@ pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", 
 pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
+/// Handlers that catch everything: a guard only around the read in its own function.
+pub(super) const CATCH_ALL: &[&str] = &["Exception", "BaseException", "*"];
 
 impl Analyzer {
     /// The handler names that guard a failing read in namespace `ns` here.
@@ -63,10 +65,21 @@ impl Analyzer {
         })
     }
 
-    /// Does a running handler catch a failing read in namespace `ns` here?
-    pub fn is_guarded(&self, ns: Ns) -> bool {
+    /// Does a running handler catch a failing read in namespace `ns` here (its exception goes
+    /// to that handler)?
+    pub fn catches(&self, ns: Ns) -> bool {
         let want = self.guard_names(ns);
         self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
+    }
+
+    /// Is a failing read in namespace `ns` here the program's own way, not a finding: a running
+    /// handler names its exception (`except KeyError:`, a caller's too), or catches everything
+    /// around the read in its own function. A catch-all of a caller (a CLI runner's `except
+    /// Exception:`, a worker's) is not about this read: it stays a finding, its key needed.
+    pub fn is_guarded(&self, ns: Ns) -> bool {
+        let want = self.guard_names(ns);
+        let here = self.cx.frames.len();
+        self.unwind.tries.iter().any(|t| (if t.frames == here { &t.caught } else { &t.named }).iter().any(|x| want.contains(&x.as_str())))
     }
 
     /// The records among the objects `v` may be.

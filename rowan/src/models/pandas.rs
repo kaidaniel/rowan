@@ -2299,7 +2299,7 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// The op reads these columns of each frame (raising for a missing one): verdicts, and the
 /// frames the program can go on with (those not surely lacking one; all when none is left).
 fn require_cols(an: &mut Analyzer, st: &mut State, c: &Call, fs: &[u32], keys: &KeySet) -> Vec<u32> {
-    let guarded = an.is_guarded(Ns::Item);
+    let (guarded, caught) = (an.is_guarded(Ns::Item), an.catches(Ns::Item));
     let mut alive = Vec::new();
     let unsure = fs.iter().any(|f| keys.iter().any(|k| !matches!(column_tier(&st.row(*f, Ns::Item), k), Tier::Proven | Tier::Likely)));
     for f in fs {
@@ -2311,7 +2311,7 @@ fn require_cols(an: &mut Analyzer, st: &mut State, c: &Call, fs: &[u32], keys: &
             alive.push(*f);
         }
     }
-    if !guarded {
+    if !caught {
         // (outside a try the analysis goes on past a failing access, as for dicts)
         return fs.to_vec();
     }

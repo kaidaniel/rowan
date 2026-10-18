@@ -10,6 +10,7 @@ use serde_json::{json, Value as J};
 use crate::domain::{key_display, Chain, Ns, ObjId, Row, Tier};
 use crate::intern::{self, str_get, StrId};
 use crate::interp::{Analyzer, Fact};
+use crate::interp::findings::CallSite;
 use crate::interp::render::{is_internal_key, join_alternatives};
 use crate::interp::report::{reads_below, reported, site_text, source_id_text, verdict_json, verdict_message, Need, MAX_FACT_OBJECTS};
 use crate::source::source_is_data;
@@ -97,12 +98,20 @@ fn fact_json(an: &Analyzer, line: u32, name: StrId, f: &Fact) -> J {
         None => fact_shape_requires(an, f, &|n| n.line == line, &|_| true),
     };
     // the value for any call (the general run's), and apart from it what the program's
-    // calls gave (with their lines); without a general run (a closure, a lambda) what the
-    // calls gave is the value
-    let call = |t: &String, lines: &Vec<u32>| {
-        let mut c = json!({"text": t, "lines": lines.iter().filter(|l| **l > 0).collect::<Vec<_>>()});
+    // calls gave (with their lines, in the hovered file; `files`: those in other files);
+    // without a general run (a closure, a lambda) what the calls gave is the value
+    let call = |t: &String, sites: &Vec<CallSite>| {
+        let main = an.program.main_idx;
+        let mut c = json!({"text": t, "lines": sites.iter().filter(|(m, l)| *l > 0 && *m == main).map(|(_, l)| l).collect::<Vec<_>>()});
+        let mut files = serde_json::Map::new();
+        for (m, l) in sites.iter().filter(|(m, l)| *l > 0 && *m != main) {
+            files.entry(an.program.rel_file(*m)).or_insert_with(|| json!([])).as_array_mut().unwrap().push(json!(l));
+        }
+        if !files.is_empty() {
+            c["files"] = J::Object(files);
+        }
         if f.param_of.is_some() {
-            c["check"] = call_check(an, f, lines);
+            c["check"] = call_check(an, f, sites);
         }
         c
     };
@@ -134,7 +143,14 @@ fn fact_json(an: &Analyzer, line: u32, name: StrId, f: &Fact) -> J {
 /// One object a hover's name may hold: what may have changed it, where it comes from, its kind,
 /// origin and symbol.
 fn fact_object_json(an: &Analyzer, f: &Fact, oid: ObjId, item: &Option<Row>, attr: &Option<Row>) -> J {
-    let origin = an.names.origins.get(&oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
+    // (`file`: when not the hovered one)
+    let origin = an.names.origins.get(&oid).map(|(t, (m, l), g)| {
+        let mut o = json!({"text": t, "line": l, "given": g});
+        if *m != an.program.main_idx {
+            o["file"] = json!(an.program.rel_file(*m));
+        }
+        o
+    });
     // for people: what may have changed it, where it comes from
     let rows = [item, attr].into_iter().flatten();
     let mut changed_by: Vec<String> = Vec::new();
@@ -223,18 +239,18 @@ fn param_contract(an: &Analyzer, foid: ObjId, name: StrId) -> J {
     J::Array(needs.into_iter().map(|n| json!({"path": n.path, "always": n.always, "only_if": n.only_if})).collect())
 }
 
-/// Whether what the program's calls on `lines` passed for a parameter has what the function
+/// Whether what the program's calls at `sites` passed for a parameter has what the function
 /// reads of it: the worst of the accesses of those calls' runs (in the function, its callees
 /// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠~ ⚠ ✗).
-fn call_check(an: &Analyzer, f: &Fact, lines: &[u32]) -> J {
-    let passed: Vec<&(Chain, Vec<ObjId>)> = f.passed.iter().filter(|(c, _)| c.last().is_some_and(|l| lines.contains(l))).collect();
+fn call_check(an: &Analyzer, f: &Fact, sites: &[CallSite]) -> J {
+    let passed: Vec<&(Chain, u32, Vec<ObjId>)> = f.passed.iter().filter(|(c, m, _)| c.last().is_some_and(|l| sites.contains(&(*m, *l)))).collect();
     let Some(st) = &an.findings.final_state else { return J::Null };
     if passed.is_empty() {
         return J::Null;
     }
     // (what they passed and what it holds)
     let mut reach: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
-    let mut work: Vec<ObjId> = passed.iter().flat_map(|(_, o)| o.iter().copied()).collect();
+    let mut work: Vec<ObjId> = passed.iter().flat_map(|(_, _, o)| o.iter().copied()).collect();
     while let Some(o) = work.pop() {
         if reach.len() > 512 || !reach.insert(o) || matches!(an.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
             continue;
@@ -251,7 +267,7 @@ fn call_check(an: &Analyzer, f: &Fact, lines: &[u32]) -> J {
     let mut worst: Option<usize> = None;
     let mut fails: Vec<String> = Vec::new();
     for v in an.findings.verdicts() {
-        if !reach.contains(&v.oid) || !passed.iter().any(|(c, _)| !c.is_empty() && within(&v.chain, c)) {
+        if !reach.contains(&v.oid) || !passed.iter().any(|(c, _, _)| !c.is_empty() && within(&v.chain, c)) {
             continue;
         }
         let Some(i) = ORDER.iter().position(|t| *t == v.tier) else { continue };
@@ -263,7 +279,7 @@ fn call_check(an: &Analyzer, f: &Fact, lines: &[u32]) -> J {
     // (tensor shapes: a shape error in those calls' runs)
     let mut errors: Vec<String> = Vec::new();
     for n in &an.m.shape_errors {
-        if n.module == an.program.main_idx && passed.iter().any(|(c, _)| !c.is_empty() && within(&n.chain, c)) && !errors.contains(&n.text) {
+        if n.module == an.program.main_idx && passed.iter().any(|(c, _, _)| !c.is_empty() && within(&n.chain, c)) && !errors.contains(&n.text) {
             errors.push(n.text.clone());
             worst = Some(0);
         }

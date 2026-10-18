@@ -47,6 +47,9 @@ pub struct TryCtx {
     /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
     /// handler ends by re-raising)
     pub caught: FxHashSet<String>,
+    /// what it catches by name, its catch-alls aside (`Exception`, a bare `except:`): a guard
+    /// of the reads in the functions it calls too (`Analyzer::is_guarded`)
+    pub named: FxHashSet<String>,
     /// the frame depth and caller-env depth it runs in: a raise inside a callee hands the
     /// handler the try frame's locals
     pub frames: usize,
@@ -171,9 +174,12 @@ pub struct Unwind {
 impl Analyzer {
     /// A try context begins: raises inside it record the state there for its handlers and
     /// its finally; `pre` is the state before the body.
+    /// `caught`: the classes its handlers name (a class's subclasses are caught too).
     pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
         let (frames, envs, mark) = (self.cx.frames.len(), self.cx.env_stack.len(), self.heap.serial());
-        self.unwind.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
+        let named = crate::models::exceptions::expand_caught(caught.iter().filter(|n| !super::access::CATCH_ALL.contains(&n.as_str())).cloned().collect());
+        let caught = crate::models::exceptions::expand_caught(caught);
+        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
     }
 
     /// The try context ends: what it recorded. What callees made since the try began and
@@ -453,8 +459,8 @@ impl Analyzer {
     /// the ways out (the body's end and `else`, each handler's end) are joined, then the
     /// finally runs on each way out.
     pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
-        // (a handler for a class catches its subclasses too)
-        let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
+        // (a handler for a class catches its subclasses too: `enter_try`)
+        let mut caught: FxHashSet<String> = handlers.iter().flat_map(|h| h.names()).collect();
         // handlers that all end by re-raising: the body's reads are still required
         let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
@@ -528,6 +534,27 @@ impl Analyzer {
         }).collect()
     }
 
+    /// The exceptions of a raise (`x`) a handler of classes `hc` may bind: those of a class it
+    /// does not surely miss (each class looked at once). None: only exceptions it misses.
+    fn exceptions_caught(&self, x: &Value, hc: &(FxHashSet<String>, bool)) -> Option<Value> {
+        if x.pts.is_empty() {
+            return Some(x.clone());
+        }
+        let mut misses: rustc_hash::FxHashMap<ObjId, bool> = Default::default();
+        let mut missed = |o: ObjId| {
+            let miss = |an: &Analyzer| handler_matches(hc, &an.exc_value_names(&Value::obj(o))) == Some(false);
+            match self.heap.instance_class(o) {
+                Some(c) => *misses.entry(c).or_insert_with(|| miss(self)),
+                None => miss(self),
+            }
+        };
+        let keep: Vec<ObjId> = x.pts.iter().filter(|o| !missed(*o)).collect();
+        if keep.len() == x.pts.len() {
+            return Some(x.clone());
+        }
+        (!keep.is_empty() || !x.kv.is_bot()).then(|| Value::with_kv(crate::domain::ObjSet::from_vec(keep), x.kv.clone()))
+    }
+
     /// Raises no handler surely catches go on to the enclosing try (or out of the call),
     /// through the finally.
     fn reraise_uncaught(&mut self, recs: &mut [crate::interp::RaiseRec], hclasses: &[(FxHashSet<String>, bool)], fin: &std::rc::Rc<Finally>) {
@@ -563,6 +590,9 @@ impl Analyzer {
                     if handler_matches(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
                         continue;
                     }
+                    // (a raise of one of several exceptions, `raise` of a handler's: the handler
+                    // binds those of its classes; none of them: it catches none of this raise)
+                    let Some(x) = self.exceptions_caught(x, &hclasses[hi]) else { continue };
                     let mut r = st.copy();
                     e = if e.reachable { e.join(&mut r) } else { r };
                     let x = if x.pts.is_empty() { unknown.clone() } else { x.clone() };

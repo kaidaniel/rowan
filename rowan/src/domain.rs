@@ -677,19 +677,20 @@ pub fn join_rows(rows: impl IntoIterator<Item = Row>) -> Row {
 /// The call sites (lines) through which an access was reached, outermost first (`via L5→L9`).
 pub type Chain = Vec<u32>;
 
-/// Canonical call chain: a call site repeated in direct recursion is kept once and the
-/// chain keeps its innermost MAX_CHAIN sites.
-pub fn chain_extend(chain: &[u32], more: &[u32]) -> Chain {
-    let mut out: Vec<u32> = chain.to_vec();
-    for &x in more {
-        if out.last() != Some(&x) {
-            out.push(x);
-        }
+/// Canonical call chain one call at `line` of module `module` deeper (`files`: the modules of
+/// the chain's sites): a call site repeated in direct recursion is kept once and the chain
+/// keeps its innermost MAX_CHAIN sites.
+pub fn chain_extend(chain: &[u32], files: &[u32], module: u32, line: u32) -> (Chain, Vec<u32>) {
+    let (mut out, mut mods) = (chain.to_vec(), files.to_vec());
+    if out.last() != Some(&line) || mods.last() != Some(&module) {
+        out.push(line);
+        mods.push(module);
     }
     if out.len() > MAX_CHAIN {
         out.drain(..out.len() - MAX_CHAIN);
+        mods.drain(..mods.len() - MAX_CHAIN);
     }
-    out
+    (out, mods)
 }
 
 // ---------------------------------------------------------------------------

@@ -148,6 +148,7 @@ pub struct LazyGen {
     pub site: String,
     pub ctx: String,
     pub chain: Vec<u32>,
+    pub files: Vec<u32>,
 }
 
 /// The generators made and run so far, and the `@contextmanager` bodies running.
@@ -233,7 +234,7 @@ impl Analyzer {
         let keep = join_values(self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect::<Vec<Value>>());
         state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazyargs"), keep, true);
         state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(1)), true);
-        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.cx.call_chain.clone() };
+        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.cx.call_chain.clone(), files: self.cx.call_files.clone() };
         self.gens.lazy.insert(gid, Rc::new(lg));
         Value::obj(gid)
     }
@@ -257,10 +258,12 @@ impl Analyzer {
             }
             self.gens.force_at = Some((lg.site.clone(), lg.ctx.clone()));
             let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
+            let saved_files = std::mem::replace(&mut self.cx.call_files, lg.files.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gens.last_reads = None;
             let r = self.call_user(lg.foid, lg.self_v.clone(), Args::new(&lg.args, &lg.kwargs, &[], &[]), state, &lg.node, false);
             self.cx.call_chain = saved;
+            self.cx.call_files = saved_files;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
                 let fp = state.footprint(&pre);
                 let mut own: FxHashSet<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(state.lens.diff_keys(&pre.lens)).collect();

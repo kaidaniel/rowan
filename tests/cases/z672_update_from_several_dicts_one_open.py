@@ -28,4 +28,4 @@ for _i in range(n - 1):
 d = merge(d, f)
 p = d.get("k", -1)
 #@value p: includes={0, 9}
-#@todo value p: exactly={0, 9}  (the dict holding a key not known has 9 under any key: its placeholder reads unknown)
+#@value p: exactly={0, 9}

@@ -144,6 +144,7 @@ impl Analyzer {
         // costs the product of their sizes)
         let mut parts: Vec<Value> = Vec::new();
         let guarded = self.is_guarded(Ns::Attr) || !report;
+        let caught = report && self.catches(Ns::Attr);
         // (a value that may also be a scalar — a str, a number — may have the attribute: no
         // object's lack of it makes the read fail for sure)
         let scalar = self.may_be_scalar(obj);
@@ -154,7 +155,7 @@ impl Analyzer {
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
             let v: Value = match k {
-                Kind::Module => self.module_attr(oid, name, nk, node, state, report, guarded, single),
+                Kind::Module => self.module_attr(oid, name, nk, node, state, caught, guarded, single),
                 Kind::External if matches!(name, "__name__" | "__qualname__") && self.heap.external_qual(oid).starts_with("builtins.") => {
                     let q = self.heap.external_qual(oid);
                     Value::lit(key_str_lit(q.rsplit('.').next().unwrap_or("")))
@@ -172,7 +173,7 @@ impl Analyzer {
                     Value::obj(vid)
                 }
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
-                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, report && guarded, single),
+                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, caught, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.heap.class_info_opt(oid).is_some() => {
                     let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
                     crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
@@ -297,7 +298,7 @@ impl Analyzer {
     /// An attribute of a module: its global, what every module has, else missing (open when
     /// unknown code may have added names).
     #[allow(clippy::too_many_arguments)]
-    fn module_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, report: bool, guarded: bool, single: bool) -> Value {
+    fn module_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, caught: bool, guarded: bool, single: bool) -> Value {
         match state.slot_opt(oid, Ns::Attr, nk) {
             Some(v) => v,
             // (what every module has)
@@ -305,7 +306,7 @@ impl Analyzer {
                 if name == "__name__" { Value::lit_str(&self.heap.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
             }
             // (inside a try that catches the AttributeError: the handler's way)
-            None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
+            None if caught => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
             None => {
                 // (a namespace changed by code rowan cannot see — `globals().update(…)`
                 // with unknown names — may have it)
@@ -763,6 +764,10 @@ impl Analyzer {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {
                 self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
+            }
+            // (a catch-all of a caller's handles it)
+            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely) {
+                self.may_raise_here("AttributeError", state);
             }
             if cls.tier != Tier::Missing && single_target && self.heap.obj(oid).single {
                 state.set_row_narrowed(oid, Ns::Attr, row.narrow_in(nk, true));

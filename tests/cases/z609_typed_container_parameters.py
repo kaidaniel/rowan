@@ -17,11 +17,11 @@ def total(rows: list[dict[str, int]]) -> int:
 def first_key(m: dict[str, list[bytes]]):  # (not float: an int passes for a float)
     for k in m:
         key = k
-        #@todo general key: types={str}  (a key and any key's value share one unknown, `m[*]`)
+        #@general key: types={str}
         xs = m[k]
         for x in xs:
             item = x
-            #@todo general item: types={bytes}  (the same: `m[k]` is `m[*]`)
+            #@general item: types={bytes}
             return key, item
     return None
 

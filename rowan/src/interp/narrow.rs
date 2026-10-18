@@ -653,9 +653,16 @@ impl Analyzer {
                         if let ast::Expr::Name(n) = &*a.value {
                             if rec.pts.len() > 1 {
                                 let keep: Vec<u32> = rec.pts.iter().filter(|o| !(self.heap.kind(*o) == Kind::Dict && { let r = state.row(*o, Ns::Item); !r.open() && !r.present.contains(k) })).collect();
-                                if !keep.is_empty() && keep.len() < rec.pts.len() {
-                                    let nv = Value::with_kv(ObjSet::from_vec(keep), rec.kv.clone());
+                                let narrowed = !keep.is_empty() && keep.len() < rec.pts.len();
+                                let nv = Value::with_kv(ObjSet::from_vec(keep), rec.kv.clone());
+                                if narrowed {
                                     self.store_narrowed(&StoreTarget::Name(s(n.id.as_str())), nv.clone(), state);
+                                }
+                                // (whichever of those left it holds has the key, as with `k in d`)
+                                if nv.pts.len() > 1 {
+                                    state.add_name_key(s(n.id.as_str()), k);
+                                }
+                                if narrowed {
                                     self.narrow_record(&nv, Ns::Item, k, true, state);
                                     return;
                                 }

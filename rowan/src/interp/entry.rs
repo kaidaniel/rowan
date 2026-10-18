@@ -758,6 +758,13 @@ impl Analyzer {
         r
     }
 
+    /// The instance `fresh_instance` made for `cls_oid` in context `ctx`, when this path has it.
+    pub(in crate::interp) fn made_instance(&self, cls_oid: ObjId, ctx: &str, state: &State) -> Option<ObjId> {
+        let ctx = if self.entry.any_instance { format!("any:{}", ctx) } else { ctx.to_string() };
+        let ci = self.heap.class_info(cls_oid);
+        self.heap.find(Kind::Instance, &format!("instance:{}#{}:{}", ci.name, cls_oid, ctx), &ctx).filter(|o| state.has_row(*o, Ns::Attr))
+    }
+
     /// An instance of `cls_oid` whose attributes are unknown (`instance C`).
     fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
         self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)

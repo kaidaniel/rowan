@@ -396,6 +396,11 @@ pub fn source(src: Source) -> SourceId {
     INTERN.with(|i| SourceId(i.borrow_mut().sources.intern(src)))
 }
 
+/// How many sources there are: those interned from here on have ids from this one.
+pub fn sources_len() -> u32 {
+    INTERN.with(|i| i.borrow().sources.items.len() as u32)
+}
+
 pub fn source_get(id: SourceId) -> Source {
     INTERN.with(|i| i.borrow().sources.get(id.0).clone())
 }

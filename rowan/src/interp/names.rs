@@ -19,9 +19,9 @@ pub struct Names {
     symbols: FxHashMap<ObjId, String>,
     /// the function whose names a symbol uses (0: module level); it is printed only there
     scopes: FxHashMap<ObjId, u32>,
-    /// results of unknown calls: (the call as written, its line, what it was given — which
+    /// results of unknown calls: (the call as written, its module and line, what it was given — which
     /// unknown code may return)
-    pub origins: FxHashMap<ObjId, (String, u32, Vec<String>)>,
+    pub origins: FxHashMap<ObjId, (String, (u32, u32), Vec<String>)>,
     /// unknown call sites (sources and mutators are named by them) as written: (the call's
     /// text, its module, its line), for reports
     pub site_names: FxHashMap<StrId, (String, u32, u32)>,

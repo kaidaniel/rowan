@@ -293,6 +293,28 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
+// ---- calls and unknowns from another file name it: a method of the hovered file that another
+// module calls (`r.render(…)` on its line 5), an unknown made there (`json.loads(…)` on its line 9)
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rowan-files-"));
+  const f = path.join(dir, "main.py");
+  fs.writeFileSync(path.join(dir, "helper.py"), ["import json", "", "", "def run(r):", '    return r.render({"title": "t"})', "", "", "def load():", "    return json.loads(input())", ""].join("\n"));
+  fs.writeFileSync(f, ["import helper", "", "", "class Report:", "    def render(self, payload):", '        return payload["title"]', "", "", "def show(x):", "    return x", "", "", "helper.run(Report())", "show(helper.load())", ""].join("\n"));
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const res = facts(f);
+  const idx = indexResult(res);
+  // (the read of payload["title"] through `helper.run(Report())` on line 13, then `r.render(…)`
+  // on helper.py's line 5)
+  const title = res.verdicts.find((v) => v.line === 6 && v.key_str === "title");
+  assert(title && title.via === "L13→helper.py:L5", JSON.stringify(title));
+  const payload = hover(idx, src, 5, "payload");
+  assert(payload.includes('- `{"title": "t"}` on line 5 in helper.py.'), payload);
+  assert(hover(idx, src, 5, "self").includes("- `Report()` on line 5 in helper.py."), hover(idx, src, 5, "self"));
+  const x = hover(idx, src, 9, "x");
+  assert(x.includes("- `?` on line 14.") && x.includes("- `?`: unknown (the result of `json.loads(input())` on line 9 in helper.py)"), x);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
 {
   const z440 = path.join(root, "tests", "cases", "z440_past_budget_changes_globals.py");
@@ -317,6 +339,7 @@ assert.strictEqual(severityFor("likely"), null);
 const v13 = (a01idx.verdicts.get(13) || [])[0];
 assert.strictEqual(diagnosticMessage(v13), 'key "rolle" is never set');
 assert.strictEqual(diagnosticMessage({ message: "m", chain: [5, 9] }), "m (via L5→L9)");
+assert.strictEqual(diagnosticMessage({ message: "m", chain: [5, 9], via: "L5→helper.py:L9" }), "m (via L5→helper.py:L9)");
 
 // ---- long values break over lines of at most 40 (here) columns, indented by level;
 // small ones, and calls with one argument, stay whole

@@ -133,7 +133,14 @@ impl Analyzer {
     fn annotated_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
         let ci = self.heap.class_info(cls);
         let Some((fields, extra, validated)) = self.declared_fields(cls, state) else {
-            return self.fresh_instance(cls, state, &format!("entry:{}", path)).map(Value::obj);
+            // (a part's, `list[B]`'s element: made once per path, as one with declared fields —
+            // made again, the earlier one still in use, it would be no single object, its
+            // `__init__`'s stores weak)
+            let ctx = format!("entry:{}", path);
+            if let Some(o) = self.made_instance(cls, &ctx, state).filter(|_| param.is_none()) {
+                return Some(Value::obj(o));
+            }
+            return self.fresh_instance(cls, state, &ctx).map(Value::obj);
         };
         let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
         let mut names: KeySet = KeySet::from_iter(fields.iter().map(|(f, _)| key_str_lit(f)));
@@ -252,6 +259,17 @@ impl Analyzer {
         // (a class the annotation does not name in the program: an unknown, the placeholder)
         let any = v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance);
         any.then_some(v)
+    }
+
+    /// What iterating unknown `oid` gives when it follows a dict annotation (`dict[str, V]`):
+    /// a key, of the annotation's key type; None for anything else (an element, `oid[*]`).
+    pub(in crate::interp) fn annotated_key(&mut self, oid: ObjId, state: &mut State) -> Option<Value> {
+        let &(ann, module) = self.heap.ann.get(&oid)?;
+        let ast::Expr::Subscript(sub) = ann else { return None };
+        let ast::Expr::Tuple(t) = &*sub.slice else { return None };
+        let (Some(("dict", _)), [kt, _]) = (builtin_annotation(ann), t.elts.as_slice()) else { return None };
+        let depth = self.heap.obj(oid).depth;
+        Some(self.field_value(kt, module, false, &format!("{}.keys", oid), false, depth, state))
     }
 
     /// The fields of a class whose instances hold its declared fields and nothing else: a
@@ -402,9 +420,7 @@ pub(in crate::interp) fn part_annotation(ann: &'static ast::Expr, k: KeyId) -> O
     };
     match (builtin_annotation(ann)?.0, args.as_slice()) {
         ("list" | "set" | "frozenset", [e]) => Some(e),
-        // (any key's value and an element share one unknown, `d[*]`: typed only when both are
-        // of one type)
-        ("dict", [kt, vt]) if k == intern::STAR => (annotation_text(kt) == annotation_text(vt)).then_some(*vt),
+        // (any key's value; its keys, what iterating it gives, are `annotated_key`)
         ("dict", [_, vt]) => Some(vt),
         ("tuple", [e, ast::Expr::EllipsisLiteral(_)]) => Some(e),
         ("tuple", ts) => intern::key_as_int(k).and_then(|i| ts.get(usize::try_from(i).ok()?).copied()),

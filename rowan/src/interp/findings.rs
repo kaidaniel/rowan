@@ -28,8 +28,9 @@ pub struct Verdict {
     pub tier: Tier,
     /// the object's label (`dict@L4`)
     pub obj: String,
-    /// call sites (lines) active when the access ran
+    /// call sites (lines) active when the access ran, and their modules
     pub chain: Chain,
+    pub chain_files: Vec<u32>,
     /// why, in words (`is only set on some paths`)
     pub note: String,
     /// the inputs that may provide the key
@@ -46,10 +47,14 @@ pub struct Verdict {
     pub guarded: bool,
 }
 
+/// What makes two verdicts the same record: file, line, column, key, tier, object, chain, and
+/// whether a handler guards it (a guarded one is no finding: an unguarded one beside it is).
+pub(in crate::interp) type VerdictKey = (String, u32, u32, String, Tier, ObjId, Chain, Vec<u32>, bool);
+
 impl Verdict {
     /// What makes two verdicts the same record (`Findings::add`).
-    pub(in crate::interp) fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
-        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
+    pub(in crate::interp) fn dedupe_key(&self) -> VerdictKey {
+        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone(), self.chain_files.clone(), self.guarded)
     }
 }
 
@@ -69,9 +74,9 @@ pub struct Fact {
     pub general_rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     /// the values (`render::render_value`) the general run recorded, distinct texts
     pub general: Vec<String>,
-    /// the values the program's calls recorded, distinct texts, each with the lines of the
+    /// the values the program's calls recorded, distinct texts, each with the sites of the
     /// calls (of the function the line is in) that gave it
-    pub calls: Vec<(String, Vec<u32>)>,
+    pub calls: Vec<(String, Vec<CallSite>)>,
     /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
@@ -80,10 +85,13 @@ pub struct Fact {
     /// `x += 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
     /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
-    /// call chain into the function, the objects given; at most `PASSED`)
+    /// call chain into the function, the file of its last call, the objects given; at most `PASSED`)
     pub param_of: Option<ObjId>,
-    pub passed: Vec<(Chain, Vec<ObjId>)>,
+    pub passed: Vec<(Chain, u32, Vec<ObjId>)>,
 }
+
+/// A call's site: its module (`frontend`'s index) and line.
+pub type CallSite = (u32, u32);
 
 /// The calls' arguments a parameter's fact keeps (`Fact::passed`).
 const PASSED: usize = 32;
@@ -114,18 +122,18 @@ impl Fact {
         }
     }
 
-    /// Has the set a recording goes to (`call`: the line of the call, None: general) all the
+    /// Has the set a recording goes to (`call`: the site of the call, None: general) all the
     /// texts it shows?
-    fn full(&self, call: Option<u32>) -> bool {
+    fn full(&self, call: Option<CallSite>) -> bool {
         match call {
             None => self.general.len() >= FACT_TEXTS,
             Some(_) => self.calls.len() >= FACT_TEXTS,
         }
     }
 
-    /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the line of the call
+    /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the site of the call
     /// it was made in, None: the general run) and its legend (a symbol's descriptions joined).
-    fn add_text(&mut self, text: String, call: Option<u32>, legend: Vec<(String, String)>) {
+    fn add_text(&mut self, text: String, call: Option<CallSite>, legend: Vec<(String, String)>) {
         match call {
             None if !self.general.contains(&text) && self.general.len() < FACT_TEXTS => self.general.push(text),
             None => {}
@@ -195,7 +203,7 @@ pub struct ValueInfo {
 pub struct Findings {
     /// the access verdicts in the order recorded, without repeats (`keys`)
     verdicts: Vec<Verdict>,
-    keys: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)>,
+    keys: FxHashSet<VerdictKey>,
     notes: Vec<String>,
     notes_set: FxHashSet<String>,
     /// per (function, call context or "entry"): the last run's result and its records' rows
@@ -252,7 +260,7 @@ impl Findings {
     }
 
     /// Record the verdict `make` builds, unless one with the same key is recorded.
-    pub(in crate::interp) fn add(&mut self, key: (String, u32, u32, String, Tier, ObjId, Chain), make: impl FnOnce() -> Verdict) {
+    pub(in crate::interp) fn add(&mut self, key: VerdictKey, make: impl FnOnce() -> Verdict) {
         if self.keys.contains(&key) {
             return;
         }
@@ -366,9 +374,9 @@ impl Analyzer {
             Some(f) => f.to_string(),
             None => self.file_of_frame(),
         };
-        let chain = self.cx.call_chain.clone();
-        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone());
+        let (chain, chain_files) = (self.cx.call_chain.clone(), self.cx.call_files.clone());
         let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.mode.verdict_guarded);
+        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone(), chain_files.clone(), guarded);
         self.findings.add(dk, || Verdict {
             line: node.line,
             col: node.col,
@@ -376,6 +384,7 @@ impl Analyzer {
             tier: cls.tier,
             obj,
             chain,
+            chain_files,
             note: cls.note.clone(),
             providers: cls.providers.iter().map(|(s, _)| *s).collect(),
             mutators: { let mut m: Vec<String> = cls.mutators.iter().map(|m| intern::str_get(*m).to_string()).collect(); m.sort(); m },
@@ -419,7 +428,8 @@ impl Analyzer {
     /// as text, with the rows of its objects; into the general run's values or the program's
     /// calls'.
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
-        if !self.findings.facts_on || node.addr == 0 {
+        // (line 0: a name of an annotation written as a string, parsed apart; no place to hover)
+        if !self.findings.facts_on || node.addr == 0 || node.line == 0 {
             return;
         }
         if node.module != self.heap.module_info(self.program.main_module).idx {
@@ -430,7 +440,7 @@ impl Analyzer {
         if self.no_facts_here(general) {
             return;
         }
-        let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
+        let call = if general { None } else { Some((self.cx.call_files.last().copied().unwrap_or(0), self.cx.call_chain.last().copied().unwrap_or(0))) };
         // (an assignment's value is what the hover shows, not the read of its target: `x += 1`)
         let writing = std::mem::take(&mut self.findings.fact_write);
         if !writing && self.findings.facts.get(&(node.line, node.col, name)).is_some_and(|e| e.written) {
@@ -514,8 +524,9 @@ impl Analyzer {
             self.findings.touch_fact((node.line, node.col, name));
             let Some(f) = self.findings.facts.get_mut(&(node.line, node.col, name)) else { continue };
             f.param_of = Some(foid);
-            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, _)| *c == self.cx.call_chain) {
-                f.passed.push((self.cx.call_chain.clone(), v.pts.to_vec()));
+            let file = self.cx.call_files.last().copied().unwrap_or(0);
+            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, m, _)| *c == self.cx.call_chain && *m == file) {
+                f.passed.push((self.cx.call_chain.clone(), file, v.pts.to_vec()));
             }
         }
     }
