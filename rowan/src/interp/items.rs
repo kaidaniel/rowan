@@ -536,8 +536,7 @@ impl Analyzer {
         let mut v = self.all_values(oid, ns, state);
         // (a closed record: the unknown key is one of its keys — one of their values; a map the
         // program filled under data keys: its values are all in its slots)
-        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src));
-        if (row.closed() || own_map) && !row.top {
+        if (row.closed() || own_map(&row)) && !row.top {
             return v;
         }
         if row.open() {
@@ -1086,7 +1085,9 @@ impl Analyzer {
                 let xns = ns_of(self, x);
                 let xr = state.row(x, xns);
                 if xr.open() && !xr.lacks(k) && state.slot_opt(x, xns, k).is_none() {
-                    let part = self.path_placeholder_value(x, xns, k, &xr, state);
+                    // (a dict the program filled under keys not known: under any key, one of
+                    // the values it stored)
+                    let part = if own_map(&xr) { self.all_values(x, xns, state) } else { self.path_placeholder_value(x, xns, k, &xr, state) };
                     let cur = vals.entry(k).or_default();
                     *cur = cur.join(&part);
                 }
@@ -1384,4 +1385,10 @@ fn weak_store(state: &mut State, oid: ObjId, ns: Ns, k: KeyId, v: &Value) {
         _ => v.clone(),
     };
     state.set_slot(oid, ns, k, v, false);
+}
+
+/// A row the program filled under keys not known (no input, no unknown code): every value it
+/// holds is in its slots.
+fn own_map(row: &Row) -> bool {
+    !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src))
 }
