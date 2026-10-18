@@ -12,16 +12,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{limit, DEADLINE_MS, FN_BUDGET};
 use crate::domain::ObjId;
 
-/// The work one entry of the program's code into a followed library may do, in quarter budgets.
-const LIB_ENTRY: usize = 16;
-/// The work all of them may do, in quarter budgets.
-const LIB_TOTAL: usize = 64;
-
-/// The budget the library allowances are counted in: a function's, at least 64 statements (with
-/// `budget=0` a small library still runs, as each function's first call does).
-fn lib_budget() -> usize {
-    limit("budget", FN_BUDGET).max(64)
-}
+/// The work one call may fan out to before the calls under it do not run, in function budgets
+/// (`ROWAN_LIMITS=fanout=N`): a function's run on demand, an entry into a followed library.
+const FANOUT: usize = 4;
 
 /// When the analysis started (the deadline counts from it).
 #[derive(Clone, Copy)]
@@ -74,10 +67,10 @@ pub struct Budget {
     pub lib_entry: Option<usize>,
     /// the work done in followed libraries' code, entries that ended
     pub lib_work: usize,
-    /// the running entry is past its allowance: bodies stop, it is undone (`library_entry`)
-    pub lib_abort: bool,
-    /// entries into followed libraries: run, undone, refused (the `ROWAN_DEBUG` `loaded:` line)
-    pub lib_counts: [usize; 3],
+    /// the running entry went past its allowance: its later calls did not run (`library_entry`)
+    pub lib_cut: std::cell::Cell<bool>,
+    /// entries into followed libraries: run, cut (the `ROWAN_DEBUG` `loaded:` line)
+    pub lib_counts: [usize; 2],
     /// `ROWAN_DEBUG` only: per function code, its name, body runs, statements of its own, and
     /// the work units and microseconds of its outermost runs (callees included; `tally_lines`)
     pub tally: FxHashMap<usize, (String, [usize; 4])>,
@@ -188,31 +181,30 @@ impl Budget {
     }
 
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
-    /// one of a callee's, past the work a function's run on demand may do (four budgets)?
+    /// one of a callee's, past the work a function's run on demand may do (`fanout_limit`)?
     pub fn past_hover_work(&self, frames: usize, work: usize) -> bool {
-        let past = self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > Self::hover_work_limit());
+        let past = self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > Self::fanout_limit());
         if past {
             self.hover_cut.set(true);
         }
         self.skip_calls || past
     }
 
-    /// The work a function's run on demand may do before its callees' calls are unknown.
-    pub fn hover_work_limit() -> usize {
-        4 * limit("budget", FN_BUDGET)
+    /// The work a function's run on demand, or an entry into a followed library, may do before
+    /// the calls under it are unknown: `FANOUT` budgets (each at least 64 statements: with
+    /// `budget=0` a small library still runs, as each function's first call does).
+    pub fn fanout_limit() -> usize {
+        limit("fanout", FANOUT).saturating_mul(limit("budget", FN_BUDGET).max(64))
     }
 
-    /// A followed library's code is called within an entry, with the work done so far `work`:
-    /// past the work one entry may do (`LIB_ENTRY`), the entry stops (`lib_abort`).
-    pub fn library_over(&mut self, work: usize) -> bool {
-        self.lib_abort |= self.lib_entry.is_some_and(|w0| work - w0 > LIB_ENTRY * lib_budget() / 4);
-        self.lib_abort
-    }
-
-    /// May the program's code enter a followed library's code again, with all entries so far
-    /// within `LIB_TOTAL`?
-    pub fn library_open(&self) -> bool {
-        self.lib_work <= LIB_TOTAL * lib_budget() / 4
+    /// A call of user code within an entry into a followed library, with the work done so far
+    /// `work`: past the work one entry may do (`fanout_limit`), it does not run (`lib_cut`).
+    pub fn past_library_work(&self, work: usize) -> bool {
+        let past = self.lib_entry.is_some_and(|w0| work - w0 > Self::fanout_limit());
+        if past {
+            self.lib_cut.set(true);
+        }
+        past
     }
 
     /// Has the deadline cut the analysis? Checked at every statement (`cut_body`): one statement

@@ -1,8 +1,8 @@
-"""Installed packages followed within an allowance (`--follow`): each entry of the program's
-code into an installed package (a call, an import) runs as the program's code does if it stays
-within its work, else it is undone and is what it is without following: a call rowan does not
-run (its arguments may change), an unknown module. `#@limits budget=64` makes `heavy` (256 calls
-of `_step`) and the import of `heavyimport` (which calls it) too much for one entry.
+"""Installed packages followed within budgets (`--follow`): library functions have budgets as
+the program's do, and each entry of the program's code into a package (a call, an import) an
+allowance past which its calls do not run (their arguments may change). `#@limits budget=64`
+makes `heavy` (256 calls of `_step`) too much: the import of `heavyimport` (which calls it) uses
+up `heavy`'s and `_step`'s budgets, so the program's own calls of `heavy` do not run.
 
 Expectations were written from the program text before running the engine."""
 #@argv --follow heavylib,heavyimport --site-packages site

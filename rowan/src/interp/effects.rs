@@ -40,8 +40,6 @@ pub struct EffectsCache {
     closures: FxHashMap<Vec<ObjId>, std::rc::Rc<Closure>>,
     /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
     closures_size: usize,
-    /// the followed libraries' code given so far, one closure (`LibClosure`)
-    library: LibClosure,
     /// on demand: what the program's functions may do to attributes by name, and the names
     /// they store (`program_uses`)
     program: Option<std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)>>,
@@ -122,15 +120,6 @@ impl ClosureWalk {
         c.removed_locs = removed;
         c
     }
-}
-
-/// The closure of all the followed libraries' code given to code that does not run, grown as
-/// more is given: a library function's closure is much of its library, and the decorators
-/// applied at import give each function in turn (computed apart, quadratic in the library).
-#[derive(Default)]
-pub struct LibClosure {
-    walk: ClosureWalk,
-    closure: Option<std::rc::Rc<Closure>>,
 }
 
 /// What a piece of code may change beyond what it is given (`code_closure`): the slots whose
@@ -506,21 +495,6 @@ impl Analyzer {
         let whole = self.effects.whole.is_some();
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
             return c.clone();
-        }
-        // (a followed library's code: one closure of all such code given so far, grown as more
-        // is given — a library's closures are much of the library each, `LibClosure`)
-        let library = roots.iter().any(|r| self.heap.func_info_opt(*r).is_some_and(|fi| self.heap.module_info(fi.module).library));
-        if library && !whole {
-            let mut lib = std::mem::take(&mut self.effects.library);
-            let fresh: Vec<ObjId> = roots.iter().copied().filter(|r| !lib.walk.out.code.contains(r)).collect();
-            if !fresh.is_empty() || lib.closure.is_none() {
-                lib.walk.work.extend(fresh);
-                self.walk_closure(&mut lib.walk, state);
-                lib.closure = Some(std::rc::Rc::new(lib.walk.finished()));
-            }
-            let c = lib.closure.clone().expect("the library closure");
-            self.effects.library = lib;
-            return c;
         }
         // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
         // code the last one's data held)

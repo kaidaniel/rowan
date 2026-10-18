@@ -403,7 +403,7 @@ impl Analyzer {
     /// How the analysis went, for the editor's note on a cut one: whether the deadline (or a
     /// cancel) cut it, the time it took and its deadline, the statements it ran.
     pub fn analysis_json(&self) -> serde_json::Value {
-        serde_json::json!({"cut": self.budget.hard_cut, "callees_cut": self.budget.hover_cut.get().then(super::budget::Budget::hover_work_limit), "ms": self.budget.elapsed_ms() as u64, "deadline_ms": super::limit("ms", super::DEADLINE_MS), "statements": self.budget.statements})
+        serde_json::json!({"cut": self.budget.hard_cut, "callees_cut": self.budget.hover_cut.get().then(super::budget::Budget::fanout_limit), "ms": self.budget.elapsed_ms() as u64, "deadline_ms": super::limit("ms", super::DEADLINE_MS), "statements": self.budget.statements})
     }
 
     /// The work done so far: statements, body runs, objects, havoc visits (see `work_line`).
@@ -411,8 +411,8 @@ impl Analyzer {
         [self.budget.statements, self.budget.runs, self.heap.len(), self.havoc.visited as usize]
     }
 
-    /// Entries into followed libraries (run, undone, refused) and the work they did.
-    pub fn library_counts(&self) -> ([usize; 3], usize) {
+    /// Entries into followed libraries (run, cut past their allowance) and the work they did.
+    pub fn library_counts(&self) -> ([usize; 2], usize) {
         (self.budget.lib_counts, self.budget.lib_work)
     }
 
