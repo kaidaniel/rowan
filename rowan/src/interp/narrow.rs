@@ -953,6 +953,13 @@ impl Analyzer {
                     let v = self.path_placeholder_value(oid, ns, k, &row, state);
                     state.set_slot_found(oid, ns, k, v, false);
                 }
+                // (a map filled under keys not known: where k was not stored by name, its value
+                // is what those stores put there — a slot another path made does not cover it)
+                if !row.definite.contains(k) && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::source::source_fills_star(src)) {
+                    if let Some(star) = state.slot_opt(oid, ns, intern::STAR) {
+                        state.set_slot_found(oid, ns, k, star, false);
+                    }
+                }
                 state.set_row_narrowed(oid, ns, row.narrow_in(k, strong));
                 if strong {
                     self.propagate_narrowing(oid, ns, k, state);
