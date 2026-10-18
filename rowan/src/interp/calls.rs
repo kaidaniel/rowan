@@ -573,9 +573,27 @@ impl Analyzer {
         } else {
             call
         };
+        let sources = intern::sources_len();
         let r = self.in_model(|an| m(an, state, call));
+        self.name_sources(sources, call);
         crate::models::itertools::after_model_consume(self, call, &r, state);
         r
+    }
+
+    /// For people: the inputs a model opened at a call as written (sources from id `from` on,
+    /// `read_csv@L5`) are named by the call and its file (`pd.read_csv(path)` (line 5 in io.py)).
+    fn name_sources(&mut self, from: u32, call: &Call) {
+        if call.call_ast.is_none() {
+            return;
+        }
+        let at = format!("@L{}", call.line);
+        for id in from..intern::sources_len() {
+            let site = intern::with_source(intern::SourceId(id), |s| s.path.is_empty().then(|| s.site.clone()));
+            if let Some(site) = site.filter(|s| s.ends_with(&at)) {
+                let text = crate::frontend::text_at(&call.node).split_whitespace().collect::<Vec<_>>().join(" ");
+                self.names.site_names.entry(intern::s(&site)).or_insert((text, call.node.module, call.line));
+            }
+        }
     }
 
     /// Runs a model's code: the objects it makes are held by it until it returns (an

@@ -490,7 +490,9 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
             },
             SourceKind::External | SourceKind::Name => {
                 let t = site_text(an, &site).replace('`', "");
-                (false, match files.get(&site) { Some(f) => t.replace("(line ", &format!("({} line ", f)), None => t }, String::new())
+                // (a site rowan has no text of: `(line 48)` is in the file of its reads)
+                let named = an.names.site_names.contains_key(&intern::s(&site));
+                (false, match (files.get(&site).filter(|_| !named), t.strip_suffix(')')) { (Some(f), Some(r)) if t.contains("(line ") => format!("{} in {})", r, f), _ => t }, String::new())
             }
             SourceKind::Call if named_call(&site) && !program.contains(site.rsplit_once("@L").map(|(q, _)| q).unwrap_or(&site)) => (false, site_text(an, &site).replace('`', ""), String::new()),
             _ => continue,

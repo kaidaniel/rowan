@@ -1670,7 +1670,7 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let tag = frame_producer(&c.qual).unwrap_or_else(|| last(&c.qual)).to_string();
-    let src = an.call_source(&tag, c);
+    let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
     let mut row = Row::with_source(src);
     if let Some(ks) = c.kw("usecols").and_then(|u| an.lit_keys(&u, st)) {
         // the file must have every listed column (ValueError otherwise)

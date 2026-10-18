@@ -493,7 +493,7 @@ pub(super) fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
         an.may_raise_here("JSONDecodeError", st);
     }
     let tag = json_tag(&c.qual);
-    let src = an.call_source(&tag, c);
+    let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
     let oid = an.alloc_at(Kind::Unknown, &c.node, st, &format!("{}@L{}", tag, c.line), Payload::None, Some(Row::with_source(src)), Ns::Item, None, None);
     st.set_row(oid, Ns::Attr, Row::with_source(src));
     let text = crate::frontend::text_at(&c.node);
