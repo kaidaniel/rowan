@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, DATA, KeyVal, KeysOf, Ns, ObjId, ObjSet, ReqInfo, Row, RowData, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
-use crate::source::{lens_apply, source_depth, source_extend, source_is_data, Source, SourceId, SourceKind};
+use crate::source::{lens_apply, source_depth, source_extend, source_fills_star, source_is_data, Source, SourceId, SourceKind};
 use crate::state::{mark_merged, view_of, Kind, State};
 
 use super::{Analyzer, Args, PATH_DEPTH, Payload, ViewKind, WIDE_READ};
@@ -691,7 +691,7 @@ impl Analyzer {
         let star = state.slot(oid, ns, STAR);
         // (a map only the program filled, under keys it computed: a key it has holds one
         // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
-        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src));
+        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| source_fills_star(src));
         // (a key it may not have: what any key not known holds — a defaultdict's or Counter's
         // read put its default there already)
         // (one the program filled by stores alone, `store@L…`: a key it may not have — a
@@ -1277,7 +1277,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
-        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !source_is_data(src));
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !source_fills_star(src));
         if row.open() && outside {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
@@ -1403,5 +1403,5 @@ fn weak_store(state: &mut State, oid: ObjId, ns: Ns, k: KeyId, v: &Value) {
 /// A row the program filled under keys not known (no input, no unknown code): every value it
 /// holds is in its slots.
 fn own_map(row: &Row) -> bool {
-    !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_is_data(src))
+    !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_fills_star(src))
 }
