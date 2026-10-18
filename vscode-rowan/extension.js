@@ -616,6 +616,58 @@ function findBinary(config, workspaceFolders, filePath) {
   return null;
 }
 
+// ----------------------------------------------------------------- installed packages
+
+/** `--follow` / `--site-packages` arguments: following `packages` (`["*"]`: every one rowan
+ * does not model; `[]`: none) from the `sitePackages` directories. */
+function followArgs(packages, sitePackages) {
+  const pkgs = (packages || []).filter((p) => typeof p === "string" && p.trim());
+  if (!pkgs.length) return [];
+  return ["--follow", pkgs.join(","), ...(sitePackages || []).flatMap((d) => ["--site-packages", d])];
+}
+
+/** An interpreter's site-packages directories (`sysconfig`'s purelib and platlib), asked once
+ * per interpreter; [] when it cannot be run (rowan then looks for `$VIRTUAL_ENV` or a `.venv`). */
+const sitePackagesCache = new Map();
+function sitePackagesOf(python, timeoutSeconds = 10) {
+  if (!python) return Promise.resolve([]);
+  if (!sitePackagesCache.has(python)) {
+    const code = "import json, sysconfig; p = sysconfig.get_paths(); print(json.dumps(sorted({p['purelib'], p['platlib']})))";
+    sitePackagesCache.set(python, new Promise((resolve) => {
+      execFile(python, ["-c", code], { timeout: timeoutSeconds * 1000 }, (err, stdout) => {
+        let dirs = [];
+        try {
+          if (!err) dirs = JSON.parse(stdout.trim().split("\n").pop()).filter((d) => typeof d === "string" && fs.existsSync(d));
+        } catch (_) {}
+        resolve(dirs);
+      });
+    }));
+  }
+  return sitePackagesCache.get(python);
+}
+
+/** The Python interpreter for `uri`: the `rowan.pythonPath` setting; else the Python
+ * extension's selected environment; else `python.defaultInterpreterPath`; else null. */
+async function interpreterFor(uri) {
+  const configured = vscode.workspace.getConfiguration("rowan").get("pythonPath");
+  if (configured) return configured;
+  try {
+    const ext = vscode.extensions.getExtension("ms-python.python");
+    if (ext) {
+      const api = ext.isActive ? ext.exports : await ext.activate();
+      const envs = api && api.environments;
+      if (envs) {
+        const active = envs.getActiveEnvironmentPath(uri);
+        const env = active && (await envs.resolveEnvironment(active));
+        const exe = env && env.executable && env.executable.uri && env.executable.uri.fsPath;
+        if (exe) return exe;
+        if (active && active.path) return active.path;
+      }
+    }
+  } catch (_) {}
+  return vscode.workspace.getConfiguration("python", uri).get("defaultInterpreterPath") || null;
+}
+
 /**
  * What an executable was built for, from its header: `{ platform, archs, text }` with the
  * platform and architectures as Node names them (`darwin` / `linux` / `win32`, `x64` /
@@ -891,7 +943,10 @@ function activate(context) {
     status.show();
     try {
       const depth = config.get("valueDepth");
-      const extraArgs = [...(config.get("extraArgs") || []), ...(Number.isInteger(depth) && depth >= 0 ? ["--value-depth", String(depth)] : [])];
+      // (installed packages followed from the selected interpreter's site-packages)
+      const follow = config.get("followPackages") || [];
+      const site = follow.length ? await sitePackagesOf(await interpreterFor(doc.uri)) : [];
+      const extraArgs = [...(config.get("extraArgs") || []), ...(Number.isInteger(depth) && depth >= 0 ? ["--value-depth", String(depth)] : []), ...followArgs(follow, site)];
       const timeoutSeconds = config.get("timeoutSeconds") || 60;
       let res;
       if (config.get("useServer") !== false) {
@@ -1025,6 +1080,17 @@ function activate(context) {
       diagnostics.delete(doc.uri);
     })
   );
+  // (another interpreter selected: its site-packages; the servers of the old ones stop)
+  const pyExt = vscode.extensions.getExtension("ms-python.python");
+  if (pyExt) {
+    Promise.resolve(pyExt.isActive ? pyExt.exports : pyExt.activate()).then((api) => {
+      const ev = api && api.environments && api.environments.onDidChangeActiveEnvironmentPath;
+      if (ev) context.subscriptions.push(ev(() => {
+        sitePackagesCache.clear();
+        if ((vscode.workspace.getConfiguration("rowan").get("followPackages") || []).length) stopServers();
+      }));
+    }, () => {});
+  }
   if (vscode.workspace.getConfiguration("rowan").get("analyseOnSave")) {
     for (const doc of vscode.workspace.textDocuments) analyse(doc);
   }
@@ -1036,4 +1102,4 @@ function deactivate() {
 
 module.exports = {
   shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, factsAt, diagnosticMessage, findBinary,
-  binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers, serverEvents };
+  binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers, serverEvents, followArgs, sitePackagesOf };

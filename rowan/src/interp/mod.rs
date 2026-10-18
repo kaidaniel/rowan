@@ -90,7 +90,8 @@ pub const FN_BUDGET: usize = 4096;
 /// (`ROWAN_LIMITS=ms=N`) calls of user code are unknown calls and running bodies stop.
 pub const DEADLINE_MS: usize = 10000;
 
-/// A bound from `ROWAN_LIMITS=budget=N,ms=N` (the only two knobs: `FN_BUDGET`, `DEADLINE_MS`),
+/// A bound from `ROWAN_LIMITS=budget=N,ms=N,fanout=N` (the only knobs: `FN_BUDGET`,
+/// `DEADLINE_MS`, `budget::FANOUT`),
 /// else `default`. Read once per thread.
 pub fn limit(name: &str, default: usize) -> usize {
     thread_local! {
@@ -222,11 +223,6 @@ impl Analyzer {
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
     /// (its calls are unknown calls). Checked at every statement.
     pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
-        // (an entry into a followed library past its allowance: everything stops, it is undone)
-        if self.budget.lib_abort {
-            state.reachable = false;
-            return true;
-        }
         if !self.budget.tick() {
             return false;
         }

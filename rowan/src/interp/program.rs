@@ -81,13 +81,6 @@ impl Program {
         })
     }
 
-    /// Forget the modules imported after the first `n` (an entry into a library undone).
-    pub fn forget_modules_since(&mut self, n: usize) {
-        self.modules.truncate(n);
-        let kept: rustc_hash::FxHashSet<ObjId> = self.modules.values().copied().collect();
-        self.by_file.retain(|_, m| kept.contains(m));
-    }
-
     /// The path of module `idx` relative to the main file's directory ("" for the main
     /// module; the file name when it lies elsewhere, the module name when it has no file).
     pub fn rel_file(&self, idx: u32) -> String {

@@ -289,7 +289,8 @@ impl Analyzer {
         self.havoc_reachable(&vals, rid, site_id, state);
         let found = std::mem::take(&mut self.havoc.code);
         let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
-        if !callables.is_empty() {
+        // (a skipped call follows them itself, with its own code: `classes_followed`)
+        if !callables.is_empty() && !classes_followed {
             self.follow_code(callables, rid, site_id, state);
         }
         // (the dunders of the instances it met may run: what they change, their receivers

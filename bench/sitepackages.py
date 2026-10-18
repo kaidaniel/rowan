@@ -16,15 +16,19 @@ change):
 Modes (each one run of `rowan MAIN --facts --site-packages VENV`, ROWAN_DEBUG=1):
 
   none      no following (the default today)
-  follow    --follow '*' with the allowance as it is (LIB_ENTRY / LIB_TOTAL, the 10 s deadline)
+  follow    --follow '*' as it is: per-function budgets, each entry's allowance (`fanout`
+            budgets of work, then its calls do not run), the 10 s deadline
   only      --follow of the scenario's own package alone (s2: acme_billing), where one is named
-  uncapped  --follow '*' with the allowance and deadline effectively off
-            (ROWAN_LIMITS=budget=10^9,ms=10^9: the allowances are counted in function budgets;
-            the main program's own functions get the same huge budget, which these small
-            programs never reach), cut by --uncapped-timeout; not run unless asked (--uncapped)
+  uncapped  --follow '*' with no entry allowance and no deadline, per-function budgets in force
+            (ROWAN_LIMITS=fanout=10^9,ms=10^9), cut by --uncapped-timeout
+  unbounded --follow '*' with every bound off (ROWAN_LIMITS=budget=10^9,ms=10^9: no
+            per-function budgets, so no allowance either, counted in budgets), cut by
+            --uncapped-timeout
+            (uncapped and unbounded run only when asked: --uncapped)
 
 Per run: wall time and peak RSS (/usr/bin/time), the `work:` counters, site-packages modules and
-lines parsed, library entries (run / undone / refused), whether the deadline cut the analysis.
+lines parsed, library entries (run / cut past their allowance), whether the deadline cut the
+analysis.
 
 What following buys, against `none` (the hover facts of the main file, `--facts`): each fact (a
 name on a line, as a hover shows it) gets a precision level from its value:
@@ -89,10 +93,10 @@ SCENARIOS = {
     },
 }
 
-UNCAPPED = "budget=1000000000,ms=1000000000"
+LIMITS = {"uncapped": "fanout=1000000000,ms=1000000000", "unbounded": "budget=1000000000,ms=1000000000"}
 WORK = re.compile(r"^work: (\d+) \(units (\d+), tabulations (\d+), objects (\d+), (\d+) ms; budgeted tabulations \d+, row joins (\d+), visits (\d+) .*havoc visits (\d+)\)")
 LOADED = re.compile(r"^loaded: (\d+) modules, (\d+) lines \(site-packages: (\d+) modules, (\d+) lines\)")
-ENTRIES = re.compile(r"^library entries \(run, undone, refused\): \[(\d+), (\d+), (\d+)\], work (\d+)")
+ENTRIES = re.compile(r"^library entries \(run, cut\): \[(\d+), (\d+)\], work (\d+)")
 # /usr/bin/time's wall clock (macOS `-l`, GNU `-v`): the guard's polling is not the run's time
 REAL = re.compile(r"^\s*(?:([\d.]+) real|Elapsed \(wall clock\) time .*: ([\d:.]+)$)")
 MARKS = {"proven": "✓", "likely": "✓~", "possibly": "⚠", "datakey": "⚠", "likely-missing": "⚠~", "missing": "✗", "input": "◌"}
@@ -158,7 +162,7 @@ def run_rowan(rowan: str, main: Path, site: Path, follow: str | None, limits: st
         elif m := LOADED.match(line):
             r.update(zip(["modules", "lines", "site_modules", "site_lines"], map(int, m.groups())))
         elif m := ENTRIES.match(line):
-            r.update(zip(["entries_run", "entries_undone", "entries_refused", "lib_work"], map(int, m.groups())))
+            r.update(zip(["entries_run", "entries_cut", "lib_work"], map(int, m.groups())))
         elif m := REAL.match(line):
             t = m.group(1) or m.group(2)
             r["wall_s"] = round(sum(float(x) * 60**i for i, x in enumerate(reversed(t.split(":")))), 2)
@@ -232,15 +236,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--rowan", default=str(ROOT / "rowan" / "target" / "release" / "rowan"))
     ap.add_argument("--scenarios", default=",".join(SCENARIOS))
-    ap.add_argument("--modes", default=None, help="none,follow,only,uncapped (default: all but uncapped)")
-    ap.add_argument("--uncapped", action="store_true", help="also run the uncapped mode")
+    ap.add_argument("--modes", default=None, help="none,follow,only,uncapped,unbounded (default: all but the last two)")
+    ap.add_argument("--uncapped", action="store_true", help="also run the uncapped and unbounded modes")
     ap.add_argument("--timeout", type=float, default=60, help="per run of the capped modes (s)")
     ap.add_argument("--uncapped-timeout", type=float, default=120)
     ap.add_argument("-v", "--verbose", action="store_true", help="list each fact gained or lost, each new warning")
     ap.add_argument("--json", action="store_true", help="print the results as JSON, not a table")
     ap.add_argument("--out", help="also write the JSON here")
     a = ap.parse_args()
-    modes = a.modes.split(",") if a.modes else ["none", "follow", "only"] + (["uncapped"] if a.uncapped else [])
+    modes = a.modes.split(",") if a.modes else ["none", "follow", "only"] + (["uncapped", "unbounded"] if a.uncapped else [])
     results = {}
     for name in a.scenarios.split(","):
         name = next(s for s in SCENARIOS if s == name or s.startswith(name + "_"))
@@ -251,9 +255,9 @@ def main() -> None:
         for mode in ["none"] + [m for m in modes if m != "none"]:
             if mode == "only" and "only" not in spec:
                 continue
-            follow = {"none": None, "follow": "*", "only": spec.get("only"), "uncapped": "*"}[mode]
-            limits = UNCAPPED if mode == "uncapped" else None
-            timeout = a.uncapped_timeout if mode == "uncapped" else a.timeout
+            follow = {"none": None, "follow": "*", "only": spec.get("only"), "uncapped": "*", "unbounded": "*"}[mode]
+            limits = LIMITS.get(mode)
+            timeout = a.uncapped_timeout if mode in LIMITS else a.timeout
             print(f"[{name}] {mode}", file=sys.stderr)
             runs[mode] = run_rowan(a.rowan, main_py, site, follow, limits, timeout)
         base = runs["none"]
@@ -276,7 +280,7 @@ def main() -> None:
 
 def table(results: dict) -> str:
     """A Markdown table: one row per scenario and mode."""
-    head = "| scenario | mode | time | peak RSS | statements | units | site-packages parsed | entries run / undone / refused | facts unknown / partial / exact | vs none: gained / lost / changed | new ⚠✗ | marks |"
+    head = "| scenario | mode | time | peak RSS | statements | units | site-packages parsed | entries run / cut | facts unknown / partial / exact | vs none: gained / lost / changed | new ⚠✗ | marks |"
     cols = head.count("|") - 1
     rows = [head, "|" + " --- |" * cols]
     for name, modes in results.items():
@@ -292,7 +296,7 @@ def table(results: dict) -> str:
             rows.append(
                 f"| {name} | {mode} | {s['wall_s']:.2f} s{cut} | {s.get('rss_mb', '?')} MB | {s.get('statements', '?')} | {s.get('units', '?')} "
                 f"| {s.get('site_modules', 0)} modules, {s.get('site_lines', 0)} lines "
-                f"| {s.get('entries_run', 0)} / {s.get('entries_undone', 0)} / {s.get('entries_refused', 0)} "
+                f"| {s.get('entries_run', 0)} / {s.get('entries_cut', 0)} "
                 f"| {lv.get('unknown', 0)} / {lv.get('partial', 0)} / {lv.get('exact', 0)} | {cmp} | {vs.get('new_warn', 0) if vs else '–'} | {marks} |"
             )
     return "\n".join(rows)

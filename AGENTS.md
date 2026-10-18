@@ -103,13 +103,13 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   is an object column's value, a number's unknown: numpy's; literal data's values in row order, `cells`, until its values or labels change; a frame's or Series' truth raises), pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop, entry runs left out (`cut`); the budget bounds the work.
   **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
-  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, `callees_cut`, several callees one `skipped_calls`,
+  verdicts (fresh budget; past `fanout` (4) budgets of work its callees' calls are unknown, `callees_cut`, several callees one `skipped_calls`,
   classes among them their instances made there; every run starts from the module's end, `demand_start`). `rowan serve` starts the whole run and the module code's
   (`__main__` block's calls skipped) together; the latter answers unless the former completes within `EARLY` (1 s), whose
   document then follows as an event. A changed file, a newer `analyse` of it or a `cancel` (the extension's, when a
   request times out) cuts the analyses running for it as the deadline does (`Budget::cancel`, read on its own thread).
-* **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, but each entry of the program's code into them (an import, a call) gets an allowance of work (`LIB_ENTRY`, all `LIB_TOTAL`, definitions not counted; no per-function budgets)
-  or is undone: the state as before, an unknown module / a call that does not run (`skipped_call`). Their own verdicts are not reported; their code given to unknown code is one closure (`LibClosure`).
+* **Installed packages** (`--follow PKG|*`: site-packages of `--site-packages`, `$VIRTUAL_ENV`, a `.venv` above the file; not modelled ones; `library.rs`) run as the program's code, with per-function budgets; each entry of the program's code into them (an import, a call) also gets an allowance of work (`fanout` budgets, definitions not counted),
+  past which its calls do not run (`skipped_call`; module code goes on: an import's names are known, its expensive calls unknown). Their own verdicts are not reported.
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators; an unknown the program gives a dataclass's, NamedTuple's or TypedDict's field annotated `str` / `Optional[int]` is one, `field_as_annotated`, `float` only validated: an int passes; a pydantic field's validated unknown is of its type). `getattr` by a name not known reads every attribute
   of the program's objects, quietly (known in part, an f-string's or a name a template makes, `"_on_%s" % m` also through a local: those whose names fit, `Payload::Affix`, `template_affixes`; a container's, or past a wide
@@ -147,7 +147,7 @@ uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink] 
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py [-j N]: vs whole runs; bench/first_hover.py (same arguments, rich): rowan serve's first hover in a file
-uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/)
+uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/); --uncapped: also no allowance (fanout), no bounds
 ```
 
 Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`, every push and PR): build, `cargo test`, golden (`--pending` informational), snapshots,
@@ -166,7 +166,7 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
 ## Debugging switches
 
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower), each library entry's work, the functions doing most (runs, own statements, units and ms of outermost runs). `2`: raises.
-* `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
+* `ROWAN_LIMITS=budget=4096,ms=10000,fanout=4`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
   Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
 ## Layout (`rowan/src/`, ~72k lines: the engine ~29k, the models ~43k)
@@ -191,7 +191,7 @@ domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output)
 | --- | --- |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.7 / ~5.5 s; 0.10 / 0.06 / 0.10 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.5 / ~1.0 / ~3.6 / ~4.8 s; 0.27 / 0.22 / 0.21 / 0.30 GB |
-| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.25 / 0.20 (0.06) / 0.38 / 0.19 / 0.31 s; 28 / 29 (14) / 53 / 73 / 44 MB (none: < 0.01 s, 10 MB); flask's test client and sklearn's imports undone; allowance off: 0.52 / 0.22 / > 1800 / 3.9 / > 1800 s (importing scipy.special alone: 4.2 s) |
+| installed packages (`bench/sitepackages.py`), `--follow '*'`: small deps / company package (alone: `--follow acme_billing`) / click+rich / flask / sklearn | 0.39 / 0.21 (0.06) / 0.70 / 0.21 / 1.7 s; 31 / 29 (14) / 70 / 75 / 358 MB (none: < 0.01 s, 10 MB); hover facts gained 6 / 30 / 13 / 13 / 0; no allowance (`fanout` off): 0.38 / 0.22 / 20 / 2.1 / > 300 s; no bounds: 0.52 / 0.22 / > 300 / 3.9 / > 300 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps

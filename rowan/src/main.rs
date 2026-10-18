@@ -257,7 +257,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
         let [m, l, sm, sl] = rowan::frontend::loaded_counts();
         eprintln!("loaded: {} modules, {} lines (site-packages: {} modules, {} lines), parsing {} ms", m, l, sm, sl, rowan::frontend::parse_time().as_millis());
-        eprintln!("library entries (run, undone, refused): {:?}, work {}", an.library_counts().0, an.library_counts().1);
+        eprintln!("library entries (run, cut): {:?}, work {}", an.library_counts().0, an.library_counts().1);
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));
