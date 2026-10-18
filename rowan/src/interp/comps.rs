@@ -144,7 +144,7 @@ impl Analyzer {
     /// with skipping it. False: not known.
     #[allow(clippy::too_many_arguments)]
     fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::iter::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
-        if let Some(items) = &it.items {
+        if let Some(items) = it.any_order_items() {
             let same = self.identical_summaries(items);
             if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
                 self.cx.summary_items.insert(own, items.len());

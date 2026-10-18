@@ -291,7 +291,7 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
             if it.items.is_none() {
                 // (choices from a parameter or a global: decided per call site)
             }
-            Some(it.items.unwrap_or_else(|| vec![Value::data("choice")]))
+            Some(it.any_order_items().cloned().unwrap_or_else(|| vec![Value::data("choice")]))
         }
         None => None,
     };

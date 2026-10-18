@@ -664,8 +664,9 @@ impl Analyzer {
                     }
                 }
             } else {
-                // an iterable whose items are known by position (zip / enumerate of known lists)
-                if matches!(kind, Kind::Zip | Kind::Enumerate) {
+                // an iterable whose items are known by position (zip / enumerate of known lists,
+                // a dict's keys)
+                if matches!(kind, Kind::Zip | Kind::Enumerate | Kind::Dict | Kind::View) {
                     let it = self.iterate(&Value::obj(oid), node, state);
                     if let Some(items) = it.items.filter(|v| v.len() == n) {
                         for i in 0..n {

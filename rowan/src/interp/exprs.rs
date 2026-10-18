@@ -390,7 +390,7 @@ impl Analyzer {
                 let en = frontend::node(e);
                 let it = self.iterate(&inner, &en, state);
                 // (the items when known, in order: their positions are known too)
-                match it.ordered_items().filter(|_| size_parts.is_none()) {
+                match it.items.clone().filter(|_| size_parts.is_none()) {
                     Some(items) => vals.extend(items),
                     None => {
                         literal = false;

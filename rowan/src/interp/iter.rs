@@ -39,26 +39,34 @@ impl Elem {
 
 /// What iterating a value gives (`Analyzer::iterate`).
 pub struct Iteration {
-    /// the items in order, when known
+    /// the items in order, when known; items in an order Python does not promise (a set's, a
+    /// dict's whose insertion order depends on the path) are each any of them here
     pub items: Option<Vec<Value>>,
+    /// those items themselves, in no order, for uses their order does not matter to (a set
+    /// built from them, `sorted`, a comprehension's distinct items): `any_order_items`
+    unordered_items: Option<Vec<Value>>,
     /// what every item is
     pub elem: Elem,
     /// the items are every key of one record (`for k in d`): a loop over them sees them all
     pub exhaustive: bool,
-    /// the items are a set's, in an order Python does not promise
+    /// the items come in an order Python does not promise
     pub unordered: bool,
 }
 
 impl Iteration {
-    /// The items for a use their order matters to (a loop's iterations, `enumerate`, `zip`,
-    /// `str.join`): a set's are each any of them.
-    pub fn ordered_items(&self) -> Option<Vec<Value>> {
-        let items = self.items.as_ref()?;
-        if !self.unordered {
-            return Some(items.clone());
+    fn new(items: Option<Vec<Value>>, elem: Elem, exhaustive: bool, unordered: bool) -> Iteration {
+        match items {
+            Some(its) if unordered => {
+                let any = join_values(its.iter().cloned());
+                Iteration { items: Some(vec![any; its.len()]), unordered_items: Some(its), elem, exhaustive, unordered }
+            }
+            items => Iteration { items, unordered_items: None, elem, exhaustive, unordered },
         }
-        let any = join_values(items.iter().cloned());
-        Some(vec![any; items.len()])
+    }
+
+    /// The items for a use their order does not matter to: a set's each one of them.
+    pub fn any_order_items(&self) -> Option<&Vec<Value>> {
+        self.unordered_items.as_ref().or(self.items.as_ref())
     }
 }
 
@@ -171,14 +179,14 @@ impl Analyzer {
             if alts_mode {
                 items = alt_items;
             }
-            return Iteration { items, elem: Elem::Pair(kacc, vacc), exhaustive: exh, unordered };
+            return Iteration::new(items, Elem::Pair(kacc, vacc), exh, unordered);
         }
         let elem = join_values(elems.iter().cloned());
         let exh = exhaustive && elems.len() == 1 && matches!(elem.kv, KeyVal::KeysOf(_));
         if alts_mode {
             items = alt_items;
         }
-        Iteration { items, elem: Elem::One(elem), exhaustive: exh, unordered }
+        Iteration::new(items, Elem::One(elem), exh, unordered)
     }
 
     /// The items of one of several containers (or strings), position by position: when every
@@ -322,8 +330,6 @@ impl Analyzer {
         let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { return };
         let mut ki = self.iterate(&ks, node, state);
         let mut vi = self.iterate(&vs, node, state);
-        // (a set's items paired in an order Python does not promise)
-        (ki.items, vi.items) = (ki.ordered_items(), vi.ordered_items());
         // an infinite side (or a generator known that far) yields as many items as the
         // other has
         if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
@@ -372,7 +378,7 @@ impl Analyzer {
     fn iter_enumerate(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { return };
         let ii = self.iterate(&inner, node, state);
-        match (ii.ordered_items(), acc.items.as_mut(), start) {
+        match (ii.items, acc.items.as_mut(), start) {
             (Some(inner_items), Some(its), Some(start)) => {
                 // known items: (index, item) pairs with literal indices
                 let ctx = self.frame().ctx.clone();
