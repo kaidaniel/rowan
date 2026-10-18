@@ -1017,6 +1017,13 @@ impl Analyzer {
                         }
                     }
                 }
+                // (keys of a record open through an input or unknown code: any key, those
+                // there too)
+                if srcrow.open() {
+                    for k in state.slot_keys(oid, ns).into_iter().filter(|k| *k != STAR) {
+                        state.set_slot(oid, ns, k, v.clone(), false);
+                    }
+                }
                 state.set_slot(oid, ns, STAR, v.clone(), false);
             }
             _ => {
