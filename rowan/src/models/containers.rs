@@ -349,7 +349,11 @@ pub(super) fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if let Some((None, p, 0)) = st.lens.get(&o) {
                 let shifted = ((m as u32) << k) | if alone { 0 } else { m as u32 };
                 if shifted <= 0xFFFF {
+                    let last = st.last_of(o);
                     st.set_lens(o, (None, p, shifted as u16));
+                    if let Some(l) = last {
+                        st.set_last(o, l);
+                    }
                 }
             }
         }

@@ -305,7 +305,7 @@ impl Analyzer {
     /// maybe there, a maybe one runs on one path and is skipped on the other. `cursor`: a
     /// one-shot iterator a `break` may leave, and where it stood. False: not unrolled.
     fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, state: &mut State) -> bool {
-        let unrolled = match &it.ordered_items() {
+        let unrolled = match &it.items {
             Some(items) if (items.len() <= UNROLL_MAX || self.distinct_objects(items)) && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
             None => self.maybe_dict_items(itv, state).map(|items| (items, None)),
             _ => None,
@@ -694,7 +694,8 @@ impl Analyzer {
 /// `state` joined with `other` (its replacement when `state` is unreachable).
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {
     if let Some(mut o) = other {
-        let j = if state.reachable { state.join(&mut o) } else { o };
+        // (a state that is unreachable still gives its returns: a loop's `else: return`)
+        let j = state.join(&mut o);
         state.replace_with(j);
     }
 }

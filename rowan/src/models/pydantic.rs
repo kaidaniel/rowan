@@ -2648,7 +2648,7 @@ pub fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
         match an.heap.kind(o) {
             Kind::Set | Kind::List | Kind::Tuple => {
                 let it = an.iterate(&Value::obj(o), node, st);
-                for x in it.items? {
+                for x in it.any_order_items()? {
                     ks.push(x.kv.as_lit()?);
                 }
             }

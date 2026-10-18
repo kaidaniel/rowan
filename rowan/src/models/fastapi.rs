@@ -1435,7 +1435,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                 match c.kwargs.get(&s("methods")) {
                     Some(ms) => {
                         let it = an.iterate(ms, &c.node, st);
-                        it.items.map(|xs| xs.iter().filter_map(str_of).map(|x| x.to_lowercase()).collect()).unwrap_or_else(|| vec!["*".into()])
+                        it.any_order_items().map(|xs| xs.iter().filter_map(str_of).map(|x| x.to_lowercase()).collect()).unwrap_or_else(|| vec!["*".into()])
                     }
                     None => vec!["get".into()],
                 }
@@ -1463,7 +1463,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             let methods: Vec<String> = match c.kwargs.get(&s("methods")) {
                 Some(ms) => {
                     let it = an.iterate(ms, &c.node, st);
-                    it.items.map(|xs| xs.iter().filter_map(str_of).map(|x| x.to_lowercase()).collect()).unwrap_or_else(|| vec!["*".into()])
+                    it.any_order_items().map(|xs| xs.iter().filter_map(str_of).map(|x| x.to_lowercase()).collect()).unwrap_or_else(|| vec!["*".into()])
                 }
                 None => vec!["get".into()],
             };

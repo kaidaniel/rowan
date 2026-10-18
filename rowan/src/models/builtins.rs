@@ -114,7 +114,7 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::obj(oid) };
     // known items that are literals, in order (a list, a string's characters, a generator)
     let it = an.iterate(a, &c.node, st);
-    let lits: Option<Vec<KeyId>> = it.items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
+    let lits: Option<Vec<KeyId>> = it.any_order_items().and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
     let mut row = st.row(oid, Ns::Item);
     if let Some(ls) = lits {
         for k in ls {
@@ -252,7 +252,7 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // (a set of known literals, `set(text)`: its distinct items, however many the
                 // iterable had)
                 let text_chars: Option<Vec<Value>> = a.kv.as_lit().and_then(intern::key_as_str).filter(|_| a.pts.is_empty()).map(|t| t.chars().map(|ch| Value::lit(key_str_lit(&ch.to_string()))).collect());
-                let distinct: Option<Vec<Value>> = it.items.as_ref().or(text_chars.as_ref()).filter(|_| kind == Kind::Set).and_then(|items| {
+                let distinct: Option<Vec<Value>> = it.any_order_items().or(text_chars.as_ref()).filter(|_| kind == Kind::Set).and_then(|items| {
                     let mut seen: Vec<KeyId> = Vec::new();
                     for v in items {
                         match (&v.kv, v.pts.is_empty()) {
@@ -263,7 +263,8 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                     Some(seen.into_iter().map(Value::lit).collect())
                 });
-                if let Some(items) = distinct.as_ref().or(it.items.as_ref()) {
+                let sorts = c.qual == "builtins.sorted";
+                if let Some(items) = distinct.as_ref().or(if sorts { it.any_order_items() } else { it.items.as_ref() }) {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
                     if an.heap.obj(oid).single && items.len() <= 64 {
@@ -820,11 +821,17 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let it = an.iterate(a, &c.node, st);
+    // (an item is surely there: known items, or a list longer than its cursor on every path)
+    let has_item = matches!(&it.items, Some(items) if !items.is_empty())
+        || a.single().filter(|g| matches!(an.heap.kind(*g), Kind::List | Kind::Tuple)).is_some_and(|g| match an.cursor_of(g, st) {
+            Some(cur) => an.heap.prefix(g, st).is_some_and(|p| p > cur) || an.heap.len_alts(g, st).is_some_and(|ls| ls.iter().all(|l| *l > cur)),
+            None => false,
+        });
     // (a generator at a position not known: it ran to one of its yields at least)
     if let Some(g) = a.single() {
         an.gen_took_item(g, st);
     }
-    match it.elem {
+    let item = match it.elem {
         Elem::Pair(k, v) => {
             let ctx = an.frame().ctx.clone();
             let pid = an.heap.alloc_raw(Kind::Pair, &format!("pair:{}", c.site), &ctx, true, "pair", Payload::Pair(k, v));
@@ -834,6 +841,15 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(items) if !items.is_empty() => items[0].clone(),
             _ => elem,
         },
+    };
+    // (it may have ended: the default, else StopIteration)
+    match c.args.get(1) {
+        _ if has_item => item,
+        Some(d) => item.join(d),
+        None => {
+            an.may_raise_here("StopIteration", st);
+            item
+        }
     }
 }
 
@@ -2167,21 +2183,13 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
                     }
                 }
                 let it = an.iterate(arg, &c.node, st);
-                if let Some(items) = it.ordered_items() {
-                    let mut parts: Vec<String> = Vec::new();
-                    let mut ok = true;
-                    for item in &items {
-                        match item.kv.as_lit().filter(|_| item.pts.is_empty()).and_then(intern::key_as_str) {
-                            Some(s) => parts.push(s.to_string()),
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        return Value::lit(key_str_lit(&parts.join(&*sep)));
-                    }
+                // (items in no promised order, at most 4: every order of them)
+                let items = if it.unordered { it.any_order_items().filter(|its| its.len() <= 4) } else { it.items.as_ref() };
+                let parts: Option<Vec<String>> = items.and_then(|its| its.iter().map(|item| item.kv.as_lit().filter(|_| item.pts.is_empty()).and_then(intern::key_as_str).map(|s| s.to_string())).collect());
+                if let Some(parts) = parts {
+                    let orders = if it.unordered { permutations(parts.len()) } else { vec![(0..parts.len()).collect()] };
+                    let joined = orders.iter().map(|o| key_str_lit(&o.iter().map(|i| parts[*i].as_str()).collect::<Vec<_>>().join(&*sep)));
+                    return Value::kv_only(crate::domain::KeyVal::lits(intern::KeySet::from_iter(joined)));
                 }
             }
             Value::data(&format!("L{}", c.line))
@@ -2605,4 +2613,20 @@ pub(super) fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, it
         if reverse { o.reverse() } else { o }
     });
     Some(idx)
+}
+
+/// Every order of `0..n` (n small).
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for p in permutations(n - 1) {
+        for i in 0..=p.len() {
+            let mut q = p.clone();
+            q.insert(i, n - 1);
+            out.push(q);
+        }
+    }
+    out
 }

@@ -414,8 +414,10 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     }
     // (an open record's key that may be there, of a value not known, says no more than `**?`:
     // left out — a loop's item read on earlier rounds was `{"id"?: ?, "name"?: ?, **?}`)
+    // (nor one holding what any key not known holds, a read under it found: `dict[?, int(?)]`)
     if !row.closed() {
-        keys.retain(|k| row.likely.contains(*k) || state.slot_opt(o, ns, *k).is_some_and(|sv| render_value(an, state, &sv, depth + 1, &mut seen.clone()) != "?"));
+        let star = state.slot_opt(o, ns, STAR);
+        keys.retain(|k| row.likely.contains(*k) || state.slot_opt(o, ns, *k).is_some_and(|sv| Some(&sv) != star.as_ref() && render_value(an, state, &sv, depth + 1, &mut seen.clone()) != "?"));
     }
     for k in keys.iter().take(MAX_ITEMS) {
         let val = match state.slot_opt(o, ns, *k) {

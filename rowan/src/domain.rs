@@ -456,6 +456,11 @@ impl Row {
                         }
                     }
                 }
+                // (a key at a place in the order but there on some paths only, copied in: on the
+                // paths without it, it goes last)
+                if strong && img(&o.present).iter().any(|k| self.order.contains(&k) && !self.definite.contains(k)) {
+                    ord.clear();
+                }
                 ord.into()
             },
             stored: self.stored.union(&img(&o.stored)),
@@ -1097,10 +1102,15 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
                 return DATA;
             }
-            if !l.is_literal() {
-                return d.clone();
-            }
             let expr = label_name(&t).starts_with("expr:");
+            // (an object's keys: of any type, not the unknown's)
+            if !l.is_literal() {
+                return match label_type(&t) {
+                    Some(_) if expr => DATA,
+                    Some(_) => untyped(*x),
+                    None => d.clone(),
+                };
+            }
             return match label_type(&t) {
                 Some(ty) if kv_literals(l).iter().all(|k| key_type(k, ty)) => if expr { KeyVal::data(&typed_label(ty, "")) } else { d.clone() },
                 _ if expr => DATA,

@@ -324,6 +324,9 @@ pub struct CodeUses {
     /// a `return` may give back something else that may be a class: a parameter, an attribute,
     /// `type(x)` (not only names' values, calls' results and new values)
     pub returns_other: bool,
+    /// the parameters its `return`s may give back themselves (`return p`, `return a or b`,
+    /// `return p if c else None`): a skipped call's result may be the argument
+    pub returns_params: Vec<StrId>,
     /// names and calls' results it gives to calls by name
     pub passes: Vec<Pass>,
     /// the attribute names it calls on what is not a name it does not bind (`x.f(…)` of a
@@ -553,6 +556,20 @@ impl<'a> Flow<'a> {
             _ => None,
         }).collect::<Option<_>>()?;
         (!ps.is_empty() && self.first.is_none_or(|f| !ps.contains(&f))).then_some(ps)
+    }
+
+    /// The parameters `e` may be itself (`p`, `p if c else q`, `p or q`, a local bound to one).
+    fn returned_params(&self, e: &Expr) -> Vec<StrId> {
+        match e {
+            Expr::Name(n) => self.alias.get(&s(n.id.as_str())).filter(|_| self.local(n.id.as_str())).map(|srcs| srcs.iter().filter_map(|x| match x {
+                (Origin::Param(p), Level::Own) => Some(*p),
+                _ => None,
+            }).collect()).unwrap_or_default(),
+            Expr::If(x) => [&*x.body, &*x.orelse].into_iter().flat_map(|y| self.returned_params(y)).collect(),
+            Expr::BoolOp(x) => x.values.iter().flat_map(|y| self.returned_params(y)).collect(),
+            Expr::Named(x) => self.returned_params(&x.value),
+            _ => Vec::new(),
+        }
     }
 
     /// `G[k] = p` (`G.a[k] = p`, `self.a[k] = p`) of a global G and a parameter p: p kept in
@@ -1387,6 +1404,8 @@ impl<'a> Flow<'a> {
                     // (names' values and calls' results go to the callers)
                     Some(v) if self.depth == 0 => {
                         self.out.returns_other |= self.srcs(v).iter().any(|(o, _)| !matches!(o, Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..)));
+                        let ps = self.returned_params(v);
+                        self.out.returns_params.extend(ps);
                         let mut srcs = Vec::new();
                         self.give(v, &mut srcs);
                         self.out.returns.extend(srcs);

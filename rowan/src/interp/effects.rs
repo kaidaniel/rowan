@@ -663,6 +663,7 @@ impl Analyzer {
             };
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
+        let returned = self.returned_args(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs));
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
         let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
@@ -726,11 +727,33 @@ impl Analyzer {
             }
             state.set_row(o, Ns::Attr, row);
         }
+        let r = r.join(&returned);
         // (a method returning its receiver gives it back: a call chained on the result runs on it)
         match self_v.filter(|_| self.code_uses(&self.heap.func_info(foid)).recv.as_ref().is_some_and(|u| u.returned)) {
             Some(v) => r.join(v),
             None => r,
         }
+    }
+
+    /// What a skipped call's result may be of its arguments: those given for the parameters
+    /// its code returns themselves (`return xs`, `return a or b`, `kept_returned`,
+    /// `returns_params`); a parameter not given by name or position: anything given.
+    fn returned_args(&mut self, foid: ObjId, self_v: Option<&Value>, positional: &[String], a: &Args) -> Value {
+        let fi = self.heap.func_info(foid);
+        let uses = self.code_uses(&fi);
+        let recv_name = self_v.and_then(|_| fi.node.params()).and_then(|ps| ps.posonlyargs.iter().chain(ps.args.iter()).next()).map(|a| s(a.parameter.name.id.as_str()));
+        let given = |p: StrId| -> Value {
+            if let (Some(r), Some(v)) = (recv_name, self_v) {
+                if r == p {
+                    return v.clone();
+                }
+            }
+            match (positional.iter().position(|x| x.as_str() == &*intern::str_get(p)).and_then(|i| a.pos.get(i)), a.kw.get(&p)) {
+                (Some(v), _) | (None, Some(v)) => v.clone(),
+                _ => a.pos.iter().chain(a.kw.values()).chain(a.star).chain(a.star_kw).fold(Value::new(), |acc, v| acc.join(v)),
+            }
+        };
+        uses.kept_returned.iter().chain(uses.returns_params.iter()).fold(Value::new(), |acc, p| acc.join(&given(*p)))
     }
 
     /// A skipped call's arguments its code keeps (`Seen::kept`) put where the program may read
