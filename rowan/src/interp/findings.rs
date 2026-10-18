@@ -427,7 +427,8 @@ impl Analyzer {
     /// as text, with the rows of its objects; into the general run's values or the program's
     /// calls'.
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
-        if !self.findings.facts_on || node.addr == 0 {
+        // (line 0: a name of an annotation written as a string, parsed apart; no place to hover)
+        if !self.findings.facts_on || node.addr == 0 || node.line == 0 {
             return;
         }
         if node.module != self.heap.module_info(self.program.main_module).idx {
