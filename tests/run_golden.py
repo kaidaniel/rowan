@@ -62,7 +62,8 @@ VALUE_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, s
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
-                "datakey": "datakey", "none": "none", "any": "any", "map": "none", "sound": "sound", "fails": "fails"}
+                "datakey": "datakey", "none": "none", "any": "any", "map": "none", "sound": "sound", "fails": "fails",
+                "reported": "reported"}
 
 
 def key_str(k: Any) -> str:
@@ -230,6 +231,11 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
                 wrong = [v for v in matches if v["tier"] == "proven"]
                 if wrong:
                     failures.append(f"L{ln}: {key!r} may fail, but rowan says " + ", ".join(sorted({v['tier'] for v in wrong})))
+                continue
+            if tier == "reported":
+                # a finding: some verdict for the key that no handler guarding the read hides
+                if not any(not v.get("guarded") for v in matches):
+                    failures.append(f"L{ln}: expected {key!r} reported, got " + (", ".join(f"{v['tier']} (guarded)" for v in matches) or "nothing"))
                 continue
             if tier == "any":
                 if not matches:

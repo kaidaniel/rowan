@@ -102,9 +102,9 @@ impl Analyzer {
         let key = &okey;
         let mut acc = Value::new();
         let guarded = self.is_guarded(ns) || !report;
-        // a real try/except guard (as opposed to a model's unreported load): no exception
-        // means the key was present from here on
-        let try_guard = report && self.is_guarded(ns);
+        // a running handler catches its failure (a model's unreported load: none): the read
+        // raises to it, and no exception means the key was present from here on
+        let try_guard = report && self.catches(ns);
         let scalar = self.may_be_scalar(obj);
         let single_target = obj.pts.len() == 1 && !scalar;
         let line_data = Value::data(&format!("L{}", node.line));
@@ -503,7 +503,7 @@ impl Analyzer {
             let is_lit = matches!(kv, KeyVal::Lit(_));
             for k in intern::sorted_by_str(ks.iter()) {
                 let cls = classify(&row, k);
-                if guarded && cls.tier != Tier::Proven && (try_guard) {
+                if try_guard && cls.tier != Tier::Proven {
                     self.guarded_read_raises(oid, ns, k, kind, &cls, &mut row, node, state, single_target, try_guard, is_lit);
                 }
                 if guarded {

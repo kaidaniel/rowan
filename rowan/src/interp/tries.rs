@@ -47,6 +47,9 @@ pub struct TryCtx {
     /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
     /// handler ends by re-raising)
     pub caught: FxHashSet<String>,
+    /// what it catches by name, its catch-alls aside (`Exception`, a bare `except:`): a guard
+    /// of the reads in the functions it calls too (`Analyzer::is_guarded`)
+    pub named: FxHashSet<String>,
     /// the frame depth and caller-env depth it runs in: a raise inside a callee hands the
     /// handler the try frame's locals
     pub frames: usize,
@@ -171,9 +174,12 @@ pub struct Unwind {
 impl Analyzer {
     /// A try context begins: raises inside it record the state there for its handlers and
     /// its finally; `pre` is the state before the body.
+    /// `caught`: the classes its handlers name (a class's subclasses are caught too).
     pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
         let (frames, envs, mark) = (self.cx.frames.len(), self.cx.env_stack.len(), self.heap.serial());
-        self.unwind.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
+        let named = crate::models::exceptions::expand_caught(caught.iter().filter(|n| !super::access::CATCH_ALL.contains(&n.as_str())).cloned().collect());
+        let caught = crate::models::exceptions::expand_caught(caught);
+        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
     }
 
     /// The try context ends: what it recorded. What callees made since the try began and
@@ -453,8 +459,8 @@ impl Analyzer {
     /// the ways out (the body's end and `else`, each handler's end) are joined, then the
     /// finally runs on each way out.
     pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
-        // (a handler for a class catches its subclasses too)
-        let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
+        // (a handler for a class catches its subclasses too: `enter_try`)
+        let mut caught: FxHashSet<String> = handlers.iter().flat_map(|h| h.names()).collect();
         // handlers that all end by re-raising: the body's reads are still required
         let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
