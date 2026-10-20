@@ -8,6 +8,11 @@
 //!   follows as an event line `{"event":"analysed","path":P,"ms":…,"deps":…,"result":…}`; cut,
 //!   `{"event":"cut","path":P,"whole":…}` (how far it got, `analysis_json`; a module code's
 //!   document answered after the cut carries it as `whole`).
+//! * Following installed packages (`--follow`): all of the above runs without following, so the
+//!   first answer comes as fast as without; a whole program's analysis that follows them starts
+//!   too (`pending` until it ends), and when it completes (not cut by its deadline) its document
+//!   replaces the answer, `{"event":"analysed","followed":true,…}` (a later event of the analyses
+//!   without following then says nothing). A newer `analyse`, `changed` or `cancel` cuts it.
 //! * `{"cmd":"hover","path":P,"line":L}` returns the `--facts` document of the function of `P`
 //!   defined over line L, from its run for any call (open parameters as annotated, from the
 //!   state the module ended in), cached per function until a file it depends on changes; it
@@ -170,13 +175,17 @@ fn spawn_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (Fi
 /// The server's state shared with the threads that wait for a whole program's analysis: the
 /// documents kept per file (with the files they depend on and their hashes), the analyses kept
 /// for `hover`, and per file the number of its latest `analyse` (a late answer to an earlier
-/// one is dropped), and the flags that cancel the analyses running for a file.
+/// one is dropped), the flags that cancel the analyses running for a file, and the `analyse`
+/// a followed analysis answered.
 #[derive(Default)]
 struct Shared {
     cache: std::collections::HashMap<String, (Vec<(String, u64)>, String)>,
     sessions: Vec<Session>,
     latest: std::collections::HashMap<String, u64>,
     running: Vec<(String, Cancel)>,
+    /// per file, the latest `analyse` whose analysis following installed packages answered
+    /// (`follow_followed`): the analyses without following say nothing after it
+    followed: std::collections::HashMap<String, u64>,
 }
 
 /// Set from the server's reader: the analysis holding it is stale (its file changed, a newer
@@ -327,12 +336,21 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
         let mut sh = shared.lock().unwrap();
         (sh.cancel_flag(path), sh.cancel_flag(path))
     };
+    // (following installed packages: the answer comes from analyses without, one with follows)
+    let following = !opts.follow.is_empty() && spawn_followed(shared, out, opts, path, generation, t0);
+    let opts = &unfollowed(opts);
     let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, whole_cancel);
     let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module, module_cancel);
     let answer = |res: Result<(String, Vec<String>), String>, pending: bool| -> String {
+        let mut pending = pending || following;
         match res {
-            Ok((doc, deps)) => {
-                shared.lock().unwrap().cache.insert(path.to_string(), (hashed(&deps), doc.clone()));
+            Ok((mut doc, mut deps)) => {
+                let mut sh = shared.lock().unwrap();
+                // (the analysis following installed packages answered first: its document)
+                match sh.cache.get(path).filter(|_| sh.followed.get(path) == Some(&generation)) {
+                    Some((d, r)) => (doc, deps, pending) = (r.clone(), d.iter().map(|(p, _)| p.clone()).collect(), false),
+                    None => drop(sh.cache.insert(path.to_string(), (hashed(&deps), doc.clone()))),
+                }
                 format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"pending\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), pending, t0.elapsed().as_millis(), serde_json::json!(deps), doc)
             }
             Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
@@ -419,7 +437,7 @@ fn with_whole(doc: String, info: &str) -> String {
 fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, path: &str, generation: u64, whole_rx: std::sync::mpsc::Receiver<First>, _whole_tx: std::sync::mpsc::Sender<HoverReq>, module_doc: String, t0: std::time::Instant) {
     let Ok(r) = whole_rx.recv() else { return };
     let mut sh = shared.lock().unwrap();
-    if sh.latest.get(path) != Some(&generation) {
+    if sh.latest.get(path) != Some(&generation) || sh.followed.get(path) == Some(&generation) {
         return;
     }
     if let Some(info) = cut_of(&r) {
@@ -441,6 +459,37 @@ fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, pa
     send_line(out, &format!("{{\"event\":\"analysed\",\"ok\":true,\"path\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), doc));
 }
 
+/// The options without following installed packages.
+fn unfollowed(opts: &Opts) -> Opts {
+    Opts { follow: Vec::new(), ..opts.clone() }
+}
+
+/// For `analyse` request `generation` of `path`: the whole program's analysis following
+/// installed packages, on a thread of its own; when it completes (not cut by its deadline) its
+/// document replaces the answer as an `analysed` event (`followed`: true) and in the cache.
+/// Nothing when a newer `analyse` came or a file it loaded changed. False if it cannot start.
+fn spawn_followed(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, opts: &Opts, path: &str, generation: u64, t0: std::time::Instant) -> bool {
+    let cancel = shared.lock().unwrap().cancel_flag(path);
+    let (rx, tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, cancel);
+    let (shared, out, path) = (shared.clone(), out.clone(), path.to_string());
+    std::thread::Builder::new()
+        .spawn(move || {
+            let _tx = tx;
+            let Ok(Some(Ok((doc, deps)))) = rx.recv().map(whole_doc) else { return };
+            let deps_h = hashed(&deps);
+            let mut sh = shared.lock().unwrap();
+            if sh.latest.get(&path) != Some(&generation) || !deps_h.iter().all(|(p, h)| file_hash(p) == Some(*h)) {
+                return;
+            }
+            sh.followed.insert(path.clone(), generation);
+            sh.cache.insert(path.clone(), (deps_h, doc.clone()));
+            sh.sessions.retain(|s| s.path != path);
+            drop(sh);
+            send_line(&out, &format!("{{\"event\":\"analysed\",\"followed\":true,\"ok\":true,\"path\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), doc));
+        })
+        .is_ok()
+}
+
 /// A `hover` request: the function of `path` at `line`, from the analysis kept for `path` (set
 /// up first, its module code alone, if there is none).
 fn hover_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, opts: &Opts, id: &serde_json::Value, path: &str, line: u32) -> String {
@@ -449,7 +498,7 @@ fn hover_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, opts: &Opts,
     let has = shared.lock().unwrap().sessions.iter().any(|s| s.path == path);
     if !has {
         let cancel = shared.lock().unwrap().cancel_flag(path);
-        setup = match spawn_analysis(path.to_string(), opts.clone(), Start::Module, cancel) {
+        setup = match spawn_analysis(path.to_string(), unfollowed(opts), Start::Module, cancel) {
             (Ok((_, deps, _)), Some(tx)) => {
                 keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx });
                 Ok(Some(t0.elapsed().as_millis()))

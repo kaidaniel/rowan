@@ -300,6 +300,11 @@ fn analyser(file: &str, opts: Opts, facts: bool) -> Result<Analyzer, String> {
 fn deps_of(an: &Analyzer, file: &str) -> Vec<String> {
     let mut deps: Vec<String> = vec![file.to_string()];
     for (_, &m) in an.modules().iter() {
+        // (not installed packages' files: the editor restarts the server when its environment
+        // changes, and hashing hundreds of them at every request would cost)
+        if an.heap.module_info(m).library {
+            continue;
+        }
         if let Some(p) = &an.heap.module_info(m).path {
             // (a namespace package's directory has no text to hash)
             if !deps.contains(p) && !std::path::Path::new(p).is_dir() {
