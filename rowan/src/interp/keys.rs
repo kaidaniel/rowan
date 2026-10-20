@@ -408,3 +408,31 @@ impl Analyzer {
         }
     }
 }
+
+/// The keys of some objects (`KeyVal::KeysOf`) as they are now, where they are kept past the
+/// iteration that took them (a list's elements: `[k for k in d]`): the keys of a record that
+/// nothing outside the program fills (closed) are its keys now, as literals (up to
+/// `MAX_LITS`) or their type; keys it gains or loses later are not the list's (an open
+/// record's stay its keys).
+pub(in crate::interp) fn keys_now(kv: &KeyVal, state: &State) -> Option<KeyVal> {
+    let KeyVal::KeysOf(ko) = kv else { return None };
+    if ko.chain != intern::EMPTY_LENS {
+        return None;
+    }
+    let mut keys = KeySet::new();
+    for o in ko.objs.iter() {
+        let row = state.row(o, ko.ns);
+        if row.open() || row.present.contains(intern::STAR) {
+            return None;
+        }
+        keys = keys.union(&row.present.difference(&ko.exclude));
+    }
+    if keys.len() <= crate::domain::MAX_LITS {
+        return Some(KeyVal::Lits(keys));
+    }
+    let ty = crate::domain::TYPE_NAMES.iter().copied().find(|t| keys.iter().all(|k| crate::domain::key_type(k, t)));
+    Some(match ty {
+        Some(t) => KeyVal::Data(intern::s(&crate::domain::typed_label(t, "")), Default::default()),
+        None => crate::domain::DATA,
+    })
+}

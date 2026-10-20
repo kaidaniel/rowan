@@ -9,7 +9,7 @@ ruff (private names mangled as CPython does) and walks the syntax tree, running 
 abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import *`, namespaces).
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
-  literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
+  literal, up to 64 literals, the keys of some objects (kept in a list's elements: a closed record's keys then, `keys_now`), or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
   builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins (`result_type`; a range's items, `enumerate`'s index, `os.environ`'s values, `read_text`, a str's items), operators; the keys of some objects: `State::keys_type`, from typed stores' sources `store@L4:str`). Joined with None, the type or None (`optional_label`: `None | int(?)`; a test that removes None, `kv_not_none`, leaves the type). Joined with literals, an operator's (`expr:`) loses its name (`max(1, n - 1)`: `int(?)`); the label still covers the value, and `Data`'s hint keeps the literals (up to 8, then saturated: `hint_sat`) as ones it may be (`8080 | ?`; code ignoring it stays sound): operators, `try_pure` calls (`pure_hint`) and narrowing carry them (`split_hinted`; also literals beside unknown objects).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
@@ -60,10 +60,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     module's call sites the records are made anew there (`materialize`: up to 16 records, 4 deep; the rest the call's unknown
     result); elsewhere its scalars by type only (`int(?)`: records there cost every later walk and join). An object the run was
     given, read from elsewhere, or stored where the program reads it back (`escaped`: the receiver, a global, unknown code's
-    object) is `any`. Shapes come from a *source*: an analyzer of its own (`summary_source`, made at the first skipped call: the
-    module's code with every call after a function's first skipped, `Budget::cap`, set up for runs on demand), which runs a
-    function for any call when a call of it is first skipped (`shape_for`; its thread marks swapped in, `ThreadState`; a quarter
-    of the deadline in all); keyed by the `def`'s address (the parse cache keeps it); packages are not followed there.
+    object) is `any`. Shapes come from a *source*: an analyzer of its own (`summary_source`, made at the first skipped call in the main module, also in `rowan serve`'s runs on demand; until then a call elsewhere stays unknown: the module's code with every call skipped, set up for runs on demand, in which every call after a function's first is skipped, `Budget::cap`), which runs a
+    function for any call when a call of it is first skipped (`shape_for`; its thread marks swapped in, `ThreadState`; a quarter of the deadline in all); keyed by the `def`'s address (the parse cache keeps it); packages are not followed there.
+    A getter (`return self._link`, `return p.a.b`) is the attribute read at the call site where that runs no program code (`getter_result`).
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class); where that code may have removed an attribute, the class's `__getattr__` there is a call that does not run.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
@@ -189,8 +188,8 @@ Maps of the code, file by file, with where to start reading: `rowan/README.md` (
 
 | input | time |
 | --- | --- |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.2 / ~5.7 / ~5.5 s; 0.10 / 0.06 / 0.10 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10.5 / ~1.0 / ~3.6 / ~4.8 s; 0.27 / 0.22 / 0.21 / 0.30 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.7 / ~2.2 / ~5.5 / ~5.7 s; 0.14 / 0.07 / 0.12 / 0.12 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~11.1 / ~0.65 / ~3.2 / ~4.9 s; 0.33 / 0.22 / 0.21 / 0.31 GB |
 | installed packages (`bench/sitepackages.py`, s1–s9), `--follow '*'` | 0.37 / 0.20 / 0.53 / 0.19 / 2.9 / 2.0 / 1.2 / 0.44 / 0.26 s; 30 / 29 / 62 / 73 / 401 / 406 / 169 / 79 / 87 MB; facts gained 6 / 32 / 13 / 13 / 6 / 8 / 14 / 6 / 10, lost 0 (none: < 0.01 s, 10 MB); `rowan serve`: first answer as without (13–23 ms), followed document at 0.18–2.2 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 

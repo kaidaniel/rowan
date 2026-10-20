@@ -633,6 +633,9 @@ impl Analyzer {
     /// elements' (`state.elems`; none recorded there: not known, which a join with another
     /// path's elements must not lose).
     pub fn add_elem(&mut self, oid: u32, v: &Value, state: &mut State) {
+        // (a record's keys as they are now: what it gains or loses later is not the list's)
+        let now = super::keys::keys_now(&v.kv, state).map(|kv| Value::with_kv(v.pts.clone(), kv));
+        let v = now.as_ref().unwrap_or(v);
         state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
         let cur = state.elems.get(&oid).unwrap_or(DATA);
         state.elems.insert(oid, kv_join(&cur, &v.kv));
