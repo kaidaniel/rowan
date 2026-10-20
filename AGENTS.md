@@ -116,7 +116,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   read: one method per call site, unknown code on them when called); `exec`, `setattr` with unknown names on a class, metaclasses and
   monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
   unknown code does not shadow a class attribute on an instance of a library-based class; an unknown beside objects is no instance
-  of the program's or a library's classes (`isinstance`: a builtin's, by its type); a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
+  of the program's or a library's classes (`isinstance`: a builtin's, by its type; it decides and narrows literals by type, typed unknowns against builtin classes, `int(?)` not against `bool`, `kv_isinstance_narrowed`); a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items, and a dict's whose insertion order depends on the path, have no order: each is any of them for every order-dependent use (`Iteration::items`; `any_order_items` for sets, `sorted`, comprehensions).
 
 ## Working conventions (the owner's standing instructions)

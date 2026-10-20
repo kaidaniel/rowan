@@ -463,7 +463,7 @@ impl Analyzer {
                 (cur, StoreTarget::Slot(bo, Ns::Attr, attr))
             }
         };
-        if cur.pts.is_empty() {
+        if cur.pts.is_empty() && cur.kv.is_bot() {
             return;
         }
         self.narrow_isinstance_value(&cur, cls_expr, truth, state, store);
@@ -506,14 +506,16 @@ impl Analyzer {
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
         let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes, state) != Some(!truth)).collect();
         let new_pts = ObjSet::from_vec(keep);
-        if new_pts == cur.pts {
+        // (literals and typed unknowns by their type)
+        let new_kv = crate::models::builtins::kv_isinstance_narrowed(self, &cur.kv, &classes, truth).unwrap_or_else(|| cur.kv.clone());
+        if new_pts == cur.pts && new_kv == cur.kv {
             return;
         }
-        if new_pts.is_empty() && cur.kv.is_bot() {
+        if new_pts.is_empty() && new_kv.is_bot() {
             state.reachable = false;
             return;
         }
-        self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
+        self.store_narrowed(&store, Value::with_kv(new_pts, new_kv), state);
     }
 
     /// The classes an `isinstance` test names (a class, or a tuple of them); None when it is
@@ -539,7 +541,8 @@ impl Analyzer {
     pub fn instance_of(&self, o: u32, classes: &[u32], st: &State) -> Option<bool> {
         let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.heap.kind(o) };
         if k == Kind::Unknown {
-            return None;
+            // (an unknown of a builtin type, as annotated: by its type)
+            return self.heap.obj(o).ty.filter(|t| crate::domain::TYPE_NAMES.contains(t)).and_then(|t| crate::models::builtins::typed_isinstance(self, t, classes));
         }
         let per: Vec<Option<bool>> = classes.iter().map(|c| self.instance_of_one(o, k, *c, st)).collect();
         if per.contains(&Some(true)) {
