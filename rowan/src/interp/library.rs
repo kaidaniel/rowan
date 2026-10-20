@@ -121,9 +121,14 @@ impl Analyzer {
     /// `import name` of a followed library from the program's code: one entry
     /// (`library_entry`); past the library's share, a module rowan does not read.
     pub(super) fn import_library(&mut self, name: &str, node: &crate::frontend::Node, state: &mut State) -> Value {
-        match self.library_entry(|| format!("import {}", name), state, |an, st| an.import_module(name, node, st)) {
-            Some(v) => v,
-            None => self.external_module(name),
+        if let Some(v) = self.library_entry(|| format!("import {}", name), state, |an, st| an.import_module(name, node, st)) {
+            return v;
         }
+        // (a submodule of a package loaded before: its attribute too, as an import makes it)
+        let v = self.external_module(name);
+        if let Some(&po) = name.rsplit_once('.').and_then(|(parent, _)| self.program.modules.get(parent)) {
+            state.set_slot(po, crate::domain::Ns::Attr, intern::key_str_lit(name.rsplit('.').next().unwrap_or(name)), v.clone(), true);
+        }
+        v
     }
 }
