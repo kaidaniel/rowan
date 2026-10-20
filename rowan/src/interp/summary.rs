@@ -15,7 +15,10 @@
 //!
 //! The shapes come from a *source*: an analyzer of its own (`Analyzer::summary_source`) that ran
 //! the module's code with every call after a function's first skipped (`Budget::cap`) and is
-//! set up for runs on demand. A function's shape is made when a call of it first does not run
+//! set up for runs on demand. It is made at the first call in the main module that does not run
+//! (the source costs one more run of the program's module code: a program that skips calls
+//! only in other modules, timm's registry decorators, does not pay it; once it is made, every
+//! skipped call uses it). A function's shape is made when a call of it first does not run
 //! (`shape_for`): its run for any call in the source, with the thread's marks exchanged for the
 //! source's around it (`ThreadState`). So the cost is one run per function whose calls are
 //! skipped, within a share of the deadline, not a run of every function. Keyed by the `def`'s
@@ -148,6 +151,11 @@ impl Analyzer {
     /// result, as records there would cost every later walk and join.
     pub(in crate::interp) fn summarized(&mut self, foid: ObjId, unknown: Value, node: &Node, state: &mut State) -> Value {
         let code = self.heap.func_info(foid).node.addr();
+        // (the source is made for the file the editor shows and the report is about, at the
+        // first call there that does not run; until then a call elsewhere stays unknown)
+        if self.summaries.source.is_none() && node.module != self.program.main_idx {
+            return unknown;
+        }
         let Some(sh) = self.shape_for(code) else { return unknown };
         self.summaries.applied += 1;
         let records = node.module == self.program.main_idx;
