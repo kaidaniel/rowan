@@ -419,16 +419,24 @@ const LOOKS_AT_CODE: &[&str] = &[
     "inspect.getcomments", "inspect.signature", "inspect.getfullargspec",
 ];
 
+/// The library functions taken to change nothing they are given that may call what they are
+/// given (so also a library function or bound method that changes its receiver or arguments).
+const CALLS_GIVEN: &[&str] = &["operator.", "threading.", "concurrent.", "asyncio.", "multiprocessing.", "os.walk", "os.fwalk", "shutil.", "signal.", "sys.set"];
+
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (a library function given what it may call — the program's functions, classes, callable
-    // instances, a library function or bound method that may change its receiver or arguments —
-    // may call it: `inspect.getmembers(x, pred)`, `asyncio.to_thread(f, …)`, `os.walk(top,
+    // instances; a library function or bound method that may change its receiver or arguments,
+    // where it calls what it is given, `CALLS_GIVEN` — may call it: `inspect.getmembers(x, pred)`, `asyncio.to_thread(f, …)`, `os.walk(top,
     // onerror=errs.append)`, `operator.call(d.setdefault, k, v)`; typing's, abc's and enum's
     // look at classes only)
     let types_only = ["typing.", "abc.", "enum."].iter().any(|p| c.qual.starts_with(p));
+    // (library code given library callables: those that call what they are given, a thread's
+    // target, `operator.call`; not `sys.modules.get(m.__name__)`)
+    let calls_lib = CALLS_GIVEN.iter().any(|p| c.qual.starts_with(p));
     let code = |v: &Value| {
         v.pts.iter().any(|o| match an.heap.kind(o) {
-            Kind::Function | Kind::Bound | Kind::Partial | Kind::Method | Kind::External => true,
+            Kind::Function | Kind::Bound | Kind::Partial => true,
+            Kind::Method | Kind::External => calls_lib,
             Kind::Class => !types_only,
             Kind::Instance => an.heap.instance_class(o).is_some_and(|cl| an.class_lookup(cl, "__call__").is_some()),
             _ => false,

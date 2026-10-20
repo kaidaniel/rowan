@@ -1039,11 +1039,12 @@ impl Analyzer {
         out
     }
 
-    /// The program's `__init__`, `__new__` and `__call__` of class `c`: what code calling the
-    /// class or an instance of it runs.
-    pub(in crate::interp) fn construct_dunders(&mut self, c: ObjId, state: &State) -> Vec<ObjId> {
+    /// The program's `__call__` of class `c`, and its `__init__` and `__new__` where the class
+    /// itself is met (`called`): what code calling an instance of it, or it, runs.
+    pub(in crate::interp) fn construct_dunders(&mut self, c: ObjId, called: bool, state: &State) -> Vec<ObjId> {
         let mut out = Vec::new();
-        for name in ["__init__", "__new__", "__call__"] {
+        let names: &[&str] = if called { &["__init__", "__new__", "__call__"] } else { &["__call__"] };
+        for &name in names {
             let Some(owner) = self.class_lookup(c, name) else { continue };
             let k = key_str_lit(name);
             let v = state.slot_opt(owner, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned()).unwrap_or_default();
