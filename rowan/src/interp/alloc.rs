@@ -191,7 +191,9 @@ impl Analyzer {
         }
         // born here: its length is unknown until the code making it says
         state.set_lens(oid, (None, 0, 0));
-        if kind.is_record() {
+        // (a function made with an empty row of attributes: one a path then gives it is not
+        // there on the paths that do not, and a strong re-allocation drops the earlier ones)
+        if kind.is_record() || (kind == Kind::Function && row.is_some()) {
             let fresh = row.unwrap_or_default();
             if state.has_row(oid, ns) && !obj_single {
                 let j = state.row(oid, ns).join(&fresh);

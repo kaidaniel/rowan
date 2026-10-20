@@ -9,7 +9,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_literals, BOT, DATA, KeyVal, Ns, ObjId, Value};
+use crate::domain::{kv_literals, BOT, DATA, KeyVal, Ns, ObjId, Row, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::source::SourceKind;
@@ -94,7 +94,7 @@ impl Analyzer {
         };
         let n = node.node();
         let has_closure = !info.closure.is_empty();
-        let oid = self.alloc_at(Kind::Function, &n, state, &format!("def {}", qual), Payload::Func(Rc::new(info)), None, Ns::Item, None, None);
+        let oid = self.alloc_at(Kind::Function, &n, state, &format!("def {}", qual), Payload::Func(Rc::new(info)), Some(Row::new()), Ns::Attr, None, None);
         // a closure made inside a concrete call (not an entry run): its own analysis with
         // open parameters comes from the closure the factory's entry run makes
         let creator = self.cx.frames.iter().rev().find_map(|f| f.func);
