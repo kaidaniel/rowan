@@ -816,6 +816,11 @@ impl Analyzer {
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
         let returned = self.returned_args(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs));
+        // (a getter: the attribute it returns, read here; it changes nothing, it may raise)
+        if let Some(v) = self.getter_result(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs), node, state) {
+            self.flag_may_raise(state);
+            return v;
+        }
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
         let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();

@@ -62,6 +62,9 @@ pub struct Summaries {
     pub by_addr: FxHashMap<usize, ObjId>,
     pub spent: std::time::Duration,
     pub ms: usize,
+    /// per function code: the parameter and attribute names a getter's `return` reads
+    /// (`getter_result`), None for other functions
+    getters: FxHashMap<usize, Option<Rc<(String, Vec<String>)>>>,
 }
 
 /// A value without its heap: its scalar part, the records it may be, and whether it may be
@@ -160,6 +163,39 @@ impl Analyzer {
         self.summaries.applied += 1;
         let records = node.module == self.program.main_idx;
         self.materialize(&sh, &unknown, node, state, "", records)
+    }
+
+    /// A skipped call of a getter (`return self._link`, `return p.name`, `return self.a.b`: its
+    /// body one `return` of attributes of a parameter): that attribute as the call site's
+    /// object has it, the same value and object, where reading it runs no code of the
+    /// program's (a property, a descriptor, `__getattr__`); None for other functions.
+    pub(in crate::interp) fn getter_result(&mut self, foid: ObjId, self_v: Option<&Value>, positional: &[String], a: &super::Args, node: &Node, state: &mut State) -> Option<Value> {
+        let fi = self.heap.func_info(foid);
+        let code = fi.node.addr();
+        let path = match self.summaries.getters.get(&code) {
+            Some(p) => p.clone(),
+            None => {
+                let p = getter_path(&fi.node).map(Rc::new);
+                self.summaries.getters.insert(code, p.clone());
+                p
+            }
+        }?;
+        let (param, names) = (&path.0, &path.1);
+        let first = fi.node.params()?.posonlyargs.iter().chain(fi.node.params()?.args.iter()).next().map(|p| p.parameter.name.id.as_str());
+        let mut v = match self_v {
+            Some(r) if first == Some(param.as_str()) && !fi.is_static.get() => r.clone(),
+            // (a static method through an instance: its parameters not matched here)
+            Some(_) if fi.is_static.get() => return None,
+            _ if !a.star.is_empty() || !a.star_kw.is_empty() => return None,
+            _ => positional.iter().position(|x| x == param).and_then(|i| a.pos.get(i)).or_else(|| a.kw.get(&s(param)))?.clone(),
+        };
+        for name in names.iter() {
+            if v.pts.iter().any(|o| self.attr_runs_user_code(o, name, false)) {
+                return None;
+            }
+            v = self.load_attr(&v, name, node, state, false);
+        }
+        Some(v)
     }
 
     /// The shape of `ret`, a run's result: `pre` the state the run started from, `born` the
@@ -369,4 +405,29 @@ fn type_only(kv: &KeyVal) -> KeyVal {
         (None, false) if kv.is_bot() => KeyVal::Bot,
         (None, false) => DATA,
     }
+}
+
+/// A getter's body (after a docstring): one `return p.a.b` of attributes of parameter `p`,
+/// with the names in the order read; not async, not a generator.
+fn getter_path(f: &super::FuncNode) -> Option<(String, Vec<String>)> {
+    use ruff_python_ast as ast;
+    let super::FuncNode::Def(d) = f else { return None };
+    let body: &[ast::Stmt] = match d.body.first() {
+        Some(ast::Stmt::Expr(e)) if e.value.is_string_literal_expr() => &d.body[1..],
+        _ => &d.body,
+    };
+    let ([ast::Stmt::Return(r)], false) = (body, d.is_async) else { return None };
+    let mut e = r.value.as_deref()?;
+    let mut names = Vec::new();
+    while let ast::Expr::Attribute(a) = e {
+        names.push(a.attr.id.to_string());
+        e = &a.value;
+    }
+    let ast::Expr::Name(n) = e else { return None };
+    let params = d.parameters.posonlyargs.iter().chain(d.parameters.args.iter()).chain(d.parameters.kwonlyargs.iter());
+    if names.is_empty() || !params.into_iter().any(|p| p.parameter.name.id == n.id) {
+        return None;
+    }
+    names.reverse();
+    Some((n.id.to_string(), names))
 }
