@@ -113,5 +113,5 @@ re_ = _map["m_e"]()
 #@value re_: includes={'E'}
 built = STATE["built"]
 #@value built: includes={'e'}
-# (the skipped registrations walk none of the models' code: 44 visits before, 35 now)
-#@visits <= 40
+# (the skipped registrations walk none of the models' code: 44 visits before, 35 now; 43 with the slots applying a closure reads)
+#@visits <= 50

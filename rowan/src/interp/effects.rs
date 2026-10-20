@@ -65,7 +65,7 @@ pub struct RecvEffects {
 }
 
 /// A slot: (object, namespace, key).
-type Loc = (ObjId, Ns, KeyId);
+pub type Loc = (ObjId, Ns, KeyId);
 
 /// A skipped call's arguments as its code may change them (`args_as_seen`), the code reading
 /// them may run, and those it keeps: each with the dicts whose items may hold it and whether
@@ -105,7 +105,7 @@ impl ClosureWalk {
     /// may, a walk from it does not reach all of that).
     fn finished(&self) -> Closure {
         let mut c = self.out.clone();
-        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs] {
+        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs, &mut c.unbound] {
             l.sort_unstable();
             l.dedup();
         }
@@ -145,6 +145,50 @@ pub struct Closure {
     pub removed_values: Vec<(Value, Removes)>,
     pub iterated_locs: Vec<Loc>,
     pub iterated_values: Vec<Value>,
+    /// the slots the code reads names from that were not bound when it was walked (a name
+    /// defined later in its module or enclosing function): once one is, the closure is stale
+    pub unbound: Vec<Loc>,
+}
+
+impl Closure {
+    /// What this closure has that `prev` (a subset: an earlier round's) has not; `resumed`:
+    /// this one's walk went on from `prev`'s, so its values lists start with `prev`'s.
+    pub fn since(&self, prev: &Closure, resumed: bool) -> Closure {
+        fn locs(a: &[Loc], b: &[Loc]) -> Vec<Loc> {
+            a.iter().filter(|l| b.binary_search(l).is_err()).copied().collect()
+        }
+        fn vals<T: Clone>(a: &[T], b: &[T], resumed: bool) -> Vec<T> {
+            a[if resumed { b.len().min(a.len()) } else { 0 }..].to_vec()
+        }
+        Closure {
+            code: FxHashSet::default(),
+            locs: locs(&self.locs, &prev.locs),
+            held_locs: locs(&self.held_locs, &prev.held_locs),
+            held2_locs: locs(&self.held2_locs, &prev.held2_locs),
+            rebound: locs(&self.rebound, &prev.rebound),
+            values: vals(&self.values, &prev.values, resumed),
+            held_values: vals(&self.held_values, &prev.held_values, resumed),
+            edited_locs: locs(&self.edited_locs, &prev.edited_locs),
+            edited_values: vals(&self.edited_values, &prev.edited_values, resumed),
+            removed_locs: self.removed_locs.iter().filter(|r| !prev.removed_locs.contains(r)).cloned().collect(),
+            removed_values: vals(&self.removed_values, &prev.removed_values, resumed),
+            iterated_locs: locs(&self.iterated_locs, &prev.iterated_locs),
+            iterated_values: vals(&self.iterated_values, &prev.iterated_values, resumed),
+            unbound: locs(&self.unbound, &prev.unbound),
+        }
+    }
+
+    /// The slots it names.
+    pub fn slot_locs(&self) -> impl Iterator<Item = Loc> + '_ {
+        let locs = [&self.locs, &self.held_locs, &self.held2_locs, &self.rebound, &self.edited_locs, &self.iterated_locs, &self.unbound];
+        locs.into_iter().flat_map(|l| l.iter().copied()).chain(self.removed_locs.iter().map(|(l, _)| *l))
+    }
+
+    /// The objects its values are.
+    pub fn value_objects(&self) -> impl Iterator<Item = ObjId> + '_ {
+        let values = [&self.values, &self.held_values, &self.edited_values, &self.iterated_values];
+        values.into_iter().flat_map(|v| v.iter().flat_map(|v| v.pts.iter())).chain(self.removed_values.iter().flat_map(|(v, _)| v.pts.iter()))
+    }
 }
 
 impl Analyzer {
@@ -486,15 +530,19 @@ impl Analyzer {
     /// classes, the methods of those classes it reads, dunders): the slots whose values may
     /// change (globals, cells, class attributes by name) or be rebound, and other values it may
     /// change (mutable defaults, bound receivers). Computed once per set of roots: the code a
-    /// name holds is taken as fixed (rebinding a function or class is monkey-patching), and
-    /// methods called by a computed name are not followed; the code in the data those values
+    /// name holds is taken as fixed (rebinding a function or class is monkey-patching; a
+    /// builtin's name holds the builtin), until a name it reads that was not bound then is
+    /// (`Closure::unbound`: a `def` later in the module); methods called by a computed name are not followed; the code in the data those values
     /// hold is followed where the call is (`skipped_call`). `from`: the walk of a subset of the
     /// roots, resumed (and left there), unless the closure is cached.
     pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
         let whole = self.effects.whole.is_some();
+        // (a name its code reads bound since: the closure is computed again)
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
-            return c.clone();
+            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) {
+                return c.clone();
+            }
         }
         // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
         // code the last one's data held)
@@ -1163,7 +1211,12 @@ impl Analyzer {
                 f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, removes, held: f.changes || f.methods || f.held || f.held2 || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
-            code(self, &state.slot(loc.0, loc.1, loc.2), work);
+            match state.slot_opt(loc.0, loc.1, loc.2) {
+                Some(v) => code(self, &v, work),
+                // (a builtin's name not bound in the module: the builtin, taken as fixed)
+                None if !intern::key_as_str(loc.2).is_some_and(|n| crate::models::tables::is_builtin_name(&n)) => out.unbound.push(loc),
+                None => {}
+            }
         }
     }
 

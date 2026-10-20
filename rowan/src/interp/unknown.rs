@@ -19,13 +19,42 @@ pub const MAX_ARG_JOIN: usize = 64;
 /// Havoc walks remembered (`Havoc::walk_from`); past this many the table starts over.
 pub const HAVOC_MEMOS: usize = 1024;
 
+/// The parts of a state unknown code changes (rows, slots, elements, lengths), kept to tell
+/// later which objects a state changed since (O(1) to keep: the maps are persistent).
+pub struct Snapshot {
+    rows: crate::layered::LayerMap<(ObjId, Ns), Row>,
+    slots: crate::layered::TwoLevel<ObjId, SlotKey, Value>,
+    elems: crate::layered::LayerMap<ObjId, KeyVal>,
+    lens: crate::layered::LayerMap<ObjId, crate::state::LenFact>,
+}
+
+impl Snapshot {
+    pub fn of(state: &State) -> Snapshot {
+        Snapshot { rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone() }
+    }
+
+    /// The objects whose rows, slots, elements or lengths differ in `state` (at a cost of what
+    /// differs); None past `limit` of them.
+    pub fn changed(&self, state: &State, limit: usize) -> Option<FxHashSet<ObjId>> {
+        let (mut ch, slots) = self.changed_parts(state, limit)?;
+        ch.extend(slots.into_iter().map(|(o, _)| o));
+        Some(ch)
+    }
+
+    /// `changed`, the objects whose rows, elements or lengths differ apart from the slots that
+    /// differ.
+    pub fn changed_parts(&self, state: &State, limit: usize) -> Option<(FxHashSet<ObjId>, Vec<(ObjId, SlotKey)>)> {
+        let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&self.rows, limit)?.into_iter().map(|(o, _)| o).collect();
+        ch.extend(state.elems.diff_upto(&self.elems, limit)?);
+        ch.extend(state.lens.diff_upto(&self.lens, limit)?);
+        Some((ch, state.slots.diff_upto(&self.slots, limit)?))
+    }
+}
+
 /// What a havoc walk met and the heap it left (`Havoc::walk_from`).
 pub struct HavocMemo {
     pub roots: Vec<ObjId>,
-    pub rows: crate::layered::LayerMap<(ObjId, Ns), Row>,
-    pub slots: crate::layered::TwoLevel<ObjId, SlotKey, Value>,
-    pub elems: crate::layered::LayerMap<ObjId, KeyVal>,
-    pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
+    pub left: Snapshot,
     pub visited: FxHashSet<ObjId>,
     pub code: Vec<ObjId>,
     /// the skipped method's receivers and names they were walked by, and how often each was met
@@ -53,6 +82,25 @@ pub struct Havoc {
     /// the next unknown call is a skipped call's, which follows the classes it meets itself
     /// (their dunders among their code)
     pub classes_followed: bool,
+    /// per code followed (`follow_code`) and receivers walked by names: what it read and
+    /// changed, and the heap it left
+    follows: FxHashMap<u64, FollowMemo>,
+    /// while code is followed: the objects its walks meet
+    met: Option<Vec<ObjId>>,
+}
+
+/// A `follow_code` remembered: its code, the skipped method's receivers walked by names (and
+/// how often its walks met each), the objects whose rows, slots, elements or lengths it read or
+/// changed, and the heap it left.
+pub struct FollowMemo {
+    roots: Vec<ObjId>,
+    guard: Vec<(ObjId, std::rc::Rc<[KeyId]>)>,
+    met: Vec<u32>,
+    deps: FxHashSet<ObjId>,
+    /// the slots it read or rebound, of objects it did not walk (globals, cells, class
+    /// attributes)
+    slots: FxHashSet<(ObjId, SlotKey)>,
+    left: Snapshot,
 }
 
 /// The object standing for any value unknown code may have stored: nothing known about it.
@@ -67,6 +115,44 @@ impl Havoc {
     pub(in crate::interp) fn new_walk(&mut self) -> u32 {
         self.walks += 1;
         self.walks
+    }
+
+    /// The key of the code `roots` followed with the receivers walked by names now.
+    fn follow_key(&self, roots: &[ObjId]) -> u64 {
+        let mut h = rustc_hash::FxHasher::default();
+        std::hash::Hash::hash(roots, &mut h);
+        for (g, _, used) in &self.guard {
+            std::hash::Hash::hash(&(g, &**used), &mut h);
+        }
+        std::hash::Hasher::finish(&h)
+    }
+
+    /// The code `roots` was followed before (with the same receivers walked by names), and
+    /// nothing it read or changed has changed since: running it again changes nothing (each of
+    /// its writes would write what is there). Its walks' meetings of the receivers count again.
+    fn followed_unchanged(&mut self, key: u64, roots: &[ObjId], state: &State) -> bool {
+        let Some(m) = self.follows.get(&key) else { return false };
+        if m.roots != roots || !m.guard.iter().map(|(g, u)| (*g, u)).eq(self.guard.iter().map(|(g, _, u)| (*g, u))) {
+            return false;
+        }
+        // (a diff past what re-applying it would read costs more than it saves)
+        match m.left.changed_parts(state, (m.deps.len() + m.slots.len()).max(64)) {
+            Some((ch, slots)) if !ch.iter().any(|o| m.deps.contains(o)) && !slots.iter().any(|(o, k)| m.deps.contains(o) || m.slots.contains(&(*o, *k))) => {
+                for ((_, n, _), k) in self.guard.iter_mut().zip(&m.met) {
+                    *n += k;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn remember_follow(&mut self, key: u64, roots: Vec<ObjId>, met: Vec<u32>, deps: Vec<ObjId>, slots: FxHashSet<(ObjId, SlotKey)>, state: &State) {
+        if self.follows.len() >= HAVOC_MEMOS {
+            self.follows.clear();
+        }
+        let guard = self.guard.iter().map(|(g, _, u)| (*g, u.clone())).collect();
+        self.follows.insert(key, FollowMemo { roots, guard, met, deps: deps.into_iter().collect(), slots, left: Snapshot::of(state) });
     }
 
     /// Unknown code ran on `vals`, past the objects walk `walk` met already (marking those it
@@ -165,13 +251,17 @@ impl Havoc {
         for ((_, n, _), m) in self.guard.iter_mut().zip(met) {
             *n = (*n).max(m);
         }
+        // (what it met, the remembered walk's too: what a `follow_code` read and changed)
+        if let Some(m) = &mut self.met {
+            m.extend(visited.iter().copied());
+        }
         if self.memo.len() >= HAVOC_MEMOS {
             self.memo.clear();
         }
         code.sort_unstable();
         code.dedup();
         let guard = self.guard.iter().map(|(g, n, used)| (*g, used.clone(), *n)).collect();
-        self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
+        self.memo.insert(key, HavocMemo { roots, left: Snapshot::of(state), visited, code, guard });
     }
 
     /// Code rowan does not follow changed the containers `objs` in place (`Flags::edits`; with
@@ -200,14 +290,7 @@ impl Havoc {
         match memo {
             Some(m) => {
                 let limit = (m.visited.len() / 4).max(32);
-                let changed: Option<FxHashSet<ObjId>> = (|| {
-                    let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&m.rows, limit)?.into_iter().map(|(o, _)| o).collect();
-                    ch.extend(state.slots.diff_upto(&m.slots, limit)?.into_iter().map(|(o, _)| o));
-                    ch.extend(state.elems.diff_upto(&m.elems, limit)?);
-                    ch.extend(state.lens.diff_upto(&m.lens, limit)?);
-                    Some(ch)
-                })();
-                match changed {
+                match m.left.changed(state, limit) {
                     Some(ch) => {
                         work.extend(ch.iter().copied().filter(|o| m.visited.contains(o)));
                         self.code.extend(m.code.iter().copied());
@@ -410,19 +493,71 @@ impl Analyzer {
         self.havoc.walk_from(&mut self.heap, vals, rid, site, state, walk);
     }
 
+    /// The code followed again (`Havoc::follows`, key `key`) changed nothing, but what it may
+    /// change may have changed again: as its walk would, it drops the tests of those objects
+    /// (their rows got this call's mutator) and the last items of the lists among them.
+    fn followed_again(&mut self, key: u64, state: &mut State) {
+        // (what it may change may have changed again: the tests of it no longer hold, as
+        // when its walk gives their rows this call's mutator)
+        if let Some(m) = self.havoc.follows.get(&key).filter(|_| !state.facts.is_empty()) {
+            let on = |o: ObjId| m.deps.contains(&o);
+            let kept: Vec<_> = state.facts.iter().filter(|f| !(f.deps.iter().any(|(_, v)| v.pts.iter().any(on)) || f.rows.iter().any(|((o, _), _, _)| on(*o)) || f.guards.iter().any(|((o, _), _)| on(*o)))).cloned().collect();
+            if kept.len() != state.facts.len() {
+                state.facts = std::sync::Arc::new(kept);
+            }
+        }
+        // (a list given an item since, as a walk would: its last item, any length)
+        let lasts: Vec<ObjId> = state.lasts.iter().map(|(o, _)| *o).filter(|o| self.havoc.follows.get(&key).is_some_and(|m| m.deps.contains(o))).collect();
+        for o in lasts {
+            self.heap.set_prefix(o, state, 0);
+        }
+    }
+
     /// What the code `roots` hold may change when it runs where rowan does not run it: the
     /// values at the slots its closure may change are havocked, the slots it rebinds may hold
-    /// anything, and the code the data they hold is followed too.
+    /// anything, and the code the data they hold is followed too, in rounds (each applies what
+    /// the closure gained). The same code followed before, with nothing it read or changed
+    /// changed since, changes nothing again (`Havoc::follows`).
     pub(super) fn follow_code(&mut self, mut roots: Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State) {
+        roots.sort_unstable();
+        roots.dedup();
+        // (a closure is the program's own while it is followed whole: not remembered)
+        let memo = self.effects.whole.is_none();
+        let key = self.havoc.follow_key(&roots);
+        if memo && self.havoc.followed_unchanged(key, &roots, state) {
+            self.followed_again(key, state);
+            return;
+        }
+        let first = roots.clone();
+        let counts0: Vec<u32> = self.havoc.guard.iter().map(|(_, n, _)| *n).collect();
+        let mut deps: Vec<ObjId> = self.havoc.guard.iter().map(|(g, _, _)| *g).collect();
+        let met0 = self.havoc.met.replace(Vec::new());
+        let mut slots: FxHashSet<(ObjId, SlotKey)> = FxHashSet::default();
         let any = Value::obj(crate::interp::any_object(&mut self.heap));
         let walk = self.havoc.new_walk();
         self.havoc.code.clear();
         let mut walk_so_far = None;
+        let mut prev: Option<std::rc::Rc<super::effects::Closure>> = None;
         loop {
             roots.append(&mut self.havoc.code);
             roots.sort_unstable();
             roots.dedup();
-            let cl = self.code_closure(&roots, &mut walk_so_far, state);
+            let resumed = walk_so_far.is_some();
+            let full = self.code_closure(&roots, &mut walk_so_far, state);
+            // (a later round: what the closure gained, the rest was applied)
+            let gained;
+            let cl: &super::effects::Closure = match &prev {
+                Some(p) => {
+                    gained = full.since(p, resumed);
+                    &gained
+                }
+                None => &full,
+            };
+            let before = slots.len();
+            slots.extend(cl.slot_locs().map(|(o, ns, k)| (o, (ns, k))));
+            // (each slot it reads: part of the work measure)
+            (before..slots.len()).for_each(|_| self.budget.walk_visit());
+            deps.extend(cl.value_objects());
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
             // (values whose parts may change, not themselves: their parts; whose parts' parts
@@ -430,16 +565,19 @@ impl Analyzer {
             let mut parts: Vec<ObjId> = Vec::new();
             for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
                 for o in v.pts.iter() {
+                    deps.push(o);
                     self.obj_edges(o, state, &mut parts);
                 }
             }
             let mut mid: Vec<ObjId> = Vec::new();
             for v in cl.held2_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)) {
                 for o in v.pts.iter() {
+                    deps.push(o);
                     self.obj_edges(o, state, &mut mid);
                 }
             }
             for o in mid {
+                deps.push(o);
                 self.havoc.code.extend(code_of(&self.heap, o));
                 self.obj_edges(o, state, &mut parts);
             }
@@ -450,18 +588,26 @@ impl Analyzer {
             let objs = |locs: &[(ObjId, Ns, KeyId)], values: &[Value], state: &State| -> Vec<ObjId> { locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect() };
             for (locs, values, change) in [(&cl.edited_locs, &cl.edited_values, true), (&cl.iterated_locs, &cl.iterated_values, false)] {
                 let objs = objs(locs, values, state);
+                deps.extend_from_slice(&objs);
                 self.havoc.edit(&mut self.heap, &objs, change, site, state);
             }
             let removed: Vec<(ObjId, Removes)> = cl.removed_locs.iter().map(|((o, ns, k), r)| (state.slot(*o, *ns, *k), *r)).chain(cl.removed_values.iter().cloned()).flat_map(|(v, r)| v.pts.iter().map(move |o| (o, r)).collect::<Vec<_>>()).collect();
+            deps.extend(removed.iter().map(|(o, _)| *o));
             may_have_removed(&self.heap, &removed, state);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
             }
-            self.havoc.code.retain(|c| !cl.code.contains(c));
+            self.havoc.code.retain(|c| !full.code.contains(c));
+            prev = Some(full);
             if self.havoc.code.is_empty() {
-                return;
+                break;
             }
+        }
+        deps.extend(std::mem::replace(&mut self.havoc.met, met0).unwrap_or_default());
+        if memo {
+            let added: Vec<u32> = self.havoc.guard.iter().zip(counts0).map(|((_, n, _), n0)| n - n0).collect();
+            self.havoc.remember_follow(key, first, added, deps, slots, state);
         }
     }
 
