@@ -419,9 +419,20 @@ const LOOKS_AT_CODE: &[&str] = &[
 ];
 
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    // (a library function given the program's functions may call them: `inspect.getmembers(x,
-    // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
-    let code = |v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
+    // (a library function given what it may call — the program's functions, classes, callable
+    // instances, a library function or bound method that may change its receiver or arguments —
+    // may call it: `inspect.getmembers(x, pred)`, `asyncio.to_thread(f, …)`, `os.walk(top,
+    // onerror=errs.append)`, `operator.call(d.setdefault, k, v)`; typing's, abc's and enum's
+    // look at classes only)
+    let types_only = ["typing.", "abc.", "enum."].iter().any(|p| c.qual.starts_with(p));
+    let code = |v: &Value| {
+        v.pts.iter().any(|o| match an.heap.kind(o) {
+            Kind::Function | Kind::Bound | Kind::Partial | Kind::Method | Kind::External => true,
+            Kind::Class => !types_only,
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|cl| an.class_lookup(cl, "__call__").is_some()),
+            _ => false,
+        })
+    };
     if !c.qual.starts_with("builtins.") && !LOOKS_AT_CODE.iter().any(|p| c.qual.starts_with(p)) && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
         return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
     }

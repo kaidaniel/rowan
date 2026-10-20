@@ -1039,6 +1039,19 @@ impl Analyzer {
         out
     }
 
+    /// The program's `__init__`, `__new__` and `__call__` of class `c`: what code calling the
+    /// class or an instance of it runs.
+    pub(in crate::interp) fn construct_dunders(&mut self, c: ObjId, state: &State) -> Vec<ObjId> {
+        let mut out = Vec::new();
+        for name in ["__init__", "__new__", "__call__"] {
+            let Some(owner) = self.class_lookup(c, name) else { continue };
+            let k = key_str_lit(name);
+            let v = state.slot_opt(owner, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned()).unwrap_or_default();
+            out.extend(v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))));
+        }
+        out
+    }
+
     /// Does a call of `f` on an instance of class `c` change nothing (its receiver, its
     /// arguments, what its code reaches)? The methods it calls on its receiver neither
     /// (`depth`: at most 3 calls deep; `seen`: those met).

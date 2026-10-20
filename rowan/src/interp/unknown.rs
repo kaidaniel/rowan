@@ -404,6 +404,9 @@ impl Analyzer {
         let classes: Vec<ObjId> = found.iter().copied().filter(|o| !classes_followed && !stores && self.heap.kind(*o) == Kind::Class).collect();
         for c in classes {
             dunders.extend(self.changing_dunders(c, state).iter().copied());
+            // (it may call the class, or an instance of it: what their code reaches besides
+            // the instance may change, `Box.made += 1` in `__init__`)
+            dunders.extend(self.construct_dunders(c, state));
         }
         if !dunders.is_empty() {
             dunders.sort_unstable();
