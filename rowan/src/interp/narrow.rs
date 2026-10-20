@@ -256,6 +256,15 @@ impl Analyzer {
                         }
                         return;
                     }
+                    // (a dunder of a class a decorator or a library base made: from places
+                    // rows do not show, `__dataclass_fields__`)
+                    let made = |an: &Analyzer, o: u32| {
+                        let c = if an.heap.kind(o) == Kind::Class { Some(o) } else { an.heap.instance_class(o) };
+                        c.is_none_or(|c| an.heap.mro(c).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.dataclass_fields.borrow().is_some() || ci.pyd_dataclass.get() || ci.lib.quals.iter().any(|q| q != "builtins.object"))))
+                    };
+                    if intern::key_as_str(k).is_some_and(|n| n.starts_with("__")) && rec.pts.iter().any(|o| made(self, o)) {
+                        return;
+                    }
                     // (an instance whose class defines the name has it whatever its own
                     // attributes are: its row says nothing about it)
                     // (a class with a base rowan does not see: its row is not all it has)
