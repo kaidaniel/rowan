@@ -1092,12 +1092,13 @@ pub struct ThreadState {
     fp_visits: usize,
     view_hits: u64,
     row_joins: usize,
+    opaque: bool,
     shapes: crate::models::shape::Saved,
 }
 
 impl Default for ThreadState {
     fn default() -> Self {
-        ThreadState { merged: Default::default(), any: ObjId::MAX, views: Default::default(), viewed: Default::default(), drops: 0, fp_visits: 0, view_hits: 0, row_joins: 0, shapes: Default::default() }
+        ThreadState { merged: Default::default(), any: ObjId::MAX, views: Default::default(), viewed: Default::default(), drops: 0, fp_visits: 0, view_hits: 0, row_joins: 0, opaque: false, shapes: Default::default() }
     }
 }
 
@@ -1112,6 +1113,7 @@ impl ThreadState {
         FP_VISITS.with(|c| self.fp_visits = c.replace(self.fp_visits));
         VIEW_HITS.with(|c| self.view_hits = c.replace(self.view_hits));
         crate::domain::swap_row_joins(&mut self.row_joins);
+        crate::models::pynum::swap_opaque(&mut self.opaque);
         crate::models::shape::swap(&mut self.shapes);
     }
 }

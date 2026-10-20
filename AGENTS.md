@@ -56,12 +56,14 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened. An activation is a call site in its context (4 deep, then the innermost); with literal arguments, its place, receiver and literals (40 deep); a call of itself with nothing but the innermost one's arguments or data from outside: the innermost past one level (`recursion_without_progress`).
   * **Result summaries** (`summary.rs`): a call that does not run gives back what its function returns for any call, as a
-    *shape* (literals, typed unknowns, per record born in the run its keys, slots, elements, length, class) made anew at the
-    call site (`materialize`: up to 16 records, 4 deep; the rest the call's unknown result). An object the run was given,
-    read from elsewhere, or stored where the program reads it back (`escaped`: the receiver, a global, unknown code's object) is
-    `any`. Shapes come from a pre-pass by an analyzer of its own (`result_summaries`: the module's code with every call after
-    a function's first skipped, `Budget::cap`, then each function's run for any call, earlier definitions first, within a
-    quarter of the deadline; packages not followed), keyed by the `def`'s address (the parse cache keeps it).
+    *shape* (literals, typed unknowns; per record born in the run its keys, slots, elements, length, class). At the main
+    module's call sites the records are made anew there (`materialize`: up to 16 records, 4 deep; the rest the call's unknown
+    result); elsewhere its scalars by type only (`int(?)`: records there cost every later walk and join). An object the run was
+    given, read from elsewhere, or stored where the program reads it back (`escaped`: the receiver, a global, unknown code's
+    object) is `any`. Shapes come from a *source*: an analyzer of its own (`summary_source`, made at the first skipped call: the
+    module's code with every call after a function's first skipped, `Budget::cap`, set up for runs on demand), which runs a
+    function for any call when a call of it is first skipped (`shape_for`; its thread marks swapped in, `ThreadState`; a quarter
+    of the deadline in all); keyed by the `def`'s address (the parse cache keeps it); packages are not followed there.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class); where that code may have removed an attribute, the class's `__getattr__` there is a call that does not run.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
