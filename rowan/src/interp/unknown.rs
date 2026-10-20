@@ -389,14 +389,7 @@ impl Analyzer {
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         // everything it can reach through what it is given may have changed: keys, values,
         // items, lengths; and it may call the program's functions it is given
-        let outer = self.havoc.met.replace(Vec::new());
-        self.havoc_reachable(&vals, rid, site_id, state);
-        let mut found = std::mem::take(&mut self.havoc.code);
-        let met = std::mem::replace(&mut self.havoc.met, outer).unwrap_or_default();
-        self.unknown_runs_generators(&met, rid, site_id, &mut found, state);
-        if let Some(m) = &mut self.havoc.met {
-            m.extend(met);
-        }
+        let found = self.havoc_given(&vals, rid, site_id, state);
         let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Module)).collect();
         // (a skipped call follows them itself, with its own code: `classes_followed`)
         if !callables.is_empty() && !classes_followed {
@@ -433,6 +426,20 @@ impl Analyzer {
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// Unknown code ran on `vals` (`havoc_reachable`), and the generators it met may run on
+    /// (`unknown_runs_generators`): the code it met.
+    fn havoc_given(&mut self, vals: &[Value], rid: ObjId, site_id: StrId, state: &mut State) -> Vec<ObjId> {
+        let outer = self.havoc.met.replace(Vec::new());
+        self.havoc_reachable(vals, rid, site_id, state);
+        let mut found = std::mem::take(&mut self.havoc.code);
+        let met = std::mem::replace(&mut self.havoc.met, outer).unwrap_or_default();
+        self.unknown_runs_generators(&met, rid, site_id, &mut found, state);
+        if let Some(m) = &mut self.havoc.met {
+            m.extend(met);
+        }
+        found
     }
 
     /// The generators among the objects unknown code met (`met`) may run on (it may consume
