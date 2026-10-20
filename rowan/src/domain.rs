@@ -868,11 +868,15 @@ pub struct KeysOf {
     pub chain: LensId,
     /// conditional depth at which an iteration over these keys is exhaustive, or -1
     pub exhaustive_depth: i32,
+    /// the keys the objects had when these were taken (`STAR`: they were open then): a key
+    /// they lose later may still be this one (`State::keys_row`)
+    pub then: KeySet,
 }
 
 impl KeysOf {
-    pub fn new(objs: ObjSet, ns: Ns) -> Self {
-        KeysOf { objs, ns, exclude: KeySet::new(), chain: EMPTY_LENS, exhaustive_depth: -1 }
+    /// The keys of `objs` taken when their keys are `then` (`State::keys_of`).
+    pub fn new(objs: ObjSet, ns: Ns, then: KeySet) -> Self {
+        KeysOf { objs, ns, exclude: KeySet::new(), chain: EMPTY_LENS, exhaustive_depth: -1, then }
     }
 }
 
@@ -1187,7 +1191,7 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
     }
     if let (KeyVal::KeysOf(x), KeyVal::KeysOf(y)) = (a, b) {
         if x.exclude == y.exclude && x.chain == y.chain && x.ns == y.ns {
-            return KeyVal::KeysOf(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1 });
+            return KeyVal::KeysOf(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1, then: x.then.union(&y.then) });
         }
     }
     if let (KeyVal::Data(x, _), KeyVal::Data(y, _)) = (a, b) {

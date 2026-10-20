@@ -702,6 +702,55 @@ impl State {
         Row::new()
     }
 
+    /// The keys of `objs` in `ns` taken now (`for k in d`): the keys they have now, any if
+    /// one is open (`KeysOf::then`).
+    pub fn keys_of(&self, objs: crate::domain::ObjSet, ns: Ns) -> crate::domain::KeysOf {
+        let mut then = IdSet::new();
+        for o in objs.iter() {
+            let r = self.row(o, ns);
+            then = then.union(&r.present);
+            if r.open() {
+                then = then.insert(STAR);
+            }
+        }
+        crate::domain::KeysOf::new(objs, ns, then)
+    }
+
+    /// The row whose keys `ko` ranges over: its objects' rows joined, with the keys they had
+    /// when `ko` was taken (they may have lost some since: `d.clear()` after `for k in d`), and
+    /// open where one of them was open then.
+    pub fn keys_row(&self, ko: &crate::domain::KeysOf) -> Row {
+        let row = crate::domain::join_rows(ko.objs.iter().map(|x| self.row(x, ko.ns)));
+        let then = ko.then.remove(STAR);
+        if then.difference(&row.present).is_empty() && (!ko.then.contains(STAR) || row.open()) {
+            return row;
+        }
+        let mut d = row.data();
+        d.present = d.present.union(&then);
+        d.absent = d.absent.difference(&then);
+        d.absent_likely = d.absent_likely.difference(&then);
+        let row = Row::from_data(d);
+        if ko.then.contains(STAR) && !row.open() {
+            return row.mutate(crate::intern::s("keys"));
+        }
+        row
+    }
+
+    /// The type of the keys `ko` ranges over: a closed record's, the type all its keys have;
+    /// else `keys_type`, where its objects lost none of them since.
+    pub fn keys_of_type(&self, ko: &crate::domain::KeysOf) -> Option<&'static str> {
+        // (a closed record's keys: the type all of them have)
+        let row = self.keys_row(ko);
+        if row.closed() && !row.present.is_empty() {
+            return crate::domain::TYPE_NAMES.iter().copied().find(|t| row.present.iter().all(|k| crate::domain::key_type(k, t)));
+        }
+        let lost = ko.objs.iter().fold(ko.then.remove(STAR), |ks, o| ks.difference(&self.row(o, ko.ns).present));
+        if !lost.is_empty() {
+            return None;
+        }
+        self.keys_type(ko.objs.iter(), ko.ns)
+    }
+
     pub fn has_row(&self, oid: ObjId, ns: Ns) -> bool {
         self.rows.contains_key(&(oid, ns)) || (is_any(oid) && matches!(ns, Ns::Item | Ns::Attr))
     }

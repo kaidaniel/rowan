@@ -303,7 +303,7 @@ impl Analyzer {
         }
         if let Payload::View(ViewKind::Keys, recv) = &self.heap.obj(oid).payload {
             if name == "str" {
-                return Err(Value::kv_only(KeyVal::KeysOf(crate::domain::KeysOf::new(recv.pts.clone(), Ns::Item))));
+                return Err(Value::kv_only(KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item))));
             }
         }
         Ok(self.method_value(&format!("view.{}", name), &Value::obj(oid)))
