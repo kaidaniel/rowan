@@ -84,7 +84,7 @@ fn main() {
             other => file = Some(other.to_string()),
         }
     }
-    let opts = Opts { search, follow, site, entry, imports };
+    let opts = Opts { search, follow, site, entry, imports, probe: None };
     if serve {
         on_big_stack(move || Ok(serve::serve_loop(opts)));
         return;
@@ -127,11 +127,14 @@ struct Opts {
     site: Vec<String>,
     entry: bool,
     imports: bool,
+    /// `rowan serve`, an analysis without following installed packages: the packages it
+    /// would follow, and a flag it sets when the program imports one (`serve::followable`)
+    probe: Option<(Vec<String>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
 }
 
 /// site-packages directories for `file`: the ones given, `$VIRTUAL_ENV`, and a `.venv`
 /// under the file's directory or an ancestor (no Python interpreter is consulted).
-fn site_packages_for(file: &str, given: &[String]) -> Vec<String> {
+pub(crate) fn site_packages_for(file: &str, given: &[String]) -> Vec<String> {
     let mut out: Vec<String> = given.to_vec();
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(v) = std::env::var("VIRTUAL_ENV") {
@@ -275,7 +278,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
 
 /// The analyser of `file` with these import options (hover facts collected with `facts`).
 fn analyser(file: &str, opts: Opts, facts: bool) -> Result<Analyzer, String> {
-    let Opts { search, follow, site, entry, imports } = opts;
+    let Opts { search, follow, site, entry, imports, .. } = opts;
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     let dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);

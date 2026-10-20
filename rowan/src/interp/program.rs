@@ -48,6 +48,8 @@ pub struct Program {
     pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
     /// the classes the program defines, in definition order
     pub user_classes: Vec<ObjId>,
+    /// the top-level names of modules imported that rowan did not read (`external_module`)
+    pub external: std::collections::BTreeSet<String>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     rel_files: RefCell<FxHashMap<u32, String>>,
     /// module index -> whether it is the program's own (`is_local_idx`: paths canonicalized once)
@@ -323,6 +325,7 @@ impl Analyzer {
     /// A module rowan does not read: an external object (torch and numpy turn the shape
     /// model on).
     pub(super) fn external_module(&mut self, name: &str) -> Value {
+        self.program.external.insert(name.split('.').next().unwrap_or(name).to_string());
         if name == "torch" || name.starts_with("torch.") {
             self.m.torch_on = true;
             self.m.torch_real = true;

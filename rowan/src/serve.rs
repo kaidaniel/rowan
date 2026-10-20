@@ -9,10 +9,12 @@
 //!   `{"event":"cut","path":P,"whole":…}` (how far it got, `analysis_json`; a module code's
 //!   document answered after the cut carries it as `whole`).
 //! * Following installed packages (`--follow`): all of the above runs without following, so the
-//!   first answer comes as fast as without; a whole program's analysis that follows them starts
-//!   too (`pending` until it ends), and when it completes (not cut by its deadline) its document
-//!   replaces the answer, `{"event":"analysed","followed":true,…}` (a later event of the analyses
-//!   without following then says nothing). A newer `analyse`, `changed` or `cancel` cuts it.
+//!   first answer comes as fast as without. When they saw the program import a package it would
+//!   follow (by the answer, or when the whole program's analysis completes), a whole program's
+//!   analysis following them starts (`pending`, `following`); when it completes (not cut by its
+//!   deadline) its document replaces the answer, `{"event":"analysed","followed":true,…}` (later
+//!   events of the analyses without following say nothing). A newer `analyse`, `changed` or
+//!   `cancel` cuts it.
 //! * `{"cmd":"hover","path":P,"line":L}` returns the `--facts` document of the function of `P`
 //!   defined over line L, from its run for any call (open parameters as annotated, from the
 //!   state the module ended in), cached per function until a file it depends on changes; it
@@ -93,6 +95,11 @@ fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (st
             an.main_block_unrun();
         }
         an.run();
+        if let Some((follow, flag)) = &opts.probe {
+            if followable(&an.external_imports(), follow, &path, &opts.site) {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         if std::env::var("ROWAN_DEBUG").is_ok() {
             eprintln!("{} ({} run of {})", an.work_line(), if whole { "whole" } else { "module" }, path);
         }
@@ -336,22 +343,24 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
         let mut sh = shared.lock().unwrap();
         (sh.cancel_flag(path), sh.cancel_flag(path))
     };
-    // (following installed packages: the answer comes from analyses without, one with follows)
-    let following = !opts.follow.is_empty() && spawn_followed(shared, out, opts, path, generation, t0);
-    let opts = &unfollowed(opts);
+    // (following installed packages: the answer comes from analyses without; when they see the
+    // program import one it would follow, an analysis following them starts, `follow_later`)
+    let later = FollowLater { opts: opts.clone(), probe: Default::default(), spawned: Default::default() };
+    let opts = &Opts { probe: (!opts.follow.is_empty()).then(|| (opts.follow.clone(), later.probe.clone())), ..unfollowed(opts) };
     let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, whole_cancel);
     let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module, module_cancel);
     let answer = |res: Result<(String, Vec<String>), String>, pending: bool| -> String {
+        let mut following = later.start(shared, out, path, generation, t0);
         let mut pending = pending || following;
         match res {
             Ok((mut doc, mut deps)) => {
                 let mut sh = shared.lock().unwrap();
                 // (the analysis following installed packages answered first: its document)
                 match sh.cache.get(path).filter(|_| sh.followed.get(path) == Some(&generation)) {
-                    Some((d, r)) => (doc, deps, pending) = (r.clone(), d.iter().map(|(p, _)| p.clone()).collect(), false),
+                    Some((d, r)) => (doc, deps, pending, following) = (r.clone(), d.iter().map(|(p, _)| p.clone()).collect(), false, false),
                     None => drop(sh.cache.insert(path.to_string(), (hashed(&deps), doc.clone()))),
                 }
-                format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"pending\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), pending, t0.elapsed().as_millis(), serde_json::json!(deps), doc)
+                format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"pending\":{},\"following\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), pending, following, t0.elapsed().as_millis(), serde_json::json!(deps), doc)
             }
             Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
         }
@@ -400,8 +409,8 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
     keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx: module_tx });
     // (the whole program's document, when its analysis completes, replaces this one)
     let waiter = std::thread::Builder::new().spawn({
-        let (shared, out, path, module_doc) = (shared.clone(), out.clone(), path.to_string(), doc.clone());
-        move || follow_whole(&shared, &out, &path, generation, whole_rx, _whole_tx, module_doc, t0)
+        let (shared, out, path, module_doc, later) = (shared.clone(), out.clone(), path.to_string(), doc.clone(), later.clone());
+        move || follow_whole(&shared, &out, &path, generation, whole_rx, _whole_tx, module_doc, t0, later)
     });
     let pending = waiter.is_ok();
     answer(Ok((doc, deps)), pending)
@@ -434,8 +443,10 @@ fn with_whole(doc: String, info: &str) -> String {
 /// module code's); cut at its deadline, a `cut` event (the module code's document stays, saying
 /// so). Nothing when a newer `analyse` came, or a file it loaded changed.
 #[allow(clippy::too_many_arguments)]
-fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, path: &str, generation: u64, whole_rx: std::sync::mpsc::Receiver<First>, _whole_tx: std::sync::mpsc::Sender<HoverReq>, module_doc: String, t0: std::time::Instant) {
+fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, path: &str, generation: u64, whole_rx: std::sync::mpsc::Receiver<First>, _whole_tx: std::sync::mpsc::Sender<HoverReq>, module_doc: String, t0: std::time::Instant, later: FollowLater) {
     let Ok(r) = whole_rx.recv() else { return };
+    // (an import the module code's analysis did not see, in a function: following starts now)
+    later.start(shared, out, path, generation, t0);
     let mut sh = shared.lock().unwrap();
     if sh.latest.get(path) != Some(&generation) || sh.followed.get(path) == Some(&generation) {
         return;
@@ -461,7 +472,39 @@ fn follow_whole(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, pa
 
 /// The options without following installed packages.
 fn unfollowed(opts: &Opts) -> Opts {
-    Opts { follow: Vec::new(), ..opts.clone() }
+    Opts { follow: Vec::new(), probe: None, ..opts.clone() }
+}
+
+/// Does the program import a package `follow` names (`*`: any) that rowan has no model of and
+/// that is installed in the site-packages it would read?
+fn followable(imports: &[String], follow: &[String], path: &str, site: &[String]) -> bool {
+    let wanted: Vec<&String> = imports.iter().filter(|n| follow.iter().any(|f| f == *n || f == "*") && !rowan::models::has_module_models(n)).collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let dirs = crate::site_packages_for(path, site);
+    wanted.iter().any(|n| dirs.iter().any(|d| std::path::Path::new(d).join(n.as_str()).is_dir() || std::path::Path::new(d).join(format!("{}.py", n)).exists()))
+}
+
+/// An `analyse` request's analysis following installed packages, started once an analysis
+/// without following saw the program import one (`probe`): at its answer, or when its whole
+/// program's analysis completes later.
+#[derive(Clone)]
+struct FollowLater {
+    opts: Opts,
+    probe: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    spawned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FollowLater {
+    /// Start it if it is due and not started; is it running (or done)?
+    fn start(&self, shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, path: &str, generation: u64, t0: std::time::Instant) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.spawned.load(Relaxed) && self.probe.load(Relaxed) && shared.lock().unwrap().latest.get(path) == Some(&generation) {
+            self.spawned.store(spawn_followed(shared, out, &self.opts, path, generation, t0), Relaxed);
+        }
+        self.spawned.load(Relaxed)
+    }
 }
 
 /// For `analyse` request `generation` of `path`: the whole program's analysis following

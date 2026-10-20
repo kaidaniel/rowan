@@ -133,7 +133,7 @@ def main() -> None:
         if "--follow" in extra and r.get("ok"):
             ev = next((e for e in seen if e.get("followed")), None)
             deadline = time.monotonic() + a.followed_timeout
-            while ev is None and r.get("pending") and time.monotonic() < deadline:
+            while ev is None and r.get("following") and time.monotonic() < deadline:
                 try:
                     e = q.get(timeout=max(0.01, deadline - time.monotonic()))
                 except queue.Empty:
@@ -142,7 +142,8 @@ def main() -> None:
                     break
                 if e.get("followed"):
                     ev = dict(e, at=time.monotonic())
-            followed_ms = round((ev["at"] - t0) * 1000) if ev else -1 if r.get("pending") else round(analyse_ms)
+            # (none started: nothing the program imports is followed, the answer is the document)
+            followed_ms = round((ev["at"] - t0) * 1000) if ev else -1 if r.get("following") else round(analyse_ms)
             followed_facts = len((ev or r)["result"].get("facts", []))
         p.stdin.write(json.dumps({"id": -1, "cmd": "shutdown"}) + "\n")
         p.stdin.flush()
