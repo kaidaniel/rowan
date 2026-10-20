@@ -288,22 +288,42 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
         if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
             if let Some(a0) = cl.arguments.args.first() {
                 let wv = an.eval(a0, state);
-                let strong = wv.pts.len() == 1;
-                for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
-                    for (k, v) in state.obj_slots(w, Ns::Attr) {
-                        state.set_slot(f, Ns::Attr, k, v, strong);
-                    }
-                }
-                // (a wrapper of what rowan does not know, a function a call that does not run
-                // gave back: it has whatever attributes that has)
-                if !wv.kv.is_bot() || wv.pts.iter().any(|w| an.heap.kind(w) != Kind::Function) {
-                    let r = state.row(f, Ns::Attr).mutate(intern::s("functools.wraps"));
-                    state.set_row(f, Ns::Attr, r);
-                }
-                an.m.wrapped.insert(f, wv);
+                wrap_like(an, state, f, wv);
             }
         }
         return true;
     }
     false
+}
+
+/// Wrapper `f` takes `wv`'s name, qualname, doc, `__wrapped__` and the attributes it was given
+/// (its `__dict__`): `functools.wraps(wv)(f)`, `update_wrapper(f, wv)`.
+fn wrap_like(an: &mut Analyzer, state: &mut State, f: ObjId, wv: Value) {
+    let strong = wv.pts.len() == 1;
+    for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
+        for (k, v) in state.obj_slots(w, Ns::Attr) {
+            state.set_slot(f, Ns::Attr, k, v, strong);
+        }
+    }
+    // (a wrapper of what rowan does not know, a function a call that does not run gave back:
+    // it has whatever attributes that has)
+    if !wv.kv.is_bot() || wv.pts.iter().any(|w| an.heap.kind(w) != Kind::Function) {
+        let r = state.row(f, Ns::Attr).mutate(intern::s("functools.wraps"));
+        state.set_row(f, Ns::Attr, r);
+    }
+    an.m.wrapped.insert(f, wv);
+}
+
+/// `functools.update_wrapper(wrapper, wrapped)`: the wrapper, with what `wraps` gives it
+/// (`wrap_like`); a wrapper that is not one of the program's functions: an unknown call.
+pub fn m_update_wrapper(an: &mut Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    match (c.args.first(), c.args.get(1)) {
+        (Some(w), Some(f)) if c.kwargs.is_empty() && c.star_args.is_empty() && !w.pts.is_empty() && w.kv.is_bot() && w.pts.iter().all(|o| an.heap.kind(o) == Kind::Function) => {
+            for o in w.pts.iter() {
+                wrap_like(an, st, o, f.clone());
+            }
+            w.clone()
+        }
+        _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
+    }
 }

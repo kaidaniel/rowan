@@ -211,7 +211,7 @@ impl Analyzer {
                 Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
                     // (a wrapper of an unknown, stored on some paths only: on the others what
                     // the unknown has)
-                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).definite.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
+                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
                     Some(v) => v,
                     // (an attribute the program did not give it: it may not have it)
                     None => {
@@ -1054,7 +1054,9 @@ impl Analyzer {
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             // (stored on some paths only: on the others it is what the object has under the
             // name, as for an open record's key, `literal_key_value`)
-            if row.open() && !(row.definite.contains(nk) && row.stored.contains(nk)) {
+            // (one with an unknown part already — a weak store's, `store_attr` — covers it)
+            let known = matches!(v.kv, KeyVal::Bot | KeyVal::Lit(_) | KeyVal::Lits(_)) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown);
+            if known && row.open() && !(row.likely.contains(nk) && row.stored.contains(nk)) {
                 let v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
                 state.set_slot_found(oid, Ns::Attr, nk, v.clone(), false);
                 return v;
