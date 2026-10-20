@@ -65,7 +65,7 @@ pub struct RecvEffects {
 }
 
 /// A slot: (object, namespace, key).
-type Loc = (ObjId, Ns, KeyId);
+pub type Loc = (ObjId, Ns, KeyId);
 
 /// A skipped call's arguments as its code may change them (`args_as_seen`), the code reading
 /// them may run, and those it keeps: each with the dicts whose items may hold it and whether
@@ -148,6 +148,47 @@ pub struct Closure {
     /// the slots the code reads names from that were not bound when it was walked (a name
     /// defined later in its module or enclosing function): once one is, the closure is stale
     pub unbound: Vec<Loc>,
+}
+
+impl Closure {
+    /// What this closure has that `prev` (a subset: an earlier round's) has not; `resumed`:
+    /// this one's walk went on from `prev`'s, so its values lists start with `prev`'s.
+    pub fn since(&self, prev: &Closure, resumed: bool) -> Closure {
+        fn locs(a: &[Loc], b: &[Loc]) -> Vec<Loc> {
+            a.iter().filter(|l| b.binary_search(l).is_err()).copied().collect()
+        }
+        fn vals<T: Clone>(a: &[T], b: &[T], resumed: bool) -> Vec<T> {
+            a[if resumed { b.len().min(a.len()) } else { 0 }..].to_vec()
+        }
+        Closure {
+            code: FxHashSet::default(),
+            locs: locs(&self.locs, &prev.locs),
+            held_locs: locs(&self.held_locs, &prev.held_locs),
+            held2_locs: locs(&self.held2_locs, &prev.held2_locs),
+            rebound: locs(&self.rebound, &prev.rebound),
+            values: vals(&self.values, &prev.values, resumed),
+            held_values: vals(&self.held_values, &prev.held_values, resumed),
+            edited_locs: locs(&self.edited_locs, &prev.edited_locs),
+            edited_values: vals(&self.edited_values, &prev.edited_values, resumed),
+            removed_locs: self.removed_locs.iter().filter(|r| !prev.removed_locs.contains(r)).cloned().collect(),
+            removed_values: vals(&self.removed_values, &prev.removed_values, resumed),
+            iterated_locs: locs(&self.iterated_locs, &prev.iterated_locs),
+            iterated_values: vals(&self.iterated_values, &prev.iterated_values, resumed),
+            unbound: locs(&self.unbound, &prev.unbound),
+        }
+    }
+
+    /// The slots it names.
+    pub fn slot_locs(&self) -> impl Iterator<Item = Loc> + '_ {
+        let locs = [&self.locs, &self.held_locs, &self.held2_locs, &self.rebound, &self.edited_locs, &self.iterated_locs, &self.unbound];
+        locs.into_iter().flat_map(|l| l.iter().copied()).chain(self.removed_locs.iter().map(|(l, _)| *l))
+    }
+
+    /// The objects its values are.
+    pub fn value_objects(&self) -> impl Iterator<Item = ObjId> + '_ {
+        let values = [&self.values, &self.held_values, &self.edited_values, &self.iterated_values];
+        values.into_iter().flat_map(|v| v.iter().flat_map(|v| v.pts.iter())).chain(self.removed_values.iter().flat_map(|(v, _)| v.pts.iter()))
+    }
 }
 
 impl Analyzer {
