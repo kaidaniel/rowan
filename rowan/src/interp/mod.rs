@@ -43,6 +43,7 @@ pub mod items;
 pub mod iter;
 pub mod keys;
 pub mod library;
+pub mod libclosure;
 pub mod loops;
 pub mod narrow;
 pub mod ops;
