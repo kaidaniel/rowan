@@ -1026,6 +1026,27 @@ pub fn label_base(label: &str) -> Option<(&'static str, bool)> {
     TYPE_NAMES.iter().copied().find(|t| *t == ty).map(|t| (t, opt))
 }
 
+/// A scalar a builtin made sure is of type `ty` (CPython raises otherwise: `len` of what
+/// `__len__` gave): an unknown of that type, named as it was (one whose label says more, a
+/// tensor's or a text's, as it is), the literals it may be of that type; literals as they are.
+pub fn kv_of_type(kv: &KeyVal, ty: &'static str) -> KeyVal {
+    match kv {
+        KeyVal::Data(l, h) => {
+            let t = str_get(*l);
+            if !hintable(&t) || label_type(&t) == Some(ty) {
+                return kv.clone();
+            }
+            let name = label_name(&t);
+            // (a label that is a type's name, `str`, is no name; a bool is no longer one)
+            let name = if label_type(name).is_some() { "" } else { name };
+            let exact = |k: KeyId| key_type(k, ty) && (ty == "bool" || !with_key(k, |kk| matches!(kk, crate::intern::Key::Bool(_))));
+            let h = if h.contains(intern::STAR) { h.clone() } else { h.iter().filter(|k| exact(*k)).collect() };
+            KeyVal::Data(intern::s(&typed_label(ty, name)), h)
+        }
+        _ => kv.clone(),
+    }
+}
+
 /// A scalar on a path where it is not None: an optional typed unknown's (`optional_label`)
 /// the unknown of its type, without None among the literals it may be; others as they are.
 pub fn kv_not_none(kv: &KeyVal) -> KeyVal {

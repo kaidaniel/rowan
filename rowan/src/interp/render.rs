@@ -106,6 +106,12 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.retain(|p| p != "?");
         parts.push("?".into());
     }
+    // (literals left out, `…`, beside the literals: `"a" | "b" | … | str(?)`)
+    if let Some(i) = parts.iter().position(|p| p == "…") {
+        let dots = parts.remove(i);
+        let at = parts.iter().position(|p| p.ends_with("(?)") || p == "?").unwrap_or(parts.len()).min(4);
+        parts.insert(at, dots);
+    }
     parts.join(" | ")
 }
 
