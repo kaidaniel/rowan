@@ -212,7 +212,13 @@ impl Analyzer {
                     // (a wrapper of an unknown, stored on some paths only: on the others what
                     // the unknown has)
                     Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
-                    Some(v) => v,
+                    // (stored on some paths only: on the others an AttributeError)
+                    Some(v) => {
+                        if !state.row(oid, Ns::Attr).definite.contains(nk) {
+                            self.may_raise_here("AttributeError", state);
+                        }
+                        v
+                    }
                     // (an attribute the program did not give it: it may not have it)
                     None => {
                         self.may_raise_here("AttributeError", state);

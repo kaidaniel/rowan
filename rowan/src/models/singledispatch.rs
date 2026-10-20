@@ -301,9 +301,14 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
 fn wrap_like(an: &mut Analyzer, state: &mut State, f: ObjId, wv: Value) {
     let strong = wv.pts.len() == 1;
     for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
+        // (its keys too: there where they are there on w)
+        let wrow = state.row(w, Ns::Attr);
+        let mut row = state.row(f, Ns::Attr);
         for (k, v) in state.obj_slots(w, Ns::Attr) {
+            row = row.store(k, strong && wrow.definite.contains(k));
             state.set_slot(f, Ns::Attr, k, v, strong);
         }
+        state.set_row(f, Ns::Attr, row);
     }
     // (a wrapper of what rowan does not know, a function a call that does not run gave back:
     // it has whatever attributes that has)
