@@ -5744,7 +5744,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
     }
     // `df[list(df.columns)]` / `df[df.columns]`: every column of the frame itself
     let own_keys = key.pts.iter().all(|x| match an.heap.kind(x) {
-        Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS && ko.then.remove(intern::STAR).difference(&row.present).is_empty()),
+        Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS && ko.then.difference(&row.present).is_empty()),
         Kind::View => matches!(&an.heap.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
         _ => false,
     });

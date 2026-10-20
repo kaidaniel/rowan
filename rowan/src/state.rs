@@ -704,16 +704,20 @@ impl State {
 
     /// The keys of `objs` in `ns` taken now (`for k in d`): the keys they have now, any if
     /// one is open (`KeysOf::then`).
-    pub fn keys_of(&self, objs: crate::domain::ObjSet, ns: Ns) -> crate::domain::KeysOf {
-        let mut then = IdSet::new();
+    pub fn keys_of(&self, objs: crate::domain::ObjSet, ns: Ns) -> Box<crate::domain::KeysOf> {
+        // (an open row's keys are any: none kept; a closed one's, its set itself)
+        let (mut then, mut open) = (IdSet::new(), false);
         for o in objs.iter() {
             let r = self.row(o, ns);
-            then = then.union(&r.present);
             if r.open() {
-                then = then.insert(STAR);
+                open = true;
+            } else if then.is_empty() {
+                then = r.present.clone();
+            } else {
+                then = then.union(&r.present);
             }
         }
-        crate::domain::KeysOf::new(objs, ns, then)
+        Box::new(crate::domain::KeysOf::new(objs, ns, then, open))
     }
 
     /// The row whose keys `ko` ranges over: its objects' rows joined, with the keys they had
@@ -721,16 +725,16 @@ impl State {
     /// open where one of them was open then.
     pub fn keys_row(&self, ko: &crate::domain::KeysOf) -> Row {
         let row = crate::domain::join_rows(ko.objs.iter().map(|x| self.row(x, ko.ns)));
-        let then = ko.then.remove(STAR);
-        if then.difference(&row.present).is_empty() && (!ko.then.contains(STAR) || row.open()) {
+        let then = &ko.then;
+        if then.difference(&row.present).is_empty() && (!ko.then_open || row.open()) {
             return row;
         }
         let mut d = row.data();
-        d.present = d.present.union(&then);
-        d.absent = d.absent.difference(&then);
-        d.absent_likely = d.absent_likely.difference(&then);
+        d.present = d.present.union(then);
+        d.absent = d.absent.difference(then);
+        d.absent_likely = d.absent_likely.difference(then);
         let row = Row::from_data(d);
-        if ko.then.contains(STAR) && !row.open() {
+        if ko.then_open && !row.open() {
             return row.mutate(crate::intern::s("keys"));
         }
         row
@@ -744,7 +748,7 @@ impl State {
         if row.closed() && !row.present.is_empty() {
             return crate::domain::TYPE_NAMES.iter().copied().find(|t| row.present.iter().all(|k| crate::domain::key_type(k, t)));
         }
-        let lost = ko.objs.iter().fold(ko.then.remove(STAR), |ks, o| ks.difference(&self.row(o, ko.ns).present));
+        let lost = ko.objs.iter().fold(ko.then.clone(), |ks, o| ks.difference(&self.row(o, ko.ns).present));
         if !lost.is_empty() {
             return None;
         }

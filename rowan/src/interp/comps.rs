@@ -65,18 +65,18 @@ impl Analyzer {
             return;
         }
         self.cx.comp_known.push(false);
-        let depth = self.cx.cond_depth;
+        let depth = i16::try_from(self.cx.cond_depth).unwrap_or(i16::MAX);
         let mut elem = it.elem.clone();
         if it.exhaustive && understood {
             match &elem {
                 Elem::One(v) => {
                     if let KeyVal::KeysOf(ko) = &v.kv {
-                        elem = Elem::One(Value::with_kv(v.pts.clone(), KeyVal::KeysOf(KeysOf { exhaustive_depth: depth, ..ko.clone() })));
+                        elem = Elem::One(Value::with_kv(v.pts.clone(), KeyVal::KeysOf(Box::new(KeysOf { exhaustive_depth: depth, ..(**ko).clone() }))));
                     }
                 }
                 Elem::Pair(k0, v1) => {
                     if let KeyVal::KeysOf(ko) = &k0.kv {
-                        elem = Elem::Pair(Value::with_kv(k0.pts.clone(), KeyVal::KeysOf(KeysOf { exhaustive_depth: depth, ..ko.clone() })), v1.clone());
+                        elem = Elem::Pair(Value::with_kv(k0.pts.clone(), KeyVal::KeysOf(Box::new(KeysOf { exhaustive_depth: depth, ..(**ko).clone() }))), v1.clone());
                     }
                 }
             }

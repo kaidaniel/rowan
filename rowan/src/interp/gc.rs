@@ -565,7 +565,7 @@ fn rename_value(v: &Value, map: &FxHashMap<ObjId, ObjId>) -> Option<Value> {
     }
     let pts = if hit_pts { v.pts.replace(|o| map.get(&o).copied()) } else { v.pts.clone() };
     let kv = match &v.kv {
-        KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(KeysOf { objs: ko.objs.replace(|o| map.get(&o).copied()), ..ko.clone() }),
+        KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(Box::new(KeysOf { objs: ko.objs.replace(|o| map.get(&o).copied()), ..(**ko).clone() })),
         other => other.clone(),
     };
     Some(Value::with_kv(pts, kv))

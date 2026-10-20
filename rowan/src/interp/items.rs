@@ -1011,10 +1011,10 @@ impl Analyzer {
             }
             KeyVal::KeysOf(ko) => {
                 let srcrow = state.keys_row(ko);
-                let exhaustive = strong && ko.exhaustive_depth == self.cx.cond_depth;
+                let exhaustive = strong && i32::from(ko.exhaustive_depth) == self.cx.cond_depth;
                 state.set_row(oid, ns, row.copy_from(&srcrow, exhaustive, &ko.exclude, ko.chain));
                 // (the keys they had then too: one they lost since may be this one)
-                let then = ko.then.remove(STAR);
+                let then = &ko.then;
                 for x in ko.objs.iter() {
                     let mut ks = state.slot_keys(x, ko.ns);
                     let more: Vec<KeyId> = then.iter().filter(|k| !ks.contains(k)).collect();
