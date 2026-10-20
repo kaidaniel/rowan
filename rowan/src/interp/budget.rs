@@ -71,7 +71,19 @@ pub struct Budget {
     pub lib_cut: std::cell::Cell<bool>,
     /// calls that did not run (`skipped_call`), all along
     pub skipped: usize,
-    /// entries into followed libraries: run, cut (the `ROWAN_DEBUG` `loaded:` line)
+    /// the running entry began (its time is the library's, not the program's: `library_ms`)
+    pub lib_since: Option<std::time::Instant>,
+    /// the time spent in entries that ended
+    pub lib_time: std::time::Duration,
+    /// the work of entries that ended, as the library's share counts it; the running one's
+    /// at its start
+    pub lib_share: usize,
+    pub lib_share0: usize,
+    /// the library's share ran out: no library code runs any more (`library_entry`)
+    pub lib_out: bool,
+    /// the running entry stops: the share ran out in it, it is undone
+    pub lib_abort: std::cell::Cell<bool>,
+    /// entries into followed libraries: run, cut or undone (the `ROWAN_DEBUG` `loaded:` line)
     pub lib_counts: [usize; 2],
     /// `ROWAN_DEBUG` only: per function code, its name, body runs, statements of its own, and
     /// the work units and microseconds of its outermost runs (callees included; `tally_lines`)
@@ -166,9 +178,21 @@ impl Budget {
         self.started.elapsed().as_millis()
     }
 
-    /// Past the deadline (`DEADLINE_MS`): calls of user code are unknown code from there on.
+    /// Past the deadline (`DEADLINE_MS`), counted without the time spent in followed
+    /// libraries (`library_ms`: theirs is a share of its own): calls of user code are unknown
+    /// code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS) || self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > limit("ms", DEADLINE_MS) || self.cancelled()
+    }
+
+    /// Set from outside: the analysis is stale (`cancel`).
+    pub fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Milliseconds spent in entries into followed libraries, the running one's too.
+    pub fn library_ms(&self) -> u128 {
+        (self.lib_time + self.lib_since.map(|t| t.elapsed()).unwrap_or_default()).as_millis()
     }
 
     /// A fresh budget for one function's run on demand (`general_run_of`): no statements
@@ -180,6 +204,7 @@ impl Budget {
         self.hard_cut = false;
         self.hover_cut.set(false);
         self.lib_work = 0;
+        (self.lib_time, self.lib_share, self.lib_out) = (Default::default(), 0, false);
     }
 
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it

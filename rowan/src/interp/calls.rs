@@ -800,6 +800,11 @@ impl Analyzer {
     /// or past its budget (`skipped_call`); a generator function's call makes a lazy generator
     /// (its body runs when consumed); else its body runs here (`call_user_inner`).
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, entry: bool) -> Value {
+        // (an entry past the library's share: it stops, to be undone)
+        if self.budget.lib_abort.get() {
+            state.reachable = false;
+            return Value::new();
+        }
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // (its run for any call starts from the heap here too; a followed library's code has none)
         let library = self.heap.module_info(self.heap.func_info(foid).module).library;
@@ -809,7 +814,14 @@ impl Analyzer {
         // a followed library's code: from the program's code, one entry into it (`library_entry`)
         if library && self.budget.lib_entry.is_none() {
             let q = self.heap.func_info(foid).qualname.clone();
-            let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
+            let r = match self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry)) {
+                Some(r) => r,
+                // (past the library's share: a call that does not run)
+                None => {
+                    self.gens.force_at = None;
+                    self.skipped_call(foid, &q, self_v.as_ref(), a, state, node)
+                }
+            };
             return self.named_by_call(r, node);
         }
         // (an inert body runs a few steps: it runs wherever it is called, `inert`)
