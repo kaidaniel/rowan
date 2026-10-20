@@ -16,4 +16,5 @@ g = gen(d)
 if len(sys.argv) > 1:
     first = next(g)                              #@value first: exactly={"x"}
 second = next(g)                                 #@value second: exactly={"x","y"}
-_ = 0                                            #@row d: present={a,b} definite={a} closed
+_ = 0                                            #@row d: present={a,b} closed
+#@todo row d: present={a,b} definite={a} closed  (run again where it had not run, its effects joined with the paths it ran on: their consumer may have changed d since, `del d["a"]`)

@@ -289,10 +289,11 @@ impl Analyzer {
             if let Some(mut b) = before {
                 let j = state.join(&mut b);
                 state.replace_with(j);
-                // (how far it has run differs by path: not known, its effects any of its steps')
+                // (how far it has run differs by path: not known, its effects any of its steps'
+                // joined in — the paths it ran on keep what their consumer changed since)
                 if let Some(ge) = self.gens.eff.get(&o).cloned() {
-                    crate::interp::gens::gen_copy_facts(state, &ge.join, &ge);
-                    state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("join")), true);
+                    gen_join_facts(state, &ge.join, &ge);
+                    state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::data("effpos"), true);
                 }
                 self.set_cursor(o, None, state);
             }

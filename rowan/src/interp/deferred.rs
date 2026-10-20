@@ -18,9 +18,9 @@ use ruff_python_ast as ast;
 use super::effects::Loc;
 use super::heap::Heap;
 use super::{Analyzer, Args, FrameKind, Payload};
-use crate::domain::{Ns, ObjId, Value};
+use crate::domain::{Ns, ObjId, Row, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, str_get, KeyId};
+use crate::intern::{self, key_str_lit, str_get, KeyId, KeySet};
 use crate::state::{Kind, State};
 
 /// A deferred definition (`Payload::Deferred`).
@@ -100,6 +100,9 @@ impl Analyzer {
         let ctx = self.frame().ctx.clone();
         let p = self.heap.alloc_raw(Kind::Unknown, &format!("deferred:{}", super::site_string(&n)), &ctx, true, &format!("@{}", f.name.id), Payload::Deferred(Rc::new(d)));
         self.heap.deferred += 1;
+        // (not run yet on this path: a row without `forced_key`, so a join with a path it ran on
+        // has the key only possibly, `force_one`)
+        state.set_row(p, Ns::Attr, Row::new());
         Some(Value::obj(p))
     }
 
@@ -173,10 +176,17 @@ impl Analyzer {
     }
 
     /// Run a placeholder's decorators on its function, here, from the bindings of their names
-    /// as at the `def` (put back after), in the `def`'s call context; once per path.
+    /// as at the `def` (put back after), in the `def`'s call context; once per path. Where it
+    /// ran on some of the paths joined here only (`forced_key` not definite), it runs again on
+    /// a copy, joined with the paths it ran on (a strong store there would undo what those
+    /// paths changed since, `m.f.tag = 'z'`, and the other paths' `f` is as at the `def`).
     fn force_one(&mut self, p: ObjId, state: &mut State) -> Value {
-        if let Some(r) = state.slot_opt(p, Ns::Attr, forced_key()) {
-            return r;
+        let done = state.slot_opt(p, Ns::Attr, forced_key());
+        let everywhere = state.rows.get(&(p, Ns::Attr)).is_none_or(|r| r.definite.contains(forced_key()));
+        if let Some(r) = &done {
+            if everywhere {
+                return r.clone();
+            }
         }
         let Payload::Deferred(d) = &self.heap.obj(p).payload else { return Value::obj(p) };
         let d = d.clone();
@@ -184,6 +194,22 @@ impl Analyzer {
             return Value::new();
         }
         self.heap.forced += 1;
+        let r = match done {
+            None => self.apply_deferred(&d, state),
+            Some(prev) => {
+                let mut c = state.copy();
+                let r = self.apply_deferred(&d, &mut c);
+                *state = state.join(&mut c);
+                prev.join(&r)
+            }
+        };
+        state.set_slot(p, Ns::Attr, forced_key(), r.clone(), true);
+        state.set_row(p, Ns::Attr, Row::closed_with(KeySet::one(forced_key())));
+        r
+    }
+
+    /// The decorators of `d` applied to its function on this path (see `force_one`).
+    fn apply_deferred(&mut self, d: &Deferred, state: &mut State) -> Value {
         let now: Vec<Option<Value>> = d.names.iter().map(|(l, _)| state.slot_opt(l.0, l.1, l.2)).collect();
         for (l, v) in &d.names {
             state.slots.set(&l.0, (l.1, l.2), v.clone());
@@ -204,7 +230,6 @@ impl Analyzer {
                 None => drop(state.slots.remove(&l.0, &(l.1, l.2))),
             }
         }
-        state.set_slot(p, Ns::Attr, forced_key(), r.clone(), true);
         r
     }
 }
