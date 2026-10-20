@@ -123,6 +123,11 @@ fn fact_json(an: &Analyzer, line: u32, name: StrId, f: &Fact) -> J {
         (g, calls)
     };
     let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
+    // (the unknowns the text names by where they come from, nothing more known of them:
+    // `nx.connected_components(g)[*]`)
+    if f.legend.iter().any(|(_, d)| d == "?") {
+        fact["named"] = json!(f.legend.iter().filter(|(_, d)| d == "?").map(|(s0, _)| s0).collect::<Vec<_>>());
+    }
     // a parameter at its `def`: what the function reads of it for any call (its contract)
     if let Some(foid) = f.param_of {
         fact["param"] = json!(true);
