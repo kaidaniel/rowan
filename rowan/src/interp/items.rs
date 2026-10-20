@@ -216,6 +216,7 @@ impl Analyzer {
                 if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
                     // `obj.__dict__[k]`: an attribute load
                     let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
+                    let v = self.force(v, state);
                     parts.push(v);
                 } else if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
                     let v = self.load_item(&inner, Ns::Item, key, node, state, report);

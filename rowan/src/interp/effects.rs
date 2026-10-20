@@ -14,7 +14,7 @@ use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
 use super::flows::{Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
-use super::{Analyzer, Args, FuncInfo, Payload};
+use super::{Analyzer, Args, FuncInfo, FuncNode, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
 pub const CLOSURE_CACHE: usize = 1 << 21;
@@ -50,6 +50,9 @@ pub struct EffectsCache {
     /// per class: its dunders library code may run whose code may change something
     /// (`changing_dunders`; the code a class attribute holds is taken as fixed, as for closures)
     dunders: FxHashMap<ObjId, std::rc::Rc<[ObjId]>>,
+    /// per function code (`FuncNode::addr`): what its body does when it is inert
+    /// (`inert::inert`), None when it is not
+    inert: FxHashMap<usize, Option<std::rc::Rc<super::inert::Inert>>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -148,6 +151,16 @@ pub struct Closure {
     /// the slots the code reads names from that were not bound when it was walked (a name
     /// defined later in its module or enclosing function): once one is, the closure is stale
     pub unbound: Vec<Loc>,
+    /// the modules walked as values (all their globals) and the names they had then
+    /// (`module_names`): once one has more, the closure is stale
+    pub modules: Vec<(ObjId, u64)>,
+}
+
+/// The names a module has on a path, as a fingerprint (their number and their keys).
+fn module_names(state: &State, m: ObjId) -> u64 {
+    let mut h: u64 = 0;
+    state.slots.each(&m, &mut |k, _| h = (h.rotate_left(5) ^ u64::from(k.1.0)).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+    h
 }
 
 impl Closure {
@@ -175,6 +188,7 @@ impl Closure {
             iterated_locs: locs(&self.iterated_locs, &prev.iterated_locs),
             iterated_values: vals(&self.iterated_values, &prev.iterated_values, resumed),
             unbound: locs(&self.unbound, &prev.unbound),
+            modules: self.modules.iter().filter(|m| !prev.modules.contains(m)).copied().collect(),
         }
     }
 
@@ -192,6 +206,22 @@ impl Closure {
 }
 
 impl Analyzer {
+    /// What the function's body does when it is inert (`inert::inert`: a
+    /// bounded handful of steps that make functions and store attributes): its own steps cost
+    /// next to nothing, so a call of it runs even past an entry's allowance or the work of a
+    /// run on demand (within its budget); what it calls follows the rules of every call.
+    pub(in crate::interp) fn inert(&mut self, foid: ObjId) -> Option<std::rc::Rc<super::inert::Inert>> {
+        let fi = self.heap.func_info_opt(foid)?;
+        let FuncNode::Def(f) = fi.node else { return None };
+        self.effects.inert.entry(fi.node.addr()).or_insert_with(|| super::inert::inert(&f.parameters, &f.body).map(std::rc::Rc::new)).clone()
+    }
+
+    /// Is `o` code a closure walk follows (`walk_closure`): a function, class, bound method,
+    /// instance (its class), partial, module, deferred definition?
+    fn holds_code(&self, o: ObjId) -> bool {
+        matches!(self.heap.kind(o), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module) || matches!(self.heap.obj(o).payload, Payload::Deferred(_))
+    }
+
     /// The names a function's code reads beyond its locals (computed once per `def`).
     fn code_uses(&mut self, fi: &FuncInfo) -> std::rc::Rc<CodeUses> {
         let addr = fi.node.addr();
@@ -540,7 +570,7 @@ impl Analyzer {
         let whole = self.effects.whole.is_some();
         // (a name its code reads bound since: the closure is computed again)
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
-            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) {
+            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) && c.modules.iter().all(|&(m, h)| module_names(state, m) == h) {
                 return c.clone();
             }
         }
@@ -570,7 +600,7 @@ impl Analyzer {
     /// walked again; a class already met is looked at again only for the names whose use grew
     /// since: the closure is the same whatever order the code is met in).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
-        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
+        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| an.holds_code(*x)));
         let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty } = w;
         loop {
             while let Some(o) = work.pop() {
@@ -588,7 +618,8 @@ impl Analyzer {
                         dirty.extend(u.class_stores_result.iter().map(|(_, a)| *a).chain(u.uses.iter().filter_map(|x| x.attr)));
                     }
                     (Kind::Module, _) => {
-                        // (a module used as a value: any of its globals)
+                        // (a module used as a value: any of its globals, those it has now)
+                        out.modules.push((o, module_names(state, o)));
                         for (k, v) in state.obj_slots(o, Ns::Attr) {
                             out.locs.push((o, Ns::Attr, k));
                             code(self, &v, work);
@@ -601,6 +632,8 @@ impl Analyzer {
                         }
                     }
                     (Kind::Instance, Payload::Cls(c)) => work.push(*c),
+                    // (a deferred definition: its decorators' code, the function's)
+                    (Kind::Unknown, Payload::Deferred(_)) => work.extend(super::deferred::deferred_code(&self.heap, o).unwrap_or_default()),
                     (Kind::Bound, Payload::Bound(f, recv)) => {
                         work.push(*f);
                         out.values.push(recv.clone());
@@ -1116,7 +1149,7 @@ impl Analyzer {
     /// what may happen to attributes by name (`attrs`, `class_stores`: class attributes).
     #[allow(clippy::too_many_arguments)]
     fn function_closure(&mut self, fi: &FuncInfo, state: &State, out: &mut Closure, attrs: &mut FxHashMap<StrId, Flags>, reads: &mut FxHashSet<StrId>, class_stores: &mut FxHashSet<StrId>, work: &mut Vec<ObjId>) {
-        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
+        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| an.holds_code(*x)));
         let uses = self.code_uses(fi);
         for (a, f) in &uses.attrs {
             attrs.entry(*a).or_default().join(f);

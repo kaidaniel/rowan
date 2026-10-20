@@ -231,6 +231,10 @@ impl Analyzer {
             if v.pts.is_empty() && v.kv.is_bot() {
                 v = self.load_attr(mod_v, &name, n, state, false);
             }
+            // (into the main module: its names are what the editor shows)
+            if self.frame().module == self.program.main_module {
+                v = self.force(v, state);
+            }
             self.store_name(s(&name), v, state);
         }
     }

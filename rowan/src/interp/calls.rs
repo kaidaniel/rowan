@@ -22,6 +22,8 @@ impl Analyzer {
     /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
     /// generators among them run (`force_gen`), then each callee `fv` may be called.
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
+        let forced = self.force(fv.clone(), state);
+        let fv = &forced;
         let mut args: Vec<Value> = Vec::new();
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
         let mut star_args: Vec<Value> = Vec::new();
@@ -810,14 +812,16 @@ impl Analyzer {
             let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
             return self.named_by_call(r, node);
         }
+        // (an inert body runs a few steps: it runs wherever it is called, `inert`)
+        let inert = self.inert(foid).is_some();
         // (within an entry past its allowance, calls of code do not run)
-        if self.budget.past_library_work(self.library_work()) {
+        if !inert && self.budget.past_library_work(self.library_work()) {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         // (on demand, past the work a function's run may do, its callees' calls are unknown)
-        if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
+        if !inert && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);

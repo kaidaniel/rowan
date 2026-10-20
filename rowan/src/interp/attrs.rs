@@ -13,6 +13,9 @@ use crate::state::{mark_merged, Kind, State};
 use super::{Analyzer, Args, DICT_METHOD_NAMES, Payload, STR_METHOD_NAMES, ViewKind, is_scalar_method};
 use super::access::OBJECT_ATTRS;
 
+/// The names every module has (`__name__`, `__file__`, …), bound or not in its namespace.
+pub const MODULE_NAMES: &[&str] = &["__name__", "__file__", "__doc__", "__package__", "__spec__", "__loader__", "__path__", "__cached__", "__builtins__"];
+
 impl Analyzer {
     /// Does attribute `name` of `oid` resolve without the object's own row: through its class
     /// (an instance), for a class object through its MRO and `type`, for an object a model
@@ -130,6 +133,8 @@ impl Analyzer {
     /// class, a module, an unknown (`load_unknown_attr`), a library object (its method or
     /// attribute model) — with a verdict where a record may lack the name.
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        let forced = self.force(obj.clone(), state);
+        let obj = &forced;
         if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
             return v;
         }
@@ -201,7 +206,14 @@ impl Analyzer {
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
-                Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
+                Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
+                    Some(v) => v,
+                    // (an attribute the program did not give it: it may not have it)
+                    None => {
+                        self.may_raise_here("AttributeError", state);
+                        Value::data(&format!("L{}", node.line))
+                    }
+                },
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => match self.view_attr(oid, name, node, state, report) {
                     Ok(v) => v,
@@ -300,9 +312,11 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn module_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, caught: bool, guarded: bool, single: bool) -> Value {
         match state.slot_opt(oid, Ns::Attr, nk) {
-            Some(v) => v,
+            // (`from m import f` in a module's code binds what m holds, a deferred definition too)
+            Some(v) if self.mode.keep_deferred => v,
+            Some(v) => self.force_slot(oid, nk, v, state),
             // (what every module has)
-            None if matches!(name, "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__" | "__loader__" | "__path__" | "__cached__" | "__builtins__") => {
+            None if MODULE_NAMES.contains(&name) => {
                 if name == "__name__" { Value::lit_str(&self.heap.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
             }
             // (inside a try that catches the AttributeError: the handler's way)
@@ -315,6 +329,8 @@ impl Analyzer {
                 if !guarded {
                     self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
                 }
+                // (an AttributeError; the path goes on, as after any read that fails)
+                self.may_raise_here("AttributeError", state);
                 Value::data(&format!("L{}", node.line))
             }
         }

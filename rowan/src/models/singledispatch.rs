@@ -248,11 +248,18 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
         }
         return true;
     }
-    // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
+    // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__, and
+    // the attributes fn was given (its `__dict__`)
     if q == "functools.wraps" {
         if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
             if let Some(a0) = cl.arguments.args.first() {
                 let wv = an.eval(a0, state);
+                let strong = wv.pts.len() == 1;
+                for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
+                    for (k, v) in state.obj_slots(w, Ns::Attr) {
+                        state.set_slot(f, Ns::Attr, k, v, strong);
+                    }
+                }
                 an.m.wrapped.insert(f, wv);
             }
         }

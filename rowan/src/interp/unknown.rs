@@ -214,13 +214,21 @@ impl Havoc {
             let k = heap.kind(o);
             match (&k, &heap.obj(o).payload) {
                 // (the code it meets, for `skipped_call`; a stored method may change its receiver)
-                (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
+                // (a module of the program's: its globals' code, what they hold, `walk_closure`)
+                (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial | Kind::Module, _) => {
                     self.code.push(o);
                     code.push(o);
                     continue;
                 }
                 (Kind::Method, Payload::Method(_, recv)) => {
                     work.extend(recv.pts.iter());
+                    continue;
+                }
+                // (a deferred definition: unknown code may run its decorators' code, the function's)
+                (Kind::Unknown, Payload::Deferred(_)) => {
+                    let c = super::deferred::deferred_code(heap, o).unwrap_or_default();
+                    self.code.extend(c.iter().copied());
+                    code.extend(c);
                     continue;
                 }
                 (Kind::Instance, Payload::Cls(c)) => {
@@ -234,7 +242,7 @@ impl Havoc {
                         continue;
                     }
                 }
-                (Kind::Module | Kind::External | Kind::Method, _) => continue,
+                (Kind::External | Kind::Method, _) => continue,
                 // (a compiled pattern, a match, a path, a frozenset: nothing to change)
                 (Kind::Namespace, Payload::Method(q, _)) if matches!(q.as_str(), "stdobj.repattern" | "stdobj.rematch" | "stdobj.path") => {
                     havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
@@ -255,6 +263,10 @@ impl Havoc {
         if let Some(m) = &mut self.met {
             m.extend(visited.iter().copied());
         }
+        // (the tests of what it met a path passed since no longer hold: a walk replayed left
+        // the objects unchanged since as they were, rows and all, and one that gives a row a
+        // mutator it has already leaves it too)
+        drop_facts_on(state, |o| visited.contains(&o));
         if self.memo.len() >= HAVOC_MEMOS {
             self.memo.clear();
         }
@@ -371,7 +383,7 @@ impl Analyzer {
         // items, lengths; and it may call the program's functions it is given
         self.havoc_reachable(&vals, rid, site_id, state);
         let found = std::mem::take(&mut self.havoc.code);
-        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Module)).collect();
         // (a skipped call follows them itself, with its own code: `classes_followed`)
         if !callables.is_empty() && !classes_followed {
             self.follow_code(callables, rid, site_id, state);
@@ -452,7 +464,7 @@ impl Analyzer {
         let site_id = s(site);
         self.havoc_reachable(std::slice::from_ref(v), any, site_id, state);
         let found = std::mem::take(&mut self.havoc.code);
-        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Module)).collect();
         if !callables.is_empty() {
             self.follow_code(callables, any, site_id, state);
         }
@@ -486,7 +498,8 @@ impl Analyzer {
     /// Unknown code ran on `vals`: every object they reach (through slots, items, elements)
     /// may have changed. Records get the call as a mutator (any key may have been added or
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
-    /// lists and sets any items and any length. Modules, classes and functions are not entered.
+    /// lists and sets any items and any length. Modules, classes and functions are not entered (their
+    /// code is met: `follow_code`).
     pub(in crate::interp) fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
         self.havoc.code.clear();
         let walk = self.havoc.new_walk();
@@ -499,12 +512,8 @@ impl Analyzer {
     fn followed_again(&mut self, key: u64, state: &mut State) {
         // (what it may change may have changed again: the tests of it no longer hold, as
         // when its walk gives their rows this call's mutator)
-        if let Some(m) = self.havoc.follows.get(&key).filter(|_| !state.facts.is_empty()) {
-            let on = |o: ObjId| m.deps.contains(&o);
-            let kept: Vec<_> = state.facts.iter().filter(|f| !(f.deps.iter().any(|(_, v)| v.pts.iter().any(on)) || f.rows.iter().any(|((o, _), _, _)| on(*o)) || f.guards.iter().any(|((o, _), _)| on(*o)))).cloned().collect();
-            if kept.len() != state.facts.len() {
-                state.facts = std::sync::Arc::new(kept);
-            }
+        if let Some(m) = self.havoc.follows.get(&key) {
+            drop_facts_on(state, |o| m.deps.contains(&o));
         }
         // (a list given an item since, as a walk would: its last item, any length)
         let lasts: Vec<ObjId> = state.lasts.iter().map(|(o, _)| *o).filter(|o| self.havoc.follows.get(&key).is_some_and(|m| m.deps.contains(o))).collect();
@@ -558,6 +567,8 @@ impl Analyzer {
             // (each slot it reads: part of the work measure)
             (before..slots.len()).for_each(|_| self.budget.walk_visit());
             deps.extend(cl.value_objects());
+            // (a module walked as a value: all its names, those it gains too)
+            deps.extend(cl.modules.iter().map(|(m, _)| *m));
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
             // (values whose parts may change, not themselves: their parts; whose parts' parts
@@ -620,6 +631,17 @@ impl Analyzer {
         if kept.len() != state.facts.len() {
             state.facts = std::sync::Arc::new(kept);
         }
+    }
+}
+
+/// Drop the facts of tests (`CondFact`) that read or narrowed an object `on` holds.
+fn drop_facts_on(state: &mut State, on: impl Fn(ObjId) -> bool) {
+    if state.facts.is_empty() {
+        return;
+    }
+    let kept: Vec<_> = state.facts.iter().filter(|f| !(f.deps.iter().any(|(_, v)| v.pts.iter().any(&on)) || f.rows.iter().any(|((o, _), _, _)| on(*o)) || f.guards.iter().any(|((o, _), _)| on(*o)))).cloned().collect();
+    if kept.len() != state.facts.len() {
+        state.facts = std::sync::Arc::new(kept);
     }
 }
 

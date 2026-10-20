@@ -1,6 +1,6 @@
 """How fast rowan loads installed packages (`--follow`), and what following them buys.
 
-Five scenarios, each a small realistic main program in bench/sitepackages/ and a venv made by
+Nine scenarios, each a small realistic main program in bench/sitepackages/ and a venv made by
 uv with every distribution pinned (installed with --no-deps, so the venv is the same on every
 machine; cached under bench/work/sitepackages/, remade when the pins or the local package
 change):
@@ -12,6 +12,10 @@ change):
   s3_cli         click and rich
   s4_web         flask (+ werkzeug, jinja2, …) with pydantic (modelled, never followed)
   s5_data        numpy, pandas (modelled, never followed), scikit-learn (+ scipy, joblib)
+  s6_symbolic    sympy (+ mpmath): a heavy import
+  s7_orm         SQLAlchemy 2 on an in-memory SQLite database: an ORM's registries
+  s8_schema      marshmallow: schemas, fields, hooks (httpx and requests are modelled)
+  s9_graph       networkx: dispatching decorators on hundreds of functions
 
 Modes (each one run of `rowan MAIN --facts --site-packages VENV`, ROWAN_DEBUG=1):
 
@@ -90,6 +94,18 @@ SCENARIOS = {
             "cloudpickle==3.1.2", "joblib==1.6.0", "narwhals==2.27.1", "numpy==2.5.4", "pandas==3.0.6",
             "python-dateutil==2.9.0.post0", "scikit-learn==1.9.1", "scipy==1.18.1", "six==1.17.0", "threadpoolctl==3.7.0",
         ],
+    },
+    "s6_symbolic": {
+        "pins": ["mpmath==1.3.0", "sympy==1.14.0"],
+    },
+    "s7_orm": {
+        "pins": ["sqlalchemy==2.1.1", "typing-extensions==4.16.0"],
+    },
+    "s8_schema": {
+        "pins": ["marshmallow==4.3.1"],
+    },
+    "s9_graph": {
+        "pins": ["networkx==3.7"],
     },
 }
 

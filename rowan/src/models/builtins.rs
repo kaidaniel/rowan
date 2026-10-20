@@ -882,6 +882,10 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let (Some(name), true) = (name_v.kv.as_lit().and_then(intern::key_as_str), name_v.pts.is_empty()) {
         return by_name(an, st, &name, true);
     }
+    // (a module's names not known: its deferred definitions run)
+    for o in obj.pts.iter() {
+        an.force_module(o, st);
+    }
     // the names it may be: literals, the keys of closed records (`for k in d`), the attributes
     // whose names fit the text known of it (`f"run_{mode}"`: `run_*`); any other part is a
     // name nothing is known of (`getattr_any_name`)
@@ -1408,6 +1412,7 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let empty = st.row(oid, Ns::Item);
     let mut rows: Vec<Row> = Vec::new();
     for x in an.record_objects(a) {
+        an.force_module(x, st);
         rows.push(empty.copy_from(&st.row(x, Ns::Attr), true, &KeySet::new(), intern::EMPTY_LENS));
         for (k, v) in st.obj_slots(x, Ns::Attr) {
             st.set_slot(oid, Ns::Item, k, v, false);
