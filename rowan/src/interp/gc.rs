@@ -229,6 +229,10 @@ impl Analyzer {
         let (map, keep_pos) = self.summary_objects(back, &recs);
         fold_recent_facts(back, &map, &keep_pos);
         rename_references(back, head, &map);
+        // (a list's last item, as the summary)
+        if back.lasts.iter().any(|(_, x)| rename_value(x, &map).is_some()) {
+            back.lasts = std::sync::Arc::new(back.lasts.iter().map(|(o, x)| (*o, rename_value(x, &map).unwrap_or_else(|| x.clone()))).collect());
+        }
         // 3. objects allocated during the iteration that hold references in their payloads
         self.heap.rename_payloads(mark, &|v: &Value| rename_value(v, &map), &map);
         self.m.rename_recent(&map);
@@ -279,11 +283,7 @@ impl Analyzer {
         if let Some(nv) = rename_value(v, &map) {
             *v = nv;
         }
-        // (a list's last item, as the summary; a test's facts on them go: they are other
-        // objects' when made again)
-        if st.lasts.iter().any(|(_, x)| rename_value(x, &map).is_some()) {
-            st.lasts = std::sync::Arc::new(st.lasts.iter().map(|(o, x)| (*o, rename_value(x, &map).unwrap_or_else(|| x.clone()))).collect());
-        }
+        // (a test's facts on them go: they are other objects' when made again)
         let mentions = |f: &crate::state::CondFact| f.deps.iter().any(|(_, x)| rs.iter().any(|r| x.pts.contains(*r))) || f.rows.iter().any(|((o, _), _, _)| rs.contains(o)) || f.guards.iter().any(|((o, _), _)| rs.contains(o));
         if st.facts.iter().any(|f| mentions(f)) {
             st.facts = std::sync::Arc::new(st.facts.iter().filter(|f| !mentions(f)).cloned().collect());
