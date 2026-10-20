@@ -142,6 +142,18 @@ impl Analyzer {
         sh.informative().then_some(sh)
     }
 
+    /// A skipped call of `foid`'s result from its function's shape (`unknown`: the call's
+    /// unknown result, which it stays without one): its records at the main module's call sites
+    /// (what the editor and the report show), elsewhere its scalars by type beside the unknown
+    /// result, as records there would cost every later walk and join.
+    pub(in crate::interp) fn summarized(&mut self, foid: ObjId, unknown: Value, node: &Node, state: &mut State) -> Value {
+        let code = self.heap.func_info(foid).node.addr();
+        let Some(sh) = self.shape_for(code) else { return unknown };
+        self.summaries.applied += 1;
+        let records = node.module == self.program.main_idx;
+        self.materialize(&sh, &unknown, node, state, "", records)
+    }
+
     /// The shape of `ret`, a run's result: `pre` the state the run started from, `born` the
     /// heap's serial then (objects made since are the run's own), `st` its end.
     pub(in crate::interp) fn shape_of_result(&self, ret: &Value, pre: &State, st: &State, born: u64) -> Shape {
@@ -242,10 +254,8 @@ impl Analyzer {
         Some(out)
     }
 
-    /// A skipped call's result from its function's shape, made at `node`: `unknown` is the
-    /// call's unknown result (the shape's `any`); its records only where `records` (the main
-    /// module's call sites: what the editor and the report show), elsewhere the unknown result
-    /// beside its scalars by type.
+    /// A value from a shape, made at `node`: `unknown` is the call's unknown result (the shape's
+    /// `any`); its records only where `records`, else the unknown result beside its scalars by type.
     pub(in crate::interp) fn materialize(&mut self, sh: &Shape, unknown: &Value, node: &Node, state: &mut State, path: &str, records: bool) -> Value {
         // (elsewhere its scalars by type only: literal sets cost every join they reach)
         let mut v = Value::kv_only(if records { sh.kv.clone() } else { type_only(&sh.kv) });
