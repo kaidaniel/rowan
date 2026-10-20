@@ -90,7 +90,13 @@ impl Analyzer {
         // take its changes)
         work.extend(view_of(o));
         match &self.heap.obj(o).payload {
-            Payload::Func(fi) => work.extend(fi.closure.values().copied()),
+            Payload::Func(fi) => {
+                work.extend(fi.closure.values().copied());
+                // (an `lru_cache` function's cache: the results it keeps)
+                if fi.is_memo.get() {
+                    work.extend(self.heap.find(Kind::Dict, &format!("memo:{}", o), ""));
+                }
+            }
             Payload::Cls(c) => work.push(*c),
             Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(work),
             Payload::Bound(f, v) | Payload::Super(f, v) => {

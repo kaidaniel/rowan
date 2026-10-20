@@ -193,7 +193,9 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, recv: Option<Value>, a: A
         let pre = may_hit.then(|| state.copy());
         bump(state, "hits", false);
         bump(state, "misses", false);
-        let r = an.call_user(oid, recv, a, state, node, false);
+        // (in one context for every such call: what it makes is one site's objects, as the
+        // results a cache keeps are some calls' — not one more object per call site)
+        let r = an.call_user_in(oid, recv, a, state, node, &format!("memo:{}", oid));
         let out = if may_hit { r.join(&cached) } else { r.clone() };
         if let Some(mut pre) = pre {
             let j = state.join(&mut pre);

@@ -416,7 +416,8 @@ impl Analyzer {
             }
             Kind::Bound => {
                 let Payload::Bound(f, self_v) = self.heap.obj(oid).payload.clone() else { return Value::new() };
-                if self.heap.func_info(f).is_memo.get() {
+                // (a method's calls past its budget do not run, cached or not)
+                if self.heap.func_info(f).is_memo.get() && !self.budget.exhausted(self.heap.func_info(f).node.addr()) {
                     return crate::models::singledispatch::memo_call(self, f, Some(self_v), a, state, node);
                 }
                 self.call_user(f, Some(self_v), a, state, node, false)
