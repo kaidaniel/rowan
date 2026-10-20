@@ -493,6 +493,26 @@ impl Analyzer {
         self.havoc.walk_from(&mut self.heap, vals, rid, site, state, walk);
     }
 
+    /// The code followed again (`Havoc::follows`, key `key`) changed nothing, but what it may
+    /// change may have changed again: as its walk would, it drops the tests of those objects
+    /// (their rows got this call's mutator) and the last items of the lists among them.
+    fn followed_again(&mut self, key: u64, state: &mut State) {
+        // (what it may change may have changed again: the tests of it no longer hold, as
+        // when its walk gives their rows this call's mutator)
+        if let Some(m) = self.havoc.follows.get(&key).filter(|_| !state.facts.is_empty()) {
+            let on = |o: ObjId| m.deps.contains(&o);
+            let kept: Vec<_> = state.facts.iter().filter(|f| !(f.deps.iter().any(|(_, v)| v.pts.iter().any(on)) || f.rows.iter().any(|((o, _), _, _)| on(*o)) || f.guards.iter().any(|((o, _), _)| on(*o)))).cloned().collect();
+            if kept.len() != state.facts.len() {
+                state.facts = std::sync::Arc::new(kept);
+            }
+        }
+        // (a list given an item since, as a walk would: its last item, any length)
+        let lasts: Vec<ObjId> = state.lasts.iter().map(|(o, _)| *o).filter(|o| self.havoc.follows.get(&key).is_some_and(|m| m.deps.contains(o))).collect();
+        for o in lasts {
+            self.heap.set_prefix(o, state, 0);
+        }
+    }
+
     /// What the code `roots` hold may change when it runs where rowan does not run it: the
     /// values at the slots its closure may change are havocked, the slots it rebinds may hold
     /// anything, and the code the data they hold is followed too, in rounds (each applies what
@@ -505,20 +525,7 @@ impl Analyzer {
         let memo = self.effects.whole.is_none();
         let key = self.havoc.follow_key(&roots);
         if memo && self.havoc.followed_unchanged(key, &roots, state) {
-            // (what it may change may have changed again: the tests of it no longer hold, as
-            // when its walk gives their rows this call's mutator)
-            if let Some(m) = self.havoc.follows.get(&key).filter(|_| !state.facts.is_empty()) {
-                let on = |o: ObjId| m.deps.contains(&o);
-                let kept: Vec<_> = state.facts.iter().filter(|f| !(f.deps.iter().any(|(_, v)| v.pts.iter().any(on)) || f.rows.iter().any(|((o, _), _, _)| on(*o)) || f.guards.iter().any(|((o, _), _)| on(*o)))).cloned().collect();
-                if kept.len() != state.facts.len() {
-                    state.facts = std::sync::Arc::new(kept);
-                }
-            }
-            // (a list given an item since, as a walk would: its last item, any length)
-            let lasts: Vec<ObjId> = state.lasts.iter().map(|(o, _)| *o).filter(|o| self.havoc.follows.get(&key).is_some_and(|m| m.deps.contains(o))).collect();
-            for o in lasts {
-                self.heap.set_prefix(o, state, 0);
-            }
+            self.followed_again(key, state);
             return;
         }
         let first = roots.clone();
