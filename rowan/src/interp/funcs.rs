@@ -385,6 +385,12 @@ impl Analyzer {
             let oid = self.heap.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, &nm, Payload::Str(format!("builtins.{}", nm)));
             return Value::obj(oid);
         }
+        // (a name an imported module does not bind, nor anything rowan cannot see: a NameError,
+        // and the path goes on, as after any read that fails; the main module's free names are
+        // its inputs)
+        if fr_module != self.program.main_module && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
+            self.may_raise_here("NameError", state);
+        }
         let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm));
         Value::obj(oid)
     }
