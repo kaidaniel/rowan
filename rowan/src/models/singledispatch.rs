@@ -209,9 +209,11 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, recv: Option<Value>, a: A
         bump(state, "hits", true);
         return state.slot(memo, Ns::Item, mk);
     }
-    // (a bounded cache's hit: it may have dropped the result, and the call runs)
+    // (a hit on some paths, a bounded cache's hit that may have dropped the result, or a
+    // call with arguments not known that may have cached it: a hit or a miss, the call's
+    // effects only on the miss)
     let hit = row.present.contains(mk).then(|| state.slot(memo, Ns::Item, mk));
-    let pre = (bounded && row.definite.contains(mk)).then(|| state.copy());
+    let pre = (hit.is_some() || star.is_some()).then(|| state.copy());
     if hit.is_some() || star.is_some() {
         bump(state, "hits", false);
         bump(state, "misses", false);
@@ -291,6 +293,12 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
                     for (k, v) in state.obj_slots(w, Ns::Attr) {
                         state.set_slot(f, Ns::Attr, k, v, strong);
                     }
+                }
+                // (a wrapper of what rowan does not know, a function a call that does not run
+                // gave back: it has whatever attributes that has)
+                if !wv.kv.is_bot() || wv.pts.iter().any(|w| an.heap.kind(w) != Kind::Function) {
+                    let r = state.row(f, Ns::Attr).mutate(intern::s("functools.wraps"));
+                    state.set_row(f, Ns::Attr, r);
                 }
                 an.m.wrapped.insert(f, wv);
             }

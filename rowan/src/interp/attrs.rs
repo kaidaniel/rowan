@@ -209,6 +209,9 @@ impl Analyzer {
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
+                    // (a wrapper of an unknown, stored on some paths only: on the others what
+                    // the unknown has)
+                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).definite.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
                     Some(v) => v,
                     // (an attribute the program did not give it: it may not have it)
                     None => {
