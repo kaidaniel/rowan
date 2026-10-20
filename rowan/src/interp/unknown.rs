@@ -593,30 +593,7 @@ impl Analyzer {
             deps.extend(cl.modules.iter().map(|(m, _)| *m));
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
-            // (values whose parts may change, not themselves: their parts; whose parts' parts
-            // may: those)
-            let mut parts: Vec<ObjId> = Vec::new();
-            for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
-                for o in v.pts.iter() {
-                    deps.push(o);
-                    self.obj_edges(o, state, &mut parts);
-                }
-            }
-            let mut mid: Vec<ObjId> = Vec::new();
-            for v in cl.held2_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)) {
-                for o in v.pts.iter() {
-                    deps.push(o);
-                    self.obj_edges(o, state, &mut mid);
-                }
-            }
-            for o in mid {
-                deps.push(o);
-                self.havoc.code.extend(code_of(&self.heap, o));
-                self.obj_edges(o, state, &mut parts);
-            }
-            parts.sort_unstable();
-            parts.dedup();
-            vals.extend(parts.into_iter().map(Value::obj));
+            vals.extend(self.held_parts(cl, state, &mut deps).into_iter().map(Value::obj));
             self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
             let objs = |locs: &[(ObjId, Ns, KeyId)], values: &[Value], state: &State| -> Vec<ObjId> { locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect() };
             for (locs, values, change) in [(&cl.edited_locs, &cl.edited_values, true), (&cl.iterated_locs, &cl.iterated_values, false)] {
@@ -642,6 +619,33 @@ impl Analyzer {
             let added: Vec<u32> = self.havoc.guard.iter().zip(counts0).map(|((_, n, _), n0)| n - n0).collect();
             self.havoc.remember_follow(key, first, added, deps, slots, state);
         }
+    }
+
+    /// The parts of the values a closure may change the parts of, not themselves (and of those
+    /// whose parts' parts it may change, those), the values met added to `deps`.
+    fn held_parts(&mut self, cl: &super::effects::Closure, state: &State, deps: &mut Vec<ObjId>) -> Vec<ObjId> {
+        let mut parts: Vec<ObjId> = Vec::new();
+        for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
+            for o in v.pts.iter() {
+                deps.push(o);
+                self.obj_edges(o, state, &mut parts);
+            }
+        }
+        let mut mid: Vec<ObjId> = Vec::new();
+        for v in cl.held2_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)) {
+            for o in v.pts.iter() {
+                deps.push(o);
+                self.obj_edges(o, state, &mut mid);
+            }
+        }
+        for o in mid {
+            deps.push(o);
+            self.havoc.code.extend(code_of(&self.heap, o));
+            self.obj_edges(o, state, &mut parts);
+        }
+        parts.sort_unstable();
+        parts.dedup();
+        parts
     }
 
     /// Drop the facts whose test read one of `objs`.

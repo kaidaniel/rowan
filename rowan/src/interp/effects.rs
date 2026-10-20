@@ -693,9 +693,7 @@ impl Analyzer {
                 if !out.code.insert(o) {
                     continue;
                 }
-                self.budget.walk_visit();
-                *visits += 1;
-                if *cap != 0 && *visits > *cap {
+                if self.closure_visit(visits, *cap) {
                     *cut = true;
                     return;
                 }
@@ -765,8 +763,7 @@ impl Analyzer {
                 }
             }
             for (c, k, v) in slots {
-                self.budget.walk_visit();
-                *visits += 1;
+                self.closure_visit(visits, 0);
                 let name = intern::key_str_id(k);
                 if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
                     code(self, &v, work);
@@ -786,6 +783,13 @@ impl Analyzer {
                 return;
             }
         }
+    }
+
+    /// One more visit of a closure walk: past `cap` (0: none) of them, the walk stops.
+    fn closure_visit(&self, visits: &mut usize, cap: usize) -> bool {
+        self.budget.walk_visit();
+        *visits += 1;
+        cap != 0 && *visits > cap
     }
 
     /// A call of user code whose body does not run (past its budget, cut at the deadline): an
