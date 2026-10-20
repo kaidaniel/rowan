@@ -14,7 +14,7 @@ use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
 use super::flows::{Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
-use super::{Analyzer, Args, FuncInfo, Payload};
+use super::{Analyzer, Args, FuncInfo, FuncNode, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
 pub const CLOSURE_CACHE: usize = 1 << 21;
@@ -50,6 +50,9 @@ pub struct EffectsCache {
     /// per class: its dunders library code may run whose code may change something
     /// (`changing_dunders`; the code a class attribute holds is taken as fixed, as for closures)
     dunders: FxHashMap<ObjId, std::rc::Rc<[ObjId]>>,
+    /// per function code (`FuncNode::addr`): what its body does when it is inert
+    /// (`flows::inert`), None when it is not
+    inert: FxHashMap<usize, Option<std::rc::Rc<super::flows::Inert>>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -203,6 +206,16 @@ impl Closure {
 }
 
 impl Analyzer {
+    /// What the function's body does when it is inert (`flows::inert`: a
+    /// bounded handful of steps that make functions and store attributes): its own steps cost
+    /// next to nothing, so a call of it runs even past an entry's allowance or the work of a
+    /// run on demand (within its budget); what it calls follows the rules of every call.
+    pub(in crate::interp) fn inert(&mut self, foid: ObjId) -> Option<std::rc::Rc<super::flows::Inert>> {
+        let fi = self.heap.func_info_opt(foid)?;
+        let FuncNode::Def(f) = fi.node else { return None };
+        self.effects.inert.entry(fi.node.addr()).or_insert_with(|| super::flows::inert(&f.parameters, &f.body).map(std::rc::Rc::new)).clone()
+    }
+
     /// The names a function's code reads beyond its locals (computed once per `def`).
     fn code_uses(&mut self, fi: &FuncInfo) -> std::rc::Rc<CodeUses> {
         let addr = fi.node.addr();

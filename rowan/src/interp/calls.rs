@@ -810,14 +810,16 @@ impl Analyzer {
             let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
             return self.named_by_call(r, node);
         }
+        // (an inert body runs a few steps: it runs wherever it is called, `inert`)
+        let inert = self.inert(foid).is_some();
         // (within an entry past its allowance, calls of code do not run)
-        if self.budget.past_library_work(self.library_work()) {
+        if !inert && self.budget.past_library_work(self.library_work()) {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         // (on demand, past the work a function's run may do, its callees' calls are unknown)
-        if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
+        if !inert && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
