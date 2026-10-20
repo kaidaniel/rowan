@@ -315,10 +315,13 @@ fn wrap_like(an: &mut Analyzer, state: &mut State, f: ObjId, wv: Value) {
 }
 
 /// `functools.update_wrapper(wrapper, wrapped)`: the wrapper, with what `wraps` gives it
-/// (`wrap_like`); a wrapper that is not one of the program's functions: an unknown call.
+/// (`wrap_like`); a wrapper that is not one of the program's functions, or a call in a followed
+/// package's code (as without the model: their decorators' wrappers, run where they are called,
+/// cost the package's allowance), an unknown call.
 pub fn m_update_wrapper(an: &mut Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let in_library = an.module_of_idx(c.node.module).is_some_and(|m| an.heap.module_info(m).library);
     match (c.args.first(), c.args.get(1)) {
-        (Some(w), Some(f)) if c.kwargs.is_empty() && c.star_args.is_empty() && !w.pts.is_empty() && w.kv.is_bot() && w.pts.iter().all(|o| an.heap.kind(o) == Kind::Function) => {
+        (Some(w), Some(f)) if !in_library && c.kwargs.is_empty() && c.star_args.is_empty() && !w.pts.is_empty() && w.kv.is_bot() && w.pts.iter().all(|o| an.heap.kind(o) == Kind::Function) => {
             for o in w.pts.iter() {
                 wrap_like(an, st, o, f.clone());
             }
