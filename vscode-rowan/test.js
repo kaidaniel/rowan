@@ -774,7 +774,27 @@ async function follow() {
   assert.deepStrictEqual(await sitePackagesOf(path.join(tmp, "no-such-python")), []);
   const f = path.join(site, "..", "n99_lib_budgets.py");
   const src = fs.readFileSync(f, "utf8").split("\n");
-  const on = hover(indexResult(await runEngineServer(bin, f, followArgs(["partlib"], dirs), 60, [])), src, 14, "name");
+  // (the first answer is without following, as fast as without it; the followed document
+  // comes as an event, `followed`)
+  const got = new Promise((resolve) => {
+    const h = (m) => {
+      if (m.event === "analysed" && m.followed && m.path === f) {
+        serverEvents.delete(h);
+        resolve(m);
+      }
+    };
+    serverEvents.add(h);
+  });
+  const first = await runEngineServer(bin, f, followArgs(["partlib"], dirs), 60, []);
+  const firstName = hover(indexResult(first), src, 14, "name");
+  let followed = first;
+  if (first.pending) {
+    assert(!(firstName || "").includes('"partlib"'), firstName);
+    const ev = await Promise.race([got, new Promise((r) => setTimeout(() => r(null), 60000))]);
+    assert(ev && ev.ok && ev.result.facts.length > 0, "the followed document follows");
+    followed = ev.result;
+  }
+  const on = hover(indexResult(followed), src, 14, "name");
   assert.strictEqual(on, '```python\nname = "partlib"\n```');
   const off = hover(indexResult(await runEngineServer(bin, f, [], 60, [])), src, 14, "name");
   // (not followed: a library's attribute, which the hover leaves to the language server)

@@ -9,9 +9,20 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
     if let Some(src) = c.args.first() {
         // a parameter: a mapping or pairs, decided per call site
-        let recs = an.record_objects(src);
+        // (an instance of the program's class without library bases: its pairs, by its
+        // `__iter__`; by `keys()` with one; neither, a TypeError)
+        let plain = |an: &Analyzer, o: u32| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.hierarchy_closed(c) && an.heap.mro(c).iter().all(|x| an.heap.class_info_opt(*x).is_some_and(|ci| ci.lib.quals.iter().all(|q| q == "builtins.object"))));
+        if !src.pts.is_empty() && src.kv.is_bot() && src.pts.iter().all(|o| plain(an, o) && an.heap.instance_class(o).is_some_and(|cl| ["__iter__", "__getitem__", "keys"].iter().all(|m| an.class_lookup(cl, m).is_none()))) {
+            an.raise_here("TypeError", st);
+            return Value::new();
+        }
+        let recs: Vec<u32> = an.record_objects(src).into_iter().filter(|o| !plain(an, *o)).collect();
         if !recs.is_empty() {
-            an.copy_into(oid, Ns::Item, src, st, true, &KeySet::new());
+            an.copy_into(oid, Ns::Item, &Value::with_kv(crate::domain::ObjSet::from_vec(recs), src.kv.clone()), st, true, &KeySet::new());
+            if src.pts.iter().any(|o| plain(an, o)) {
+                let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
+                st.set_row(oid, Ns::Item, r);
+            }
         } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.m.sorted_items.get(&x).cloned()) {
             // `dict(sorted(d.items()))`: d's keys (the sure ones sure) in sorted order
             let mut d = st.row(oid, Ns::Item).data();
@@ -71,7 +82,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             an.store_key(oid, Ns::Item, &kel, &vel, false, &c.node, st);
                         }
                     }
-                    Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate => {
+                    Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
                         let it = an.iterate(&Value::obj(x), &c.node, st);
                         match (&it.elem, &it.items) {
                             (_, Some(items)) => {
@@ -353,7 +364,7 @@ pub(super) fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value 
         let b = match an.heap.kind(o) {
             Kind::Function | Kind::Bound | Kind::Class | Kind::Partial | Kind::Method => true,
             Kind::Instance => match an.heap.instance_class(o) {
-                Some(cls) if !an.heap.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base)) => an.class_lookup(cls, "__call__").is_some(),
+                Some(cls) if !an.heap.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base.get())) => an.class_lookup(cls, "__call__").is_some(),
                 _ => return Value::data("callable"),
             },
             Kind::Dict | Kind::List | Kind::Tuple | Kind::Set => false,

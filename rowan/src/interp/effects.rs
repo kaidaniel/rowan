@@ -400,7 +400,7 @@ impl Analyzer {
     pub(in crate::interp) fn receiver_effects(&mut self, foid: ObjId, recv: ObjId, state: &State, bind: &dyn Fn(&str) -> Option<String>) -> Option<RecvEffects> {
         let cls = self.heap.instance_class(recv)?;
         let mro = self.heap.mro(cls);
-        if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
+        if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base.get())) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
             return None;
         }
         let (mut stores, mut deletes, mut used): (FxHashSet<StrId>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
@@ -512,7 +512,7 @@ impl Analyzer {
             let mro = self.heap.mro(rc);
             let Some(at) = mro.iter().position(|c| *c == cls) else { return KeySet::new() };
             // (a base rowan does not see may be the one called)
-            if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) {
+            if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base.get())) {
                 return KeySet::new();
             }
             for c in &mro[at + 1..] {
@@ -701,6 +701,7 @@ impl Analyzer {
     /// and cells it, and the code it can call, reads where they may change).
     pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
+        self.budget.skipped += 1;
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what
         // the call reaches otherwise reaches the receiver too (`Havoc::guard`); one of several
@@ -991,6 +992,7 @@ impl Analyzer {
         for (f, r) in fns {
             self.note_call(*f, r.as_ref(), state);
         }
+        self.budget.skipped += 1;
         self.gens.force_at = None;
         let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
@@ -1309,7 +1311,7 @@ impl Analyzer {
         for o in v.pts.iter() {
             let code = match (self.heap.kind(o), &self.heap.obj(o).payload) {
                 // (an instance, or what a `__new__` of its own gives back)
-                (Kind::Class, _) if self.heap.class_info_opt(o).is_some_and(|ci| !ci.open_base) => match self.class_lookup(o, "__new__") {
+                (Kind::Class, _) if self.heap.class_info_opt(o).is_some_and(|ci| !ci.open_base.get()) => match self.class_lookup(o, "__new__") {
                     None => continue,
                     Some(c) => match self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit("__new__"))).and_then(|f| f.single()) {
                         Some(f) if self.heap.kind(f) == Kind::Function => f,

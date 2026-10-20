@@ -411,7 +411,7 @@ impl Analyzer {
                 },
                 // (a class deriving from a builtin / library class — `class C(list)` — may have
                 // its `__len__` / `__bool__`)
-                Kind::Instance if self.has_truth_dunder(oid) || self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base))) => return None,
+                Kind::Instance if self.has_truth_dunder(oid) || self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base.get() || ci.lib.dict_base))) => return None,
                 Kind::Instance | Kind::Function | Kind::Bound | Kind::Class | Kind::Module | Kind::Namespace => verdicts.push(true),
                 _ => return None,
             }
@@ -502,7 +502,7 @@ impl Analyzer {
         }
         // no __eq__: identity
         if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq) {
-            let no_eq =|an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.heap.instance_class(o).map(|c| !an.heap.class_info(c).open_base && an.heap.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
+            let no_eq =|an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.heap.instance_class(o).map(|c| !an.heap.class_info(c).open_base.get() && an.heap.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
             if let (Some(x), Some(y)) = (ai, bi) {
                 if no_eq(self, ai) && no_eq(self, bi) {
                     let same = if x == y && self.heap.obj(x).single { Some(true) } else if x != y { Some(false) } else { None };

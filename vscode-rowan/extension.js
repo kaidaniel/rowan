@@ -1013,9 +1013,11 @@ function activate(context) {
       diags.push(d);
     }
     diagnostics.set(doc.uri, diags);
-    const mode = res.pending ? " (functions analysed when hovered; the whole program is still being analysed)" : idx.onDemand ? " (functions analysed when hovered)" : "";
+    // (following installed packages: this answer is without; the followed one comes as an event)
+    const mode = res.pending && res.on_demand ? " (functions analysed when hovered; the whole program is still being analysed)" : res.pending ? " (installed packages are still being analysed)" : idx.onDemand ? " (functions analysed when hovered)" : "";
     status.text = `$(check) rowan: ${diags.length} findings${mode}`;
-    output.appendLine(`${new Date().toISOString()} ${doc.uri.fsPath}: ${res.facts.length} facts, ${diags.length} findings${res.pending ? " (on demand until the whole program is analysed)" : ""}`);
+    const note = res.pending && res.on_demand ? " (on demand until the whole program is analysed)" : res.pending ? " (until installed packages are analysed)" : res.followed ? " (installed packages followed)" : "";
+    output.appendLine(`${new Date().toISOString()} ${doc.uri.fsPath}: ${res.facts.length} facts, ${diags.length} findings${note}`);
   }
 
   // (the whole program's result, after an early answer from the module code: it replaces it)
@@ -1031,6 +1033,7 @@ function activate(context) {
     }
     if (msg.event !== "analysed" || !msg.ok) return;
     if (!doc || !prev || !prev.how) return;
+    if (msg.followed) msg.result.followed = true;
     show(doc, msg.result, prev.how);
     status.show();
   };

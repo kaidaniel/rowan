@@ -204,6 +204,8 @@ impl Analyzer {
                     crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
+                // (its defaults: made at the first read, kept on it: what changes them reaches its calls)
+                Kind::Function if matches!(name, "__defaults__" | "__kwdefaults__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_defaults_attr(oid, name, node, state),
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
@@ -491,6 +493,28 @@ impl Analyzer {
         }
     }
 
+    /// A function's `__defaults__` (a tuple, None without any) or `__kwdefaults__` (a dict of
+    /// its keyword-only parameters' defaults, None without any) before anything stored one:
+    /// made from its defaults and stored on it, so that its calls take what is changed through
+    /// it (`live_defaults`).
+    fn function_defaults_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
+        let fi = self.heap.func_info(oid);
+        let Some(params) = fi.node.params() else { return self.none_v.clone() };
+        let kw = name == "__kwdefaults__";
+        let ps: Vec<&ast::ParameterWithDefault> = if kw { params.kwonlyargs.iter().collect() } else { params.posonlyargs.iter().chain(params.args.iter()).collect() };
+        let (names, vals): (Vec<String>, Vec<Value>) = ps.iter().filter_map(|p| fi.defaults.get(&intern::s(p.parameter.name.id.as_str())).map(|v| (p.parameter.name.id.to_string(), v.clone()))).unzip();
+        let v = if vals.is_empty() {
+            self.none_v.clone()
+        } else if kw {
+            crate::models::stdlib::names_dict(self, state, node, &names, Some(vals), "kwdefaults")
+        } else {
+            let kv = vals.iter().map(|v| v.kv.clone()).reduce(|a, b| crate::domain::kv_join(&a, &b)).unwrap_or(crate::domain::DATA);
+            self.alloc_positional_sfx(Kind::Tuple, node, ":defaults", Some(vals), Value::new(), kv, state)
+        };
+        self.store_attr(&Value::obj(oid), name, &v, node, state);
+        v
+    }
+
     /// An attribute of a class object: a class attribute (a classmethod bound to this class), an Enum
     /// member, a pydantic model's attribute or method, a dataclass `__init__`, else a method of the
     /// class object.
@@ -511,7 +535,7 @@ impl Analyzer {
                 }
             }
             if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
-        } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
+        } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base.get())) {
             crate::models::enums::class_attr(self, oid, name, node, guarded, state)
         } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
             crate::models::pydantic::attr_value(self, state, oid, name, node)

@@ -468,7 +468,7 @@ impl Analyzer {
                 return true;
             }
             if let Some(ci) = self.heap.class_info_opt(cls) {
-                if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base {
+                if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base.get() {
                     parts.push(line_data.clone());
                     return true;
                 }

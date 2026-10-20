@@ -223,8 +223,14 @@ impl Analyzer {
 
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
-    /// (its calls are unknown calls). Checked at every statement.
+    /// (its calls are unknown calls). Checked at every statement. In an entry into a followed
+    /// library past the library's share, no statement runs (the entry is undone).
     pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
+        // (an entry into a followed library past the library's share: every statement, to be undone)
+        if self.library_share_spent() {
+            state.reachable = false;
+            return true;
+        }
         if !self.budget.tick() {
             return false;
         }

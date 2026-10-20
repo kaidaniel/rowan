@@ -737,7 +737,7 @@ impl Analyzer {
     /// external base's may come from outside the program).
     pub fn alloc_instance(&mut self, cls: ObjId, node: &Node, state: &mut State) -> ObjId {
         let ci = self.heap.class_info(cls);
-        let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
+        let row = if ci.open_base.get() { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
         // not collapse onto one instance; by the class object, as two classes may share a name
         // (`type(name, bases, ns)` per choice of bases)
@@ -745,7 +745,7 @@ impl Analyzer {
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.lib.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
-        } else if ci.open_base && !ci.lib.dict_base {
+        } else if ci.open_base.get() && !ci.lib.dict_base {
             // (an external base — `list`, a library class — may hold items the program's code
             // does not show: `append` / `super().__init__(items)` run there)
             state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
@@ -800,6 +800,11 @@ impl Analyzer {
     /// or past its budget (`skipped_call`); a generator function's call makes a lazy generator
     /// (its body runs when consumed); else its body runs here (`call_user_inner`).
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, entry: bool) -> Value {
+        // (an entry past the library's share: it stops, to be undone)
+        if self.budget.lib_abort.get() {
+            state.reachable = false;
+            return Value::new();
+        }
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         // (its run for any call starts from the heap here too; a followed library's code has none)
         let library = self.heap.module_info(self.heap.func_info(foid).module).library;
@@ -809,7 +814,14 @@ impl Analyzer {
         // a followed library's code: from the program's code, one entry into it (`library_entry`)
         if library && self.budget.lib_entry.is_none() {
             let q = self.heap.func_info(foid).qualname.clone();
-            let r = self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry));
+            let r = match self.library_entry(|| format!("call {} at {}", q, super::site_string(node)), state, |an, st| an.call_user(foid, self_v.clone(), a, st, node, entry)) {
+                Some(r) => r,
+                // (past the library's share: a call that does not run)
+                None => {
+                    self.gens.force_at = None;
+                    self.skipped_call(foid, &q, self_v.as_ref(), a, state, node)
+                }
+            };
             return self.named_by_call(r, node);
         }
         // (an inert body runs a few steps: it runs wherever it is called, `inert`)
@@ -1107,11 +1119,13 @@ impl Analyzer {
             }
         }
         let used_kw: Vec<StrId> = bound.keys().copied().filter(|k| kwargs.contains_key(k)).collect();
+        let live = self.live_defaults(fi, &positional, &kwonly, state);
+        let defaults = live.as_ref().unwrap_or(&fi.defaults);
         for name in positional.iter().chain(kwonly.iter()) {
             if bound.contains_key(name) {
                 continue;
             }
-            let v = self.unbound_param_value(fi, *name, star_kwargs, node, state);
+            let v = self.unbound_param_value(defaults, *name, star_kwargs, node, state);
             bound.insert(*name, v);
         }
         if let Some(va) = &a.vararg {
@@ -1149,18 +1163,85 @@ impl Analyzer {
         bound
     }
 
+    /// The defaults a call of `fi` (the running frame's function) takes: its own, unless its
+    /// `__defaults__` / `__kwdefaults__` were stored or read (`function_defaults_attr`): then
+    /// what they hold now (their own as well where the attribute may not be set; an unknown's
+    /// or an open dict's: unknown too; a parameter none of them gives a default: none).
+    fn live_defaults(&self, fi: &FuncInfo, positional: &[StrId], kwonly: &[StrId], state: &State) -> Option<IndexMap<StrId, Value>> {
+        let foid = self.frame().func.filter(|f| self.heap.func_info_opt(*f).is_some_and(|g| std::ptr::eq(&*g, fi)))?;
+        let mut out: Option<IndexMap<StrId, Value>> = None;
+        for (attr, names) in [("__defaults__", positional), ("__kwdefaults__", kwonly)] {
+            let k = intern::key_str_lit(attr);
+            let Some(v) = state.slot_opt(foid, Ns::Attr, k) else { continue };
+            let mut new: IndexMap<StrId, Value> = IndexMap::new();
+            let mut add = |n: StrId, x: Value| {
+                let e = new.entry(n).or_default();
+                *e = e.join(&x);
+            };
+            let any = |add: &mut dyn FnMut(StrId, Value)| names.iter().for_each(|n| add(*n, Value::data(attr)));
+            // (a tuple's items are the last parameters' defaults)
+            let aligned = |items: Vec<Value>, add: &mut dyn FnMut(StrId, Value)| match names.len().checked_sub(items.len()) {
+                Some(off) => items.into_iter().enumerate().for_each(|(i, x)| add(names[off + i], x)),
+                None => names.iter().for_each(|n| add(*n, Value::data(attr))),
+            };
+            if !v.kv.is_literal() && !v.kv.is_bot() {
+                any(&mut add);
+            }
+            for lit in crate::domain::kv_literals(&v.kv).iter() {
+                match intern::key_get(lit) {
+                    intern::Key::None => {}
+                    intern::Key::Tuple(xs) if attr == "__defaults__" => aligned(xs.into_iter().map(Value::lit).collect(), &mut add),
+                    _ => any(&mut add),
+                }
+            }
+            for o in v.pts.iter() {
+                match (self.heap.kind(o), attr) {
+                    (Kind::Tuple, "__defaults__") => match self.heap.llen(o, state) {
+                        Some(n) => aligned((0..n).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect(), &mut add),
+                        None => any(&mut add),
+                    },
+                    (Kind::Dict, "__kwdefaults__") => {
+                        let row = state.row(o, Ns::Item);
+                        for n in names {
+                            let nk = intern::key_of_str(*n);
+                            if row.open() {
+                                add(*n, state.slot(o, Ns::Item, nk).join(&Value::data(attr)));
+                            } else if row.present.contains(nk) {
+                                add(*n, state.slot(o, Ns::Item, nk));
+                            }
+                        }
+                    }
+                    _ => any(&mut add),
+                }
+            }
+            let d = out.get_or_insert_with(|| fi.defaults.clone());
+            // (where it may not be set, its own defaults too)
+            let keep = state.row(foid, Ns::Attr).definite.contains(k);
+            for n in names {
+                let own = d.shift_remove(n).filter(|_| !keep);
+                match (own, new.get(n)) {
+                    (Some(a), Some(b)) => d.insert(*n, a.join(b)),
+                    (Some(a), None) => d.insert(*n, a),
+                    (None, Some(b)) => d.insert(*n, b.clone()),
+                    (None, None) => None,
+                };
+            }
+        }
+        out
+    }
+
     /// The value of a parameter no argument binds: `**kwargs` holding the name wins over the
     /// default (joined with it when the key is only possibly there); a required one only
     /// `**kw` supplies is read from it (a requirement on an input).
-    fn unbound_param_value(&mut self, fi: &FuncInfo, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
+    fn unbound_param_value(&mut self, defaults: &IndexMap<StrId, Value>, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
         let nk = intern::key_of_str(name);
         let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
         let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
-        if let (Some(d), false) = (fi.defaults.get(&name), kw_present) {
+        if let (Some(d), false) = (defaults.get(&name), kw_present) {
             d.clone()
         } else if !star_kwargs.is_empty() {
             let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
-            if fi.defaults.get(&name).is_none() && !kw_definite {
+            if defaults.get(&name).is_none() && !kw_definite {
                 // a required parameter only `**kw` can supply: read from it (a requirement on
                 // an input; a missing key is a TypeError at the call)
                 for sk in star_kwargs {
@@ -1173,7 +1254,7 @@ impl Analyzer {
             }
             let mut v = if vals.is_empty() { Value::data("kw") } else { join_values(vals) };
             if !kw_definite {
-                v = match fi.defaults.get(&name) {
+                v = match defaults.get(&name) {
                     Some(d) => v.join(d),
                     None => v.join(&Value::data("kw")),
                 };

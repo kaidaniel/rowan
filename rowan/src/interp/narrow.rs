@@ -256,9 +256,23 @@ impl Analyzer {
                         }
                         return;
                     }
+                    // (a dunder of a class a decorator or a library base made: from places
+                    // rows do not show, `__dataclass_fields__`)
+                    let made = |an: &Analyzer, o: u32| {
+                        let c = match an.heap.kind(o) {
+                            Kind::Class => Some(o),
+                            Kind::Instance => an.heap.instance_class(o),
+                            _ => return false,
+                        };
+                        c.is_none_or(|c| an.heap.mro(c).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.dataclass_fields.borrow().is_some() || ci.pyd_dataclass.get() || ci.lib.quals.iter().any(|q| q != "builtins.object"))))
+                    };
+                    if intern::key_as_str(k).is_some_and(|n| n.starts_with("__")) && rec.pts.iter().any(|o| made(self, o)) {
+                        return;
+                    }
                     // (an instance whose class defines the name has it whatever its own
                     // attributes are: its row says nothing about it)
-                    let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
+                    // (a class with a base rowan does not see: its row is not all it has)
+                    let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n)) || (an.heap.kind(o) == Kind::Class && !an.hierarchy_closed(o));
                     let kept = rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o));
                     // (where it holds, it may hold for those others: the rest say nothing)
                     if truth && kept.len() < rec.pts.len() {
@@ -583,7 +597,7 @@ impl Analyzer {
             // (a class deriving from a builtin / library class, or one an ABC may recognise by
             // its methods: not decided)
             let ic = self.heap.instance_class(o)?;
-            let open = self.heap.mro(ic).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
+            let open = self.heap.mro(ic).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.open_base.get() || ci.lib.dict_base));
             return (!open && !structural).then_some(false);
         }
         let container = matches!(k, Kind::Dict | Kind::List | Kind::Tuple | Kind::Pair | Kind::Set | Kind::Frame | Kind::Series);
@@ -624,7 +638,7 @@ impl Analyzer {
             }
             seen.push(c);
             let Some(ci) = self.heap.class_info_opt(c) else { return false };
-            if ci.open_base {
+            if ci.open_base.get() {
                 return false;
             }
             work.extend(ci.bases.iter().copied());

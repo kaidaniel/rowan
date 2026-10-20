@@ -42,11 +42,17 @@ name on a line, as a hover shows it) gets a precision level from its value:
   exact    no `?`, no unknown object, no named unknown
 `gained` / `lost` count facts whose level rose / fell, `changed` those whose text changed at
 the same level. Names of library modules, classes and functions (`tabulate`: a library object
-→ `function`) are counted apart (`names`). Verdicts are counted by mark (✓ ✓~ ⚠ ⚠~ ✗ ◌);
+→ `function`; the program's function a library's decorator wraps, which without following is
+taken unchanged: `cli` → `Group(…)`) are counted apart (`names`). Verdicts are counted by mark (✓ ✓~ ⚠ ⚠~ ✗ ◌);
 `new_warn` counts accesses whose mark is ⚠ / ⚠~ / ✗ in a mode but not without following.
+
+The check: following must never be worse than not following. The script exits with status 1
+(after its table) when a capped mode (follow, only) loses a fact against `none` in any scenario
+(`--no-check`: it does not).
 
 Usage: python bench/sitepackages.py [--rowan PATH] [--uncapped] [--uncapped-timeout S]
            [--timeout S] [--scenarios s1,s2,…] [--modes none,follow,…] [-v] [--json] [--out FILE]
+           [--no-check]
 Every run goes through .guard/run when it exists (the owner's Mac); run from anywhere.
 """
 
@@ -200,8 +206,9 @@ def level(fact: dict) -> int:
     text, kinds = fact["text"], [o["kind"] for o in fact["objects"]]
     if text == "?" or (kinds and all(k in UNSEEN for k in kinds)):
         return 0
-    # (a legend names the unknowns the text shows by where they come from: `customer_from_dict(c)`)
-    return 1 if "?" in text or any(k in UNSEEN for k in kinds) or fact.get("legend") else 2
+    # (a legend names the unknowns the text shows by where they come from: `customer_from_dict(c)`;
+    # `named` those it names with nothing more known: `nx.connected_components(g)[*]`, `ctx`)
+    return 1 if "?" in text or any(k in UNSEEN for k in kinds) or fact.get("legend") or fact.get("named") else 2
 
 
 def is_name(fact: dict) -> bool:
@@ -222,7 +229,9 @@ def compare(base: dict, run: dict, show: str | None = None) -> dict:
             c["new" if fa is None else "gone"] += 1
         elif fa["text"] == fb["text"] and level(fa) == level(fb):
             continue
-        elif is_name(fa) and is_name(fb):
+        elif is_name(fa):
+            # (a library's class or function as such, or the program's function a library's
+            # decorator wraps, taken unchanged without following: what following shows it is)
             c["names"] += 1
         else:
             la, lb = level(fa), level(fb)
@@ -259,6 +268,7 @@ def main() -> None:
     ap.add_argument("-v", "--verbose", action="store_true", help="list each fact gained or lost, each new warning")
     ap.add_argument("--json", action="store_true", help="print the results as JSON, not a table")
     ap.add_argument("--out", help="also write the JSON here")
+    ap.add_argument("--no-check", action="store_true", help="do not fail when following loses facts")
     a = ap.parse_args()
     modes = a.modes.split(",") if a.modes else ["none", "follow", "only"] + (["uncapped", "unbounded"] if a.uncapped else [])
     results = {}
@@ -290,8 +300,13 @@ def main() -> None:
         Path(a.out).write_text(json.dumps(doc, indent=2, ensure_ascii=False))
     if a.json:
         print(json.dumps(doc, indent=2, ensure_ascii=False))
-        return
-    print(table(results))
+    else:
+        print(table(results))
+    # (following must never be worse than not following)
+    lost = [(name, mode, s["vs_none"]["lost"]) for name, ms in results.items() for mode, s in ms.items() if mode in ("follow", "only") and s.get("vs_none", {}).get("lost")]
+    if lost and not a.no_check:
+        print("following loses facts against not following: " + ", ".join(f"{n} {m}: {k}" for n, m, k in lost) + " (-v lists them)", file=sys.stderr)
+        sys.exit(1)
 
 
 def table(results: dict) -> str:

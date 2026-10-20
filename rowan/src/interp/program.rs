@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, ModuleInfo, Payload};
 use crate::domain::{Ns, ObjId, Value};
@@ -48,6 +48,8 @@ pub struct Program {
     pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
     /// the classes the program defines, in definition order
     pub user_classes: Vec<ObjId>,
+    /// the top-level names of modules imported that rowan did not read (`external_module`)
+    pub external: std::collections::BTreeSet<String>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     rel_files: RefCell<FxHashMap<u32, String>>,
     /// module index -> whether it is the program's own (`is_local_idx`: paths canonicalized once)
@@ -55,6 +57,22 @@ pub struct Program {
 }
 
 impl Program {
+    /// How many modules and classes there are now (`forget_since`).
+    pub fn mark(&self) -> (usize, usize) {
+        (self.modules.len(), self.user_classes.len())
+    }
+
+    /// Forget the modules imported and the classes defined since `mark` (an entry into a
+    /// followed library undone): an import of them loads them again.
+    pub fn forget_since(&mut self, (modules, classes): (usize, usize)) {
+        let kept: FxHashSet<ObjId> = self.modules.values().take(modules).copied().collect();
+        let gone: FxHashSet<ObjId> = self.modules.values().skip(modules).copied().filter(|m| !kept.contains(m)).collect();
+        self.modules.truncate(modules);
+        self.by_file.retain(|_, m| !gone.contains(m));
+        self.type_only.retain(|(m, _), _| !gone.contains(m));
+        self.user_classes.truncate(classes);
+    }
+
     pub fn new(filename: &str, main_idx: u32, search_paths: Vec<String>, analyse_entry_points: bool) -> Program {
         Program { filename: filename.to_string(), main_idx, search_paths, analyse_entry_points, ..Default::default() }
     }
@@ -307,6 +325,7 @@ impl Analyzer {
     /// A module rowan does not read: an external object (torch and numpy turn the shape
     /// model on).
     pub(super) fn external_module(&mut self, name: &str) -> Value {
+        self.program.external.insert(name.split('.').next().unwrap_or(name).to_string());
         if name == "torch" || name.starts_with("torch.") {
             self.m.torch_on = true;
             self.m.torch_real = true;

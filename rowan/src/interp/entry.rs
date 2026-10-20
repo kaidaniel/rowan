@@ -796,7 +796,7 @@ impl Analyzer {
         // (any construction of a pydantic model without an `__init__` of the program's: what its
         // validation sets — a RootModel's `root` — is not in the fields)
         let pydantic = self.entry.any_instance && !has_init && self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.pydantic));
-        let row = if ci.open_base || !(has_init || has_fields) || pydantic { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
+        let row = if ci.open_base.get() || !(has_init || has_fields) || pydantic { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
         let inst = self.instance_with(cls_oid, ci, row, state, ctx);
         // dataclass / TypedDict / NamedTuple fields (own and inherited) are present on a fresh instance
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
