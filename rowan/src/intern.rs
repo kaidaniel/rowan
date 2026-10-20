@@ -609,6 +609,24 @@ impl<T: Copy + Ord> IdSet<T> {
     pub fn map(&self, f: impl FnMut(T) -> T) -> Self {
         Self::from_iter(self.s().iter().copied().map(f))
     }
+    /// Each item `f` maps to another, replaced by it: the others keep their order, the new
+    /// ones merge in (no sort of the whole set).
+    pub fn replace(&self, mut f: impl FnMut(T) -> Option<T>) -> Self {
+        let mut new: Vec<T> = Vec::new();
+        let kept = self.filter(|x| match f(x) {
+            Some(y) => {
+                new.push(y);
+                false
+            }
+            None => true,
+        });
+        if new.is_empty() {
+            return kept;
+        }
+        new.sort_unstable();
+        new.dedup();
+        kept.union(&Self::sorted(new))
+    }
     pub fn filter(&self, mut f: impl FnMut(T) -> bool) -> Self {
         let v: Vec<T> = self.s().iter().copied().filter(|x| f(*x)).collect();
         if v.len() == self.len() {

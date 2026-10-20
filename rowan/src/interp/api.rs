@@ -439,8 +439,13 @@ impl Analyzer {
         self.budget.deadline_ms = Some(ms);
         // (`note_call`: a run for any call starts from the heaps at module code's calls too)
         self.findings.general_checks = true;
+        let t0 = std::time::Instant::now();
         self.run();
+        let t1 = t0.elapsed().as_millis();
         self.on_demand();
+        if super::debug_enabled() {
+            eprintln!("summaries: source module code {} ms, on demand {} ms", t1, t0.elapsed().as_millis() - t1);
+        }
         self.summaries.recording = true;
         self.summaries.ms = ms;
         for (oid, _, _) in self.outermost_functions(|m| self.is_local_module(m)) {
