@@ -148,6 +148,16 @@ pub struct Closure {
     /// the slots the code reads names from that were not bound when it was walked (a name
     /// defined later in its module or enclosing function): once one is, the closure is stale
     pub unbound: Vec<Loc>,
+    /// the modules walked as values (all their globals) and the names they had then
+    /// (`module_names`): once one has more, the closure is stale
+    pub modules: Vec<(ObjId, u64)>,
+}
+
+/// The names a module has on a path, as a fingerprint (their number and their keys).
+fn module_names(state: &State, m: ObjId) -> u64 {
+    let mut h: u64 = 0;
+    state.slots.each(&m, &mut |k, _| h = (h.rotate_left(5) ^ u64::from(k.1.0)).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+    h
 }
 
 impl Closure {
@@ -175,6 +185,7 @@ impl Closure {
             iterated_locs: locs(&self.iterated_locs, &prev.iterated_locs),
             iterated_values: vals(&self.iterated_values, &prev.iterated_values, resumed),
             unbound: locs(&self.unbound, &prev.unbound),
+            modules: self.modules.iter().filter(|m| !prev.modules.contains(m)).copied().collect(),
         }
     }
 
@@ -540,7 +551,7 @@ impl Analyzer {
         let whole = self.effects.whole.is_some();
         // (a name its code reads bound since: the closure is computed again)
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
-            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) {
+            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) && c.modules.iter().all(|&(m, h)| module_names(state, m) == h) {
                 return c.clone();
             }
         }
@@ -588,7 +599,8 @@ impl Analyzer {
                         dirty.extend(u.class_stores_result.iter().map(|(_, a)| *a).chain(u.uses.iter().filter_map(|x| x.attr)));
                     }
                     (Kind::Module, _) => {
-                        // (a module used as a value: any of its globals)
+                        // (a module used as a value: any of its globals, those it has now)
+                        out.modules.push((o, module_names(state, o)));
                         for (k, v) in state.obj_slots(o, Ns::Attr) {
                             out.locs.push((o, Ns::Attr, k));
                             code(self, &v, work);

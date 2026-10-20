@@ -60,9 +60,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
     and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
-    cannot change); the program's functions among it may run (`follow_code`: their code's closure, cached per roots until a name it read unbound is bound, in rounds that resume one walk, each applying what it gained; a class
+    cannot change); the program's functions among it may run, a module's too (`follow_code`: their code's closure, cached per roots until a name it read unbound is bound or a module walked gains a name, in rounds that resume one walk, each applying what it gained; a class
     attribute's flags applied again as they grow; the same code followed with nothing it read or changed changed since changes nothing, `Havoc::follows`). A walk from the same
-    values (by any unknown code) redoes only what changed (`Havoc`'s memo); the dunders of the program's instances it meets that may change
+    values (by any unknown code) redoes only what changed (`Havoc`'s memo; the tests of what it met no longer hold); the dunders of the program's instances it meets that may change
     something run as code that does not (`changing_dunders`; a skipped call follows their classes). They return an unknown and may raise anything; its
     items may be those of the mappings it was given itself (not `**d`'s, the callable's own, an `int`'s; open through the call, not
     through a value read under an input's key: `unknown_result_rows`). `a + b` of unknowns: either's elements. Library functions
