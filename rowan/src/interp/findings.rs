@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ruff_python_ast as ast;
 
 use super::{Analyzer, Payload, ViewKind};
-use crate::domain::{classify, kv_literals, label_type, Chain, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{classify, kv_literals, label_base, Chain, Classification, KeyVal, Ns, ObjId, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::state::{Kind, State};
@@ -570,7 +570,16 @@ impl Analyzer {
             info.lits = v.kv.hint().iter().collect();
             let ty = match &v.kv {
                 KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
-                kv => kv.data_site().and_then(|l| label_type(&intern::str_get(l))),
+                kv => match kv.data_site().and_then(|l| label_base(&intern::str_get(l))) {
+                    // (an unknown of a type or None: None among the literals)
+                    Some((t, opt)) => {
+                        if opt && !info.lits.contains(&intern::key_none()) {
+                            info.lits.push(intern::key_none());
+                        }
+                        Some(t)
+                    }
+                    None => None,
+                },
             };
             typed(&mut info, ty);
         }

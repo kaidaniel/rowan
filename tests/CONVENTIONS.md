@@ -35,7 +35,8 @@ fields — and the **values** of names when they follow from the program text.
 * `#@value NAME: exactly={…}` (one of these literals) / `includes={…}` / `unknown` / `shows={…}`
   (exactly these literals are named as possible, beside an unknown too: `8080 | ?`; not checked by the oracle) /
   `types={int,str}` (every unknown part is known to be of one of these types: `int(?)`; the
-  oracle checks the runtime value's type) / `untyped` (some unknown part's type is not known).
+  oracle checks the runtime value's type, or that it is a literal the same clause `shows`:
+  `shows={None} types={int}` is `None | int(?)`) / `untyped` (some unknown part's type is not known).
 * `#@general NAME: …` (the same clauses): NAME's value for **any** call of the function the line
   is in — the program's own, and any once the module has run, after any of its functions ran:
   its parameters anything their annotations allow, a method's receiver any instance (its

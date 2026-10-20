@@ -350,7 +350,7 @@ impl Analyzer {
                     // the name is None / is not None
                     if let ast::Expr::Name(l) = left {
                         let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || cur.kv.hint().contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX));
+                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || cur.kv.hint().contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX) || matches!(crate::domain::label_base(&intern::str_get(l)), Some((_, true))));
                         if has_none || is_none {
                             self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
                         }
@@ -998,10 +998,15 @@ impl Analyzer {
 /// other truth (None, 0, "" on the true path; an unknown's it may be too). None: nothing to
 /// remove.
 pub fn truth_narrowed(v: &Value, truth: bool) -> Option<Value> {
-    if let KeyVal::Data(l, _) = &v.kv {
-        let h = v.kv.hint();
+    if let KeyVal::Data(_, _) = &v.kv {
+        // (true: not None, an optional typed unknown's type alone)
+        let kv = if truth { crate::domain::kv_not_none(&v.kv) } else { v.kv.clone() };
+        let KeyVal::Data(l, all) = &kv else { unreachable!() };
+        let h = kv.hint();
         let keep: KeySet = h.iter().filter(|k| crate::models::pyvalues::truthy(*k) != Some(!truth)).collect();
-        return (keep.len() < h.len()).then(|| Value::with_kv(v.pts.clone(), KeyVal::Data(*l, keep)));
+        // (a saturated hint stays so)
+        let keep = if all.contains(intern::STAR) { all.clone() } else { keep };
+        return (keep.len() < h.len() || kv != v.kv).then(|| Value::with_kv(v.pts.clone(), KeyVal::Data(*l, keep)));
     }
     let lits = kv_literals(&v.kv);
     if !v.kv.is_literal() || lits.is_empty() {

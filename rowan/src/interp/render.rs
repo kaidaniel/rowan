@@ -4,7 +4,7 @@
 //! from), cut at a depth (`VALUE_DEPTH`) and width; `value_legend` says what the names it
 //! mentions stand for; `join_alternatives` merges the texts of several runs of a line.
 
-use crate::domain::{key_display, kv_literals, label_name, label_type, DATA, KeyVal, Ns, ObjId, Value};
+use crate::domain::{key_display, kv_literals, label_base, label_name, DATA, KeyVal, Ns, ObjId, Value};
 use crate::intern::{self, KeyId, STAR};
 use crate::interp::Analyzer;
 use crate::state::{Kind, State};
@@ -87,7 +87,11 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
-    } else if let Some(t) = v.kv.data_site().and_then(|l| label_type(&intern::str_get(l))) {
+    } else if let Some((t, opt)) = v.kv.data_site().and_then(|l| label_base(&intern::str_get(l))) {
+        // (an unknown of a type or None: `None | int(?)`)
+        if opt {
+            parts.push("None".into());
+        }
         parts.push(format!("{}(?)", t));
     } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
