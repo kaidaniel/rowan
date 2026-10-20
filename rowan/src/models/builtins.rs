@@ -404,42 +404,37 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         let ty = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l)));
         match (user, ty) {
             (true, _) => verdicts.push(false),
-            (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => verdicts.push(classes.iter().any(|c| builtin(an, *c).is_some_and(|b| b == t || b == "object" || (b == "int" && t == "bool")))),
+            (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => match typed_isinstance(an, t, &classes) {
+                Some(b) => verdicts.push(b),
+                None => return Value::data("bool"),
+            },
             // (a library class's: decided by the objects, as for the program's classes)
             _ if classes.iter().all(|c| an.heap.kind(*c) != Kind::External || !an.heap.external_qual(*c).starts_with("builtins.")) => verdicts.push(false),
             _ => return Value::data("bool"),
         }
     }
+    // a typed unknown alone (`str(?)`, `None | int(?)`): by its type
+    if v.pts.is_empty() {
+        if let Some(parts) = typed_parts(&v.kv) {
+            for (_, kind) in parts {
+                match typed_isinstance(an, kind, &classes) {
+                    Some(b) => verdicts.push(b),
+                    None => return Value::data("bool"),
+                }
+            }
+        }
+    }
     // literal values (with or without objects: both parts count)
-    if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
+    if (v.pts.is_empty() && typed_parts(&v.kv).is_none()) || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
         if !v.kv.is_literal() || lits.is_empty() {
             return Value::data("bool");
         }
         for k in lits.iter() {
-            let kind = intern::with_key(k, |kk| match kk {
-                intern::Key::Str(_) => "str",
-                intern::Key::Bool(_) => "bool",
-                intern::Key::Int(_) => "int",
-                intern::Key::Float(_) => "float",
-                intern::Key::None => "NoneType",
-                intern::Key::Tuple(_) => "tuple",
-                intern::Key::Bytes(_) => "bytes",
-                intern::Key::Dec(..) => "Decimal",
-                intern::Key::Frac(..) => "Fraction",
-                intern::Key::Frozen(_) => "frozenset",
-                _ => "?",
-            });
-            // (an abstract class like numbers.Number or collections.abc.Hashable: not decided)
-            const KNOWN: &[&str] = &["str", "bool", "int", "float", "NoneType", "tuple", "bytes", "Decimal", "Fraction", "frozenset", "object", "list", "dict", "set", "complex", "bytearray", "type", "range", "defaultdict", "OrderedDict", "Counter", "deque"];
-            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false) || protocol_members(an, *cls).is_some()) {
-                return Value::data("bool");
+            match kind_isinstance(an, lit_kind_name(k), &classes) {
+                Some(b) => verdicts.push(b),
+                None => return Value::data("bool"),
             }
-            let hit = classes.iter().any(|cls| match builtin(an, *cls) {
-                Some(b) => b == kind || (b == "int" && kind == "bool") || (b == "object"),
-                None => false,
-            });
-            verdicts.push(hit);
         }
     }
     for o in v.pts.iter() {
@@ -455,6 +450,84 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     } else {
         Value::data("bool")
     }
+}
+
+/// The type of a literal as `type(k).__name__` says (`"?"`: none `kind_isinstance` knows).
+fn lit_kind_name(k: KeyId) -> &'static str {
+    intern::with_key(k, |kk| match kk {
+        intern::Key::Str(_) => "str",
+        intern::Key::Bool(_) => "bool",
+        intern::Key::Int(_) => "int",
+        intern::Key::Float(_) => "float",
+        intern::Key::None => "NoneType",
+        intern::Key::Tuple(_) => "tuple",
+        intern::Key::Bytes(_) => "bytes",
+        intern::Key::Dec(..) => "Decimal",
+        intern::Key::Frac(..) => "Fraction",
+        intern::Key::Frozen(_) => "frozenset",
+        _ => "?",
+    })
+}
+
+/// A typed unknown's parts and their types: `int(?)` an int; `None | int(?)` an int and None.
+fn typed_parts(kv: &KeyVal) -> Option<Vec<(KeyVal, &'static str)>> {
+    let KeyVal::Data(l, _) = kv else { return None };
+    let (t, opt) = crate::domain::label_base(&intern::str_get(*l))?;
+    let mut out = vec![(crate::domain::kv_not_none(kv), t)];
+    if opt {
+        out.push((KeyVal::Lit(intern::key_none()), "NoneType"));
+    }
+    Some(out)
+}
+
+/// Whether a value of the builtin type `kind` (as `type(x).__name__` says) is an instance of
+/// one of `classes`; None when that is not known (an abstract class, a protocol, a library
+/// class `kind_isinstance` does not know). Of the program's classes it is none.
+fn kind_isinstance(an: &Analyzer, kind: &str, classes: &[u32]) -> Option<bool> {
+    // (an abstract class like numbers.Number or collections.abc.Hashable: not decided)
+    const KNOWN: &[&str] = &["str", "bool", "int", "float", "NoneType", "tuple", "bytes", "Decimal", "Fraction", "frozenset", "object", "list", "dict", "set", "complex", "bytearray", "type", "range", "defaultdict", "OrderedDict", "Counter", "deque"];
+    let builtin = |cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
+    if kind == "?" || classes.iter().any(|cls| builtin(*cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false) || protocol_members(an, *cls).is_some()) {
+        return None;
+    }
+    Some(classes.iter().any(|cls| match builtin(*cls) {
+        Some(b) => b == kind || (b == "int" && kind == "bool") || (b == "object"),
+        None => false,
+    }))
+}
+
+/// `kind_isinstance` for a typed unknown, which may be of a subclass: an `int(?)` a bool
+/// (`key_type`), an annotated `str` a `StrEnum`'s member. Decided only for builtin classes.
+pub fn typed_isinstance(an: &Analyzer, kind: &str, classes: &[u32]) -> Option<bool> {
+    let builtin = |c: u32| an.heap.kind(c) == Kind::External && an.heap.external_qual(c).starts_with("builtins.");
+    let names_bool = || classes.iter().any(|c| an.heap.external_qual(*c) == "builtins.bool");
+    if !classes.iter().all(|c| builtin(*c)) || kind == "int" && names_bool() {
+        return None;
+    }
+    kind_isinstance(an, kind, classes)
+}
+
+/// The scalar part of a value on the path where `isinstance(value, classes)` is `truth`: its
+/// literals and typed parts (`None | int(?)`) of the other outcome left out; None when nothing
+/// is known to go.
+pub fn kv_isinstance_narrowed(an: &Analyzer, kv: &KeyVal, classes: &[u32], truth: bool) -> Option<KeyVal> {
+    let typed = typed_parts(kv);
+    let parts: Vec<(KeyVal, &'static str)> = match typed.clone() {
+        Some(p) => p,
+        None if kv.is_literal() => crate::domain::kv_literals(kv).iter().map(|k| (KeyVal::Lit(k), lit_kind_name(k))).collect(),
+        None => return None,
+    };
+    let mut out = KeyVal::Bot;
+    let mut dropped = false;
+    for (part, kind) in parts {
+        let verdict = if typed.is_some() && part.data_site().is_some() { typed_isinstance(an, kind, classes) } else { kind_isinstance(an, kind, classes) };
+        if verdict == Some(!truth) {
+            dropped = true;
+        } else {
+            out = crate::domain::kv_join(&out, &part);
+        }
+    }
+    dropped.then_some(out)
 }
 
 /// `a op b` (an ordering or equality) where a library value decides it: pathlib paths are

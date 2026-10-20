@@ -72,7 +72,9 @@ impl Analyzer {
         let parts = if v.kv.is_literal() {
             vec![Value::objs(v.pts.clone()), Value::kv_only(v.kv.clone())]
         } else {
-            vec![Value::with_kv(v.pts.clone(), v.kv.unhinted()), Value::kv_only(KeyVal::lits(v.kv.hint()))]
+            // (None among them: the rest is not None, `kv_not_none`)
+            let rest = if v.kv.hint().contains(intern::key_none()) { crate::domain::kv_not_none(&v.kv).unhinted() } else { v.kv.unhinted() };
+            vec![Value::with_kv(v.pts.clone(), rest), Value::kv_only(KeyVal::lits(v.kv.hint()))]
         };
         self.run_parts(vs, i, parts, state, f)
     }

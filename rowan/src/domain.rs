@@ -1002,12 +1002,62 @@ pub fn typed_label(ty: &str, name: &str) -> String {
 /// The type of an unknown by its label: a typed label's (`typed_label`), and the labels that
 /// name a type (`"str"`: a text not known, a str method's result; `"int"`).
 pub fn label_type(label: &str) -> Option<&'static str> {
+    match label_base(label) {
+        Some((t, false)) => Some(t),
+        _ => None,
+    }
+}
+
+/// The label of an unknown that is of type `ty` or None (`None | int(?)`): `typed_label`'s
+/// with `?` after the type, which `label_type` does not name (code that does not know it takes
+/// it for an unknown of no type); `label_base` does.
+pub fn optional_label(ty: &str, name: &str) -> String {
+    typed_label(&format!("{}?", ty), name)
+}
+
+/// The type of an unknown by its label, and whether it may be None too (`optional_label`).
+pub fn label_base(label: &str) -> Option<(&'static str, bool)> {
     let ty = match label.strip_prefix('\u{2}') {
         Some(rest) => rest.split('\u{2}').next()?,
         None if matches!(label, "str" | "int") => label,
         None => return None,
     };
-    TYPE_NAMES.iter().copied().find(|t| *t == ty)
+    let (ty, opt) = ty.strip_suffix('?').map_or((ty, false), |t| (t, true));
+    TYPE_NAMES.iter().copied().find(|t| *t == ty).map(|t| (t, opt))
+}
+
+/// A scalar a builtin made sure is of type `ty` (CPython raises otherwise: `len` of what
+/// `__len__` gave): an unknown of that type, named as it was (one whose label says more, a
+/// tensor's or a text's, as it is), the literals it may be of that type; literals as they are.
+pub fn kv_of_type(kv: &KeyVal, ty: &'static str) -> KeyVal {
+    match kv {
+        KeyVal::Data(l, h) => {
+            let t = str_get(*l);
+            if !hintable(&t) || label_type(&t) == Some(ty) {
+                return kv.clone();
+            }
+            let name = label_name(&t);
+            // (a label that is a type's name, `str`, is no name; a bool is no longer one)
+            let name = if label_type(name).is_some() { "" } else { name };
+            let exact = |k: KeyId| key_type(k, ty) && (ty == "bool" || !with_key(k, |kk| matches!(kk, crate::intern::Key::Bool(_))));
+            let h = if h.contains(intern::STAR) { h.clone() } else { h.iter().filter(|k| exact(*k)).collect() };
+            KeyVal::Data(intern::s(&typed_label(ty, name)), h)
+        }
+        _ => kv.clone(),
+    }
+}
+
+/// A scalar on a path where it is not None: an optional typed unknown's (`optional_label`)
+/// the unknown of its type, without None among the literals it may be; others as they are.
+pub fn kv_not_none(kv: &KeyVal) -> KeyVal {
+    if let KeyVal::Data(l, h) = kv {
+        let t = str_get(*l);
+        if let Some((ty, true)) = label_base(&t) {
+            let h = if h.contains(intern::STAR) { h.clone() } else { h.difference(&KeySet::one(key_none())) };
+            return KeyVal::Data(intern::s(&typed_label(ty, label_name(&t))), h);
+        }
+    }
+    kv.clone()
 }
 
 /// A label without its type: what names the unknown (`expr:3:x + 1`, "" for none).
@@ -1033,7 +1083,7 @@ pub fn key_type(k: KeyId, ty: &str) -> bool {
 /// A typed label's type dropped (the value may be of another type now), its name kept.
 fn untyped(label: StrId) -> KeyVal {
     let l = str_get(label);
-    if label_type(&l).is_none() {
+    if label_base(&l).is_none() {
         return KeyVal::Data(label, KeySet::EMPTY);
     }
     let name = label_name(&l);
@@ -1140,9 +1190,9 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
         if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
         }
-        // (two unknowns of one type: an unknown of that type)
-        return match (label_type(&lx), label_type(&ly)) {
-            (Some(t), Some(u)) if t == u => KeyVal::data(&typed_label(t, "")),
+        // (two unknowns of one type: an unknown of that type, or None if either may be)
+        return match (label_base(&lx), label_base(&ly)) {
+            (Some((t, o)), Some((u, p))) if t == u => KeyVal::data(&if o || p { optional_label(t, "") } else { typed_label(t, "") }),
             _ => DATA,
         };
     }
@@ -1166,14 +1216,25 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
             let expr = label_name(&t).starts_with("expr:");
             // (an object's keys: of any type, not the unknown's)
             if !l.is_literal() {
-                return match label_type(&t) {
+                return match label_base(&t) {
                     Some(_) if expr => DATA,
                     Some(_) => untyped(*x),
                     None => d.clone(),
                 };
             }
-            return match label_type(&t) {
-                Some(ty) if kv_literals(l).iter().all(|k| key_type(k, ty)) => if expr { KeyVal::data(&typed_label(ty, "")) } else { d.clone() },
+            // (of its type, or None: an unknown of its type or None, `None | int(?)`)
+            let lits = kv_literals(l);
+            return match label_base(&t) {
+                Some((ty, opt)) if lits.iter().all(|k| key_type(k, ty) || k == key_none()) => {
+                    let opt = opt || lits.contains(key_none());
+                    // (a label that is a type's name, `str`, is no name)
+                    let name = if expr || label_type(label_name(&t)).is_some() { "" } else { label_name(&t) };
+                    match (opt, expr) {
+                        (false, false) => d.clone(),
+                        (false, true) => KeyVal::data(&typed_label(ty, "")),
+                        (true, _) => KeyVal::data(&optional_label(ty, name)),
+                    }
+                }
                 _ if expr => DATA,
                 _ => untyped(*x),
             };
@@ -1241,6 +1302,8 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             ko2.exclude = ko.exclude.union(keys);
             Some(KeyVal::KeysOf(ko2))
         }
+        // an int or None, not None: the int (`kv_not_none`)
+        KeyVal::Data(l, _) if keys.contains(key_none()) && matches!(label_base(&str_get(*l)), Some((_, true))) => kv_exclude(&kv_not_none(kv), keys),
         // a tensor or None, not None: the tensor
         // (an unknown that may be some literals: not these)
         KeyVal::Data(l, h) if !kv.hint().is_empty() => Some(KeyVal::Data(*l, h.difference(keys))),

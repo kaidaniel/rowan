@@ -350,7 +350,7 @@ impl Analyzer {
                     // the name is None / is not None
                     if let ast::Expr::Name(l) = left {
                         let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || cur.kv.hint().contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX));
+                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || cur.kv.hint().contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX) || matches!(crate::domain::label_base(&intern::str_get(l)), Some((_, true))));
                         if has_none || is_none {
                             self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
                         }
@@ -463,7 +463,7 @@ impl Analyzer {
                 (cur, StoreTarget::Slot(bo, Ns::Attr, attr))
             }
         };
-        if cur.pts.is_empty() {
+        if cur.pts.is_empty() && cur.kv.is_bot() {
             return;
         }
         self.narrow_isinstance_value(&cur, cls_expr, truth, state, store);
@@ -506,14 +506,16 @@ impl Analyzer {
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
         let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes, state) != Some(!truth)).collect();
         let new_pts = ObjSet::from_vec(keep);
-        if new_pts == cur.pts {
+        // (literals and typed unknowns by their type)
+        let new_kv = crate::models::builtins::kv_isinstance_narrowed(self, &cur.kv, &classes, truth).unwrap_or_else(|| cur.kv.clone());
+        if new_pts == cur.pts && new_kv == cur.kv {
             return;
         }
-        if new_pts.is_empty() && cur.kv.is_bot() {
+        if new_pts.is_empty() && new_kv.is_bot() {
             state.reachable = false;
             return;
         }
-        self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
+        self.store_narrowed(&store, Value::with_kv(new_pts, new_kv), state);
     }
 
     /// The classes an `isinstance` test names (a class, or a tuple of them); None when it is
@@ -539,7 +541,8 @@ impl Analyzer {
     pub fn instance_of(&self, o: u32, classes: &[u32], st: &State) -> Option<bool> {
         let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.heap.kind(o) };
         if k == Kind::Unknown {
-            return None;
+            // (an unknown of a builtin type, as annotated: by its type)
+            return self.heap.obj(o).ty.filter(|t| crate::domain::TYPE_NAMES.contains(t)).and_then(|t| crate::models::builtins::typed_isinstance(self, t, classes));
         }
         let per: Vec<Option<bool>> = classes.iter().map(|c| self.instance_of_one(o, k, *c, st)).collect();
         if per.contains(&Some(true)) {
@@ -998,10 +1001,15 @@ impl Analyzer {
 /// other truth (None, 0, "" on the true path; an unknown's it may be too). None: nothing to
 /// remove.
 pub fn truth_narrowed(v: &Value, truth: bool) -> Option<Value> {
-    if let KeyVal::Data(l, _) = &v.kv {
-        let h = v.kv.hint();
+    if let KeyVal::Data(_, _) = &v.kv {
+        // (true: not None, an optional typed unknown's type alone)
+        let kv = if truth { crate::domain::kv_not_none(&v.kv) } else { v.kv.clone() };
+        let KeyVal::Data(l, all) = &kv else { unreachable!() };
+        let h = kv.hint();
         let keep: KeySet = h.iter().filter(|k| crate::models::pyvalues::truthy(*k) != Some(!truth)).collect();
-        return (keep.len() < h.len()).then(|| Value::with_kv(v.pts.clone(), KeyVal::Data(*l, keep)));
+        // (a saturated hint stays so)
+        let keep = if all.contains(intern::STAR) { all.clone() } else { keep };
+        return (keep.len() < h.len() || kv != v.kv).then(|| Value::with_kv(v.pts.clone(), KeyVal::Data(*l, keep)));
     }
     let lits = kv_literals(&v.kv);
     if !v.kv.is_literal() || lits.is_empty() {

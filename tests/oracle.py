@@ -379,7 +379,9 @@ class Run:
         for name, spec in self.exp.values.get(key, []):
             if "types" in spec and (name in loc or name in glb):
                 v = loc[name] if name in loc else glb[name]
-                if type(v).__name__ not in spec["types"] and not any(isinstance(v, BUILTIN_TYPES.get(t, ())) for t in spec["types"]):
+                # (a literal the same clause names, `shows={None} types={int}`: `None | int(?)`)
+                shown = any(v is w or (type(v) is type(w) and v == w) for w in spec.get("shows", ()))
+                if not shown and type(v).__name__ not in spec["types"] and not any(isinstance(v, BUILTIN_TYPES.get(t, ())) for t in spec["types"]):
                     self.fails.append(f"{where}L{line} value {name}: {v!r} of type {type(v).__name__}, claimed one of {sorted(spec['types'])}")
             if "exactly" in spec and (name in loc or name in glb):
                 v = loc[name] if name in loc else glb[name]

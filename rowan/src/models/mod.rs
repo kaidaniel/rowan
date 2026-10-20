@@ -624,13 +624,30 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, a: Args, state: &mut State,
                     an.iterate(&r, node, state);
                     Value::data(&format!("L{}", node.line))
                 }
-                _ => r,
+                // (of the builtin's type whatever the dunder gave: CPython raises otherwise)
+                _ => match qual {
+                    "builtins.len" | "builtins.hash" | "builtins.int" => of_type(an, r, "int"),
+                    "builtins.str" | "builtins.repr" | "builtins.ascii" => of_type(an, r, "str"),
+                    "builtins.float" => of_type(an, r, "float"),
+                    _ => r,
+                },
             };
             let tail = rest_call(an, rest, state);
             Some(r.join(&tail))
         }
         _ => None,
     }
+}
+
+/// What a builtin gives of `r`, what a dunder returned, when CPython makes sure it is of type
+/// `ty` (raising otherwise): its unknowns (scalar or objects not known) an unknown of that type.
+fn of_type(an: &Analyzer, r: Value, ty: &'static str) -> Value {
+    let unknown = |o: ObjId| an.heap.kind(o) == Kind::Unknown;
+    let mut out = Value::with_kv(r.pts.filter(|o| !unknown(o)), crate::domain::kv_of_type(&r.kv, ty));
+    if r.pts.iter().any(unknown) {
+        out = out.join(&Value::data(&crate::domain::typed_label(ty, "")));
+    }
+    out
 }
 
 /// `format(v, spec)` for the instances among `v` whose class defines `__format__`, or (an
