@@ -11,7 +11,8 @@ expectations written by hand.
 
     uv run --no-project python tests/fuzz.py [KIND…] [--seed S] [-n N] [-j J] [--out DIR] [--shrink]
 
-KIND: lists, objects, calls, scalars, dicts, attrs, tries, gens, comps, formats, funcs, order, flow (default: all). Run it under `.guard/run`;
+KIND: lists, objects, calls, scalars, dicts, attrs, tries, gens, comps, formats, funcs, order, flow, summaries, decorators,
+unknown (default: all). Run it under `.guard/run`;
 `FUZZ_TRACE=1` (with `-j 1`) names each program before its check, to find one that a guard killed.
 """
 from __future__ import annotations
@@ -836,9 +837,350 @@ def flow_program():
     return FLOW_HEAD.split("\n"), block(flow_op, 0, random.randrange(4, 12), conds), probes
 
 
+# ---------------------------------------------------------------- calls that do not run: result summaries, getters
+# (checked under `budget=0` and `budget=20` too: past its budget a call gives back its
+# function's result summary, a getter the attribute; the escape check keeps records stored
+# elsewhere unknown)
+SUV = ["0", "1", '"s"', "None", "[1]"]
+SUK = ['"a"', '"b"', '"c"']
+SUMMARIES_HEAD = """import sys
+n = len(sys.argv)
+REG = {}
+CACHE = []
+G = {"a": 0}
+class P:
+    def __init__(self, v):
+        self.v = v
+        self._x = v
+        self.kids = []
+    def get_x(self):
+        return self._x
+    @property
+    def x(self):
+        return self._x
+    def get_kids(self):
+        return self.kids
+    def make(self):
+        return {"a": self.v}
+    def remember(self):
+        d = {"a": self.v}
+        self.last = d
+        return d
+    def first_kid(self):
+        return self.kids[0] if self.kids else None
+    @classmethod
+    def build(cls, v):
+        return cls(v)
+    @classmethod
+    def kind(cls):
+        return cls.tag
+    @staticmethod
+    def stat(v):
+        return {"s": v}
+    tag = "p"
+class Q(P):
+    tag = "q"
+    def get_x(self):
+        return -1
+def fresh(v):
+    return {"a": v, "b": [v]}
+def fresh_list(v):
+    return [v, v]
+def fresh_obj(v):
+    return P(v)
+def maybe(v):
+    if v:
+        return {"a": v}
+    return {}
+def registered(name, v):
+    d = {"a": v}
+    REG[name] = d
+    return d
+def cached(v):
+    d = {"a": v}
+    CACHE.append(d)
+    return d
+def from_global():
+    return dict(G)
+def the_global():
+    return G
+def getv(p):
+    return p.v
+def getx(p):
+    return p._x
+def kids_of(p):
+    return p.kids
+def nested(v):
+    return {"in": {"a": v}}
+def keys_of(d):
+    return list(d)
+def copy_of(d):
+    return dict(d)
+def pair(v):
+    return (v, {"a": v})
+def given(d):
+    return d
+def adds(d, k):
+    d[k] = 1
+    return d
+def rec(k):
+    return {"a": k} if k <= 0 else rec(k - 1)
+def snap():
+    return {k: 1 for k in G}
+def sized():
+    return {"n": len(G), "l": len(CACHE)}
+def on_class():
+    d = {"a": 1}
+    P.shared = d
+    return d
+def closure(v):
+    d = {"a": v}
+    def get():
+        return d
+    REG["get"] = get
+    return d
+def two(v):
+    return fresh(v), fresh(v)
+def through(p):
+    return p.make()
+p = P(1)
+q = Q(2)
+o = P(0)
+d1 = {}
+d2 = {"a": 1}
+d3 = {}
+l1 = []
+x = 0"""
+
+
+def summaries_op() -> list:
+    dn, dm, v, w, k = random.choice(["d1", "d2", "d3"]), random.choice(["d1", "d2", "d3"]), random.choice(SUV), random.choice(SUV), random.choice(SUK)
+    pn, pm = random.choice("pqo"), random.choice("pqo")
+    nm = random.choice(['"r1"', '"r2"'])
+    return random.choice([
+        [f"{dn} = fresh({v})"], [f"{dn} = maybe({v})"], [f"{dn} = registered({nm}, {v})"], [f"{dn} = cached({v})"], [f"{dn} = from_global()"],
+        [f"{dn} = the_global()"], [f"{dn} = {pn}.make()"], [f"{dn} = {pn}.remember()"], [f"{dn} = P.stat({v})"], [f"{dn} = nested({v})"],
+        [f"{dn} = copy_of({dm})"], [f"{dn} = given({dm})"], [f"{dn} = adds({dm}, {k})"], [f"{dn} = rec(n % 3)"], [f"{dn} = pair({v})[1]"],
+        [f"{dn}[{k}] = {v}"], [f"{dn}.pop({k}, None)"], [f"{dn}.clear()"], [f'if "b" in {dn} and isinstance({dn}["b"], list):', f'    {dn}["b"].append({v})'],
+        [f'if "in" in {dn}:', f'    {dn}["in"][{k}] = {v}'], [f"if {nm} in REG:", f"    REG[{nm}][{k}] = {v}"], ["if CACHE:", f"    CACHE[-1][{k}] = {v}"],
+        [f"G[{k}] = {v}"], [f"G.pop({k}, None)"], ["G = {}"], [f"if hasattr({pn}, 'last'):", f"    {pn}.last[{k}] = {v}"],
+        [f"{pn}._x = {v}"], [f"{pn}.v = {v}"], [f"{pn}.kids.append({v})"], [f"{pn} = {pm}"], [f"{pn} = P({v})"], [f"{pn} = fresh_obj({v})"],
+        [f"{pn} = P.build({v})"], [f"{pn} = Q.build({v})"], [f"{pn}.tag = {v}"], [f"x = {pn}.get_x()"], [f"x = {pn}.x"], [f"x = getv({pn})"],
+        [f"x = getx({pn})"], [f"x = {pn}.kind()"], [f"x = {pn}.first_kid()"], [f"x = len({pn}.get_kids())"], [f"x = len(kids_of({pn}))"],
+        [f"kids_of({pn}).append({v})"], [f"{pn}.get_kids().clear()"], [f"l1 = fresh_list({v})"], ["l1.append(x)"], ["l1 = keys_of(G)"],
+        [f"l1 = keys_of({dn})"], [f"x = len(fresh_list({v}))"], [f'x = {dn}.get({k}, -1)'], [f"x = len({dn})"], [f"x = {k} in {dn}"],
+        ["try:", f"    x = {dn}[{k}]  #ACC {k}", "except KeyError:", "    x = -2  #BAD"],
+        [f"if hasattr({pn}, 'last'):", "    try:", f"        x = {pn}.last[{k}]  #ACC {k}", "    except KeyError:", "        x = -3  #BAD"],
+        [f"for _j in range(n):", f"    {dn} = fresh(_j)", f"    {dn}[{k}] = _j"], [f"for _j in range(n):", f"    {dn} = registered({nm}, _j)"],
+        [f"{dn} = snap()"], [f"{dn} = sized()"], [f"{dn} = on_class()"], ["if hasattr(P, 'shared'):", f"    P.shared[{k}] = {v}"], [f"{dn} = closure({v})"],
+        ['if "get" in REG:', f'    REG["get"]()[{k}] = {v}'], [f"{dn}, {dm} = two({v})"], [f"{dn} = through({pn})"],
+        [f"x = fresh({v}) is fresh({v})"], [f"x = registered({nm}, {v}) is REG[{nm}]"], [f"x = {pn}.remember() is {pn}.last"], [f"x = the_global() is G"],
+    ])
+
+
+def summaries_program():
+    probes = ["x", "len(REG)", "len(CACHE)", "len(G)", 'G.get("a", -1)', "len(l1)", "l1[-1] if l1 else -9", ("row", "G")]
+    for dn in ["d1", "d2", "d3"]:
+        probes += [f"len({dn})", f"{dn}.get({random.choice(SUK)}, -1)", ("row", dn)]
+    for pn in "pqo":
+        probes += [f"{pn}.v", f"{pn}._x", f"{pn}.get_x()", f"len({pn}.kids)", f"getattr({pn}, 'last', {{}}).get('a', -9)", ("row", pn)]
+    probes += ['REG.get("r1", {}).get("a", -9)', "CACHE[-1].get('a', -9) if CACHE else -8", "len(getattr(P, 'shared', {}))", "d1 is d2", "d2 is d3"]
+    return SUMMARIES_HEAD.split("\n"), block(summaries_op, 0, random.randrange(4, 14)), probes
+
+
+# ---------------------------------------------------------------- decorators, in the main module and an imported one
+# (a second module the program imports: its plain decorators — `functools.wraps`, attributes set
+# on the function — run when a name is first read, `deferred.rs`; registries and decorators with
+# state run at the `def`)
+DECO_DEFS = '''import functools
+CALLS = {"n": 0}
+REG = {}
+def logged(fn):
+    @functools.wraps(fn)
+    def inner(*a, **k):
+        return fn(*a, **k)
+    return inner
+def tagged(fn):
+    fn.tag = "t"
+    return fn
+def named(fn):
+    setattr(fn, "label", fn.__name__ + "!")
+    return fn
+def wrapped(fn):
+    def inner(*a, **k):
+        return fn(*a, **k)
+    return functools.update_wrapper(inner, fn)
+def register(fn):
+    REG[fn.__name__] = fn
+    return fn
+def counted(fn):
+    @functools.wraps(fn)
+    def inner(*a):
+        CALLS["n"] += 1
+        return fn(*a)
+    return inner
+def with_tag(t):
+    def deco(fn):
+        fn.tag = t
+        return fn
+    return deco
+def memo(fn):
+    cache = {}
+    @functools.wraps(fn)
+    def inner(v):
+        if v not in cache:
+            cache[v] = fn(v)
+        return cache[v]
+    inner.cache = cache
+    return inner
+def swap(fn):
+    return REG.get("f0", fn)'''
+DECOS = ["@logged", "@tagged", "@named", "@wrapped", "@register", "@counted", '@with_tag("w")', "@memo", "@swap", "@functools.lru_cache(maxsize=None)"]
+DV2 = ["0", "1", "2", "n", "x"]
+
+
+def deco_defs(prefix: str, count: int) -> list:
+    """`count` functions `{prefix}0…`, each under 0–2 decorators, returning a scalar of its
+    argument (some calling an earlier one)."""
+    lines: list = []
+    for i in range(count):
+        for _ in range(random.choice([0, 1, 1, 2])):
+            lines.append(random.choice(DECOS))
+        body = random.choice(["v + %d" % i, "v * 2", "-v", "len(str(v))", f"{prefix}0(v) + 1" if i else "v - 1", "CALLS['n'] + v"])
+        lines += [f"def {prefix}{i}(v):", f"    return {body}"]
+        if random.random() < 0.2:
+            lines.append(random.choice([f"ALIAS{i} = {prefix}{i}", f"NAME{i} = {prefix}{i}.__name__", f"{prefix}{i}.extra = {i}"]))
+    if random.random() < 0.3:
+        lines += ["def logged(fn):", "    return None", "def tagged(fn):", "    return 7"]
+    return lines
+
+
+def decorators_program():
+    mod = f"fzm{random.randrange(10**8)}"
+    src = DECO_DEFS + "\n" + "\n".join(deco_defs("f", 4)) + "\n"
+    head = (["import sys", "import functools", f"import {mod} as m", f"from {mod} import f0, f1, CALLS, REG"] + DECO_DEFS.split("\n")[1:]
+            + ["n = len(sys.argv)", "x = 0"] + deco_defs("g", 3))
+    names = [f"m.f{i}" for i in range(4)] + ["f0", "f1"] + [f"g{i}" for i in range(3)]
+
+    def op() -> list:
+        f, f2, v = random.choice(names), random.choice(names), random.choice(DV2)
+        return random.choice([
+            [f"x = {f}({v})"], [f"x = {f}.__name__"], [f"x = getattr({f}, 'tag', '-')"], [f"x = getattr({f}, 'label', '-')"],
+            [f"x = getattr({f}, 'extra', -1)"], ["x = len(m.REG)"], ["x = m.CALLS['n']"], ["x = len(REG)"], ["x = CALLS['n']"],
+            [f"x = hasattr({f}, '__wrapped__')"], [f"x = {f}.__wrapped__.__name__ if hasattr({f}, '__wrapped__') else '-'"],
+            ["x = ','.join(sorted(m.REG))"], ["x = ','.join(sorted(REG))"], [f"x = vars(m)['f{random.randrange(4)}'].__name__"],
+            [f"x = getattr(m, ['f0', 'f1', 'f2', 'f3'][n % 4])({v})"], [f"x = len({f}.cache) if hasattr({f}, 'cache') else -2"],
+            [f"{f}.tag = 'z'"], [f"m.f{random.randrange(4)} = {f2}"], [f"x = {f} is {f2}"], ["x = m.REG['f1'](n) if 'f1' in m.REG else -3"],
+            [f"x = getattr(m, 'ALIAS{random.randrange(4)}', {f})({v})"], [f"x = getattr(m, 'NAME{random.randrange(4)}', '-')"],
+            [f"x = callable({f})"], [f"x = {f}({f2}(1))"], [f"x = getattr(m, 'f{random.randrange(4)}').__name__"],
+            [f"x = sorted(k for k in vars(m) if k.startswith('f'))[n % 3]"],
+        ])
+
+    probes = ["x", "m.CALLS['n']", "len(m.REG)", "','.join(sorted(m.REG))", "CALLS['n']", "len(REG)"]
+    probes += [f"getattr({f}, 'tag', '-')" for f in names[:4]] + [f"{f}.__name__" for f in names] + [f"{f}(2)" for f in names]
+    return head, block(op, 0, random.randrange(3, 10)), probes, {mod: src}
+
+
+# ---------------------------------------------------------------- the program's code handed to unknown code
+# (`operator.call` is unknown code to rowan that calls what it is given: the code it reaches is
+# followed, `follow_code`, again after the state it reads or changes changed, `Havoc::follows`;
+# a name it reads unbound and bound later, the closure cache)
+UK = ['"x"', '"y"', "1"]
+UNKNOWN_HEAD = """import sys
+import operator
+import pprint
+n = len(sys.argv)
+G = {"a": 0}
+L = []
+class Box:
+    count = 0
+    def __init__(self):
+        self.v = 0
+        self.items = {}
+    def bump(self):
+        self.v += 1
+        self.items[self.v] = 1
+    def put(self, k):
+        self.items[k] = 1
+    def __repr__(self):
+        self.v += 10
+        return "Box"
+def add_key(d, k):
+    d[k] = 1
+def cb_g():
+    G["b"] = len(G)
+def cb_cond():
+    if len(L) > 1:
+        G["c"] = 1
+def cb_l():
+    L.append(len(L))
+def cb_late():
+    LATE.append(1)
+def cb_rebind():
+    global G
+    G = {"r": 1}
+def cb_drop():
+    G.pop("a", None)
+def make_cb(d):
+    def cb():
+        d["m"] = len(d)
+    return cb
+def cb_class():
+    Box.count += 1
+def cb_box(b):
+    b.items.clear()
+    b.v = -1
+def cb_copy():
+    for k in G:
+        d[k] = 1
+def make_counter():
+    c = [0]
+    def inc():
+        c[0] += 1
+        G["n"] = c[0]
+    return inc
+def gen_cb():
+    for i in range(2):
+        L.append(i)
+        yield i
+box = Box()
+d = {}
+cbs = []"""
+
+
+def unknown_op() -> list:
+    k, v = random.choice(UK), random.choice(["0", "1", "2"])
+    return random.choice([
+        ["operator.call(cb_g)"], ["operator.call(cb_cond)"], ["operator.call(cb_l)"], [f"operator.call(add_key, d, {k})"],
+        [f"operator.call(add_key, G, {k})"], ["operator.call(box.bump)"], [f"operator.call(box.put, {k})"],
+        ["try:", "    operator.call(cb_late)", "except NameError:", "    pass"], ["LATE = []"], ["operator.call(cb_rebind)"],
+        ["operator.call(cb_drop)"], ["operator.call(make_cb(d))"], ["cbs.append(make_cb(d))"], ["cbs.append(make_cb(G))"],
+        ["if cbs:", "    operator.call(cbs[-1])"], ["for c in cbs:", "    operator.call(c)"], ["G = {}"], ["L.clear()"], ["d = {}"],
+        [f"L.append({v})"], ["box = Box()"], ["operator.call(cb_class)"], [f"G.pop({k}, None)"], [f"d[{k}] = {v}"], [f"G[{k}] = {v}"],
+        ["operator.call(cb_box, box)"], ["operator.call(lambda: d.update(z=1))"], ["operator.call(lambda: L.append(len(G)))"],
+        ["pprint.pformat(box)"], ["pprint.pformat([box, d])"], ["operator.call(getattr(box, 'bump'))"], ["x = operator.call(len, G)"],
+        ["box.bump()"], ["cb_g()"], ["cb_cond()"], [f"if {k} in d:", f"    del d[{k}]"], ["operator.call(operator.call, cb_l)"],
+        ["def cb_new():", f"    d[{k}] = len(L)", "operator.call(cb_new)"], ["operator.call(sorted, L)"],
+        ["operator.call(cb_copy)"], ["inc = make_counter()"], ["if 'inc' in globals():", "    operator.call(inc)"], ["operator.call(list, gen_cb())"],
+        [f"operator.call(setattr, box, 'v', {v})"], ['operator.call(d.setdefault, "s", [])'], ["operator.call(Box.bump, box)"],
+        ["g = gen_cb()", "next(g)", "operator.call(next, g, None)"], [f"operator.call(G.update, {{{k}: {v}}})"], ["x = operator.call(box.items.copy)"],
+    ])
+
+
+def unknown_program():
+    probes = ["len(G)", 'G.get("b", -1)', 'G.get("c", -1)', 'G.get("a", -1)', "len(L)", "L[-1] if L else -9", "len(d)", 'd.get("m", -1)',
+              'd.get("z", -1)', "box.v", "len(box.items)", "Box.count", "len(cbs)", 'len(LATE) if "LATE" in globals() else -9',
+              ("row", "G"), ("row", "d"), ("row", "box"), "len(box.items) + box.v"]
+    conds = COND + ["if L:", "if len(G) > 1:"]
+    return UNKNOWN_HEAD.split("\n"), block(unknown_op, 0, random.randrange(4, 14), conds), probes
+
+
 KINDS = {"lists": lists_program, "objects": objects_program, "calls": calls_program, "scalars": scalars_program, "dicts": dicts_program,
          "attrs": attrs_program, "tries": tries_program, "gens": gens_program, "comps": comps_program, "formats": formats_program,
-         "funcs": funcs_program, "order": order_program, "flow": flow_program}
+         "funcs": funcs_program, "order": order_program, "flow": flow_program, "summaries": summaries_program,
+         "decorators": decorators_program, "unknown": unknown_program}
+# (ROWAN_LIMITS a kind is checked under besides `--limits`: some calls run, the later ones not)
+KIND_LIMITS = {"summaries": ["budget=6"], "decorators": ["budget=6"], "unknown": ["budget=6"]}
 
 
 # ---------------------------------------------------------------- running and checking
@@ -848,12 +1190,13 @@ KINDS = {"lists": lists_program, "objects": objects_program, "calls": calls_prog
 UNSOUND = ("leaves out", "never executed", "rowan failed", "bad JSON", "of a closed row", "not definite in the program", "is absent", "but rowan says")
 
 
-def annotate(head: list, body: list, probes: list, limits: str = "") -> str | None:
+def annotate(head: list, body: list, probes: list, limits: str = "", mods: dict | None = None, moddir: str | None = None) -> str | None:
     """The program with its probes and their directives from CPython's runs over n = 1..5, or
     None when a run raised: `#@value pN: includes={…}` (the values a probe took), `#@row pN:
     possible={…} definite_within={…}` (a `("row", NAME)` probe: the keys of the dict, or the
     attributes of the object, NAME was), and on an access marked `#ACC KEY` (its handler `#BAD`)
-    `#@ sound KEY` when it succeeded in a run, `#@ fails KEY` when it failed."""
+    `#@ sound KEY` when it succeeded in a run, `#@ fails KEY` when it failed. `mods`: the
+    modules the program imports (name → source), written to `moddir`, next to the program."""
     seen: dict = {}
     rows: dict = {}
     acc: dict = {}
@@ -881,6 +1224,11 @@ def annotate(head: list, body: list, probes: list, limits: str = "") -> str | No
     py += [f"_row('p{i}', {e[1]})" if isinstance(e, tuple) else f"_rec('p{i}', {e})" for i, e in enumerate(probes)]
     saved = sys.argv
     steps = [0]
+    for name, src in (mods or {}).items():
+        with open(os.path.join(moddir, f"{name}.py"), "w") as f:
+            f.write(src)
+    if mods:
+        sys.path.insert(0, moddir)
 
     def tracer(frame, event, arg):
         # (a shrunk program may loop for ever: `while True` without its `break`)
@@ -893,12 +1241,16 @@ def annotate(head: list, body: list, probes: list, limits: str = "") -> str | No
         sys.settrace(tracer)
         for n in range(1, 6):
             sys.argv = ["x"] * n
+            for name in mods or {}:
+                sys.modules.pop(name, None)
             exec("\n".join(py), {"_rec": rec, "_row": rec_row, "_acc": lambda i, ok: acc.setdefault(i, set()).add(ok)})  # noqa: S102 (generated code)
     except Exception:  # noqa: BLE001
         return None
     finally:
         sys.settrace(None)
         sys.argv = saved
+        if mods:
+            sys.path.remove(moddir)
     for i, key in keys.items():
         # (a key of a name, `kx`, has no verdict of its own name)
         if key.isidentifier():
@@ -929,12 +1281,12 @@ def fails(path: str) -> list:
     return [p for p in problems if any(m in p for m in UNSOUND)]
 
 
-def shrink(path: str, head: list, body: list, probes: list, limits: str) -> str:
+def shrink(path: str, head: list, body: list, probes: list, limits: str, mods: dict) -> str:
     """Replace statements (and whole blocks) by `pass` while the program still fails."""
     tmp = path.replace(".py", "_try.py")
 
     def still(b):
-        text = annotate(head, b, probes, limits)
+        text = annotate(head, b, probes, limits, mods, os.path.dirname(path))
         if text is None:
             return False
         with open(tmp, "w") as f:
@@ -958,7 +1310,7 @@ def shrink(path: str, head: list, body: list, probes: list, limits: str) -> str:
     os.remove(tmp)
     out = path.replace(".py", "_min.py")
     with open(out, "w") as f:
-        f.write(annotate(head, [l for l in body if l], probes, limits))
+        f.write(annotate(head, [l for l in body if l], probes, limits, mods, os.path.dirname(path)))
     return out
 
 
@@ -982,30 +1334,31 @@ def main() -> int:
             random.seed(f"{kind}{seed}")
             if os.environ.get("FUZZ_TRACE"):
                 print(f"making {kind} {seed}", file=sys.stderr, flush=True)
-            head, body, probes = KINDS[kind]()
+            head, body, probes, *mods = KINDS[kind]()
+            mods = mods[0] if mods else {}
             made.setdefault(kind, [0, 0])[0] += 1
-            for lim in limits:
-                text = annotate(head, body, probes, lim)
+            for lim in limits + KIND_LIMITS.get(kind, []):
+                text = annotate(head, body, probes, lim, mods, out)
                 if text is None:
                     break
                 made[kind][1] += 1
                 path = os.path.join(out, f"{kind}_{seed}{'_' + re.sub(r'[^a-z0-9]+', '', lim) if lim else ''}.py")
                 with open(path, "w") as f:
                     f.write(text)
-                cases.append((kind, path, head, body, probes, lim))
+                cases.append((kind, path, head, body, probes, lim, mods))
     # (processes: the golden harness keeps a case's expectations in module globals)
     with ProcessPoolExecutor(a.j) as ex:
         results = list(ex.map(fails, [c[1] for c in cases]))
     bad = [(c, r) for c, r in zip(cases, results) if r]
-    for (kind, path, head, body, probes, lim), problems in bad:
+    for (kind, path, head, body, probes, lim, mods), problems in bad:
         print(f"FAIL {path}")
         for p in problems[:4]:
             print(f"    {p.splitlines()[0][:200]}")
         if a.shrink:
-            print(f"    shrunk: {shrink(path, head, body, probes, lim)}")
+            print(f"    shrunk: {shrink(path, head, body, probes, lim, mods)}")
     for kind, (m, c) in made.items():
         nb = sum(1 for cs, _ in bad if cs[0] == kind)
-        print(f"  {kind}: {m} programs ({m - c // max(len(limits), 1)} raised under CPython), {c} checks, {nb} unsound")
+        print(f"  {kind}: {m} programs ({m - c // max(len(limits) + len(KIND_LIMITS.get(kind, [])), 1)} raised under CPython), {c} checks, {nb} unsound")
     print(f"{len(cases) - len(bad)}/{len(cases)} checks agree with CPython ({out})")
     return 1 if bad else 0
 

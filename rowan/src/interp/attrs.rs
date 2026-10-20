@@ -1049,6 +1049,13 @@ impl Analyzer {
         }
         let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
+            // (stored on some paths only: on the others it is what the object has under the
+            // name, as for an open record's key, `literal_key_value`)
+            if row.open() && !(row.definite.contains(nk) && row.stored.contains(nk)) {
+                let v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+                state.set_slot_found(oid, Ns::Attr, nk, v.clone(), false);
+                return v;
+            }
             return v;
         }
         let cls = classify(&row, nk);
