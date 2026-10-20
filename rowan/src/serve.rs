@@ -91,11 +91,11 @@ fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (st
             }
         };
         an.set_cancel(cancel.clone());
-        if whole {
-            // (the result summaries' source, made when a call first does not run)
-            let (p, o) = (path.clone(), opts.clone());
-            an.set_summary_source(move || summaries_of(&p, &o).ok());
-        } else {
+        // (the result summaries' source, made when a call in the file first does not run: in
+        // the whole run, or in a function's run on demand)
+        let (p, o) = (path.clone(), opts.clone());
+        an.set_summary_source(move || summaries_of(&p, &o).ok());
+        if !whole {
             an.main_block_unrun();
         }
         an.run();
