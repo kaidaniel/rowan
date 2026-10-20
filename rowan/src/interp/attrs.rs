@@ -209,6 +209,9 @@ impl Analyzer {
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
+                    // (a wrapper of an unknown, stored on some paths only: on the others what
+                    // the unknown has)
+                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
                     Some(v) => v,
                     // (an attribute the program did not give it: it may not have it)
                     None => {
@@ -303,7 +306,7 @@ impl Analyzer {
         }
         if let Payload::View(ViewKind::Keys, recv) = &self.heap.obj(oid).payload {
             if name == "str" {
-                return Err(Value::kv_only(KeyVal::KeysOf(crate::domain::KeysOf::new(recv.pts.clone(), Ns::Item))));
+                return Err(Value::kv_only(KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item))));
             }
         }
         Ok(self.method_value(&format!("view.{}", name), &Value::obj(oid)))
@@ -1049,6 +1052,15 @@ impl Analyzer {
         }
         let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
+            // (stored on some paths only: on the others it is what the object has under the
+            // name, as for an open record's key, `literal_key_value`)
+            // (one with an unknown part already — a weak store's, `store_attr` — covers it)
+            let known = matches!(v.kv, KeyVal::Bot | KeyVal::Lit(_) | KeyVal::Lits(_)) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown);
+            if known && row.open() && !(row.likely.contains(nk) && row.stored.contains(nk)) {
+                let v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+                state.set_slot_found(oid, Ns::Attr, nk, v.clone(), false);
+                return v;
+            }
             return v;
         }
         let cls = classify(&row, nk);

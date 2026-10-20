@@ -248,7 +248,7 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
                 // (every key of a dict: `list(d)` holds them all)
                 let kv = match &elem.kv {
-                    KeyVal::KeysOf(ko) if it.exhaustive => KeyVal::KeysOf(crate::domain::KeysOf { exhaustive_depth: crate::domain::ALL_KEYS, ..ko.clone() }),
+                    KeyVal::KeysOf(ko) if it.exhaustive => KeyVal::KeysOf(Box::new(crate::domain::KeysOf { exhaustive_depth: crate::domain::ALL_KEYS, ..(**ko).clone() })),
                     kv => kv.clone(),
                 };
                 st.elems.insert(oid, kv);
@@ -1029,9 +1029,9 @@ fn getattr_names(kv: &KeyVal, st: &State) -> (Vec<String>, bool) {
         KeyVal::Bot => (Vec::new(), false),
         KeyVal::Lit(k) => (strs(&mut std::iter::once(*k)), false),
         KeyVal::Lits(ks) => (strs(&mut ks.iter()), false),
-        KeyVal::KeysOf(ko) if ko.objs.iter().all(|o| st.row(o, ko.ns).closed()) => {
-            let mut keys = ko.objs.iter().flat_map(|o| st.row(o, ko.ns).present.difference(&ko.exclude).iter().collect::<Vec<_>>());
-            let keys: Vec<KeyId> = (&mut keys).filter_map(|k| crate::source::lens_apply(ko.chain, k)).collect();
+        KeyVal::KeysOf(ko) if st.keys_row(ko).closed() => {
+            let keys = st.keys_row(ko).present.difference(&ko.exclude);
+            let keys: Vec<KeyId> = keys.iter().filter_map(|k| crate::source::lens_apply(ko.chain, k)).collect();
             (strs(&mut keys.into_iter()), false)
         }
         _ => (Vec::new(), true),

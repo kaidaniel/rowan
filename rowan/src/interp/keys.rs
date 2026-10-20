@@ -419,14 +419,11 @@ pub(in crate::interp) fn keys_now(kv: &KeyVal, state: &State) -> Option<KeyVal> 
     if ko.chain != intern::EMPTY_LENS {
         return None;
     }
-    let mut keys = KeySet::new();
-    for o in ko.objs.iter() {
-        let row = state.row(o, ko.ns);
-        if row.open() || row.present.contains(intern::STAR) {
-            return None;
-        }
-        keys = keys.union(&row.present.difference(&ko.exclude));
+    let row = state.keys_row(ko);
+    if row.open() || row.present.contains(intern::STAR) {
+        return None;
     }
+    let keys = row.present.difference(&ko.exclude);
     if keys.len() <= crate::domain::MAX_LITS {
         return Some(KeyVal::Lits(keys));
     }

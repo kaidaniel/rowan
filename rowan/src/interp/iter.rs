@@ -6,7 +6,7 @@
 //! value of several objects iterates as one of them (alternatives, joined position by
 //! position).
 
-use crate::domain::{join_values, kv_literals, ALL_KEYS, DATA, KeyVal, KeysOf, Ns, ObjId, ObjSet, Value};
+use crate::domain::{join_values, kv_literals, ALL_KEYS, DATA, KeyVal, Ns, ObjId, ObjSet, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
@@ -228,7 +228,7 @@ impl Analyzer {
         acc.exhaustive &= match state.elems.get(&oid) {
             Some(KeyVal::KeysOf(ko)) if ko.exhaustive_depth == ALL_KEYS && ko.objs.len() == 1 && ko.exclude.is_empty() => {
                 let row = state.row(ko.objs.first().unwrap(), ko.ns);
-                !row.open() && row.present == row.definite && ll == Some(row.present.len())
+                !row.open() && row.present == row.definite && ll == Some(row.present.len()) && ko.then.difference(&row.present).is_empty()
             }
             _ => false,
         };
@@ -261,7 +261,7 @@ impl Analyzer {
             },
             _ => acc.items = None,
         }
-        acc.elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
+        acc.elems.push(Value::kv_only(KeyVal::KeysOf(state.keys_of(ObjSet::one(oid), Ns::Item))));
     }
 
     /// A pandas Series: its values (not its labels, as a dict's keys).
@@ -288,7 +288,7 @@ impl Analyzer {
             }
             return;
         }
-        let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
+        let kv = KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item));
         let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
         let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
         match (lit, acc.items.as_mut()) {
@@ -617,7 +617,7 @@ impl Analyzer {
                     acc = acc.join(&Value::with_kv(e.pts, kv));
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => acc = acc.join(&crate::models::pandas::series_values(state, oid, node.line).1),
-                Kind::Dict | Kind::Frame => acc = acc.join(&Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item)))),
+                Kind::Dict | Kind::Frame => acc = acc.join(&Value::kv_only(KeyVal::KeysOf(state.keys_of(ObjSet::one(oid), Ns::Item)))),
                 _ => acc = acc.join(&Value::data(&format!("L{}", node.line))),
             }
         }

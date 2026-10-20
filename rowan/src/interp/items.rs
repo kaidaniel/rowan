@@ -727,7 +727,7 @@ impl Analyzer {
     /// object's keys are not all this one's; any of the values.
     #[allow(clippy::too_many_arguments)]
     fn keys_of_key_read(&mut self, oid: ObjId, ns: Ns, ko: &KeysOf, row: &Row, node: &Node, state: &mut State, guarded: bool) -> Value {
-        let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
+        let srcrow = state.keys_row(ko);
         if !guarded && srcrow.closed() && row.closed() {
             let mut missing: Vec<KeyId> = Vec::new();
             for k in srcrow.present.difference(&ko.exclude).iter() {
@@ -1010,11 +1010,16 @@ impl Analyzer {
                 }
             }
             KeyVal::KeysOf(ko) => {
-                let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
-                let exhaustive = strong && ko.exhaustive_depth == self.cx.cond_depth;
+                let srcrow = state.keys_row(ko);
+                let exhaustive = strong && i32::from(ko.exhaustive_depth) == self.cx.cond_depth;
                 state.set_row(oid, ns, row.copy_from(&srcrow, exhaustive, &ko.exclude, ko.chain));
+                // (the keys they had then too: one they lost since may be this one)
+                let then = &ko.then;
                 for x in ko.objs.iter() {
-                    for k in state.slot_keys(x, ko.ns) {
+                    let mut ks = state.slot_keys(x, ko.ns);
+                    let more: Vec<KeyId> = then.iter().filter(|k| !ks.contains(k)).collect();
+                    ks.extend(more);
+                    for k in ks {
                         if ko.exclude.contains(k) {
                             continue;
                         }

@@ -9,7 +9,7 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, KeyVal, KeysOf, Ns, ObjSet, Row, RowData, Tier, Value, DATA};
+use crate::domain::{classify, join_rows, join_values, kv_join, kv_literals, Classification, KeyVal, Ns, ObjSet, Row, RowData, Tier, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, KeyId, KeySet, EMPTY_LENS};
 use crate::interp::iter::Elem;
@@ -2664,7 +2664,7 @@ fn rename_step(an: &mut Analyzer, st: &mut State, cols: &Value, c: &Call, fs: &[
                 }
             }
             Kind::Function | Kind::Bound => {
-                let probe = Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::from_vec(fs.to_vec()), Ns::Item)));
+                let probe = Value::kv_only(KeyVal::KeysOf(st.keys_of(ObjSet::from_vec(fs.to_vec()), Ns::Item)));
                 let res = an.call_value(&Value::obj(x), &c.node, None, st, Some(vec![probe]));
                 if let KeyVal::KeysOf(ko) = &res.kv {
                     if ko.objs == ObjSet::from_vec(fs.to_vec()) && ko.exclude.is_empty() {
@@ -5461,7 +5461,7 @@ pub fn columns_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value>
     match rename_step(an, st, &f, c, &fs) {
         Some(steps) => {
             let lens = intern::lens(crate::source::Lens { steps });
-            let mut ko = KeysOf::new(ObjSet::from_vec(fs), Ns::Item);
+            let mut ko = st.keys_of(ObjSet::from_vec(fs), Ns::Item);
             ko.chain = lens;
             Some(Value::kv_only(KeyVal::KeysOf(ko)))
         }
@@ -5570,7 +5570,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
                 }
                 Kind::View => {
                     if let Payload::View(_, recv) = &an.heap.obj(x).payload {
-                        let e = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
+                        let e = KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item));
                         kv = Some(match kv {
                             None => e,
                             Some(k) => kv_join(&k, &e),
@@ -5744,7 +5744,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
     }
     // `df[list(df.columns)]` / `df[df.columns]`: every column of the frame itself
     let own_keys = key.pts.iter().all(|x| match an.heap.kind(x) {
-        Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS),
+        Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS && ko.then.difference(&row.present).is_empty()),
         Kind::View => matches!(&an.heap.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
         _ => false,
     });
@@ -5794,7 +5794,7 @@ pub fn frame_setitem(an: &mut Analyzer, oid: u32, key: &Value, v: &Value, node: 
         return;
     }
     if let KeyVal::KeysOf(ko) = &key.kv {
-        let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
+        let srcrow = state.keys_row(ko);
         state.set_row(oid, Ns::Item, row.copy_from(&srcrow, false, &ko.exclude, ko.chain));
         return;
     }

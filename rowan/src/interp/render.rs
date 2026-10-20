@@ -78,7 +78,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     }
     // a part nothing is known about (data, keys of something): `?`; keys of a builtin type
     let keys = match &v.kv {
-        KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_type(ko.objs.iter(), ko.ns),
+        KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_of_type(ko),
         _ => None,
     };
     if let Some(t) = keys {

@@ -867,17 +867,25 @@ pub struct KeysOf {
     pub exclude: KeySet,
     pub chain: LensId,
     /// conditional depth at which an iteration over these keys is exhaustive, or -1
-    pub exhaustive_depth: i32,
+    pub exhaustive_depth: i16,
+    /// the keys the objects had when these were taken (a closed row's own set, shared): a key
+    /// they lose later may still be this one (`State::keys_row`); `then_open`: one was open
+    pub then: KeySet,
+    pub then_open: bool,
 }
 
+// (a `Value`'s size: `KeyVal`'s parts are copied with every value, the keys of objects boxed)
+const _: () = assert!(std::mem::size_of::<KeyVal>() <= 24);
+
 impl KeysOf {
-    pub fn new(objs: ObjSet, ns: Ns) -> Self {
-        KeysOf { objs, ns, exclude: KeySet::new(), chain: EMPTY_LENS, exhaustive_depth: -1 }
+    /// The keys of `objs` taken when their keys are `then` (`State::keys_of`).
+    pub fn new(objs: ObjSet, ns: Ns, then: KeySet, then_open: bool) -> Self {
+        KeysOf { objs, ns, exclude: KeySet::new(), chain: EMPTY_LENS, exhaustive_depth: -1, then, then_open }
     }
 }
 
 /// `KeysOf::exhaustive_depth` of a sequence's elements that are every key (`list(d)`).
-pub const ALL_KEYS: i32 = -2;
+pub const ALL_KEYS: i16 = -2;
 
 /// The scalar part of a `Value`: what it may be besides objects.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -887,7 +895,7 @@ pub enum KeyVal {
     /// one of these literals (at most `MAX_LITS`)
     Lits(KeySet),
     /// one of the keys of some objects
-    KeysOf(KeysOf),
+    KeysOf(Box<KeysOf>),
     /// an unknown, named by its label ("" = unnamed): where it comes from (`row["id"]`), a
     /// tensor shape, a builtin type (`typed_label`). The label alone covers the value; the
     /// set is literals it may be among others (`8080 | ?`, from joins: at most `HINT_MAX`, else
@@ -1187,7 +1195,7 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
     }
     if let (KeyVal::KeysOf(x), KeyVal::KeysOf(y)) = (a, b) {
         if x.exclude == y.exclude && x.chain == y.chain && x.ns == y.ns {
-            return KeyVal::KeysOf(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1 });
+            return KeyVal::KeysOf(Box::new(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1, then: x.then.union(&y.then), then_open: x.then_open || y.then_open }));
         }
     }
     if let (KeyVal::Data(x, _), KeyVal::Data(y, _)) = (a, b) {

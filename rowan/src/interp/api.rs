@@ -121,6 +121,13 @@ impl Call {
 }
 
 impl Analyzer {
+    /// `call_user` with the callee's call site and allocation context `site` in place of the
+    /// call's own (every call of a cached function whose arguments are not known: one context).
+    pub fn call_user_in(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, site: &str) -> Value {
+        self.gens.force_at = Some((site.to_string(), site.to_string()));
+        self.call_user(foid, self_v, a, state, node, false)
+    }
+
     // ------------------------------------------------------------ the program
     /// The module imported under `name`, if it is.
     pub fn module(&self, name: &str) -> Option<ObjId> {

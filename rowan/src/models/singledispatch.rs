@@ -153,28 +153,28 @@ pub(crate) fn sdispatch_call(an: &mut Analyzer, foid: ObjId, self_v: Option<Valu
     join_values(outs)
 }
 
-/// A call of a `functools.lru_cache` / `cache` function: with known arguments, the first
-/// call's result is the result of every later call with the same arguments.
-pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
-    // a memoised function with known arguments: the first call's result is the
-    // result of every later call with the same arguments
+/// A call of a `functools.lru_cache` / `cache` function (`recv`: a method's receiver): with
+/// known arguments, the first call's result is the result of every later call with the same
+/// arguments while the cache keeps it (an unbounded one always: `functools.cache`,
+/// `lru_cache(maxsize=None)`; a bounded one may have dropped it: the call may run again). With
+/// arguments not known (a receiver, `*args`, unknowns) the call may be a hit on any result
+/// cached so far (then it does not run) or a miss.
+pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, recv: Option<Value>, a: Args, state: &mut State, node: &Node) -> Value {
     let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
-    let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
-    let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
+    let pos: Option<Vec<KeyId>> = a.pos.iter().map(lit).collect();
+    let kws: Option<Vec<(StrId, KeyId)>> = a.kw.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
     // the cache is a hidden dict in the (flow-sensitive) state: on paths where the
     // first call happened the result is reused, elsewhere the call runs
-    let key = pos.zip(kws).map(|(p, k)| {
+    let key = pos.zip(kws).filter(|_| recv.is_none() && a.star.is_empty() && a.star_kw.is_empty()).map(|(p, k)| {
         let mut parts = p;
         for (n, v) in k {
             parts.push(intern::key_tuple(vec![key_str_lit(&intern::str_get(n)), v]));
         }
         intern::key_tuple(parts)
     });
-    let Some(mk) = key else {
-        return an.call_user(oid, None, Args::new(&args, &kwargs, &[], &[]), state, node, false);
-    };
     let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
     let row = state.row(memo, Ns::Item);
+    let bounded = state.slot_opt(memo, Ns::Attr, key_str_lit("\u{1}bounded")).is_some();
     // the hit / miss counts (cache_info), known while every call's outcome is
     let bump = |state: &mut State, name: &str, by_known: bool| {
         let k = key_str_lit(name);
@@ -185,18 +185,47 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &
         };
         state.set_slot(memo, Ns::Attr, k, nv, true);
     };
-    if row.definite.contains(mk) {
+    // (what calls with arguments not known cached: under any key)
+    let star = state.slot_opt(memo, Ns::Item, intern::STAR);
+    let Some(mk) = key else {
+        let cached = an.all_values(memo, Ns::Item, state);
+        let may_hit = !row.present.is_empty() || star.is_some();
+        let pre = may_hit.then(|| state.copy());
+        bump(state, "hits", false);
+        bump(state, "misses", false);
+        // (in one context for every such call: what it makes is one site's objects, as the
+        // results a cache keeps are some calls' — not one more object per call site)
+        let r = an.call_user_in(oid, recv, a, state, node, &format!("memo:{}", oid));
+        let out = if may_hit { r.join(&cached) } else { r.clone() };
+        if let Some(mut pre) = pre {
+            let j = state.join(&mut pre);
+            state.replace_with(j);
+        }
+        let v = star.map_or(r.clone(), |s| s.join(&r));
+        state.set_slot(memo, Ns::Item, intern::STAR, v, false);
+        return out;
+    };
+    if row.definite.contains(mk) && !bounded {
         bump(state, "hits", true);
         return state.slot(memo, Ns::Item, mk);
     }
-    if row.present.contains(mk) {
+    // (a hit on some paths, a bounded cache's hit that may have dropped the result, or a
+    // call with arguments not known that may have cached it: a hit or a miss, the call's
+    // effects only on the miss)
+    let hit = row.present.contains(mk).then(|| state.slot(memo, Ns::Item, mk));
+    let pre = (hit.is_some() || star.is_some()).then(|| state.copy());
+    if hit.is_some() || star.is_some() {
         bump(state, "hits", false);
         bump(state, "misses", false);
     } else {
         bump(state, "misses", true);
     }
-    let r = an.call_user(oid, None, Args::new(&args, &kwargs, &[], &[]), state, node, false);
-    let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
+    let r = an.call_user(oid, None, a, state, node, false);
+    let out = [hit, star].into_iter().flatten().fold(r, |acc, v| acc.join(&v));
+    if let Some(mut pre) = pre {
+        let j = state.join(&mut pre);
+        state.replace_with(j);
+    }
     let row = state.row(memo, Ns::Item).store(mk, true);
     state.set_row(memo, Ns::Item, row);
     state.set_slot(memo, Ns::Item, mk, out.clone(), true);
@@ -245,6 +274,11 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
             // the (empty) cache exists from the definition on, on every path
             let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
             state.set_row(memo, Ns::Item, crate::domain::Row::new());
+            // (`lru_cache` keeps 128 results unless told `maxsize=None`: it may drop one)
+            let unbounded = q == "functools.cache" || matches!(&d.expression, ast::Expr::Call(c) if c.arguments.keywords.iter().any(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "maxsize") && k.value.is_none_literal_expr()) || matches!(c.arguments.args.first(), Some(e) if e.is_none_literal_expr()));
+            if !unbounded {
+                state.set_slot(memo, Ns::Attr, key_str_lit("\u{1}bounded"), Value::lit(intern::key_none()), true);
+            }
         }
         return true;
     }
@@ -254,16 +288,45 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
         if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
             if let Some(a0) = cl.arguments.args.first() {
                 let wv = an.eval(a0, state);
-                let strong = wv.pts.len() == 1;
-                for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
-                    for (k, v) in state.obj_slots(w, Ns::Attr) {
-                        state.set_slot(f, Ns::Attr, k, v, strong);
-                    }
-                }
-                an.m.wrapped.insert(f, wv);
+                wrap_like(an, state, f, wv);
             }
         }
         return true;
     }
     false
+}
+
+/// Wrapper `f` takes `wv`'s name, qualname, doc, `__wrapped__` and the attributes it was given
+/// (its `__dict__`): `functools.wraps(wv)(f)`, `update_wrapper(f, wv)`.
+fn wrap_like(an: &mut Analyzer, state: &mut State, f: ObjId, wv: Value) {
+    let strong = wv.pts.len() == 1;
+    for w in wv.pts.iter().filter(|w| an.heap.kind(*w) == Kind::Function) {
+        for (k, v) in state.obj_slots(w, Ns::Attr) {
+            state.set_slot(f, Ns::Attr, k, v, strong);
+        }
+    }
+    // (a wrapper of what rowan does not know, a function a call that does not run gave back:
+    // it has whatever attributes that has)
+    if !wv.kv.is_bot() || wv.pts.iter().any(|w| an.heap.kind(w) != Kind::Function) {
+        let r = state.row(f, Ns::Attr).mutate(intern::s("functools.wraps"));
+        state.set_row(f, Ns::Attr, r);
+    }
+    an.m.wrapped.insert(f, wv);
+}
+
+/// `functools.update_wrapper(wrapper, wrapped)`: the wrapper, with what `wraps` gives it
+/// (`wrap_like`); a wrapper that is not one of the program's functions, or a call in a followed
+/// package's code (as without the model: their decorators' wrappers, run where they are called,
+/// cost the package's allowance), an unknown call.
+pub fn m_update_wrapper(an: &mut Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let in_library = an.module_of_idx(c.node.module).is_some_and(|m| an.heap.module_info(m).library);
+    match (c.args.first(), c.args.get(1)) {
+        (Some(w), Some(f)) if !in_library && c.kwargs.is_empty() && c.star_args.is_empty() && !w.pts.is_empty() && w.kv.is_bot() && w.pts.iter().all(|o| an.heap.kind(o) == Kind::Function) => {
+            for o in w.pts.iter() {
+                wrap_like(an, st, o, f.clone());
+            }
+            w.clone()
+        }
+        _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
+    }
 }

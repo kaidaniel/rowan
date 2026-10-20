@@ -229,6 +229,7 @@ impl Registry {
         r(&["functools.partial"], m_partial);
         r(&["memo.cache_info", "memo.cache_clear"], m_memo);
         r(&["functools.reduce"], m_reduce);
+        r(&["functools.update_wrapper"], singledispatch::m_update_wrapper);
         r(&["itertools.chain", "itertools.chain.from_iterable"], m_chain);
         r(&["partial.*"], m_partial_call);
         r(&["logging.getLogger", "logging.getLogger.getChild", "structlog.get_logger", "loguru.logger.bind"], m_get_logger);
@@ -418,10 +419,29 @@ const LOOKS_AT_CODE: &[&str] = &[
     "inspect.getcomments", "inspect.signature", "inspect.getfullargspec",
 ];
 
+/// The library functions taken to change nothing they are given that may call what they are
+/// given (so also a library function or bound method that changes its receiver or arguments).
+const CALLS_GIVEN: &[&str] = &["operator.", "threading.", "concurrent.", "asyncio.", "multiprocessing.", "os.walk", "os.fwalk", "shutil.", "signal.", "sys.set"];
+
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    // (a library function given the program's functions may call them: `inspect.getmembers(x,
-    // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
-    let code = |v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
+    // (a library function given what it may call — the program's functions, classes, callable
+    // instances; a library function or bound method that may change its receiver or arguments,
+    // where it calls what it is given, `CALLS_GIVEN` — may call it: `inspect.getmembers(x, pred)`, `asyncio.to_thread(f, …)`, `os.walk(top,
+    // onerror=errs.append)`, `operator.call(d.setdefault, k, v)`; typing's, abc's and enum's
+    // look at classes only)
+    let types_only = ["typing.", "abc.", "enum."].iter().any(|p| c.qual.starts_with(p));
+    // (library code given library callables: those that call what they are given, a thread's
+    // target, `operator.call`; not `sys.modules.get(m.__name__)`)
+    let calls_lib = CALLS_GIVEN.iter().any(|p| c.qual.starts_with(p));
+    let code = |v: &Value| {
+        v.pts.iter().any(|o| match an.heap.kind(o) {
+            Kind::Function | Kind::Bound | Kind::Partial => true,
+            Kind::Method | Kind::External => calls_lib,
+            Kind::Class => !types_only,
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|cl| an.class_lookup(cl, "__call__").is_some()),
+            _ => false,
+        })
+    };
     if !c.qual.starts_with("builtins.") && !LOOKS_AT_CODE.iter().any(|p| c.qual.starts_with(p)) && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
         return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
     }
@@ -939,6 +959,27 @@ pub struct Tables {
     /// literal arithmetic)
     pub torch_real: bool,
     pub series: ObjId,
+}
+
+impl Tables {
+    /// Recent objects fold into their summaries (`map`, recent → summary: `gc.rs`
+    /// `rename_recent`): what the tables say of a recent object holds for its summary too (a
+    /// `functools.wraps` wrapper made in a loop is one on every round, a Counter one).
+    pub fn rename_recent(&mut self, map: &FxHashMap<ObjId, ObjId>) {
+        for (r, s) in map {
+            for t in [&mut self.wrapped, &mut self.dd_factories, &mut self.csv_readers] {
+                if let Some(v) = t.get(r).cloned() {
+                    let j = t.get(s).map_or(v.clone(), |w| w.join(&v));
+                    t.insert(*s, j);
+                }
+            }
+            for t in [&mut self.counters, &mut self.ci_dicts, &mut self.zip_strict] {
+                if t.contains(r) {
+                    t.insert(*s);
+                }
+            }
+        }
+    }
 }
 
 /// A partial's `func` / `args` / `keywords`.
