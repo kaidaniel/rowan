@@ -50,8 +50,8 @@
         "rowan.followPackages": {
           "type": "array",
           "items": { "type": "string" },
-          "default": [],
-          "description": "Installed packages rowan analyses from the selected Python interpreter's site-packages, like your own code (each function within a budget; past it, as unknown code): [] none (calls into them are unknown code), [\"*\"] every one rowan has no model of, or names such as [\"acme_billing\"]."
+          "default": ["*"],
+          "description": "Installed packages rowan analyses from the selected Python interpreter's site-packages, like your own code (each function within a budget, all of them within a share of the analysis of their own; past it, as unknown code): [\"*\"] every one rowan has no model of (the default), names such as [\"acme_billing\"], or [] none (calls into them are unknown code). Hovers first come without following, as fast; the followed result replaces them when it is ready."
         },
         "rowan.pythonPath": {
           "type": "string",
