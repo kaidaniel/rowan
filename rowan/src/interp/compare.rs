@@ -145,6 +145,10 @@ impl Analyzer {
             // object is itself
             ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => self.compare_identity(op, a, b),
             ast::CmpOp::In | ast::CmpOp::NotIn if self.mixed(b) => None,
+            ast::CmpOp::In | ast::CmpOp::NotIn if b.pts.iter().any(|o| self.heap.obj(o).iterator) => {
+                let found = self.in_iterator(a, b, &lits, state);
+                found.map(|f| if op == ast::CmpOp::In { f } else { !f })
+            }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
                 if b.pts.iter().any(|o| self.hashes_keys(o)) {
                     self.check_hashable(a, state);
@@ -235,6 +239,40 @@ impl Analyzer {
             return None;
         };
         Some(if op == ast::CmpOp::Is { same } else { !same })
+    }
+
+    /// `a in it` of a one-shot iterator: it takes items until one equals `a` (or to its end).
+    /// Decided for a literal among the known items left, the iterator then just past it (or
+    /// used up); else where it stands after is not known.
+    fn in_iterator(&mut self, a: &Value, b: &Value, lits: &KeySet, state: &mut State) -> Option<bool> {
+        self.force_gen(b, state, false);
+        let one = b.single().filter(|_| b.kv.is_bot() && a.pts.is_empty() && lits.len() == 1);
+        if let (Some(o), Some((c0, n))) = (one, one.and_then(|o| self.positions_left(o, state))) {
+            let k = lits.iter().next().unwrap();
+            for i in c0..c0 + n {
+                let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+                let ks = kv_literals(&sv.kv);
+                let eq: Vec<Option<bool>> = ks.iter().map(|x| lit_eq(x, k)).collect();
+                if !sv.pts.is_empty() || !sv.kv.is_literal() || eq.iter().any(|e| e.is_none()) || (eq.contains(&Some(true)) && eq.contains(&Some(false))) {
+                    break;
+                }
+                if eq.contains(&Some(true)) {
+                    self.set_cursor(o, Some(i + 1), state);
+                    return Some(true);
+                }
+                if i + 1 == c0 + n {
+                    self.set_cursor(o, Some(c0 + n), state);
+                    return Some(false);
+                }
+            }
+            if n == 0 {
+                return Some(false);
+            }
+        }
+        for o in b.pts.iter().filter(|o| self.heap.obj(*o).iterator).collect::<Vec<_>>() {
+            self.set_cursor(o, None, state);
+        }
+        None
     }
 
     /// `a in b` / `a not in b` decided: a record's keys, a container's known members or elements,

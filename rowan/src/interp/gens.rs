@@ -212,7 +212,7 @@ impl Analyzer {
         let ctx = self.receiver_ctx(&self_v, &site);
         let q = self.heap.func_info(foid).qualname.clone();
         let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", q), Payload::None);
-        self.heap.obj_mut(gid).iterator = true;
+        self.start_iterator(gid, state);
         let mut self_v = self_v;
         if let Some(old) = self.gens.lazy.get(&gid).filter(|_| lazy_state(state, gid).0) {
             self_v = match (&self_v, &old.self_v) {
@@ -816,13 +816,17 @@ impl Analyzer {
         for lo in v.pts.iter() {
             let Some(srcs) = self.m.lazy_src.get(&lo).cloned() else { continue };
             // (consumed once on a path: a one-shot iterator itself)
+            // (false from where it is made: consumed on some of the paths joined here only,
+            // where its sources stand is not known)
             let done = key_str_lit("\u{1}consumed");
-            if state.has_slot(lo, Ns::Attr, done) {
+            let was = state.slot_opt(lo, Ns::Attr, done).map(|v| kv_literals(&v.kv));
+            if was.as_ref().is_some_and(|ks| !ks.contains(intern::key_bool(false))) {
                 continue;
             }
+            let some = was.is_some_and(|ks| ks.contains(intern::key_bool(true)));
             state.set_slot(lo, Ns::Attr, done, Value::lit(intern::key_bool(true)), true);
             for (src, n) in srcs {
-                match (full, n, self.cursor_of(src, state)) {
+                match (full && !some, n, self.cursor_of(src, state)) {
                     (true, Some(n), Some(c)) => {
                         let end = match self.heap.llen(src, state) {
                             Some(len) => (c + n).min(len),
@@ -926,6 +930,48 @@ impl Analyzer {
             for o in objs.iter() {
                 self.note_resume(o, state);
             }
+        }
+    }
+
+    /// `o` is a one-shot iterator at its start on this path: its cursor 0 (not left unset, so
+    /// a join with a path that took items from it leaves where it stands not known).
+    pub fn start_iterator(&mut self, o: ObjId, state: &mut State) {
+        self.heap.obj_mut(o).iterator = true;
+        state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(0)), true);
+    }
+
+    /// Is a one-shot iterator used up on this path (its length not known)?
+    pub fn at_end(&self, o: ObjId, state: &State) -> bool {
+        self.heap.obj(o).iterator && state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end"))
+    }
+
+    /// The items of one-shot iterator `o` from where it stands, of `items` all it gives from
+    /// its start (None: where it stands not known); an object that is no iterator: all.
+    pub fn items_from_cursor<T>(&self, o: ObjId, items: Vec<T>, state: &State) -> Option<Vec<T>> {
+        if !self.heap.obj(o).iterator {
+            return Some(items);
+        }
+        match self.cursor_of(o, state) {
+            Some(c) => Some(items.into_iter().skip(c).collect()),
+            None if self.at_end(o, state) => Some(Vec::new()),
+            None => None,
+        }
+    }
+
+    /// A list's or tuple's positions still to come, from where a one-shot iterator stands:
+    /// (the first, how many); None: not known.
+    pub fn positions_left(&self, o: ObjId, state: &State) -> Option<(usize, usize)> {
+        if !matches!(self.heap.kind(o), Kind::List | Kind::Tuple) {
+            return None;
+        }
+        let n = self.heap.llen(o, state);
+        if !self.heap.obj(o).iterator {
+            return n.map(|n| (0, n));
+        }
+        match self.cursor_of(o, state) {
+            Some(c) => n.map(|n| (c.min(n), n.saturating_sub(c))),
+            None if self.at_end(o, state) => Some((0, 0)),
+            None => None,
         }
     }
 

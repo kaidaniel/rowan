@@ -279,7 +279,7 @@ fn csv_list(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut State, ct
         an.heap.set_llen(oid, st, None);
     }
     if iterator {
-        an.heap.obj_mut(oid).iterator = true;
+        an.start_iterator(oid, st);
     }
     Value::obj(oid)
 }

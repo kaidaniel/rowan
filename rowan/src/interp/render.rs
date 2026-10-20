@@ -222,6 +222,10 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
         Kind::Tuple => ("(", ")", "tuple"),
         _ => ("{", "}", "set"),
     };
+    // (a one-shot iterator, `map(…)`'s, `iter(…)`'s: by its type, with the items it has left)
+    if an.heap.obj(o).iterator && !an.heap.obj(o).label.starts_with("generator ") && kind == Kind::List {
+        return render_iterator(an, state, o, depth, seen);
+    }
     seen.push(o);
     let out = match an.heap.llen(o, state) {
         // a generator: by its function (it runs when it is consumed)
@@ -288,6 +292,38 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
         return format!("deque({})", out);
     }
     out
+}
+
+/// A one-shot iterator: `<map: "1", "2">` (the items it has left), `<map: used up>`, `<map:
+/// some of "1", "2">` (where it stands not known), `<map: str, …>` (how many not known).
+fn render_iterator(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    let base = an.heap.obj(o).label.split('@').next().unwrap_or("").trim().to_string();
+    let name = match base.as_str() {
+        "iter" | "" => "iterator".to_string(),
+        "listcomp" => "generator".to_string(),
+        "list" | "tuple" => "iterator".to_string(),
+        b if b.contains('#') || b.contains(':') => "iterator".to_string(),
+        b => b.to_string(),
+    };
+    if depth >= VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed) {
+        return format!("<{}>", name);
+    }
+    seen.push(o);
+    let items = |from: usize, n: usize, seen: &mut Vec<ObjId>| (from..n).take(8).map(|i| state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)).map_or("?".into(), |sv| render_value(an, state, &sv, depth + 1, seen))).collect::<Vec<String>>();
+    let n = an.heap.llen(o, state);
+    let more = |n: usize, from: usize| if n - from > 8 { ", …" } else { "" };
+    let out = match (an.positions_left(o, state), n) {
+        (Some((_, 0)), _) => "used up".to_string(),
+        (Some((c, left)), _) => format!("{}{}", items(c, c + left, seen).join(", "), more(c + left, c)),
+        (None, Some(n)) if !an.at_end(o, state) => format!("some of {}{}", items(0, n, seen).join(", "), more(n, 0)),
+        (None, _) if an.at_end(o, state) => "used up".to_string(),
+        _ => {
+            let ev = Value::with_kv(state.slot(o, Ns::Elem, STAR).pts, state.elems.get(&o).unwrap_or(DATA));
+            if ev.empty() { "…".to_string() } else { format!("{}, …", render_value(an, state, &ev, depth + 1, seen)) }
+        }
+    };
+    seen.pop();
+    format!("<{}: {}>", name, out)
 }
 
 /// The lengths a list may have, when they are 2 or 3 short ones whose positions are known.

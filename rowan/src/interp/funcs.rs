@@ -542,11 +542,14 @@ impl Analyzer {
                 if elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) =>
             {
                 self.bind_starred(elts, v, state, &frontend::node(t));
+                self.exhaust(v, state);
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. }) => {
                 let n = frontend::node(t);
                 self.check_unpack_len(v, elts.len(), state);
                 let parts = self.unpack(v, elts.len(), state, &n);
+                // (a one-shot iterator unpacked: used up)
+                self.exhaust(v, state);
                 for (sub, pv) in elts.iter().zip(parts.iter()) {
                     if let ast::Expr::Starred(st) = sub {
                         self.bind_target(&st.value, pv, state);
@@ -566,9 +569,9 @@ impl Analyzer {
     fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
-        let known = v.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.heap.llen(o, state).filter(|l| *l >= si + after).map(|l| (o, l)));
-        let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, len)) = known {
-            let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int(i as i64));
+        let known = v.single().and_then(|o| self.positions_left(o, state).filter(|(_, l)| *l >= si + after).map(|(c, l)| (o, c, l)));
+        let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, c0, len)) = known {
+            let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int((c0 + i) as i64));
             let lead = (0..si).map(|i| at(i, state)).collect();
             let trail = (len - after..len).map(|i| at(i, state)).collect();
             let vals: Vec<Value> = (si..len - after).map(|i| at(i, state)).collect();
@@ -612,8 +615,8 @@ impl Analyzer {
     /// on some when a part's length is not known.
     fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
         self.force_gen(v, state, false);
-        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.heap.llen(o, state)) {
-            (Kind::List | Kind::Tuple, Some(l)) => Some(l != n),
+        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.positions_left(o, state)) {
+            (Kind::List | Kind::Tuple, Some((_, l))) => Some(l != n),
             // (a dict's item, an enumerate's or zip's of two)
             (Kind::Pair, _) => Some(n != 2),
             _ => None,
@@ -644,10 +647,9 @@ impl Analyzer {
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.heap.kind(oid);
-            let ll = self.heap.llen(oid, state);
-            if matches!(kind, Kind::Tuple | Kind::List) && ll.is_some() {
+            if let Some((c0, _)) = self.positions_left(oid, state) {
                 for i in 0..n {
-                    let sv = state.slot(oid, Ns::Pos, key_int(i as i64));
+                    let sv = state.slot(oid, Ns::Pos, key_int((c0 + i) as i64));
                     parts[i] = parts[i].join(&sv);
                 }
             } else if let Some(cls) = self.heap.instance_class(oid).filter(|c| kind == Kind::Instance && crate::models::dataclasses::is_named_tuple_class(self, *c)) {

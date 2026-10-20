@@ -44,7 +44,7 @@ pub fn it_list(an: &mut Analyzer, vals: Option<Vec<Value>>, elem: Value, node: &
         }
         _ => an.heap.set_llen(lid, st, None),
     }
-    an.heap.obj_mut(lid).iterator = true;
+    an.start_iterator(lid, st);
     Value::obj(lid)
 }
 
@@ -605,7 +605,7 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
 /// itself; anything else leaves their position unknown.
 pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, state: &mut State) {
     // (one-shot iterators, and lazy iterators over them)
-    let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((an.heap.obj(*o).iterator && an.heap.obj(*o).single && matches!(an.heap.kind(*o), Kind::List)) || an.m.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+    let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((an.heap.obj(*o).iterator && an.heap.obj(*o).single && matches!(an.heap.kind(*o), Kind::List | Kind::Zip | Kind::Enumerate)) || an.m.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
     if its.is_empty() {
         return;
     }
@@ -639,18 +639,21 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
         };
         if let (Some(ro), Some(n)) = (robj, n) {
             an.m.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
+            lazy_unconsumed(ro, state);
             return;
         }
     }
     if q == "builtins.zip" {
         if let (Some(ro), Some(pulls)) = (robj, zip_pulls(an, call, state)) {
             an.m.lazy_src.insert(ro, pulls);
+            lazy_unconsumed(ro, state);
             return;
         }
     }
     if LAZY_ALL.contains(&q) {
         if let Some(ro) = robj {
             an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+            lazy_unconsumed(ro, state);
             return;
         }
     }
@@ -661,6 +664,11 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
             an.set_cursor(o, None, state);
         }
     }
+}
+
+/// A lazy iterator not consumed yet on this path (see `consume_lazy`).
+fn lazy_unconsumed(ro: ObjId, state: &mut State) {
+    state.set_slot(ro, Ns::Attr, intern::key_str_lit("\u{1}consumed"), Value::lit(intern::key_bool(false)), true);
 }
 
 /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:

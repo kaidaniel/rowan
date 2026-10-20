@@ -4156,7 +4156,7 @@ fn iterator_list(an: &mut Analyzer, st: &mut State, node: &Node, tag: &str, item
     let e = join_values(items.clone());
     let v = an.alloc_positional_sfx(Kind::List, node, &format!(":{}", tag), Some(items), e.clone(), e.kv, st);
     for o in v.pts.iter() {
-        an.heap.obj_mut(o).iterator = true;
+        an.start_iterator(o, st);
     }
     v
 }
