@@ -399,7 +399,7 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.heap.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => crate::models::singledispatch::memo_call(self, oid, args, kwargs, state, node),
+            Kind::Function if self.heap.func_info(oid).is_memo.get() => crate::models::singledispatch::memo_call(self, oid, None, a, state, node),
             Kind::Function => {
                 let fi = self.heap.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
@@ -416,6 +416,9 @@ impl Analyzer {
             }
             Kind::Bound => {
                 let Payload::Bound(f, self_v) = self.heap.obj(oid).payload.clone() else { return Value::new() };
+                if self.heap.func_info(f).is_memo.get() {
+                    return crate::models::singledispatch::memo_call(self, f, Some(self_v), a, state, node);
+                }
                 self.call_user(f, Some(self_v), a, state, node, false)
             }
             Kind::Class => self.construct(oid, a, state, node),
