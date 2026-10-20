@@ -389,8 +389,14 @@ impl Analyzer {
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         // everything it can reach through what it is given may have changed: keys, values,
         // items, lengths; and it may call the program's functions it is given
+        let outer = self.havoc.met.replace(Vec::new());
         self.havoc_reachable(&vals, rid, site_id, state);
-        let found = std::mem::take(&mut self.havoc.code);
+        let mut found = std::mem::take(&mut self.havoc.code);
+        let met = std::mem::replace(&mut self.havoc.met, outer).unwrap_or_default();
+        self.unknown_runs_generators(&met, rid, site_id, &mut found, state);
+        if let Some(m) = &mut self.havoc.met {
+            m.extend(met);
+        }
         let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Module)).collect();
         // (a skipped call follows them itself, with its own code: `classes_followed`)
         if !callables.is_empty() && !classes_followed {
@@ -427,6 +433,23 @@ impl Analyzer {
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// The generators among the objects unknown code met (`met`) may run on (it may consume
+    /// them): what they were given may change, as unknown code changes what it is given, and
+    /// their functions' code is met (`found`), so what it changes is followed.
+    fn unknown_runs_generators(&mut self, met: &[ObjId], rid: ObjId, site_id: StrId, found: &mut Vec<ObjId>, state: &mut State) {
+        let gens: Vec<std::rc::Rc<super::gens::LazyGen>> = met.iter().filter_map(|o| self.gens.lazy.get(o).cloned()).collect();
+        if gens.is_empty() {
+            return;
+        }
+        let given: Vec<Value> = gens.iter().flat_map(|lg| lg.args.iter().chain(lg.kwargs.values()).chain(lg.self_v.iter()).cloned().collect::<Vec<_>>()).collect();
+        let walk = self.havoc.new_walk();
+        self.havoc.walk_from(&mut self.heap, &given, rid, site_id, state, walk);
+        found.append(&mut self.havoc.code);
+        found.extend(gens.iter().map(|lg| lg.foid));
+        found.sort_unstable();
+        found.dedup();
     }
 
     /// For people: the call as written names its result (and its site, for sources and
