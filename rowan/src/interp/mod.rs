@@ -32,6 +32,7 @@ pub mod calls;
 pub mod classes;
 pub mod compare;
 pub mod comps;
+pub mod deferred;
 pub mod exprs;
 pub mod flows;
 pub mod funcs;

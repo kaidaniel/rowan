@@ -224,6 +224,13 @@ impl Havoc {
                     work.extend(recv.pts.iter());
                     continue;
                 }
+                // (a deferred definition: unknown code may run its decorators' code, the function's)
+                (Kind::Unknown, Payload::Deferred(_)) => {
+                    let c = super::deferred::deferred_code(heap, o).unwrap_or_default();
+                    self.code.extend(c.iter().copied());
+                    code.extend(c);
+                    continue;
+                }
                 (Kind::Instance, Payload::Cls(c)) => {
                     let c = *c;
                     self.code.push(c);

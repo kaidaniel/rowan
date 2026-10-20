@@ -22,7 +22,7 @@
 //!     `known_positions`, `all_values`, `record_objects`) and their writers (`set_members`,
 //!     `set_positions`, `add_elem`, `normalize_set`, `literal_set`), keys (`unkey`, `opaque_key`,
 //!     `value_key`, `rename_kv`, `hashes_keys`, `check_hashable`, `check_hashable_if`),
-//!     `path_placeholder_value`;
+//!     `path_placeholder_value`, `force_module` (a module's deferred definitions run);
 //!   - operations: `binop`, `truthiness`, `truth_of`, `instance_less`, `isinstance_classes`,
 //!     `instance_of`, `hierarchy_closed`, `value_type`, `as_type`;
 //!   - iteration: `iterate`, `iterable_part`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`,

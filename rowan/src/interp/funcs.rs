@@ -373,7 +373,7 @@ impl Analyzer {
                     state.set_row_narrowed(fr_module, Ns::Attr, row.narrow_in(k, true));
                 }
             }
-            return v;
+            return self.force_slot(fr_module, intern::key_of_str(name), v, state);
         }
         let nm = str_get(name);
         // (the module's own name: `__main__` for the program's entry)

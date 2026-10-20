@@ -559,8 +559,9 @@ pub(super) fn m_simplenamespace(an: &mut Analyzer, st: &mut State, c: &Call) -> 
 /// `exec(code)` / `eval(code)`: a literal code string is run here, in this frame; anything
 /// else may change every record this frame reaches (and gives an unknown value).
 /// `globals()`: the module's names as a dict (stores through it bind names).
-pub(super) fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
+pub(super) fn m_globals(an: &mut Analyzer, st: &mut State, _c: &Call) -> Value {
     let m = an.frame().module;
+    an.force_module(m, st);
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", m), "", true, "globals()", Payload::View(ViewKind::Attrs, Value::obj(m)));
     an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(m));
     Value::obj(vid)

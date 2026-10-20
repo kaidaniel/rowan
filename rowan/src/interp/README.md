@@ -85,7 +85,8 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `attrs.rs` | attribute access through classes, instances, unknowns |
 | `keys.rs` | the key a value stands for (numbers, Enum members, identity-hashed objects), literal key views |
 | `alloc.rs`, `gc.rs` | allocation policy; liveness and collection |
-| `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
+| `flows.rs` | what a function's text does with the values it handles (for calls that do not run); which bodies are inert |
+| `deferred.rs` | deferred definitions: a module's `@dec def f` with plain inert decorators, run when `f` is first read |
 | **output** | |
 | `report.rs` | verdicts combined, access paths of what code reads, the text report, JSON, the golden document |
 | `render.rs` | values as Python text, value legends |

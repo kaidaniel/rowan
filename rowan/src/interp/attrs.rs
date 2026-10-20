@@ -133,6 +133,8 @@ impl Analyzer {
     /// class, a module, an unknown (`load_unknown_attr`), a library object (its method or
     /// attribute model) — with a verdict where a record may lack the name.
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        let forced = self.force(obj.clone(), state);
+        let obj = &forced;
         if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
             return v;
         }
@@ -310,7 +312,9 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn module_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, caught: bool, guarded: bool, single: bool) -> Value {
         match state.slot_opt(oid, Ns::Attr, nk) {
-            Some(v) => v,
+            // (`from m import f` in a module's code binds what m holds, a deferred definition too)
+            Some(v) if self.mode.keep_deferred => v,
+            Some(v) => self.force_slot(oid, nk, v, state),
             // (what every module has)
             None if MODULE_NAMES.contains(&name) => {
                 if name == "__name__" { Value::lit_str(&self.heap.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }

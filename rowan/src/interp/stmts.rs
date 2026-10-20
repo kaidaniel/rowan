@@ -94,7 +94,10 @@ impl Analyzer {
             ast::Stmt::With(w) => self.stmt_with(w, state),
             ast::Stmt::FunctionDef(f) => {
                 let v = self.make_function(FuncNode::Def(f), state, None);
-                let v = self.apply_decorators(&f.decorator_list, frontend::node(f), v, state);
+                let v = match self.decorate_def(f, &v, state) {
+                    Some(v) => v,
+                    None => self.apply_decorators(&f.decorator_list, frontend::node(f), v, state),
+                };
                 self.store_name(s(f.name.id.as_str()), v, state);
             }
             ast::Stmt::ClassDef(c) => self.stmt_classdef(c, state),
@@ -227,7 +230,10 @@ impl Analyzer {
                 }
             }
             if v.pts.is_empty() && !mod_v.pts.is_empty() {
+                let keep = self.frame().module != self.program.main_module;
+                let saved = std::mem::replace(&mut self.mode.keep_deferred, keep);
                 v = self.load_attr(&mod_v, aname, &n, state, false);
+                self.mode.keep_deferred = saved;
             }
             let target = a.asname.as_ref().map(|x| x.id.as_str()).unwrap_or(aname);
             self.store_name(s(target), v, state);

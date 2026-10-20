@@ -112,6 +112,11 @@ impl Analyzer {
             }
             Payload::Groupby(fs, _, _, _) => work.extend(fs.iter().copied()),
             Payload::Locidx(_, f) => work.push(*f),
+            Payload::Deferred(d) => {
+                d.f.push_objs(work);
+                work.extend(d.apps.iter().map(|a| a.0));
+                d.names.iter().for_each(|(_, v)| v.push_objs(work));
+            }
             _ => {}
         }
         self.side_edges(Some(o), work);

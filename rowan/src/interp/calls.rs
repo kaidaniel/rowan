@@ -22,6 +22,8 @@ impl Analyzer {
     /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
     /// generators among them run (`force_gen`), then each callee `fv` may be called.
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
+        let forced = self.force(fv.clone(), state);
+        let fv = &forced;
         let mut args: Vec<Value> = Vec::new();
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
         let mut star_args: Vec<Value> = Vec::new();

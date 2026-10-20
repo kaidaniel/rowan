@@ -118,6 +118,8 @@ pub enum Payload {
     Range(i64, i64, i64),
     /// a str known to start and end with these texts (an f-string with one unknown hole)
     Affix(String, String),
+    /// a definition whose decorators run when it is first read (`deferred.rs`)
+    Deferred(Rc<super::deferred::Deferred>),
 }
 
 impl Payload {
@@ -336,6 +338,11 @@ pub struct Heap {
     /// the functions, classes and modules made so far (definitions: the statement making one
     /// pays for it, `Analyzer::library_work`)
     pub defs: usize,
+    /// the placeholders of deferred definitions made so far (`deferred.rs`; none: no value
+    /// needs looking at for them)
+    pub deferred: usize,
+    /// their decorators' runs (once per path that reads one)
+    pub forced: usize,
     /// keys standing for objects
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
@@ -365,7 +372,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 
