@@ -53,6 +53,8 @@ pub struct EffectsCache {
     /// per function code (`FuncNode::addr`): what its body does when it is inert
     /// (`inert::inert`), None when it is not
     inert: FxHashMap<usize, Option<std::rc::Rc<super::inert::Inert>>>,
+    /// the followed libraries' code that calls not run share (`libclosure.rs`)
+    pub lib: super::libclosure::LibClosure,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -100,9 +102,58 @@ pub struct ClosureWalk {
     by_name: FxHashMap<KeyId, Vec<ObjId>>,
     /// the names whose use the code walked since the classes were last looked at may have grown
     dirty: Vec<StrId>,
+    /// past this many visits (code objects, class attributes) the walk stops (0: never), `cut`
+    /// then
+    cap: usize,
+    visits: usize,
+    cut: bool,
 }
 
+/// How much of each of a walk's lists (`Closure`'s, as pushed) has been taken
+/// (`ClosureWalk::gained`).
+#[derive(Default, Clone, Copy)]
+pub struct Taken([usize; 14]);
+
 impl ClosureWalk {
+    /// Code still to walk.
+    pub fn push(&mut self, code: impl IntoIterator<Item = ObjId>) {
+        self.work.extend(code);
+    }
+
+    /// Has the walk met code object `o`?
+    pub fn walked(&self, o: ObjId) -> bool {
+        self.out.code.contains(&o)
+    }
+
+    /// What the walk's closure gained since `at` (moved on to now): each list's new items, in
+    /// the order the walk found them (some again).
+    pub fn gained(&self, at: &mut Taken) -> Closure {
+        fn tail<T: Clone>(v: &[T], at: &mut usize) -> Vec<T> {
+            let t = v[(*at).min(v.len())..].to_vec();
+            *at = v.len();
+            t
+        }
+        let o = &self.out;
+        let a = &mut at.0;
+        Closure {
+            code: FxHashSet::default(),
+            locs: tail(&o.locs, &mut a[0]),
+            held_locs: tail(&o.held_locs, &mut a[1]),
+            held2_locs: tail(&o.held2_locs, &mut a[2]),
+            rebound: tail(&o.rebound, &mut a[3]),
+            values: tail(&o.values, &mut a[4]),
+            held_values: tail(&o.held_values, &mut a[5]),
+            edited_locs: tail(&o.edited_locs, &mut a[6]),
+            edited_values: tail(&o.edited_values, &mut a[7]),
+            removed_locs: tail(&o.removed_locs, &mut a[8]),
+            removed_values: tail(&o.removed_values, &mut a[9]),
+            iterated_locs: tail(&o.iterated_locs, &mut a[10]),
+            iterated_values: tail(&o.iterated_values, &mut a[11]),
+            unbound: tail(&o.unbound, &mut a[12]),
+            modules: tail(&o.modules, &mut a[13]),
+        }
+    }
+
     /// The closure walked so far, its slots sorted (a slot whose flags grew as the walk went
     /// on is where each of its flags put it: a value that may change keeps what it holds that
     /// may, a walk from it does not reach all of that).
@@ -157,7 +208,7 @@ pub struct Closure {
 }
 
 /// The names a module has on a path, as a fingerprint (their number and their keys).
-fn module_names(state: &State, m: ObjId) -> u64 {
+pub(in crate::interp) fn module_names(state: &State, m: ObjId) -> u64 {
     let mut h: u64 = 0;
     state.slots.each(&m, &mut |k, _| h = (h.rotate_left(5) ^ u64::from(k.1.0)).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
     h
@@ -568,11 +619,8 @@ impl Analyzer {
     pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
         let whole = self.effects.whole.is_some();
-        // (a name its code reads bound since: the closure is computed again)
-        if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
-            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) && c.modules.iter().all(|&(m, h)| module_names(state, m) == h) {
-                return c.clone();
-            }
+        if let Some(c) = self.cached_closure(roots, state).filter(|_| !whole) {
+            return c;
         }
         // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
         // code the last one's data held)
@@ -581,19 +629,57 @@ impl Analyzer {
         self.walk_closure(&mut w, state);
         let c = std::rc::Rc::new(w.finished());
         *from = Some(w);
-        // (a cache of what the program's code reaches, by root set: on large programs the root
-        // sets rarely repeat, so it is emptied past a bound on what it holds)
-        if whole {
-            return c;
+        if !whole {
+            self.cache_closure(roots, c.clone());
         }
+        c
+    }
+
+    /// The closure of `roots` cached, unless a name its code reads was bound since (it is
+    /// computed again).
+    fn cached_closure(&self, roots: &[ObjId], state: &State) -> Option<std::rc::Rc<Closure>> {
+        let c = self.effects.closures.get(roots)?;
+        (!c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) && c.modules.iter().all(|&(m, h)| module_names(state, m) == h)).then(|| c.clone())
+    }
+
+    /// A cache of what the program's code reaches, by root set: on large programs the root sets
+    /// rarely repeat, so it is emptied past a bound on what it holds.
+    fn cache_closure(&mut self, roots: &[ObjId], c: std::rc::Rc<Closure>) {
         let size = roots.len() + c.code.len() + c.locs.len() + c.held_locs.len() + c.rebound.len() + c.values.len() + c.held_values.len();
         self.effects.closures_size += size;
         if self.effects.closures_size > CLOSURE_CACHE {
             self.effects.closures.clear();
             self.effects.closures_size = size;
         }
-        self.effects.closures.insert(roots.to_vec(), c.clone());
-        c
+        self.effects.closures.insert(roots.to_vec(), c);
+    }
+
+    /// Is the closure of the code `roots` hold at most `cap` walk visits? (It is then cached,
+    /// with `cache`; past that, the walk stops there.)
+    pub(in crate::interp) fn closure_within(&mut self, roots: &[ObjId], cap: usize, cache: bool, state: &State) -> bool {
+        if let Some(c) = self.cached_closure(roots, state) {
+            return c.code.len() + c.slot_locs().count() <= cap;
+        }
+        let mut w = ClosureWalk { cap, ..Default::default() };
+        w.work.extend_from_slice(roots);
+        self.walk_closure(&mut w, state);
+        if w.cut {
+            return false;
+        }
+        if cache {
+            self.cache_closure(roots, std::rc::Rc::new(w.finished()));
+        }
+        true
+    }
+
+    /// Is the closure of `roots` cached (and not stale)?
+    pub(in crate::interp) fn closure_cached(&self, roots: &[ObjId], state: &State) -> bool {
+        self.effects.whole.is_none() && self.cached_closure(roots, state).is_some()
+    }
+
+    /// Resume walk `w` with the code it was given since (`ClosureWalk::push`).
+    pub(in crate::interp) fn walk_more(&mut self, w: &mut ClosureWalk, state: &State) {
+        self.walk_closure(w, state);
     }
 
     /// Walk the code `w.work` holds into `w`'s closure (resumable: code already in it is not
@@ -601,13 +687,18 @@ impl Analyzer {
     /// since: the closure is the same whatever order the code is met in).
     fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| an.holds_code(*x)));
-        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty } = w;
+        let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty, cap, visits, cut } = w;
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
                     continue;
                 }
                 self.budget.walk_visit();
+                *visits += 1;
+                if *cap != 0 && *visits > *cap {
+                    *cut = true;
+                    return;
+                }
                 match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
@@ -675,6 +766,7 @@ impl Analyzer {
             }
             for (c, k, v) in slots {
                 self.budget.walk_visit();
+                *visits += 1;
                 let name = intern::key_str_id(k);
                 if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
                     code(self, &v, work);
@@ -723,7 +815,7 @@ impl Analyzer {
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
         let must = self.must_after(foid, &recvs, &effs);
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
-        let walked = self.havoc.visited;
+        let (walked, walks) = (self.havoc.visited, self.budget.walked.get());
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
         let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v, args, kwargs, state);
@@ -764,7 +856,7 @@ impl Analyzer {
             }
         }
         if super::debug_enabled() {
-            eprintln!("skip {} at M{}:L{} havoc={}{}", q, node.module, node.line, self.havoc.visited - walked, if by_names { " (receiver by names)" } else { "" });
+            eprintln!("skip {} at M{}:L{} havoc={} walk={}{}", q, node.module, node.line, self.havoc.visited - walked, self.budget.walked.get() - walks, if by_names { " (receiver by names)" } else { "" });
         }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);

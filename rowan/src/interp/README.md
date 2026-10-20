@@ -86,6 +86,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `keys.rs` | the key a value stands for (numbers, Enum members, identity-hashed objects), literal key views |
 | `alloc.rs`, `gc.rs` | allocation policy; liveness and collection |
 | `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
+| `libclosure.rs` | the closure followed libraries' calls that do not run share once theirs is large (`LibClosure`): walked once, applied again where it gained or the state changed |
 | `inert.rs` | which function bodies are inert (a bounded handful of steps: `functools.wraps` decorators) |
 | `deferred.rs` | deferred definitions: a module's `@dec def f` with plain inert decorators, run when `f` is first read |
 | **output** | |

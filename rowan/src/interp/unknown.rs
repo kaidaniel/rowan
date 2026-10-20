@@ -181,8 +181,34 @@ impl Havoc {
         let met: Vec<u32> = memo.as_ref().map(|m| m.guard.iter().map(|(_, _, n)| *n).collect()).unwrap_or_default();
         let mut work = roots.clone();
         let (mut visited, mut code, changed) = self.memo_restart(memo, state, &mut work);
-        let replay = changed.is_some();
-        let unchanged = |o: ObjId, visited: &FxHashSet<ObjId>| replay && visited.contains(&o) && !changed.as_ref().is_some_and(|c| c.contains(&o));
+        self.walk_objects(heap, work, &mut visited, changed.as_ref(), &mut code, rid, site, state, walk);
+        for ((_, n, _), m) in self.guard.iter_mut().zip(met) {
+            *n = (*n).max(m);
+        }
+        // (what it met, the remembered walk's too: what a `follow_code` read and changed)
+        if let Some(m) = &mut self.met {
+            m.extend(visited.iter().copied());
+        }
+        // (the tests of what it met a path passed since no longer hold: a walk replayed left
+        // the objects unchanged since as they were, rows and all, and one that gives a row a
+        // mutator it has already leaves it too)
+        drop_facts_on(state, |o| visited.contains(&o));
+        if self.memo.len() >= HAVOC_MEMOS {
+            self.memo.clear();
+        }
+        code.sort_unstable();
+        code.dedup();
+        let guard = self.guard.iter().map(|(g, n, used)| (*g, used.clone(), *n)).collect();
+        self.memo.insert(key, HavocMemo { roots, left: Snapshot::of(state), visited, code, guard });
+    }
+
+    /// The havoc walk `walk` from the objects `work` holds (`walk_from`), adding those it meets
+    /// to `visited` and the code it meets to `code` (and `self.code`); with `changed`, a walk
+    /// resumed: the objects `visited` holds that `changed` does not are as an earlier walk left
+    /// them, and are not walked again.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::interp) fn walk_objects(&mut self, heap: &mut Heap, mut work: Vec<ObjId>, visited: &mut FxHashSet<ObjId>, changed: Option<&FxHashSet<ObjId>>, code: &mut Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State, walk: u32) {
+        let unchanged = |o: ObjId, visited: &FxHashSet<ObjId>| changed.is_some_and(|c| visited.contains(&o) && !c.contains(&o));
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
         let any_id = any_object(heap);
@@ -256,24 +282,6 @@ impl Havoc {
             }
             havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
         }
-        for ((_, n, _), m) in self.guard.iter_mut().zip(met) {
-            *n = (*n).max(m);
-        }
-        // (what it met, the remembered walk's too: what a `follow_code` read and changed)
-        if let Some(m) = &mut self.met {
-            m.extend(visited.iter().copied());
-        }
-        // (the tests of what it met a path passed since no longer hold: a walk replayed left
-        // the objects unchanged since as they were, rows and all, and one that gives a row a
-        // mutator it has already leaves it too)
-        drop_facts_on(state, |o| visited.contains(&o));
-        if self.memo.len() >= HAVOC_MEMOS {
-            self.memo.clear();
-        }
-        code.sort_unstable();
-        code.dedup();
-        let guard = self.guard.iter().map(|(g, n, used)| (*g, used.clone(), *n)).collect();
-        self.memo.insert(key, HavocMemo { roots, left: Snapshot::of(state), visited, code, guard });
     }
 
     /// Code rowan does not follow changed the containers `objs` in place (`Flags::edits`; with
@@ -532,6 +540,10 @@ impl Analyzer {
         roots.dedup();
         // (a closure is the program's own while it is followed whole: not remembered)
         let memo = self.effects.whole.is_none();
+        // (a library's code reaching much of it: the closure the library's calls share)
+        if memo && self.shares_lib_closure(&roots, state) {
+            return self.follow_shared(roots, rid, site, state);
+        }
         let key = self.havoc.follow_key(&roots);
         if memo && self.havoc.followed_unchanged(key, &roots, state) {
             self.followed_again(key, state);
@@ -547,11 +559,21 @@ impl Analyzer {
         self.havoc.code.clear();
         let mut walk_so_far = None;
         let mut prev: Option<std::rc::Rc<super::effects::Closure>> = None;
+        let mut shared = false;
         loop {
             roots.append(&mut self.havoc.code);
             roots.sort_unstable();
             roots.dedup();
-            let resumed = walk_so_far.is_some();
+            // (a later round, with the code the data changed holds: past as much as a library's
+            // code shares, the rest is the library's closure, `follow_shared`)
+            if memo && prev.is_some() && self.any_library_code(&roots) && !self.closure_within(&roots, super::libclosure::SHARED_PAST, false, state) {
+                self.follow_shared(roots, rid, site, state);
+                shared = true;
+                break;
+            }
+            // (resumed: the walk goes on from the last round's, so its lists go on from the last
+            // closure's; a closure cached is another walk's)
+            let resumed = walk_so_far.is_some() && !self.closure_cached(&roots, state);
             let full = self.code_closure(&roots, &mut walk_so_far, state);
             // (a later round: what the closure gained, the rest was applied)
             let gained;
@@ -616,7 +638,7 @@ impl Analyzer {
             }
         }
         deps.extend(std::mem::replace(&mut self.havoc.met, met0).unwrap_or_default());
-        if memo {
+        if memo && !shared {
             let added: Vec<u32> = self.havoc.guard.iter().zip(counts0).map(|((_, n, _), n0)| n - n0).collect();
             self.havoc.remember_follow(key, first, added, deps, slots, state);
         }
@@ -635,7 +657,7 @@ impl Analyzer {
 }
 
 /// Drop the facts of tests (`CondFact`) that read or narrowed an object `on` holds.
-fn drop_facts_on(state: &mut State, on: impl Fn(ObjId) -> bool) {
+pub(in crate::interp) fn drop_facts_on(state: &mut State, on: impl Fn(ObjId) -> bool) {
     if state.facts.is_empty() {
         return;
     }
