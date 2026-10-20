@@ -105,7 +105,7 @@ impl ClosureWalk {
     /// may, a walk from it does not reach all of that).
     fn finished(&self) -> Closure {
         let mut c = self.out.clone();
-        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs] {
+        for l in [&mut c.locs, &mut c.held_locs, &mut c.held2_locs, &mut c.rebound, &mut c.edited_locs, &mut c.iterated_locs, &mut c.unbound] {
             l.sort_unstable();
             l.dedup();
         }
@@ -145,6 +145,9 @@ pub struct Closure {
     pub removed_values: Vec<(Value, Removes)>,
     pub iterated_locs: Vec<Loc>,
     pub iterated_values: Vec<Value>,
+    /// the slots the code reads names from that were not bound when it was walked (a name
+    /// defined later in its module or enclosing function): once one is, the closure is stale
+    pub unbound: Vec<Loc>,
 }
 
 impl Analyzer {
@@ -486,15 +489,19 @@ impl Analyzer {
     /// classes, the methods of those classes it reads, dunders): the slots whose values may
     /// change (globals, cells, class attributes by name) or be rebound, and other values it may
     /// change (mutable defaults, bound receivers). Computed once per set of roots: the code a
-    /// name holds is taken as fixed (rebinding a function or class is monkey-patching), and
-    /// methods called by a computed name are not followed; the code in the data those values
+    /// name holds is taken as fixed (rebinding a function or class is monkey-patching; a
+    /// builtin's name holds the builtin), until a name it reads that was not bound then is
+    /// (`Closure::unbound`: a `def` later in the module); methods called by a computed name are not followed; the code in the data those values
     /// hold is followed where the call is (`skipped_call`). `from`: the walk of a subset of the
     /// roots, resumed (and left there), unless the closure is cached.
     pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
         let whole = self.effects.whole.is_some();
+        // (a name its code reads bound since: the closure is computed again)
         if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
-            return c.clone();
+            if !c.unbound.iter().any(|l| state.has_slot(l.0, l.1, l.2)) {
+                return c.clone();
+            }
         }
         // (the walk of a subset of the roots resumed: `follow_code`'s rounds, each with the
         // code the last one's data held)
@@ -1163,7 +1170,12 @@ impl Analyzer {
                 f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, removes, held: f.changes || f.methods || f.held || f.held2 || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
-            code(self, &state.slot(loc.0, loc.1, loc.2), work);
+            match state.slot_opt(loc.0, loc.1, loc.2) {
+                Some(v) => code(self, &v, work),
+                // (a builtin's name not bound in the module: the builtin, taken as fixed)
+                None if !intern::key_as_str(loc.2).is_some_and(|n| crate::models::tables::is_builtin_name(&n)) => out.unbound.push(loc),
+                None => {}
+            }
         }
     }
 
