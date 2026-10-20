@@ -796,7 +796,7 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
     if !pc.from_attributes && !an.m.pyd_from_attrs {
         let plain_obj = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
             Kind::Namespace => true,
-            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| an.heap.mro(c).iter().all(|k| an.heap.class_info_opt(*k).is_some_and(|ci| !ci.open_base))),
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| an.heap.mro(c).iter().all(|k| an.heap.class_info_opt(*k).is_some_and(|ci| !ci.open_base.get()))),
             _ => false,
         };
         let bad: Vec<ObjId> = recs.iter().copied().filter(|o| plain_obj(an, *o)).collect();
@@ -1348,7 +1348,7 @@ pub fn pyd_specialise(an: &mut Analyzer, cls: ObjId, slice: &'static ast::Expr, 
         node: ci.node,
         bases: vec![cls],
         module: ci.module,
-        open_base: false,
+        open_base: std::cell::Cell::new(false),
         dataclass_fields: std::cell::RefCell::new(Some(Vec::new())),
         lib: crate::models::ClassBase { pydantic: ci.lib.pydantic, ..Default::default() },
         pyd_dataclass: std::cell::Cell::new(ci.pyd_dataclass.get()),

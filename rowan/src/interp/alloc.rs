@@ -129,7 +129,7 @@ impl Analyzer {
             (o.site.to_string(), o.ctx.to_string(), o.payload.clone())
         };
         let Payload::Cls(c) = payload else { return None };
-        if self.heap.class_info_opt(c).is_none_or(|ci| ci.open_base) {
+        if self.heap.class_info_opt(c).is_none_or(|ci| ci.open_base.get()) {
             return None;
         }
         // (one per call depth: a recursive call's own)

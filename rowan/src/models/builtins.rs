@@ -353,7 +353,7 @@ pub(super) fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value 
         let b = match an.heap.kind(o) {
             Kind::Function | Kind::Bound | Kind::Class | Kind::Partial | Kind::Method => true,
             Kind::Instance => match an.heap.instance_class(o) {
-                Some(cls) if !an.heap.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base)) => an.class_lookup(cls, "__call__").is_some(),
+                Some(cls) if !an.heap.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base.get())) => an.class_lookup(cls, "__call__").is_some(),
                 _ => return Value::data("callable"),
             },
             Kind::Dict | Kind::List | Kind::Tuple | Kind::Set => false,

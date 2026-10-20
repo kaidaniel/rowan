@@ -30,7 +30,7 @@ impl Analyzer {
             node: c,
             bases,
             module: fr_module,
-            open_base,
+            open_base: std::cell::Cell::new(open_base),
             dataclass_fields: std::cell::RefCell::new(None),
             lib,
             pyd_dataclass: std::cell::Cell::new(false),
@@ -108,7 +108,7 @@ impl Analyzer {
                             }
                             // (a base that derives from an external class — `list`, an unseen
                             // library class — makes this one's instances open too)
-                            if self.heap.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
+                            if self.heap.class_info_opt(oid).is_some_and(|ci| ci.open_base.get()) {
                                 open_base = true;
                             }
                             bases.push(oid)
@@ -150,7 +150,9 @@ impl Analyzer {
     }
 
     /// A base's `__init_subclass__` runs for the new class (an implicit classmethod), given the
-    /// class statement's keywords.
+    /// class statement's keywords. A followed library's that does not complete (calls in it do
+    /// not run: past budgets or its entry's allowance) may have given the class attributes of
+    /// any name (`setattr` by computed names): its base is open, as an unseen one is.
     fn run_init_subclass(&mut self, c: &'static ast::StmtClassDef, coid: ObjId, info: &ClassInfo, cnode: &Node, state: &mut State) {
         let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
         if let Some(defc) = found {
@@ -166,11 +168,17 @@ impl Analyzer {
                     }
                 }
             }
+            let skipped = self.budget.skipped;
+            let mut library = false;
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
+                    library |= self.heap.module_info(self.heap.func_info(f).module).library;
                     // concretely: the class's own attributes (`cls.__name__`) are known here
                     self.call_user(f, Some(Value::obj(coid)), Args::kw(&kwargs), state, cnode, false);
                 }
+            }
+            if library && self.budget.skipped > skipped {
+                info.open_base.set(true);
             }
         }
     }

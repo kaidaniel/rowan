@@ -737,7 +737,7 @@ impl Analyzer {
     /// external base's may come from outside the program).
     pub fn alloc_instance(&mut self, cls: ObjId, node: &Node, state: &mut State) -> ObjId {
         let ci = self.heap.class_info(cls);
-        let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
+        let row = if ci.open_base.get() { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
         // not collapse onto one instance; by the class object, as two classes may share a name
         // (`type(name, bases, ns)` per choice of bases)
@@ -745,7 +745,7 @@ impl Analyzer {
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.lib.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
-        } else if ci.open_base && !ci.lib.dict_base {
+        } else if ci.open_base.get() && !ci.lib.dict_base {
             // (an external base — `list`, a library class — may hold items the program's code
             // does not show: `append` / `super().__init__(items)` run there)
             state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));

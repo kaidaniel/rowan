@@ -207,7 +207,7 @@ pub struct ClassInfo {
     pub bases: Vec<ObjId>,
     pub module: ObjId,
     /// inherits from something we do not see
-    pub open_base: bool,
+    pub open_base: std::cell::Cell<bool>,
     /// a dataclass's (NamedTuple's, pydantic model's, …) fields with their defaults, once known
     pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
     /// what its direct library bases make of it (`dict`, `TypedDict`, `NamedTuple`, pydantic's

@@ -120,7 +120,7 @@ impl Analyzer {
             Kind::Instance => match self.heap.instance_class(o) {
                 Some(c) => {
                     let ci = self.heap.class_info(c);
-                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.lib.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.lib.named_tuple && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.m.enum_members.contains_key(&c)
+                    !ci.open_base.get() && ci.dataclass_fields.borrow().is_none() && !ci.lib.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.lib.named_tuple && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.m.enum_members.contains_key(&c)
                 }
                 None => false,
             },

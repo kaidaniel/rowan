@@ -535,7 +535,7 @@ impl Analyzer {
                 }
             }
             if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
-        } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
+        } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base.get())) {
             crate::models::enums::class_attr(self, oid, name, node, guarded, state)
         } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
             crate::models::pydantic::attr_value(self, state, oid, name, node)

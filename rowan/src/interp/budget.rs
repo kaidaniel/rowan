@@ -69,6 +69,8 @@ pub struct Budget {
     pub lib_work: usize,
     /// the running entry went past its allowance: its later calls did not run (`library_entry`)
     pub lib_cut: std::cell::Cell<bool>,
+    /// calls that did not run (`skipped_call`), all along
+    pub skipped: usize,
     /// entries into followed libraries: run, cut (the `ROWAN_DEBUG` `loaded:` line)
     pub lib_counts: [usize; 2],
     /// `ROWAN_DEBUG` only: per function code, its name, body runs, statements of its own, and
