@@ -225,6 +225,7 @@ impl Analyzer {
         rename_references(back, head, &map);
         // 3. objects allocated during the iteration that hold references in their payloads
         self.heap.rename_payloads(mark, &|v: &Value| rename_value(v, &map), &map);
+        self.m.rename_recent(&map);
         // 4. flow-insensitive class attributes
         let recent: Vec<ObjId> = map.keys().copied().collect();
         let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.heap.cls_slots_with(&recent).into_iter().filter_map(|k| rename_value(self.heap.cls_slots.get(&k)?, &map).map(|nv| (k, nv))).collect();

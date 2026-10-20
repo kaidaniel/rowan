@@ -941,6 +941,27 @@ pub struct Tables {
     pub series: ObjId,
 }
 
+impl Tables {
+    /// Recent objects fold into their summaries (`map`, recent → summary: `gc.rs`
+    /// `rename_recent`): what the tables say of a recent object holds for its summary too (a
+    /// `functools.wraps` wrapper made in a loop is one on every round, a Counter one).
+    pub fn rename_recent(&mut self, map: &FxHashMap<ObjId, ObjId>) {
+        for (r, s) in map {
+            for t in [&mut self.wrapped, &mut self.dd_factories, &mut self.csv_readers] {
+                if let Some(v) = t.get(r).cloned() {
+                    let j = t.get(s).map_or(v.clone(), |w| w.join(&v));
+                    t.insert(*s, j);
+                }
+            }
+            for t in [&mut self.counters, &mut self.ci_dicts, &mut self.zip_strict] {
+                if t.contains(r) {
+                    t.insert(*s);
+                }
+            }
+        }
+    }
+}
+
 /// A partial's `func` / `args` / `keywords`.
 pub fn partial_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate::frontend::Node, state: &mut State) -> Value {
     let Payload::Partial(f, args, kw) = an.heap.obj(oid).payload.clone() else { unreachable!() };
