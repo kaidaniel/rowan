@@ -837,6 +837,7 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
         let r = self.put_kept(kept, r, node, state);
+        let r = self.summarized(foid, r, node, state);
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {

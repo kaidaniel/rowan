@@ -48,6 +48,7 @@ pub mod loops;
 pub mod narrow;
 pub mod ops;
 pub mod stmts;
+pub mod summary;
 
 // What the models, the report and the driver see.
 pub mod api;
@@ -190,6 +191,8 @@ pub struct Analyzer {
     pub(in crate::interp) cx: Context,
     /// modes an evaluation sets for the code it calls (`interp/context.rs`)
     pub(in crate::interp) mode: Modes,
+    /// result summaries: what calls that do not run give back (`interp/summary.rs`)
+    pub(in crate::interp) summaries: summary::Summaries,
     /// `None`
     pub none_v: Value,
 }

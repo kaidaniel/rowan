@@ -16,6 +16,11 @@ thread_local! {
     static OPAQUE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Exchanges the flag with `v` (`crate::state::ThreadState`).
+pub fn swap_opaque(v: &mut bool) {
+    OPAQUE.with(|o| *v = o.replace(*v));
+}
+
 pub fn set_opaque(v: bool) {
     OPAQUE.with(|o| o.set(v));
 }

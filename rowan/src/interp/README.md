@@ -27,6 +27,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `unwind` | `tries.rs` | raises in flight, running `try`s and their recorded raise states, loops' breaks |
 | `cx` | `context.rs` | the frames, callers' names, the call chain, branch depth, model calls running |
 | `mode` | `context.rs` | modes an evaluation sets for the code it calls (guarded reads, narrowing traces, …) |
+| `summaries` | `summary.rs` | result summaries: per function the shape of its result for any call, from the pre-pass |
 
 ## How a program runs
 
@@ -86,6 +87,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `keys.rs` | the key a value stands for (numbers, Enum members, identity-hashed objects), literal key views |
 | `alloc.rs`, `gc.rs` | allocation policy; liveness and collection |
 | `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
+| `summary.rs` | result summaries: the shape of what a function returns for any call (from a pre-pass's runs), made anew where a call of it does not run |
 | `libclosure.rs` | the closure followed libraries' calls that do not run share once theirs is large (`LibClosure`): walked once, applied again where it gained or the state changed |
 | `inert.rs` | which function bodies are inert (a bounded handful of steps: `functools.wraps` decorators) |
 | `deferred.rs` | deferred definitions: a module's `@dec def f` with plain inert decorators, run when `f` is first read |
@@ -99,4 +101,4 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 `mod.rs` → `entry.rs` `run` → `stmts.rs` `exec_stmt` → `exprs.rs` `eval` → `calls.rs`
 `call_value` / `call_user` → `items.rs` `load_item` / `load_record` (where verdicts and
 requirements come from) → `narrow.rs` `split` and `loops.rs` `loop_fixpoint` (how paths
-split and join) → `unknown.rs` and `effects.rs` (what rowan assumes of code it does not run).
+split and join) → `unknown.rs`, `effects.rs` and `summary.rs` (what rowan assumes of code it does not run).

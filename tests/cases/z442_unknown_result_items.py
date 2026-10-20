@@ -1,6 +1,6 @@
-# A method call past its budget is code rowan does not follow: what it returns is not
-# known, like data from outside (`input`). The receiver's attributes (lines, pos) are not
-# the items of what it returns: `second[0]` is not "item 0 is never set".
+# A method call past its budget gives back its result summary (what the method returns for
+# any call: one of the receiver's lines, a str: a position of it has no verdict). The
+# receiver's attributes (lines, pos) are not the items of what it returns.
 #@limits budget=2
 
 
@@ -19,5 +19,5 @@ class Buf:
 b = Buf()
 first = b.readline()
 second = b.readline()
-c = second[0]  #@ input 0
-#@todo ok 0  (the second call is past readline's budget)
+c = second[0]  #@ none 0
+#@value c: exactly={"a","c"}

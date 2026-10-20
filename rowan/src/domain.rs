@@ -172,6 +172,11 @@ pub fn row_joins() -> usize {
 }
 
 /// Restarts the count of row joins (a new analysis).
+/// Exchanges the count of row joins with `n` (`crate::state::ThreadState`).
+pub fn swap_row_joins(n: &mut usize) {
+    ROW_JOINS.with(|c| *n = c.replace(*n));
+}
+
 pub fn reset_row_joins() {
     ROW_JOINS.with(|c| c.set(0));
 }
