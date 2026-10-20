@@ -1,6 +1,6 @@
 //! Deferred definitions: `@d1 … @dn def f` in a module's code (not the main module's: its
 //! values are what the editor shows), where every decorator is the program's function whose
-//! own code is *plain* inert (`flows::inert`: straight-line, it makes a wrapper with
+//! own code is *plain* inert (`inert::inert`: straight-line, it makes a wrapper with
 //! `functools.wraps`, stores attributes on it or on `f`, reads nothing but the names it is
 //! bound to and what every function has, gives back a function). Its application changes
 //! nothing but `f` and what it makes, cannot raise, and reads only the bindings of its names:
@@ -103,7 +103,7 @@ impl Analyzer {
         Some(Value::obj(p))
     }
 
-    /// Is `dv` one function of the program whose code is plain inert (`flows::inert`), calling
+    /// Is `dv` one function of the program whose code is plain inert (`inert::inert`), calling
     /// only `PLAIN_CALLS` as they allow, every name it reads bound here? Those names' bindings
     /// go to `names`.
     fn plain_decorator(&mut self, dv: &Value, state: &State, names: &mut Vec<(Loc, Value)>) -> bool {

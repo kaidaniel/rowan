@@ -51,8 +51,8 @@ pub struct EffectsCache {
     /// (`changing_dunders`; the code a class attribute holds is taken as fixed, as for closures)
     dunders: FxHashMap<ObjId, std::rc::Rc<[ObjId]>>,
     /// per function code (`FuncNode::addr`): what its body does when it is inert
-    /// (`flows::inert`), None when it is not
-    inert: FxHashMap<usize, Option<std::rc::Rc<super::flows::Inert>>>,
+    /// (`inert::inert`), None when it is not
+    inert: FxHashMap<usize, Option<std::rc::Rc<super::inert::Inert>>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -206,14 +206,14 @@ impl Closure {
 }
 
 impl Analyzer {
-    /// What the function's body does when it is inert (`flows::inert`: a
+    /// What the function's body does when it is inert (`inert::inert`: a
     /// bounded handful of steps that make functions and store attributes): its own steps cost
     /// next to nothing, so a call of it runs even past an entry's allowance or the work of a
     /// run on demand (within its budget); what it calls follows the rules of every call.
-    pub(in crate::interp) fn inert(&mut self, foid: ObjId) -> Option<std::rc::Rc<super::flows::Inert>> {
+    pub(in crate::interp) fn inert(&mut self, foid: ObjId) -> Option<std::rc::Rc<super::inert::Inert>> {
         let fi = self.heap.func_info_opt(foid)?;
         let FuncNode::Def(f) = fi.node else { return None };
-        self.effects.inert.entry(fi.node.addr()).or_insert_with(|| super::flows::inert(&f.parameters, &f.body).map(std::rc::Rc::new)).clone()
+        self.effects.inert.entry(fi.node.addr()).or_insert_with(|| super::inert::inert(&f.parameters, &f.body).map(std::rc::Rc::new)).clone()
     }
 
     /// Is `o` code a closure walk follows (`walk_closure`): a function, class, bound method,

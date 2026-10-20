@@ -35,6 +35,7 @@ pub mod comps;
 pub mod deferred;
 pub mod exprs;
 pub mod flows;
+pub mod inert;
 pub mod funcs;
 pub mod gc;
 pub mod guards;
