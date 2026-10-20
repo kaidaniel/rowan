@@ -432,15 +432,20 @@ impl Analyzer {
     }
 
     /// This analyzer as the result summaries' source (`interp/summary.rs`): the module's code
-    /// with every call after a function's first skipped, set up for runs on demand, its thread
-    /// marks taken out (`ThreadState`); `ms`: how long its runs may take in all.
+    /// with every call skipped, set up for runs on demand (every call after a function's first
+    /// skipped: `cap`), its thread marks taken out (`ThreadState`); `ms`: how long its runs may
+    /// take in all.
     pub fn summary_source(mut self, ms: usize) -> Box<Analyzer> {
         self.budget.cap = Some(0);
         self.budget.deadline_ms = Some(ms);
         // (`note_call`: a run for any call starts from the heaps at module code's calls too)
         self.findings.general_checks = true;
         let t0 = std::time::Instant::now();
+        // (its module code with every call skipped: cheaper, and the runs for any call start
+        // after any code ran anyway)
+        self.budget.skip_calls = true;
         self.run();
+        self.budget.skip_calls = false;
         let t1 = t0.elapsed().as_millis();
         self.on_demand();
         if super::debug_enabled() {

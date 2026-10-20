@@ -14,8 +14,8 @@
 //! keep their row's mutators (reads are `likely`, as for the same code inline).
 //!
 //! The shapes come from a *source*: an analyzer of its own (`Analyzer::summary_source`) that ran
-//! the module's code with every call after a function's first skipped (`Budget::cap`) and is
-//! set up for runs on demand. It is made at the first call in the main module that does not run
+//! the module's code with every call skipped and is set up for runs on demand (in them every
+//! call after a function's first is skipped, `Budget::cap`). It is made at the first call in the main module that does not run
 //! (the source costs one more run of the program's module code: a program that skips calls
 //! only in other modules, timm's registry decorators, does not pay it; once it is made, every
 //! skipped call uses it). A function's shape is made when a call of it first does not run
