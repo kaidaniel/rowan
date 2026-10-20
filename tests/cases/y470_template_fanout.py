@@ -2,8 +2,9 @@
 deep: the innermost dict is made 3**8 times. Clones of a callee's objects keep only the
 innermost call sites of their context, so each summary holds a bounded number of templates
 (before, the whole call chain named each clone and every summary held 3**depth of them, all
-cloned again at each call)."""
-#@objects <= 2000
+cloned again at each call). A call past its budget makes its result summary at its call
+site: a record per call site and context, variants up to 8 while the earlier one lives."""
+#@objects <= 5000
 
 
 def f0(x):

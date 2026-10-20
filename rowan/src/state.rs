@@ -1080,6 +1080,42 @@ pub fn view_hits() -> u64 {
 
 /// A new analysis on this thread (`rowan serve` runs every request on one): object ids start
 /// again, so the merged set and the cost counters do too.
+/// The per-thread marks of one analysis (`reset_thread_state`), as a value: another analyzer
+/// on the thread (the result summaries' source, `interp/summary.rs`) runs with its own,
+/// exchanged for the thread's around each of its runs (`swap`).
+pub struct ThreadState {
+    merged: rustc_hash::FxHashSet<ObjId>,
+    any: ObjId,
+    views: rustc_hash::FxHashMap<ObjId, ObjId>,
+    viewed: rustc_hash::FxHashMap<ObjId, Vec<ObjId>>,
+    drops: u64,
+    fp_visits: usize,
+    view_hits: u64,
+    row_joins: usize,
+    shapes: crate::models::shape::Saved,
+}
+
+impl Default for ThreadState {
+    fn default() -> Self {
+        ThreadState { merged: Default::default(), any: ObjId::MAX, views: Default::default(), viewed: Default::default(), drops: 0, fp_visits: 0, view_hits: 0, row_joins: 0, shapes: Default::default() }
+    }
+}
+
+impl ThreadState {
+    /// Exchanges the thread's marks with these.
+    pub fn swap(&mut self) {
+        MERGED.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut self.merged));
+        ANY.with(|a| self.any = a.replace(self.any));
+        VIEWS.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.views));
+        VIEWED.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.viewed));
+        NAME_KEY_DROPS.with(|c| self.drops = c.replace(self.drops));
+        FP_VISITS.with(|c| self.fp_visits = c.replace(self.fp_visits));
+        VIEW_HITS.with(|c| self.view_hits = c.replace(self.view_hits));
+        crate::domain::swap_row_joins(&mut self.row_joins);
+        crate::models::shape::swap(&mut self.shapes);
+    }
+}
+
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
     VIEWS.with(|v| v.borrow_mut().clear());

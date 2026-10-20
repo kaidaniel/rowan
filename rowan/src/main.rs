@@ -218,7 +218,9 @@ fn run(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows:
 
 /// `run`, also returning the paths of every module the analysis loaded (the entry first).
 fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool) -> Result<(String, Vec<String>), String> {
-    let mut an = analyser(file, opts, facts)?;
+    let mut an = analyser(file, opts.clone(), facts)?;
+    let (f, o) = (file.to_string(), opts);
+    an.set_summary_source(move || summaries_of(&f, &o).ok());
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     if golden {
         // `#@row NAME:` / `#@value` / `#@shape` expectations of the main file and, in a package
@@ -297,6 +299,14 @@ fn analyser(file: &str, opts: Opts, facts: bool) -> Result<Analyzer, String> {
     }
     an.follow_packages(follow, || site_packages_for(file, &site));
     Ok(an)
+}
+
+/// The result summaries' source for `file`'s program (`Analyzer::summary_source`,
+/// `interp/summary.rs`): an analyzer of its own, made when a call first does not run, not
+/// following installed packages; its runs may take a quarter of the deadline.
+fn summaries_of(file: &str, opts: &Opts) -> Result<Box<Analyzer>, String> {
+    let pre = analyser(file, Opts { entry: false, follow: Vec::new(), probe: None, ..opts.clone() }, false)?;
+    Ok(pre.summary_source(rowan::interp::limit("ms", rowan::interp::DEADLINE_MS) / 4))
 }
 
 /// The paths of every module the analysis of `file` loaded (the entry first).

@@ -81,7 +81,7 @@ impl Analyzer {
         }
         let ms = super::limit("ms", super::DEADLINE_MS) as u128 / 2;
         let work = self.budget.lib_share + self.share_work() - self.budget.lib_share0;
-        let spent = self.budget.library_ms() > ms || work > LIB_SHARE.saturating_mul(super::budget::Budget::fanout_limit()) || self.budget.cancelled();
+        let spent = self.budget.library_ms() > ms || work > LIB_SHARE.saturating_mul(self.budget.fanout_limit()) || self.budget.cancelled();
         if spent {
             self.budget.lib_abort.set(true);
         }

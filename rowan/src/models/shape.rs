@@ -139,6 +139,7 @@ impl Shape {
     }
 }
 
+#[derive(Default)]
 struct Tables {
     syms: Vec<(u32, String)>,
     sym_map: FxHashMap<(u32, String), Sym>,
@@ -151,10 +152,7 @@ struct Tables {
 }
 
 thread_local! {
-    static T: RefCell<Tables> = RefCell::new(Tables {
-        syms: vec![], sym_map: FxHashMap::default(), atoms: vec![], atom_map: FxHashMap::default(),
-        dims: vec![], dim_map: FxHashMap::default(), shapes: vec![], shape_map: FxHashMap::default(),
-    });
+    static T: RefCell<Tables> = RefCell::new(Tables::default());
 }
 
 pub fn sym(scope: u32, text: &str) -> Sym {
@@ -175,6 +173,22 @@ thread_local! {
     /// dims of tensors without a name in the program bound to a module-level name
     /// (`n = len(train)`): printed by it
     static DIM_NAMES: RefCell<FxHashMap<(Sym, i32), String>> = RefCell::new(FxHashMap::default());
+}
+
+/// The thread's tables as a value (`crate::state::ThreadState`): exchanged with the thread's by
+/// `swap`.
+#[derive(Default)]
+pub struct Saved {
+    tables: Tables,
+    order: FxHashMap<Sym, u32>,
+    names: FxHashMap<(Sym, i32), String>,
+}
+
+/// Exchanges the thread's tables with `saved`'s.
+pub fn swap(saved: &mut Saved) {
+    T.with(|t| std::mem::swap(&mut *t.borrow_mut(), &mut saved.tables));
+    PARAM_ORDER.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut saved.order));
+    DIM_NAMES.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut saved.names));
 }
 
 /// `name` is bound to dim `i` of the unnamed symbol `s` (`t_name_tensor`) at module level.

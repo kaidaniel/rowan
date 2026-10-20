@@ -408,7 +408,7 @@ impl Analyzer {
     /// How the analysis went, for the editor's note on a cut one: whether the deadline (or a
     /// cancel) cut it, the time it took and its deadline, the statements it ran.
     pub fn analysis_json(&self) -> serde_json::Value {
-        serde_json::json!({"cut": self.budget.hard_cut, "callees_cut": self.budget.hover_cut.get().then(super::budget::Budget::fanout_limit), "ms": self.budget.elapsed_ms() as u64, "deadline_ms": super::limit("ms", super::DEADLINE_MS), "statements": self.budget.statements})
+        serde_json::json!({"cut": self.budget.hard_cut, "callees_cut": self.budget.hover_cut.get().then(|| self.budget.fanout_limit()), "ms": self.budget.elapsed_ms() as u64, "deadline_ms": super::limit("ms", super::DEADLINE_MS), "statements": self.budget.statements})
     }
 
     /// The work done so far: statements, body runs, objects, havoc visits (see `work_line`).
@@ -428,6 +428,37 @@ impl Analyzer {
 
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
-        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited)
+        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {}, skipped calls {} ({} with a summary; {} summaries in {} ms))", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.havoc.visited, self.budget.skipped, self.summaries.applied, self.summaries.shapes.len(), self.summaries.spent.as_millis())
+    }
+
+    /// This analyzer as the result summaries' source (`interp/summary.rs`): the module's code
+    /// with every call after a function's first skipped, set up for runs on demand, its thread
+    /// marks taken out (`ThreadState`); `ms`: how long its runs may take in all.
+    pub fn summary_source(mut self, ms: usize) -> Box<Analyzer> {
+        self.budget.cap = Some(0);
+        self.budget.deadline_ms = Some(ms);
+        // (`note_call`: a run for any call starts from the heaps at module code's calls too)
+        self.findings.general_checks = true;
+        self.run();
+        self.on_demand();
+        self.summaries.recording = true;
+        self.summaries.ms = ms;
+        for (oid, _, _) in self.outermost_functions(|m| self.is_local_module(m)) {
+            let fi = self.heap.func_info(oid);
+            if !matches!(fi.node, super::FuncNode::Def(d) if d.is_async || crate::syntax::is_generator(&d.body)) {
+                self.summaries.by_addr.insert(fi.node.addr(), oid);
+            }
+        }
+        if super::debug_enabled() {
+            eprintln!("summaries: source set up, {} functions ({})", self.summaries.by_addr.len(), self.work_line());
+        }
+        self.summaries.state.swap();
+        Box::new(self)
+    }
+
+    /// How the result summaries' source is made (`summary_source`), when a call first does not
+    /// run: such calls give back their function's result as its runs there say.
+    pub fn set_summary_source(&mut self, factory: impl FnOnce() -> Option<Box<Analyzer>> + 'static) {
+        self.summaries.factory = Some(Box::new(factory));
     }
 }

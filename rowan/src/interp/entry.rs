@@ -470,7 +470,12 @@ impl Analyzer {
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
         let saved_qr = std::mem::replace(&mut self.findings.quiet_records, called_torch);
         let start_reqs = st.reqs.clone();
-        self.call_user(oid, self_val, Args::new(&args, &kwargs, &star_args, &star_kwargs), &mut st, &fake, true);
+        // (the result summaries' pre-pass: the shape of what the run returns)
+        let recording = self.summaries.recording.then(|| (st.copy(), self.heap.serial()));
+        let ret = self.call_user(oid, self_val, Args::new(&args, &kwargs, &star_args, &star_kwargs), &mut st, &fake, true);
+        if let Some((pre, born)) = recording {
+            self.summaries.last = Some(self.shape_of_result(&ret, &pre, &st, born));
+        }
         if general {
             self.note_contract(fi, &st.reqs, &start_reqs);
         }

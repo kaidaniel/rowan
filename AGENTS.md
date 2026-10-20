@@ -55,6 +55,13 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   `receiver_effects`; what its code stores on it on every way it completes, through `super()` too, is there after, `must_stores`; one call for several receivers; a parameter a `return` gives back itself, `return p if c else q`: the argument may be the result, `returns_params`), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened. An activation is a call site in its context (4 deep, then the innermost); with literal arguments, its place, receiver and literals (40 deep); a call of itself with nothing but the innermost one's arguments or data from outside: the innermost past one level (`recursion_without_progress`).
+  * **Result summaries** (`summary.rs`): a call that does not run gives back what its function returns for any call, as a
+    *shape* (literals, typed unknowns, per record born in the run its keys, slots, elements, length, class) made anew at the
+    call site (`materialize`: up to 16 records, 4 deep; the rest the call's unknown result). An object the run was given,
+    read from elsewhere, or stored where the program reads it back (`escaped`: the receiver, a global, unknown code's object) is
+    `any`. Shapes come from a pre-pass by an analyzer of its own (`result_summaries`: the module's code with every call after
+    a function's first skipped, `Budget::cap`, then each function's run for any call, earlier definitions first, within a
+    quarter of the deadline; packages not followed), keyed by the `def`'s address (the parse cache keeps it).
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls (a copy, `x.copy()`, is as unknown). An instance unknown code changed may hold a name its class has (not a method or class); where that code may have removed an attribute, the class's `__getattr__` there is a call that does not run.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
@@ -122,26 +129,20 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 ## Working conventions (the owner's standing instructions)
 
 * Python runs only through `uv run --no-project python` (3.14 pinned), for the test harnesses.
-* **New test cases are specifications.** Write the expected rows and verdicts by hand from the program text first,
-  then make the engine produce them. Never derive an expectation from engine output. When an expectation turns out
-  wrong, fix it with a comment saying why, keeping the line count. Value analysis matters more than bug-finding verdicts.
+* **New test cases are specifications.** Write the expected rows and verdicts by hand from the program text first, then make the engine produce them. Never derive an expectation from engine output. When an expectation turns out wrong, fix it with a comment saying why, keeping the line count. Value analysis matters more than bug-finding verdicts.
 * **Hypotheses need a repro.** For a suspected bug or slowdown, a small program showing it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test` pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
-* **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
-  (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
-  (`report::site_text` names unknown code and a model's inputs by the call as written, with its file when another). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls (`on line 83 in dp/api.py` when in another file; a site the main run gives: not again from an entry run), Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
+* **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels (`report::site_text` names unknown code and a model's inputs by the call as written, with its file when another). A hover (`renderHover`): `name = value` (an open record's keys only possible, of values not known, are its `**?`) at the hovered place on the line (`(parameter) int(?)`; a target: the value assigned; facts per line, column, name: `factsAt`), then Requirements (of parameters: their function's contract, also in its body; inputs read on the line), In Calls (`on line 83 in dp/api.py` when in another file; a site the main run gives: not again from an entry run), Allocation Sites (not one object made by the name's own assignment), Notes (only what is used above, `list[x]` / `dict[k, v]` notation too; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 
 ```
 cd rowan && cargo build --release && cargo test --release --lib && cd ..
-uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths select cases; -v
-uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING
+uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths select cases; -v; --pending [--prune]: cases in tests/*/PENDING
 uv run --no-project python tests/run_snapshots.py   # --update only after reviewing the diff
-uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
+uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0; -n 50: ~5 s
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
@@ -160,23 +161,20 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes= | shows=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 13 areas (lists, dicts, attributes, try, generators, formatting, calls, insertion order, control flow…; positions, keys and names also beside an unknown object: `lx`, `kx`, `ax`); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro).
-* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 13 areas (lists, dicts, attributes, try, generators, formatting, calls, insertion order, control flow…; positions, keys and names also beside an unknown object: `lx`, `kx`, `ax`); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro). **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
 
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower), each library entry's work, the functions doing most (runs, own statements, units and ms of outermost runs). `2`: raises.
-* `ROWAN_LIMITS=budget=4096,ms=10000,fanout=4`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
-  Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
+* `ROWAN_LIMITS=budget=4096,ms=10000,fanout=4`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`. Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
 ## Layout (`rowan/src/`, ~72k lines: the engine ~29k, the models ~43k)
 
-Maps of the code, file by file, with where to start reading: `rowan/README.md` (the crate, the binary, `py/`),
-`rowan/src/README.md` (syntax, domains, `main.rs` / `serve.rs`), `rowan/src/interp/README.md` (the `Analyzer`'s
-components, how a program runs), `rowan/src/models/README.md` (what a model is, a file per library). In short:
-`frontend.rs`, `scopes.rs`, `syntax.rs` parse; `intern.rs`, `domain.rs`, `source.rs`, `layered.rs`, `state.rs` are the
-domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output); `models/` are the libraries;
-`rowan/py/` a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor extension (talks to `rowan serve`).
+Maps of the code, file by file, with where to start reading: `rowan/README.md` (the crate, the binary, `py/`), `rowan/src/README.md`
+(syntax, domains, `main.rs` / `serve.rs`), `rowan/src/interp/README.md` (the `Analyzer`'s components, how a program runs),
+`rowan/src/models/README.md` (what a model is, a file per library). In short: `frontend.rs`, `scopes.rs`, `syntax.rs` parse; `intern.rs`,
+`domain.rs`, `source.rs`, `layered.rs`, `state.rs` are the domains; `interp/` interprets (`report.rs`, `render.rs`, `facts.rs`: the output);
+`models/` are the libraries; `rowan/py/` a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor extension (talks to `rowan serve`).
 
 ## Implementation rules that are easy to break
 

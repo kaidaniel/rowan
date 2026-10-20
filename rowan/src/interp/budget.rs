@@ -71,6 +71,11 @@ pub struct Budget {
     pub lib_cut: std::cell::Cell<bool>,
     /// calls that did not run (`skipped_call`), all along
     pub skipped: usize,
+    /// a budget in place of `ROWAN_LIMITS`' (the result summaries' pre-pass: 0, every call
+    /// after a function's first is skipped)
+    pub cap: Option<usize>,
+    /// a deadline in place of `ROWAN_LIMITS`' (the pre-pass's share of it)
+    pub deadline_ms: Option<usize>,
     /// the running entry began (its time is the library's, not the program's: `library_ms`)
     pub lib_since: Option<std::time::Instant>,
     /// the time spent in entries that ended
@@ -140,7 +145,7 @@ impl Budget {
 
     /// Has function code `code` run past its budget?
     pub fn exhausted(&self, code: usize) -> bool {
-        self.spent.get(&code).copied().unwrap_or(0) > limit("budget", FN_BUDGET)
+        self.spent.get(&code).copied().unwrap_or(0) > self.cap.unwrap_or_else(|| limit("budget", FN_BUDGET))
     }
 
     /// The budgets spent so far (a generator run again from here gets them back: `restore`).
@@ -182,7 +187,7 @@ impl Budget {
     /// libraries (`library_ms`: theirs is a share of its own): calls of user code are unknown
     /// code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > limit("ms", DEADLINE_MS) || self.cancelled()
+        self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > self.deadline_ms.unwrap_or_else(|| limit("ms", DEADLINE_MS)) || self.cancelled()
     }
 
     /// Set from outside: the analysis is stale (`cancel`).
@@ -210,7 +215,7 @@ impl Budget {
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
     /// one of a callee's, past the work a function's run on demand may do (`fanout_limit`)?
     pub fn past_hover_work(&self, frames: usize, work: usize) -> bool {
-        let past = self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > Self::fanout_limit());
+        let past = self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > self.fanout_limit());
         if past {
             self.hover_cut.set(true);
         }
@@ -219,14 +224,14 @@ impl Budget {
 
     /// The work a function's run on demand, or an entry into a followed library, may do before
     /// the calls under it are unknown: `FANOUT` budgets.
-    pub fn fanout_limit() -> usize {
-        limit("fanout", FANOUT).saturating_mul(limit("budget", FN_BUDGET))
+    pub fn fanout_limit(&self) -> usize {
+        limit("fanout", FANOUT).saturating_mul(self.cap.unwrap_or_else(|| limit("budget", FN_BUDGET)))
     }
 
     /// A call of user code within an entry into a followed library, with the work done so far
     /// `work`: past the work one entry may do (`fanout_limit`), it does not run (`lib_cut`).
     pub fn past_library_work(&self, work: usize) -> bool {
-        let past = self.lib_entry.is_some_and(|w0| work.saturating_sub(w0) > Self::fanout_limit());
+        let past = self.lib_entry.is_some_and(|w0| work.saturating_sub(w0) > self.fanout_limit());
         if past {
             self.lib_cut.set(true);
         }

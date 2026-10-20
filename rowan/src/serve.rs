@@ -30,7 +30,7 @@
 
 use rowan::report;
 
-use crate::{analyser, deps_of, Opts};
+use crate::{analyser, deps_of, summaries_of, Opts};
 
 /// Objects the runs on demand of one analysis may add to its heap before it is set up again.
 pub(crate) const REBUILD_OBJECTS: usize = 500_000;
@@ -91,7 +91,11 @@ fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (st
             }
         };
         an.set_cancel(cancel.clone());
-        if !whole {
+        if whole {
+            // (the result summaries' source, made when a call first does not run)
+            let (p, o) = (path.clone(), opts.clone());
+            an.set_summary_source(move || summaries_of(&p, &o).ok());
+        } else {
             an.main_block_unrun();
         }
         an.run();

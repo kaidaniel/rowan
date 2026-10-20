@@ -837,6 +837,17 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
         let r = self.put_kept(kept, r, node, state);
+        // (what the function returns for any call, made here; `any` is the unknown result)
+        let r = match self.shape_for(fi.node.addr()) {
+            Some(sh) => {
+                self.summaries.applied += 1;
+                // (its records: at the main module's call sites, what the editor and the report show;
+                // elsewhere its scalars, as records there would cost every later walk and join)
+                let records = node.module == self.program.main_idx;
+                self.materialize(&sh, &r, node, state, "", records)
+            }
+            None => r,
+        };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
