@@ -630,8 +630,26 @@ impl Analyzer {
     /// Raises no handler surely catches go on to the enclosing try (or out of the call),
     /// through the finally.
     fn reraise_uncaught(&mut self, recs: &mut [crate::interp::RaiseRec], hclasses: &[(FxHashSet<String>, bool)], fin: &std::rc::Rc<Finally>) {
-        for (cls, st, ev) in recs.iter_mut() {
-            if hclasses.iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
+        // (raises no handler around surely catches leave the program through the finally
+        // blocks: whatever their class, the finally runs once from their states joined)
+        let leaving: Vec<usize> = (0..recs.len()).filter(|i| self.leaves_program(&recs[*i].0, hclasses)).collect();
+        if leaving.len() > 1 && !fin.is_empty() {
+            let mut j = crate::state::Joins::default();
+            for i in &leaving {
+                j.add(recs[*i].1.copy());
+            }
+            if let Some(mut st2) = j.finish() {
+                (st2.reachable, st2.ret, st2.exits) = (true, None, None);
+                self.run_finally(fin, &mut st2, true);
+                if st2.reachable {
+                    for i in &leaving {
+                        self.reraise_rec((recs[*i].0.clone(), st2.copy(), recs[*i].2.clone()));
+                    }
+                }
+            }
+        }
+        for (i, (cls, st, ev)) in recs.iter_mut().enumerate() {
+            if hclasses.iter().any(|hc| handler_matches(hc, cls) == Some(true)) || (leaving.len() > 1 && !fin.is_empty() && leaving.contains(&i)) {
                 continue;
             }
             let mut st2 = st.copy();
@@ -648,6 +666,14 @@ impl Analyzer {
             }
             self.reraise_rec((cls.clone(), st2, ev.clone()));
         }
+    }
+
+    /// A raise of class `cls` that this try's handlers (`hclasses`) and every one around surely
+    /// miss, no thread or future keeping it, no GeneratorExit at a yield: it leaves the program,
+    /// its class matters to nothing on the way.
+    fn leaves_program(&self, cls: &Option<crate::interp::ExcNames>, hclasses: &[(FxHashSet<String>, bool)]) -> bool {
+        let misses = |hcs: &[(FxHashSet<String>, bool)]| hcs.iter().all(|hc| handler_matches(hc, cls) == Some(false));
+        self.unwind.catching_depth == 0 && super::genclose::close_pos(cls).is_none() && misses(hclasses) && self.unwind.tries.iter().all(|t| misses(&t.hclasses))
     }
 
     /// Each handler runs from the raises it may catch that no earlier one surely catches; its
