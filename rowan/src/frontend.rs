@@ -364,13 +364,22 @@ fn locate(module: u32, range: TextRange) -> (u32, u32, u32, u32) {
 
 /// Locate a registered node (any Stmt / Expr / handler / comprehension of a parsed module).
 pub fn node<T: Ranged>(n: &T) -> Node {
+    thread_local! {
+        // (a node's position, computed once: evaluation asks it at every step)
+        static LOCATED: RefCell<FxHashMap<usize, Node>> = RefCell::new(FxHashMap::default());
+    }
     let addr = n as *const T as usize;
+    if let Some(nd) = LOCATED.with(|c| c.borrow().get(&addr).copied()) {
+        return nd;
+    }
     let module = REG.with(|r| r.borrow().nodes.get(&addr).copied());
     let Some(module) = module else {
         return Node { addr, module: 0, line: 0, end_line: 0, col: 0, end_col: 0 };
     };
     let (line, end_line, col, end_col) = locate(module, n.range());
-    Node { addr, module, line, end_line, col, end_col }
+    let nd = Node { addr, module, line, end_line, col, end_col };
+    LOCATED.with(|c| c.borrow_mut().insert(addr, nd));
+    nd
 }
 
 /// The node of `n` in module `module` (a part the registry does not keep: a parameter).
