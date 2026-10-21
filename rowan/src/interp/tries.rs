@@ -59,8 +59,9 @@ pub struct TryCtx {
     pub pre: State,
     pub mark: u64,
     /// the raises recorded, per class: (class, the states, the exceptions, how many items the
-    /// generator `gen` had given then), joined when it ends
-    pub recs: Vec<(Option<ExcNames>, Joins, Value, Option<usize>)>,
+    /// generator `gen` had given then, and for the raises that leave the program — one entry
+    /// for all their classes — the other classes), joined when it ends
+    pub recs: Vec<(Option<ExcNames>, Joins, Value, Option<usize>, Option<Vec<Option<ExcNames>>>)>,
     /// a generator run whole for a loop: its raises are taken where the loop asks for the item
     /// it fails to give (`genraise.rs`), kept apart by how many it gave before
     pub gen: Option<ObjId>,
@@ -215,7 +216,16 @@ impl Analyzer {
             self.flush_gen_raises(self.unwind.tries.len());
         }
         let Some(t) = self.unwind.tries.pop() else { return TryExit { recs: Vec::new(), pos: Vec::new() } };
-        let (mut recs, pos): (Vec<RaiseRec>, Vec<Option<usize>>) = t.recs.into_iter().filter_map(|(c, sts, e, p)| Some(((c, sts.finish()?, e), p))).unzip();
+        let (mut recs, mut pos): (Vec<RaiseRec>, Vec<Option<usize>>) = (Vec::new(), Vec::new());
+        let mut more: Vec<(usize, Vec<Option<ExcNames>>)> = Vec::new();
+        for (c, sts, e, p, m) in t.recs {
+            let Some(st) = sts.finish() else { continue };
+            if let Some(m) = m {
+                more.push((recs.len(), m));
+            }
+            recs.push((c, st, e));
+            pos.push(p);
+        }
         for (_, st, exc) in recs.iter_mut() {
             let mut roots: Vec<ObjId> = Vec::new();
             self.state_roots(st, t.envs, t.frames, &mut roots);
@@ -225,6 +235,14 @@ impl Analyzer {
             }
             exc.push_objs(&mut roots);
             self.collect_since(t.mark, &t.pre, roots, st, Some(t.envs));
+        }
+        // (the raises leaving the program: one state for each of their classes)
+        for (i, m) in more {
+            for c in m {
+                let (st, e) = (recs[i].1.copy(), recs[i].2.clone());
+                recs.push((c, st, e));
+                pos.push(pos[i]);
+            }
         }
         TryExit { recs, pos }
     }
@@ -318,16 +336,21 @@ impl Analyzer {
         // (joined per class: a handler takes every raise of a class or none of them; what
         // callees made is collected when the try ends)
         let pos = self.unwind.tries.last().unwrap().gen.and_then(|g| super::genraise::items_given(&self.heap, g, &here));
+        // (those leaving the program, whatever their class, in one entry: `leaves_program`)
+        let leaving = self.leaves_program(&cls, &[]);
         let recs = &mut self.unwind.tries.last_mut().unwrap().recs;
-        match recs.iter_mut().find(|r| r.0 == cls && r.3 == pos) {
+        match recs.iter_mut().find(|r| r.3 == pos && if leaving { r.4.is_some() } else { r.4.is_none() && r.0 == cls }) {
             Some(r) => {
                 r.1.add(here);
                 r.2 = r.2.join(&exc);
+                if let Some(m) = r.4.as_mut().filter(|m| r.0 != cls && !m.contains(&cls)) {
+                    m.push(cls);
+                }
             }
             None => {
                 let mut j = crate::state::Joins::default();
                 j.add(here);
-                recs.push((cls, j, exc, pos));
+                recs.push((cls, j, exc, pos, leaving.then(Vec::new)));
             }
         }
         true
