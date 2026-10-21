@@ -233,10 +233,13 @@ impl Analyzer {
         self.mode.recv_scalar = saved_scalar;
         self.end_wide_read(saved_wide, state);
         acc = acc.join(&join_values(parts));
-        if obj.pts.is_empty() {
-            return crate::models::builtins::scalar_attr(self, obj, name, report, state);
+        if report && self.literals_lack_attr(obj, name, state) {
+            return Value::new();
         }
-        acc.join(&self.mixed_literals_attr(obj, name, state))
+        if obj.pts.is_empty() {
+            return crate::models::builtins::scalar_attr(self, obj, name);
+        }
+        acc.join(&self.mixed_literals_attr(obj, name))
     }
 
     /// None beside `obj`'s objects has no attribute `name` but a dunder: an AttributeError.
@@ -246,8 +249,38 @@ impl Analyzer {
         }
     }
 
+    /// An AttributeError where the builtin type of one of `obj`'s literals lacks attribute
+    /// `name` (true: surely — each of them lacks it, no object beside them); a typed unknown's
+    /// type may be a subclass's (it may). None beside objects is `none_beside_lacks`'.
+    fn literals_lack_attr(&mut self, obj: &Value, name: &str, state: &mut State) -> bool {
+        use crate::models::tables::builtin_has_attr;
+        let lit_type = |k: KeyId| intern::with_key(k, |k| match k {
+            intern::Key::Str(_) => Some("str"),
+            intern::Key::Int(_) => Some("int"),
+            intern::Key::Bool(_) => Some("bool"),
+            intern::Key::Float(_) => Some("float"),
+            intern::Key::Bytes(_) => Some("bytes"),
+            intern::Key::None => Some("NoneType"),
+            _ => None,
+        });
+        // (per part: Some(true) lacks it, Some(false) may, None has it or is not known)
+        let parts: Vec<Option<bool>> = match &obj.kv {
+            kv if kv.is_literal() => kv_literals(kv).iter().filter(|k| obj.pts.is_empty() || *k != key_none()).map(|k| builtin_has_attr(lit_type(k)?, name).and_then(|h| (!h).then_some(true))).collect(),
+            KeyVal::Data(l, _) => vec![crate::domain::label_type(&intern::str_get(*l)).and_then(|t| builtin_has_attr(t, name)).and_then(|h| (!h).then_some(false))],
+            _ => vec![],
+        };
+        if obj.pts.is_empty() && !parts.is_empty() && parts.iter().all(|p| *p == Some(true)) {
+            self.raise_here("AttributeError", state);
+            return true;
+        }
+        if parts.iter().any(|p| p.is_some()) {
+            self.may_raise_here("AttributeError", state);
+        }
+        false
+    }
+
     /// The attribute of the literals beside a value's objects (`ops::mixed`), else nothing.
-    fn mixed_literals_attr(&mut self, obj: &Value, name: &str, state: &mut State) -> Value {
+    fn mixed_literals_attr(&mut self, obj: &Value, name: &str) -> Value {
         if !self.mixed(obj) {
             return Value::new();
         }
@@ -255,7 +288,7 @@ impl Analyzer {
         if lits.kv.is_bot() {
             return Value::new();
         }
-        crate::models::builtins::scalar_attr(self, &lits, name, false, state)
+        crate::models::builtins::scalar_attr(self, &lits, name)
     }
 
     /// A deque's `maxlen` and methods.
@@ -1090,6 +1123,12 @@ impl Analyzer {
             return Value::data(&format!("type@L{}", node.line));
         }
         let nk = key_str_lit(name);
+        // (a dict's or a scalar's method: the object may be of another type, an AttributeError
+        // a running try sees; a str's methods of one annotated `str` are there)
+        let method = DICT_METHOD_NAMES.contains(&name) || is_scalar_method(name);
+        if raises && method && !(STR_METHOD_NAMES.contains(&name) && self.heap.obj(oid).ty == Some("str")) {
+            self.may_raise_here("AttributeError", state);
+        }
         if DICT_METHOD_NAMES.contains(&name) {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
         }

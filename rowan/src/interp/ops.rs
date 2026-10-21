@@ -350,8 +350,17 @@ impl Analyzer {
             }
         }
         if op == ast::Operator::Mod {
+            // (a text's formatting: what it may raise, its unknown objects' dunders too, is
+            // `percent_raises`'s)
+            let text = a.pts.is_empty() && self.value_type(a) == Some("str");
+            if text && self.percent_raises(a, b, state) {
+                return Value::new();
+            }
             if let Some(v) = self.binop_percent(a, b, node, state) {
                 return v;
+            }
+            if text && !crate::models::pandas::is_seriesish(self, b) {
+                return Value::data(&format!("L{}", node.line));
             }
         }
         if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
@@ -385,11 +394,23 @@ impl Analyzer {
     /// surely fit, a ZeroDivisionError for `/`, `//`, `%` by what may be zero (surely: numeric
     /// literals by 0), for `**` a ZeroDivisionError (`0 ** -1`) or an OverflowError, a
     /// ValueError for a shift by what may be negative. Two literals Python computes raise
-    /// nothing; `text % args` is formatting's, the models' own labels (tensors, dims) theirs.
+    /// nothing; `text % args` is formatting's (`percent_raises`). A model's number (a tensor
+    /// dim: an int; a dim's quotient: a float) is one; its other labels (tensors) are its own.
     fn scalar_binop_raises(&mut self, op: ast::Operator, a: &Value, b: &Value, state: &mut State) -> bool {
         use ast::Operator::*;
-        let model_label = |v: &Value| matches!(v.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with('\u{1}'));
-        if self.unwind.tries.is_empty() || model_label(a) || model_label(b) {
+        let model_ty = |v: &Value| -> Option<Option<&'static str>> {
+            let KeyVal::Data(l, _) = v.kv else { return None };
+            let l = intern::str_get(l);
+            let l = l.strip_prefix('\u{1}')?;
+            Some(match l.as_bytes().first() {
+                Some(b'D') => Some("int"),
+                Some(b'Q') => Some("float"),
+                // (any number)
+                _ if l == "N" => Some("number"),
+                _ => None,
+            })
+        };
+        if self.unwind.tries.is_empty() || model_ty(a) == Some(None) || model_ty(b) == Some(None) {
             return false;
         }
         if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
@@ -398,12 +419,14 @@ impl Analyzer {
                 return false;
             }
         }
-        let (ta, tb) = (self.value_type(a), self.value_type(b));
+        let (ta, tb) = (model_ty(a).flatten().or(self.value_type(a)), model_ty(b).flatten().or(self.value_type(b)));
         if op == Mod && (matches!(ta, Some("str" | "bytes")) || a.kv.as_lit().and_then(intern::key_as_str).is_some()) {
             return false;
         }
-        let num = |t: Option<&str>| matches!(t, Some("int" | "bool" | "float"));
-        if binop_type(op, ta, tb).is_none() && !(op == Pow && num(ta) && num(tb)) {
+        let num = |t: Option<&str>| matches!(t, Some("int" | "bool" | "float" | "number"));
+        // ("number": int or float, of the type either gives)
+        let fit = |t: Option<&'static str>| if t == Some("number") { Some("float") } else { t };
+        if binop_type(op, fit(ta), fit(tb)).is_none() && !(op == Pow && num(ta) && num(tb)) {
             self.may_raise_here("TypeError", state);
         }
         let zero = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(0) | intern::Key::Bool(false)) || matches!(k, intern::Key::Float(f) if f64::from_bits(*f) == 0.0));
@@ -411,7 +434,9 @@ impl Analyzer {
         let (la, lb) = (kv_literals(&a.kv), kv_literals(&b.kv));
         match op {
             Div | FloorDiv | Mod if !matches!(ta, Some("str" | "bytes")) => {
-                if !unknown(a) && !unknown(b) && !lb.is_empty() && lb.iter().all(zero) && !la.is_empty() && la.iter().all(intern::key_is_number) {
+                // (a number, known or of a numeric type, by zeros)
+                let number = (!unknown(a) && !la.is_empty() && la.iter().all(intern::key_is_number)) || (a.pts.is_empty() && num(ta));
+                if number && !unknown(b) && !lb.is_empty() && lb.iter().all(zero) {
                     self.raise_here("ZeroDivisionError", state);
                     return true;
                 }
@@ -523,6 +548,123 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    /// What `text % b` may raise (true: surely), for each of the texts `a` may be: a
+    /// ValueError for a conversion Python does not have, a TypeError for arguments that do not
+    /// fill the conversions (a tuple's items, else b alone: a mapping may fill none) or one a
+    /// numeric conversion or `%c` does not take; unknown objects' formatting is unknown code.
+    fn percent_raises(&mut self, a: &Value, b: &Value, state: &mut State) -> bool {
+        if self.unwind.tries.is_empty() {
+            return false;
+        }
+        if b.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External)) {
+            self.flag_may_raise(state);
+            return false;
+        }
+        let texts: Vec<String> = if a.kv.is_literal() { kv_literals(&a.kv).iter().filter_map(|k| intern::key_as_str(k).map(|s| s.to_string())).collect() } else { vec![] };
+        if texts.is_empty() {
+            // (a text not known: any conversion)
+            self.may_raise_here("TypeError", state);
+            self.may_raise_here("ValueError", state);
+            return false;
+        }
+        let outcomes: Vec<Option<(&'static str, bool)>> = texts.iter().map(|t| self.percent_outcome(t, b, state)).collect();
+        let mut classes: Vec<&'static str> = outcomes.iter().flatten().map(|o| o.0).collect();
+        classes.dedup();
+        for c in &classes {
+            self.may_raise_here(c, state);
+        }
+        let sure = outcomes.iter().all(|o| o.is_some_and(|o| o.1));
+        if sure {
+            state.reachable = false;
+        }
+        sure
+    }
+
+    /// What formatting `text % b` may raise: its class and whether surely (None: nothing).
+    fn percent_outcome(&self, text: &str, b: &Value, state: &State) -> Option<(&'static str, bool)> {
+        let Some(convs) = percent_conversions(text) else {
+            // (`%(name)s` of a dict: its fields are reads of it, `binop_percent`'s; `*` widths,
+            // an incomplete format)
+            let dict = !b.pts.is_empty() && b.kv.is_bot() && b.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict);
+            return (!(dict && text.contains("%(") && !text.contains('*'))).then_some(("TypeError", false));
+        };
+        if convs.iter().any(|(_, c)| !"diouxXeEfFgGcrsa".contains(*c)) {
+            return Some(("ValueError", true));
+        }
+        let n = convs.len();
+        let tuple_lit = kv_literals(&b.kv).iter().any(|k| intern::with_key(k, |k| matches!(k, intern::Key::Tuple(_))));
+        let tuples = b.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Tuple).count();
+        let args: Vec<Value> = match b.single().filter(|_| tuples == 1 && b.kv.is_bot()) {
+            Some(t) => {
+                let Some(len) = self.heap.llen(t, state) else { return Some(("TypeError", false)) };
+                if len != n {
+                    return Some(("TypeError", true));
+                }
+                (0..len).map(|i| state.slot(t, Ns::Pos, key_int(i as i64))).collect()
+            }
+            // (one of several tuples, or a value that may be one)
+            None if tuples > 0 || tuple_lit || (b.pts.is_empty() && matches!(b.kv, KeyVal::Data(..)) && self.value_type(b).is_none()) => return Some(("TypeError", false)),
+            None => {
+                // (b alone: a mapping — a dict, a list, an instance — may fill no conversion)
+                let mapping = b.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Instance | Kind::Namespace));
+                if n != 1 {
+                    return (!(n == 0 && mapping && b.kv.is_bot())).then_some(("TypeError", n >= 2 || !mapping && b.pts.is_empty()));
+                }
+                vec![b.clone()]
+            }
+        };
+        // each argument against its conversion: surely if one surely fails
+        let mut out = None;
+        for ((_, c), v) in convs.iter().zip(&args) {
+            match self.percent_arg_fails(*c, v) {
+                Some(true) => return Some(("TypeError", true)),
+                Some(false) => out = Some(("TypeError", false)),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// Whether conversion `c` fails on `v` (true: surely; None: it does not): numeric ones take
+    /// numbers (`%x`, `%o`: ints), `%c` an int or one character; `%s`, `%r`, `%a` anything.
+    fn percent_arg_fails(&self, c: char, v: &Value) -> Option<bool> {
+        if matches!(c, 's' | 'r' | 'a') {
+            return None;
+        }
+        let int_only = matches!(c, 'x' | 'X' | 'o' | 'c');
+        // (each part: Some(true) fails, Some(false) may, None takes it)
+        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match self.heap.obj(o).ty {
+            Some("int" | "bool") => (c == 'c').then_some(false),
+            Some("float") => Some(int_only),
+            Some("str") if c == 'c' => Some(false),
+            Some(_) => Some(true),
+            None if matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Set | Kind::Tuple) => Some(true),
+            None => Some(false),
+        }).collect();
+        match &v.kv {
+            KeyVal::Bot => {}
+            kv if kv.is_literal() => parts.extend(kv_literals(kv).iter().map(|k| intern::with_key(k, |k| match k {
+                intern::Key::Int(i) if c == 'c' => (!(0..=0x10FFFF).contains(i)).then_some(true),
+                intern::Key::Str(s) if c == 'c' => (s.chars().count() != 1).then_some(true),
+                intern::Key::Int(_) | intern::Key::Bool(_) => None,
+                intern::Key::Float(_) => int_only.then_some(true),
+                intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::None => Some(true),
+                _ => Some(false),
+            }))),
+            _ => parts.push(match self.value_type(v) {
+                Some("int" | "bool") => (c == 'c').then_some(false),
+                Some("float") => Some(int_only),
+                Some("str") if c == 'c' => Some(false),
+                Some(_) => Some(true),
+                None => Some(false),
+            }),
+        }
+        if !parts.is_empty() && parts.iter().all(|p| *p == Some(true)) {
+            return Some(true);
+        }
+        parts.iter().any(|p| p.is_some()).then_some(false)
     }
 
     /// The arguments `text % b` formats, in order (b's items when it is a tuple of known

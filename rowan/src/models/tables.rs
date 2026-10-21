@@ -2,6 +2,29 @@
 //! methods without running a model: which raise only on arguments of a wrong type, which have
 //! no effect, which report their own raises, which take an iterable's items at once.
 
+/// The attributes instances of the builtin scalar types have beside `object`'s (`dir(t)` in
+/// CPython 3.14; a bool's are an int's).
+const OBJECT_ATTRS: &str = "__class__ __delattr__ __dir__ __doc__ __eq__ __format__ __ge__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __le__ __lt__ __ne__ __new__ __reduce__ __reduce_ex__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__";
+const STR_ATTRS: &str = "__add__ __contains__ __getitem__ __getnewargs__ __iter__ __len__ __mod__ __mul__ __rmod__ __rmul__ capitalize casefold center count encode endswith expandtabs find format format_map index isalnum isalpha isascii isdecimal isdigit isidentifier islower isnumeric isprintable isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill";
+const INT_ATTRS: &str = "__abs__ __add__ __and__ __bool__ __ceil__ __divmod__ __float__ __floor__ __floordiv__ __getnewargs__ __index__ __int__ __invert__ __lshift__ __mod__ __mul__ __neg__ __or__ __pos__ __pow__ __radd__ __rand__ __rdivmod__ __rfloordiv__ __rlshift__ __rmod__ __rmul__ __ror__ __round__ __rpow__ __rrshift__ __rshift__ __rsub__ __rtruediv__ __rxor__ __sub__ __truediv__ __trunc__ __xor__ as_integer_ratio bit_count bit_length conjugate denominator from_bytes imag is_integer numerator real to_bytes";
+const FLOAT_ATTRS: &str = "__abs__ __add__ __bool__ __ceil__ __divmod__ __float__ __floor__ __floordiv__ __getformat__ __getnewargs__ __int__ __mod__ __mul__ __neg__ __pos__ __pow__ __radd__ __rdivmod__ __rfloordiv__ __rmod__ __rmul__ __round__ __rpow__ __rsub__ __rtruediv__ __sub__ __truediv__ __trunc__ as_integer_ratio conjugate from_number fromhex hex imag is_integer real";
+const BYTES_ATTRS: &str = "__add__ __buffer__ __bytes__ __contains__ __getitem__ __getnewargs__ __iter__ __len__ __mod__ __mul__ __rmod__ __rmul__ capitalize center count decode endswith expandtabs find fromhex hex index isalnum isalpha isascii isdigit islower isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill";
+const NONE_ATTRS: &str = "__bool__";
+
+/// Does an instance of builtin type `ty` (`str`, `int`, `bool`, `float`, `bytes`, `NoneType`)
+/// have attribute `name`? None: not one of them.
+pub fn builtin_has_attr(ty: &str, name: &str) -> Option<bool> {
+    let own = match ty {
+        "str" => STR_ATTRS,
+        "int" | "bool" => INT_ATTRS,
+        "float" => FLOAT_ATTRS,
+        "bytes" => BYTES_ATTRS,
+        "NoneType" => NONE_ATTRS,
+        _ => return None,
+    };
+    Some(own.split(' ').chain(OBJECT_ATTRS.split(' ')).any(|n| n == name))
+}
+
 pub const SAFE_METHODS: &[&str] = &["dict.pop", "list.pop", 
     "dict.get", "dict.keys", "dict.values", "dict.items", "dict.setdefault", "dict.copy", "list.append", "str.upper", "str.lower",
     "str.strip", "str.title", "str.format", "str.join",

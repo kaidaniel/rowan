@@ -83,13 +83,20 @@ impl Analyzer {
             return None;
         }
         let born = |x: ObjId| !self.heap.born_before(x, mark);
-        let recs: Vec<Kept> = exit.recs.into_iter().zip(exit.pos).map(|(rec, pos)| {
+        let mut recs: Vec<Kept> = Vec::new();
+        for (rec, pos) in exit.recs.into_iter().zip(exit.pos) {
+            // (one state for several classes, `leave_try`: its diffs once)
+            if let Some(l) = recs.last().filter(|l| l.rec.1.same(&rec.1)) {
+                let (made, touched) = (l.made.clone(), l.touched.clone());
+                recs.push(Kept { rec, pos, made, touched, taken: false });
+                continue;
+            }
             let (mut made, mut old) = (Footprint::default(), Footprint::default());
             add_diff(&mut made, &rec.1, state, &born);
             add_diff(&mut old, &rec.1, &pre, &|x| !born(x));
             let touched = old.rows.iter().map(|k| k.0).chain(old.slots.iter().map(|k| k.0)).chain(old.elems.iter().copied()).collect();
-            Kept { rec, pos, made, touched, taken: false }
-        }).collect();
+            recs.push(Kept { rec, pos, made, touched, taken: false });
+        }
         // (one run before at this site, or the oldest past `KEPT`: what was not asked for, where
         // it is now)
         if let Some(i) = self.gens.raises.iter().position(|r| r.gid == o).or_else(|| (self.gens.raises.len() >= KEPT).then_some(0)) {
@@ -210,21 +217,32 @@ impl Analyzer {
         let base = ge.as_ref().and_then(|ge| super::gens::effects_given(state, o, ge)).unwrap_or(&gr.pre);
         let mut changed = Footprint::default();
         add_diff(&mut changed, state, &gr.after, &|_| true);
-        let mut picked: Vec<(super::RaiseRec, Footprint)> = Vec::new();
+        let mut picked: Vec<(super::RaiseRec, Option<Footprint>)> = Vec::new();
+        let mut last: Option<&Kept> = None;
         for k in gr.recs.iter().filter(|k| which(&k.pos)) {
+            // (a raise leaving the program is one state for several classes, `leave_try`: its
+            // footprint, and the state raised, once)
+            if last.is_some_and(|l| l.rec.1.same(&k.rec.1)) {
+                picked.push(((k.rec.0.clone(), State::bottom(), k.rec.2.clone()), None));
+                continue;
+            }
+            last = Some(k);
             let mut fp = k.made.clone();
             add_diff(&mut fp, &k.rec.1, base, &|x| !born(x));
             let mine = |x: ObjId| born(x) || k.touched.contains(&x);
             fp.rows.extend(changed.rows.iter().copied().filter(|x| mine(x.0)));
             fp.slots.extend(changed.slots.iter().copied().filter(|x| mine(x.0)));
             fp.elems.extend(changed.elems.iter().copied().filter(|x| mine(*x)));
-            picked.push(((k.rec.0.clone(), k.rec.1.copy(), k.rec.2.clone()), fp));
+            picked.push(((k.rec.0.clone(), k.rec.1.copy(), k.rec.2.clone()), Some(fp)));
         }
         self.gens.raises[g].recs.iter_mut().filter(|k| which(&k.pos)).for_each(|k| k.taken = true);
+        let mut prev = State::bottom();
         for ((cls, raised, exc), fp) in picked {
-            let mut here = state.copy();
-            here.join_heap_fp(&raised, &fp);
-            self.reraise_rec((cls, here, exc));
+            if let Some(fp) = fp {
+                prev = state.copy();
+                prev.join_heap_fp(&raised, &fp);
+            }
+            self.reraise_rec((cls, prev.copy(), exc));
         }
     }
 }

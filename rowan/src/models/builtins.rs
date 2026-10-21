@@ -708,7 +708,7 @@ pub fn library_compare(an: &Analyzer, op: ast::CmpOp, a: &Value, b: &Value) -> O
 
 /// An attribute of a value without objects (a str, a number, a Decimal / Fraction / datetime,
 /// None, a slice, an unknown scalar): its value, or the bound method.
-pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, state: &mut State) -> Value {
+pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str) -> Value {
     if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
         // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
         return obj.clone();
@@ -732,12 +732,6 @@ pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, sta
             return Value::data(name);
         }
         return an.method_value(&format!("num.{}", name), obj);
-    }
-    // an attribute of None (but a dunder every object has): an AttributeError
-    let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
-    if none_only && report && !name.starts_with("__") {
-        an.raise_here("AttributeError", state);
-        return Value::new();
     }
     if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
         return an.method_value(&format!("str.{}", name), obj);
