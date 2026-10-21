@@ -208,29 +208,7 @@ impl Analyzer {
                 Kind::Function if matches!(name, "__defaults__" | "__kwdefaults__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_defaults_attr(oid, name, node, state),
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
-                Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
-                    // (a wrapper of an unknown, stored on some paths only: on the others what
-                    // the unknown has)
-                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
-                    // (stored on some paths only: on the others an AttributeError)
-                    Some(v) => {
-                        if !state.row(oid, Ns::Attr).definite.contains(nk) {
-                            self.may_raise_here("AttributeError", state);
-                        }
-                        v
-                    }
-                    // (an attribute the program surely did not give it: an AttributeError — a call
-                    // that did not run gives back the functions its code may, `returned_aliases`)
-                    None if single && !name.starts_with("__") && self.plain_function(oid) && self.has_facts(oid, state) && state.row(oid, Ns::Attr).lacks(nk) => {
-                        self.raise_here("AttributeError", state);
-                        Value::new()
-                    }
-                    // (one it may not have)
-                    None => {
-                        self.may_raise_here("AttributeError", state);
-                        Value::data(&format!("L{}", node.line))
-                    }
-                },
+                Kind::Function => self.function_attr(oid, name, nk, single, node, state),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => match self.view_attr(oid, name, node, state, report) {
                     Ok(v) => v,
@@ -484,6 +462,33 @@ impl Analyzer {
                 Value::obj(b)
             }
         })
+    }
+
+    /// Attribute `name` of the program's function `oid` (`single`: the read's only object): what
+    /// the program stored on it; on paths it did not, an AttributeError — surely where it surely
+    /// lacks it (a call that did not run gives back the functions its code may,
+    /// `returned_aliases`).
+    fn function_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, single: bool, node: &Node, state: &mut State) -> Value {
+        let row = state.row(oid, Ns::Attr);
+        match state.slot_opt(oid, Ns::Attr, nk) {
+            // (a wrapper of an unknown, stored on some paths only: on the others what the
+            // unknown has)
+            Some(v) if row.open() && !row.likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
+            Some(v) => {
+                if !row.definite.contains(nk) {
+                    self.may_raise_here("AttributeError", state);
+                }
+                v
+            }
+            None if single && !name.starts_with("__") && self.plain_function(oid) && self.has_facts(oid, state) && row.lacks(nk) => {
+                self.raise_here("AttributeError", state);
+                Value::new()
+            }
+            None => {
+                self.may_raise_here("AttributeError", state);
+                Value::data(&format!("L{}", node.line))
+            }
+        }
     }
 
     /// Is `f` a plain function of the program, whose attributes are what the program gave it
