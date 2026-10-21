@@ -89,10 +89,7 @@ impl Analyzer {
         self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        // (a generator expression run for a consumer that stops early may stop at any item: a
-        // one-shot iterator it takes them from stands after each one, as a `for` that may
-        // break, `unroll_for`)
-        let once = itv.single().filter(|o| self.at_stop_hook() && self.heap.obj(*o).iterator && self.heap.obj(*o).single);
+        let once = self.stops_in(&itv);
         let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
         if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {
             self.exhaust(&exhaust_after, state);
@@ -174,6 +171,13 @@ impl Analyzer {
         state.replace_with(head);
         // (a generator iterated: used up, its effects at its end)
         self.exhaust(&exhaust_after, state);
+    }
+
+    /// The one-shot iterator a generator expression run for a consumer that stops early takes
+    /// its items from: it may stop at any of them, the iterator then just after it (as a `for`
+    /// that may break, `unroll_for`).
+    fn stops_in(&self, itv: &Value) -> Option<ObjId> {
+        itv.single().filter(|o| self.at_stop_hook() && self.heap.obj(*o).iterator && self.heap.obj(*o).single)
     }
 
     /// Generator `i`'s items when they are known (at most `limit`), each its own iteration; a

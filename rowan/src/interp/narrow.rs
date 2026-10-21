@@ -288,11 +288,7 @@ impl Analyzer {
                     if truth && g.generators.len() == 1 {
                         if let ast::Expr::Compare(cmp) = &*g.elt {
                             if cmp.ops.first() == Some(&ast::CmpOp::In) {
-                                // (the record as a name of the code the test is in: the
-                                // generator's own run evaluated it, `stopearly.rs`)
-                                let outer = cmp.comparators[0].as_name_expr().filter(|n| !crate::syntax::names_in(&g.generators[0].target).iter().any(|t| t == n.id.as_str()));
-                                let rec = self.traced(&cmp.comparators[0]).or_else(|| outer.map(|n| self.load_name(s(n.id.as_str()), &crate::frontend::Node::none(), state)));
-                                let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), rec) else { return };
+                                let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), self.traced(&cmp.comparators[0])) else { return };
                                 let ks = self.sure_lit_keys(&itv, state);
                                 if let Some(ks) = ks {
                                     if matches!(&*cmp.left, ast::Expr::Name(_)) {
