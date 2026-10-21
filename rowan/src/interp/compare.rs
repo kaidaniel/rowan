@@ -246,6 +246,7 @@ impl Analyzer {
     /// used up); else where it stands after is not known.
     fn in_iterator(&mut self, a: &Value, b: &Value, lits: &KeySet, state: &mut State) -> Option<bool> {
         self.force_gen(b, state, false);
+        self.sync_live(b, state, true);
         let one = b.single().filter(|_| b.kv.is_bot() && a.pts.is_empty() && lits.len() == 1);
         if let (Some(o), Some((c0, n))) = (one, one.and_then(|o| self.positions_left(o, state))) {
             let k = lits.iter().next().unwrap();

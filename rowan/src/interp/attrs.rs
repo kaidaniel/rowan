@@ -172,7 +172,7 @@ impl Analyzer {
                     Some(c) => Value::obj(c),
                     None => Value::data(&format!("L{}", node.line)),
                 },
-                Kind::Namespace | Kind::Instance if name == "__dict__" => {
+                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
                     let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
                     self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)
@@ -208,23 +208,7 @@ impl Analyzer {
                 Kind::Function if matches!(name, "__defaults__" | "__kwdefaults__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_defaults_attr(oid, name, node, state),
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
-                Kind::Function => match state.slot_opt(oid, Ns::Attr, nk) {
-                    // (a wrapper of an unknown, stored on some paths only: on the others what
-                    // the unknown has)
-                    Some(v) if state.row(oid, Ns::Attr).open() && !state.row(oid, Ns::Attr).likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
-                    // (stored on some paths only: on the others an AttributeError)
-                    Some(v) => {
-                        if !state.row(oid, Ns::Attr).definite.contains(nk) {
-                            self.may_raise_here("AttributeError", state);
-                        }
-                        v
-                    }
-                    // (an attribute the program did not give it: it may not have it)
-                    None => {
-                        self.may_raise_here("AttributeError", state);
-                        Value::data(&format!("L{}", node.line))
-                    }
-                },
+                Kind::Function => self.function_attr(oid, name, nk, single, node, state),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => match self.view_attr(oid, name, node, state, report) {
                     Ok(v) => v,
@@ -478,6 +462,42 @@ impl Analyzer {
                 Value::obj(b)
             }
         })
+    }
+
+    /// Attribute `name` of the program's function `oid` (`single`: the read's only object): what
+    /// the program stored on it; on paths it did not, an AttributeError — surely where it surely
+    /// lacks it (a call that did not run gives back the functions its code may,
+    /// `returned_aliases`).
+    fn function_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, single: bool, node: &Node, state: &mut State) -> Value {
+        let row = state.row(oid, Ns::Attr);
+        match state.slot_opt(oid, Ns::Attr, nk) {
+            // (a wrapper of an unknown, stored on some paths only: on the others what the
+            // unknown has)
+            Some(v) if row.open() && !row.likely.contains(nk) => v.join(&Value::data(&format!("L{}", node.line))),
+            Some(v) => {
+                if !row.definite.contains(nk) {
+                    self.may_raise_here("AttributeError", state);
+                }
+                v
+            }
+            None if single && !name.starts_with("__") && self.plain_function(oid) && self.has_facts(oid, state) && row.lacks(nk) => {
+                self.raise_here("AttributeError", state);
+                Value::new()
+            }
+            None => {
+                self.may_raise_here("AttributeError", state);
+                Value::data(&format!("L{}", node.line))
+            }
+        }
+    }
+
+    /// Is `f` a plain function of the program, whose attributes are what the program gave it
+    /// (not a property, static or class method, cached property, lru_cache, singledispatch or
+    /// contextmanager function, nor one a decorator not modelled gave back: those may be
+    /// objects with attributes of their own; nor one unknown code was given, `escaped_fns`)?
+    pub fn plain_function(&self, f: ObjId) -> bool {
+        let fi = self.heap.func_info(f);
+        !(fi.is_property.get() || fi.is_static.get() || fi.is_classmethod.get() || fi.is_cached.get() || fi.is_memo.get() || fi.is_contextmanager.get() || fi.opaque.get() || self.m.sdispatch.contains_key(&f) || self.heap.escaped_fns.contains(&f))
     }
 
     /// A function's `__name__` / `__qualname__` / `__module__` / `__wrapped__` / `__doc__` (a

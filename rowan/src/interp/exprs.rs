@@ -112,19 +112,29 @@ impl Analyzer {
             ast::Expr::DictComp(dc) => self.expr_dictcomp(dc, node, state),
             ast::Expr::ListComp(lc) => self.seq_comp(node, Kind::List, &lc.elt, &lc.generators, state),
             ast::Expr::SetComp(sc) => self.seq_comp(node, Kind::Set, &sc.elt, &sc.generators, state),
-            ast::Expr::Generator(g) => {
-                let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
-                if let Some(o) = v.single() {
-                    self.start_iterator(o, state);
-                }
-                v
-            }
+            ast::Expr::Generator(g) => self.expr_generator(g, node, state),
             ast::Expr::IpyEscapeCommand(_) => {
                 let nd = frontend::node(node);
                 self.findings.note(format!("unsupported expression IpyEscapeCommand at L{}", nd.line));
                 Value::data(&format!("L{}", nd.line))
             }
         }
+    }
+
+    /// A generator expression: run when made, a one-shot iterator over its items. Its first
+    /// iterable is taken then, its items as they are asked for: a container among it changed
+    /// before, they are not known (`live_genexpr`).
+    fn expr_generator(&mut self, g: &'static ast::ExprGenerator, node: &'static ast::Expr, state: &mut State) -> Value {
+        let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
+        if let Some(o) = v.single() {
+            self.start_iterator(o, state);
+            let first = &g.generators[0];
+            if matches!(first.iter, ast::Expr::Name(_)) && !first.is_async {
+                let src = self.eval(&first.iter, state);
+                self.live_genexpr(o, &src, node, state);
+            }
+        }
+        v
     }
 
     /// A dict display (`**m` unpacked into it).

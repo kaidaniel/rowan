@@ -80,6 +80,7 @@ impl Analyzer {
         let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class) || matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.iter" && self.heap.kind(o) == Kind::External));
         for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user) {
             self.force_gen(a, state, !bulk);
+            self.sync_live(a, state, false);
         }
         let a = Args::new(&args, &kwargs, &star_args, &star_kwargs);
         // (None, a number, a str… is not callable: TypeError)
@@ -627,6 +628,7 @@ impl Analyzer {
         let r = self.in_model(|an| m(an, state, call));
         self.name_sources(sources, call);
         crate::models::itertools::after_model_consume(self, call, &r, state);
+        crate::models::builtins::live_after_model(self, m, call, &r, state);
         r
     }
 

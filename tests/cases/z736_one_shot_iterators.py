@@ -40,15 +40,15 @@ xs = iter([1, 2, 3])
 if n > 2:
     a = next(xs)
 rest = len(list(xs))
-#@value rest: includes={2, 3}
-#@todo value rest: exactly={2, 3}  (where xs stands differs by path: not known after the join)
+#@value rest: exactly={2, 3}
+# (where xs stands differs by path: as many items left as on each)
 ys = iter([1, 2, 3])
 mm = map(str, ys)
 if n > 2:
     cc = list(mm)
 left = len(list(mm))
-#@value left: includes={0, 3}
-#@todo value left: exactly={0, 3}  (as rest)
+#@value left: exactly={0, 3}
+# (as rest)
 ky = len(list(ys))
-#@value ky: includes={0}
-#@todo value ky: exactly={0}  (as rest: mm used up on one path, ys at its end on both)
+#@value ky: exactly={0}
+# (as rest: mm used up on one path, ys at its end on both)

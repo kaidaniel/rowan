@@ -91,6 +91,7 @@ impl Analyzer {
             is_contextmanager: std::cell::Cell::new(false),
             is_cached: std::cell::Cell::new(false),
             is_memo: std::cell::Cell::new(false),
+            opaque: std::cell::Cell::new(false),
         };
         let n = node.node();
         let has_closure = !info.closure.is_empty();
@@ -189,7 +190,7 @@ impl Analyzer {
                 continue;
             }
             // functools: singledispatch (and its `register`), lru_cache / cache, wraps
-            if crate::models::singledispatch::functools_decorator(self, &q, d, fobj, fi.as_deref(), state) {
+            if crate::models::singledispatch::functools_decorator(self, &q, d, fobj, &mut fv, state) {
                 continue;
             }
             if q.starts_with("fastapi.") {
@@ -207,9 +208,11 @@ impl Analyzer {
                 };
                 let mut probe = state.copy();
                 let tv = self.eval(target, &mut probe);
-                !tv.pts.is_empty() && tv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound))
+                !tv.pts.is_empty() && tv.pts.iter().all(|o| self.callable_decorator(o))
             };
             if !user_target && (KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register")) {
+                // (most give back another object in fact: what is known of it is not the function's)
+                fi.filter(|_| !matches!(q.as_str(), "abc.abstractmethod" | "typing.final" | "typing.no_type_check")).inspect(|fi| fi.opaque.set(true));
                 continue;
             }
             if q.starts_with("user:") || user_target {
@@ -229,8 +232,21 @@ impl Analyzer {
             }
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
             self.findings.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
+            fi.inspect(|fi| fi.opaque.set(true));
         }
         fv
+    }
+
+    /// Is `o` a decorator applied by calling it: the program's function or bound method, its
+    /// class (`@Parser`: an instance of it), an instance (its `__call__`)? A followed package's
+    /// class (`@nx._dispatchable`) is taken to give the function back, its construction often past
+    /// what following allows.
+    fn callable_decorator(&self, o: ObjId) -> bool {
+        match self.heap.kind(o) {
+            Kind::Function | Kind::Bound | Kind::Instance => true,
+            Kind::Class => self.heap.class_info_opt(o).is_some_and(|ci| !self.heap.module_info(ci.module).library),
+            _ => false,
+        }
     }
 
     /// `call_method_with` and no arguments.
@@ -567,6 +583,7 @@ impl Analyzer {
     /// it the trailing ones, and the starred target a fresh list of the middle. Without a known
     /// length the leading targets keep their positions and the rest take any element.
     fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
+        self.sync_live(v, state, true);
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
         let known = v.single().and_then(|o| self.positions_left(o, state).filter(|(_, l)| *l >= si + after).map(|(c, l)| (o, c, l)));
@@ -615,6 +632,7 @@ impl Analyzer {
     /// on some when a part's length is not known.
     fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
         self.force_gen(v, state, false);
+        self.sync_live(v, state, true);
         let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.positions_left(o, state)) {
             (Kind::List | Kind::Tuple, Some((_, l))) => Some(l != n),
             // (a dict's item, an enumerate's or zip's of two)
@@ -644,6 +662,7 @@ impl Analyzer {
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
         let v = &self.iterable_part(v, state);
         self.force_gen(v, state, false);
+        self.sync_live(v, state, true);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.heap.kind(oid);

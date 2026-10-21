@@ -187,23 +187,30 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.m.sorted_items.insert(oid, std::rc::Rc::new(items));
         }
     }
-    if let Some(a) = c.args.first() {
-        let a = &an.iterable_part(a, st);
+    let src = c.args.first().map(|a| an.iterable_part(a, st));
+    fill_seq(an, st, c, oid, kind, src.as_ref());
+    match (c.qual.as_str(), &src) {
+        // (one-shot; reading the container as it is at each step)
+        ("builtins.iter" | "builtins.reversed", Some(a)) => {
+            an.start_iterator(oid, st);
+            live_from(an, st, c, oid, a);
+        }
+        (_, Some(a)) => an.exhaust(a, st),
+        _ => {}
+    }
+    Value::obj(oid)
+}
+
+/// The items of `src` (`list(src)`, `iter(src)`, …: `c`) written into `oid`, made for it or a
+/// live iterator taking them again (`refill_live`).
+fn fill_seq(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, kind: Kind, src: Option<&Value>) {
+    if let Some(a) = src {
         let it = an.iterate(a, &c.node, st);
         if kind == Kind::Set {
             match &it.items {
                 Some(items) => items.iter().for_each(|x| an.check_hashable(x, st)),
                 None => an.check_hashable_if(&it.elem.flat(), false, st),
             }
-        }
-        if c.qual == "builtins.iter" {
-            an.start_iterator(oid, st);
-        } else {
-            an.exhaust(a, st);
-        }
-        // (one-shot as `iter`'s)
-        if c.qual == "builtins.reversed" {
-            an.start_iterator(oid, st);
         }
         match &it.elem {
             Elem::Pair(k, v) => {
@@ -221,7 +228,7 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 // known pairs (zip / enumerate / items of known inputs) keep their positions;
                 // sorted by known literal keys, in that order
-                let plain = matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.reversed" | "builtins.sorted");
+                let plain = matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter" | "builtins.reversed" | "builtins.sorted");
                 if let (true, Some(items)) = (plain, &it.items) {
                     if an.heap.obj(oid).single && items.len() <= 64 {
                         let order: Option<Vec<usize>> = match c.qual.as_str() {
@@ -319,7 +326,7 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // a dict with some keys only maybe there: the sure keys before the first maybe one
         // are the first items (the length is not known)
-        if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple") && an.heap.llen(oid, st).is_none() && an.heap.obj(oid).single {
+        if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter") && an.heap.llen(oid, st).is_none() && an.heap.obj(oid).single {
             if let Some(m) = an.maybe_dict_items(a, st) {
                 let lead: Vec<Value> = m.iter().take_while(|(_, sure)| *sure).map(|(v, _)| v.clone()).collect();
                 if !lead.is_empty() {
@@ -336,8 +343,23 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // (a copy of a list / tuple whose length is one of a few: the same alternatives, each
     // with its positions — reversed, from each one's end)
-    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
-        if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple)) {
+    // (a one-shot iterator standing where it differs by path: as many items as are left on each,
+    // `list(it)` after a `next(it)` on one branch)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter") && an.heap.llen(oid, st).is_none() && an.heap.obj(oid).single {
+        if let Some((o, n, alts)) = src.and_then(|a| a.single().filter(|_| a.kv.is_bot())).filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).iterator).and_then(|o| Some((o, an.heap.llen(o, st)?, an.cursor_alternatives(o, st)?))) {
+            if alts.len() > 1 && n <= 15 {
+                let mask = alts.iter().fold(0u16, |m, c| m | (1 << (n - c)));
+                for j in 0..n - alts[0] {
+                    let v = join_values(alts.iter().filter(|c| *c + j < n).map(|c| st.slot(o, Ns::Pos, intern::key_int((c + j) as i64))).collect::<Vec<_>>());
+                    st.set_slot(oid, Ns::Pos, intern::key_int(j as i64), v, true);
+                }
+                st.set_lens(oid, (None, 0, mask));
+            }
+        }
+    }
+    // (an iterator's from its start only)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
+        if let Some(src) = src.and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple) && (!an.heap.obj(*s).iterator || an.cursor_of(*s, st) == Some(0))) {
             if let (Some((None, _, m)), Some(alts)) = (st.lens.get(&src).filter(|l| l.2 != 0), an.heap.len_alts(src, st)) {
                 let longest = alts.iter().copied().max().unwrap_or(0);
                 let reversed = c.qual == "builtins.reversed";
@@ -350,7 +372,104 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    Value::obj(oid)
+}
+
+/// `oid`, an iterator over `a` (`c`), reads the containers among it as they are at each step
+/// (`Analyzer::sync_live`); one over a tuple, a str or unknown values has no other items.
+fn live_from(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, a: &Value) {
+    if !a.pts.iter().any(|o| an.changing_container(o)) {
+        return;
+    }
+    let made = Call { args: Vec::new(), kwargs: IndexMap::new(), star_args: Vec::new(), star_kwargs: Vec::new(), recv: None, ..c.clone() };
+    an.m.live_iters.insert(oid, Rc::new(LiveIter { call: made, rerun: None }));
+    an.watch_live(oid, a, st);
+}
+
+/// Lazy iterators of several inputs (`zip`, `islice`, `chain`, …) made by model `m`: live
+/// iterators made again from their inputs as they are, where a container among them changed.
+pub(crate) fn live_after_model(an: &mut Analyzer, m: Model, call: &Call, r: &Value, st: &mut State) {
+    const RERUN: &[&str] = &[
+        "builtins.zip", "builtins.map", "itertools.islice", "itertools.chain", "itertools.chain.from_iterable", "itertools.starmap", "itertools.takewhile",
+        "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.pairwise", "itertools.batched", "itertools.filterfalse", "itertools.zip_longest",
+    ];
+    if !RERUN.contains(&call.qual.as_str()) {
+        return;
+    }
+    let Some(o) = r.single().filter(|o| an.heap.kind(*o) == Kind::List && !an.m.live_iters.contains_key(o)) else { return };
+    let args: Vec<Value> = call.args.iter().chain(call.star_args.iter()).chain(call.kwargs.values()).cloned().collect();
+    if !args.iter().any(|a| a.pts.iter().any(|x| an.changing_container(x))) {
+        return;
+    }
+    an.m.live_iters.insert(o, Rc::new(LiveIter { call: call.clone(), rerun: Some(m) }));
+    an.watch_live(o, &join_values(args), st);
+}
+
+/// A live iterator `o` (`live`) takes its items again from `srcs` as they are now.
+pub fn refill_live(an: &mut Analyzer, st: &mut State, o: ObjId, live: &LiveIter, srcs: &Value) {
+    let c = &live.call;
+    st.drop_obj_ns(o, Ns::Pos);
+    st.drop_obj_ns(o, Ns::Elem);
+    an.heap.set_llen(o, st, None);
+    // (made again, at its own site: its items copied)
+    if let Some(m) = live.rerun {
+        let v = m(an, st, c);
+        match v.single().filter(|n| *n != o) {
+            Some(n) => {
+                for ((ns, k), x) in st.slots_of(n) {
+                    if matches!(ns, Ns::Pos | Ns::Elem) {
+                        st.set_slot(o, ns, k, x, true);
+                    }
+                }
+                if let Some(e) = st.elems.get(&n) {
+                    st.elems.insert(o, e);
+                }
+                if let Some(l) = st.lens.get(&n) {
+                    st.set_lens(o, l);
+                }
+            }
+            None => {
+                let it = an.iterate(&v, &c.node, st);
+                let e = an.elem_value(&it.elem, &c.node, "live");
+                an.add_elem(o, &e, st);
+            }
+        }
+        return;
+    }
+    let as_iter = |srcs: &Value| Call { qual: "builtins.iter".into(), args: vec![srcs.clone()], ..c.clone() };
+    match c.qual.as_str() {
+        "builtins.map" | "builtins.filter" => {
+            let f = st.slot(o, Ns::Attr, key_str_lit("\u{1}fn"));
+            fill_map(an, st, &Call { args: vec![f, srcs.clone()], ..c.clone() }, o);
+        }
+        // (a list's: from the index it started at, `n0` - 1, down; an index past the list's
+        // end now ends it)
+        "builtins.reversed" if srcs.single().is_some_and(|l| an.heap.kind(l) == Kind::List) => {
+            fill_seq(an, st, &as_iter(srcs), o, Kind::List, Some(srcs));
+            let n0 = st.slot_opt(o, Ns::Attr, key_str_lit("\u{1}n0")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).map(|n| n.max(0) as usize);
+            match (n0, an.heap.llen(o, st)) {
+                (Some(n0), Some(m)) => {
+                    let fwd: Vec<Value> = (0..m).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
+                    st.drop_obj_ns(o, Ns::Pos);
+                    for j in 0..n0 {
+                        if let Some(v) = fwd.get(n0 - 1 - j) {
+                            st.set_slot(o, Ns::Pos, intern::key_int(j as i64), v.clone(), true);
+                        }
+                    }
+                    an.heap.set_llen(o, st, Some(n0));
+                    if an.cursor_of(o, st).is_some_and(|cur| m < n0 && cur < n0 - m) {
+                        an.end_iterator(o, st);
+                    }
+                }
+                // (its element the list's)
+                _ => {
+                    st.drop_obj_ns(o, Ns::Pos);
+                    an.heap.set_llen(o, st, None);
+                }
+            }
+        }
+        "builtins.reversed" => fill_seq(an, st, &Call { args: vec![srcs.clone()], ..c.clone() }, o, Kind::List, Some(srcs)),
+        _ => fill_seq(an, st, &as_iter(srcs), o, Kind::List, Some(srcs)),
+    }
 }
 
 /// `callable(x)`: decided where every value `x` may be is: functions, classes and bound
@@ -891,8 +1010,19 @@ fn one_shot(an: &mut Analyzer, v: Value, st: &mut State) -> Value {
 
 pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("next") };
+    an.sync_live(a, st, true);
     // a generator with known yields: the item at the cursor, which moves on
     if let Some(g) = a.single() {
+        // (a live iterator used up: it gives nothing more)
+        if an.at_end(g, st) && an.m.live_iters.contains_key(&g) {
+            return match c.args.get(1) {
+                Some(d) => d.clone(),
+                None => {
+                    an.raise_here("StopIteration", st);
+                    Value::new()
+                }
+            };
+        }
         if matches!(an.heap.kind(g), Kind::List) && an.heap.obj(g).single {
             // (an endless generator: the positions it is known to reach)
             if let (None, Some(p), Some(cur)) = (an.heap.llen(g, st), an.heap.prefix(g, st), an.cursor_of(g, st)) {
@@ -908,7 +1038,10 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     return st.slot(g, Ns::Pos, intern::key_int(cur));
                 }
                 if cur >= 0 && (cur as usize) >= n {
-                    // exhausted: the default, else StopIteration
+                    // exhausted: the default, else StopIteration (a live iterator: for good)
+                    if an.m.live_iters.contains_key(&g) {
+                        an.end_iterator(g, st);
+                    }
                     return match c.args.get(1) {
                         Some(d) => d.clone(),
                         None => {
@@ -1156,7 +1289,8 @@ pub(super) fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         match c.args[1].kv.as_lit().and_then(intern::key_as_str) {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),
             None => {
-                let recs = an.record_objects(&c.args[0]);
+                // (a function's attributes too)
+                let recs: Vec<ObjId> = c.args[0].pts.iter().filter(|o| an.heap.is_record(*o) || an.heap.kind(*o) == Kind::Function).collect();
                 let strong = recs.len() == 1 && an.heap.obj(recs[0]).single;
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
@@ -1394,14 +1528,23 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // (the program's function: what the program stored on it on every path, its type's
         // attributes all dunders; an lru_cache's / singledispatch's: not known here)
-        if an.heap.kind(o) == Kind::Function && !an.heap.func_info(o).is_memo.get() && !an.m.sdispatch.contains_key(&o) && an.has_facts(o, st) {
+        if an.heap.kind(o) == Kind::Function && an.plain_function(o) && an.has_facts(o, st) {
             let row = st.row(o, Ns::Attr);
             if row.definite.contains(k) {
                 verdicts.push(true);
                 continue;
             }
-            // (one it lacks is not decided, as a read of it is not: a call that did not run
-            // may give back this function as an unknown, a store into which misses it)
+            // (one it surely lacks: a call that did not run gives back the functions its code
+            // may, `returned_aliases`)
+            if row.lacks(k) {
+                verdicts.push(false);
+                continue;
+            }
+            // (stored on some paths only: either)
+            if row.closed() {
+                verdicts.extend([true, false]);
+                continue;
+            }
             return unknown;
         }
         if an.heap.kind(o) != Kind::Instance {
@@ -1446,7 +1589,7 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     } else if verdicts.iter().all(|b| !*b) {
         Value::lit(intern::key_bool(false))
     } else {
-        unknown
+        Value::lit(intern::key_bool(true)).join(&Value::lit(intern::key_bool(false)))
     }
 }
 
@@ -1522,7 +1665,7 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
-        if let Some(inst) = a.single().filter(|o| an.heap.kind(*o) == Kind::Instance) {
+        if let Some(inst) = a.single().filter(|o| matches!(an.heap.kind(*o), Kind::Instance | Kind::Function)) {
             an.m.attr_mirrors.insert(oid, inst);
         }
     }
@@ -1544,8 +1687,20 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
-    an.heap.set_llen(oid, st, None);
+    fill_map(an, st, c, oid);
     an.start_iterator(oid, st);
+    // (over one iterable: the function's results on its items as they are at each step)
+    if let [f, a] = c.args.as_slice() {
+        st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}fn"), f.clone(), true);
+        live_from(an, st, c, oid, a);
+    }
+    Value::obj(oid)
+}
+
+/// `map(f, xs…)` / `filter(f, xs)` (`c`): the function's results (the items it keeps) written
+/// into `oid`.
+fn fill_map(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId) {
+    an.heap.set_llen(oid, st, None);
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
         if c.qual.ends_with("filter") {
@@ -1581,7 +1736,7 @@ pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
                     }
                 }
-                return Value::obj(oid);
+                return;
             }
         }
         // `map(f, a, b, …)`: f gets one item of each (as many as the shortest has)
@@ -1605,7 +1760,7 @@ pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                     st.elems.insert(oid, res.kv);
                     an.heap.set_llen(oid, st, Some(n.min(items.len())));
-                    return Value::obj(oid);
+                    return;
                 }
             }
         }
@@ -1624,7 +1779,6 @@ pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
         st.elems.insert(oid, res.kv);
     }
-    Value::obj(oid)
 }
 
 /// `reduce(f, xs[, init])`: over known items the function item by item; otherwise one

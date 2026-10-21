@@ -27,7 +27,8 @@
 //!     `instance_of`, `hierarchy_closed`, `value_type`, `as_type`;
 //!   - iteration: `iterate`, `iterable_part`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`,
 //!     `cursor_of`, `set_cursor`, `exhaust`, `gen_took_item`, one-shot iterators'
-//!     `start_iterator`, `at_end`, `items_from_cursor`, `positions_left`;
+//!     `start_iterator`, `at_end`, `end_iterator`, `items_from_cursor`, `positions_left`; live
+//!     ones' `watch_live`, `sync_live`, `changing_container`;
 //!   - calls: `call_value`, `call_one`, `call_user`, `call_external`, `unknown_call`,
 //!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
 //!     `decorator_qualname`;

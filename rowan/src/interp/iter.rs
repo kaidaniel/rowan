@@ -104,6 +104,7 @@ impl Analyzer {
     /// part's (`iter_scalar`).
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
         self.force_gen(v, state, false);
+        self.sync_live(v, state, true);
         for o in v.pts.iter() {
             self.gens.read(o, None);
         }

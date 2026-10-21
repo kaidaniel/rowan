@@ -167,7 +167,7 @@ impl FuncNode {
 
 /// A function object of the program (`Payload::Func`): what its `def` made. The flags are set
 /// by its decorators after it is made (`apply_decorators`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuncInfo {
     pub node: FuncNode,
     pub name: String,
@@ -190,6 +190,9 @@ pub struct FuncInfo {
     pub is_cached: Cell<bool>,
     /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
     pub is_memo: Cell<bool>,
+    /// decorated by what rowan takes to give it back unchanged (a decorator not modelled,
+    /// `typing.overload`, …): what the name holds may be another object
+    pub opaque: Cell<bool>,
 }
 
 impl FuncInfo {
@@ -355,6 +358,9 @@ pub struct Heap {
     pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
+    /// the program's functions unknown code was given (on any path): it may have set any
+    /// attribute on them (`Analyzer::plain_function`)
+    pub escaped_fns: rustc_hash::FxHashSet<ObjId>,
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
@@ -372,7 +378,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
 

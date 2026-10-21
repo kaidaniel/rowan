@@ -244,6 +244,10 @@ impl Havoc {
                 (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial | Kind::Module, _) => {
                     self.code.push(o);
                     code.push(o);
+                    // (a function: unknown code may set any attribute on it)
+                    if k == Kind::Function {
+                        heap.escaped_fns.insert(o);
+                    }
                     continue;
                 }
                 (Kind::Method, Payload::Method(_, recv)) => {

@@ -233,8 +233,8 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, recv: Option<Value>, a: A
 }
 
 /// A functools decorator (`singledispatch` and `.register`, `lru_cache` / `cache`, `wraps`)
-/// on the function `fobj` (its `fi`): applied; false for any other decorator.
-pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::Decorator, fobj: Option<ObjId>, fi: Option<&crate::interp::FuncInfo>, state: &mut State) -> bool {
+/// on the function `fobj` (decorated so far: `fv`): applied; false for any other decorator.
+pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::Decorator, fobj: Option<ObjId>, fv: &mut Value, state: &mut State) -> bool {
     // `@singledispatch`: implementations registered on it are chosen by the type of the
     // first argument
     if matches!(q, "functools.singledispatch" | "functools.singledispatchmethod") {
@@ -269,17 +269,9 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
         return true;
     }
     if matches!(q, "functools.lru_cache" | "functools.cache") {
-        if let (Some(fi), Some(f)) = (&fi, fobj) {
-            fi.is_memo.set(true);
-            // the (empty) cache exists from the definition on, on every path
-            let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
-            state.set_row(memo, Ns::Item, crate::domain::Row::new());
-            // (`lru_cache` keeps 128 results unless told `maxsize=None`: it may drop one)
-            let unbounded = q == "functools.cache" || matches!(&d.expression, ast::Expr::Call(c) if c.arguments.keywords.iter().any(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "maxsize") && k.value.is_none_literal_expr()) || matches!(c.arguments.args.first(), Some(e) if e.is_none_literal_expr()));
-            if !unbounded {
-                state.set_slot(memo, Ns::Attr, key_str_lit("\u{1}bounded"), Value::lit(intern::key_none()), true);
-            }
-        }
+        // (`lru_cache` keeps 128 results unless told `maxsize=None`: it may drop one)
+        let unbounded = q == "functools.cache" || matches!(&d.expression, ast::Expr::Call(c) if c.arguments.keywords.iter().any(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "maxsize") && k.value.is_none_literal_expr()) || matches!(c.arguments.args.first(), Some(e) if e.is_none_literal_expr()));
+        *fv = memo_wrapper(an, fv, unbounded, &crate::frontend::node(d), state);
         return true;
     }
     // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__, and
@@ -294,6 +286,28 @@ pub(crate) fn functools_decorator(an: &mut Analyzer, q: &str, d: &'static ast::D
         return true;
     }
     false
+}
+
+/// `lru_cache(...)(fv)` / `cache(fv)`: a new function object (CPython's `_lru_cache_wrapper`)
+/// that runs `fv`'s code through its cache (`memo_call`), with `fv`'s name, attributes and
+/// `__wrapped__`; of what is not one function of the program, what a call that does not run gives.
+fn memo_wrapper(an: &mut Analyzer, fv: &Value, unbounded: bool, node: &Node, state: &mut State) -> Value {
+    let Some(f) = fv.single().filter(|f| fv.kv.is_bot() && an.heap.kind(*f) == Kind::Function) else {
+        return an.unknown_call("functools.lru_cache", None, Args::new(std::slice::from_ref(fv), &IndexMap::new(), &[], &[]), state, node);
+    };
+    let fi = (*an.heap.func_info(f)).clone();
+    fi.is_memo.set(true);
+    let label = format!("lru_cache of {}", fi.qualname);
+    let w = an.alloc_at(Kind::Function, node, state, &label, Payload::Func(std::rc::Rc::new(fi.clone())), Some(crate::domain::Row::new()), Ns::Attr, None, Some(&format!("memo{}", f)));
+    an.heap.obj_mut(w).payload = Payload::Func(std::rc::Rc::new(fi));
+    // the (empty) cache exists from the decoration on
+    let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", w), "", true, "lru_cache", Payload::None);
+    state.set_row(memo, Ns::Item, crate::domain::Row::new());
+    if !unbounded {
+        state.set_slot(memo, Ns::Attr, key_str_lit("\u{1}bounded"), Value::lit(intern::key_none()), true);
+    }
+    wrap_like(an, state, w, fv.clone());
+    Value::obj(w)
 }
 
 /// Wrapper `f` takes `wv`'s name, qualname, doc, `__wrapped__` and the attributes it was given
@@ -331,6 +345,27 @@ pub fn m_update_wrapper(an: &mut Analyzer, st: &mut State, c: &crate::interp::Ca
                 wrap_like(an, st, o, f.clone());
             }
             w.clone()
+        }
+        _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
+    }
+}
+
+/// `functools.cache(f)`, `lru_cache(f)`: the wrapper (`memo_wrapper`); `lru_cache(maxsize=…)`,
+/// `lru_cache(None)`: the decorator that makes it (`functools.lru_cache.decorating`, its
+/// receiver whether the cache is bounded).
+pub fn m_lru_cache(an: &mut Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let lit = |v: &Value| v.pts.is_empty() && v.kv.is_literal();
+    match (c.qual.as_str(), c.args.first()) {
+        ("functools.cache", Some(f)) => memo_wrapper(an, f, true, &c.node, st),
+        ("functools.lru_cache", Some(f)) if !lit(f) && c.kwargs.is_empty() => memo_wrapper(an, f, false, &c.node, st),
+        ("functools.lru_cache", first) => {
+            let size = first.or_else(|| c.kwargs.get(&intern::s("maxsize")));
+            let unbounded = size.is_some_and(|v| v.pts.is_empty() && v.kv.as_lit() == Some(intern::key_none()));
+            an.method_value("functools.lru_cache.decorating", &Value::lit(intern::key_bool(unbounded)))
+        }
+        ("functools.lru_cache.decorating", Some(f)) => {
+            let unbounded = c.recv.as_ref().and_then(|r| r.kv.as_lit()) == Some(intern::key_bool(true));
+            memo_wrapper(an, f, unbounded, &c.node, st)
         }
         _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
     }

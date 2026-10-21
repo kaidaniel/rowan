@@ -242,13 +242,16 @@ impl Analyzer {
         }
         self.force_gen(&itv, state, true);
         self.gens.for_iters.push(itv.pts.clone());
+        if self.for_stepping(f, &itv, &iter_node, state) {
+            return;
+        }
         let it = self.iterate(&itv, &iter_node, state);
         // (a list the body changes where the next items come from: Python takes each item as
         // the list is then — run again, each round's item any the list holds then)
         let watch = self.for_watch(&itv, state);
         let redo = watch.list.is_some().then(|| (state.copy(), self.findings.mark()));
         self.unwind.for_watch.push(watch);
-        self.for_items(f, &itv, it, state);
+        self.for_items(f, &itv, it, state, false);
         let w = self.unwind.for_watch.pop().unwrap_or_default();
         if let (Some((pre, mark)), Some((l, _, _))) = (redo, &w.list) {
             let differs = |a: &State, b: &State| a.lens.get(l) != b.lens.get(l) || a.elems.get(l) != b.elems.get(l) || a.slot_opt(*l, Ns::Elem, intern::STAR) != b.slot_opt(*l, Ns::Elem, intern::STAR);
@@ -260,13 +263,61 @@ impl Analyzer {
         }
     }
 
+    /// A `for` over a one-shot iterator its body takes items from too (`for w in words: …
+    /// next(words)`): each round takes the item where the iterator stands then, as Python does;
+    /// unrolled while that is known, then a fixpoint over any element (`for_live`). False: not
+    /// such a loop (its body does not name the iterator).
+    fn for_stepping(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) -> bool {
+        let ast::Expr::Name(n) = &*f.iter else { return false };
+        let Some(o) = itv.single().filter(|o| itv.kv.is_bot() && self.heap.obj(*o).iterator && self.heap.obj(*o).single) else { return false };
+        if crate::syntax::body_mentions(&f.body, n.id.as_str()) == 0 {
+            return false;
+        }
+        let mut breaks: Option<State> = None;
+        for idx in 0..=UNROLL_MAX {
+            if !state.reachable {
+                break;
+            }
+            let c = self.cursor_of(o, state);
+            let items = self.iterate(itv, node, state).items;
+            match (c, items) {
+                // (used up: the loop ends, its `else` runs)
+                (Some(_), Some(items)) if items.is_empty() => {
+                    self.end_iterator(o, state);
+                    if !f.orelse.is_empty() {
+                        self.exec_block(&f.orelse, state);
+                    }
+                    break;
+                }
+                (Some(c), Some(items)) if idx < UNROLL_MAX => {
+                    self.set_cursor(o, Some(c + 1), state);
+                    let item = items[0].clone();
+                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
+                }
+                // (the rest: any element, where the iterator stands not known in the body)
+                _ => {
+                    let it = self.iterate(itv, node, state);
+                    self.unwind.for_watch.push(ForWatch::default());
+                    self.for_items(f, itv, it, state, true);
+                    self.unwind.for_watch.pop();
+                    break;
+                }
+            }
+        }
+        join_breaks(state, breaks);
+        true
+    }
+
     /// What a `for` watches of what it iterates (`ForWatch`): a list whose positions its items
     /// are (the list, an `enumerate`'s or `zip`'s at its start), a dict's or set's keys.
     fn for_watch(&self, itv: &Value, state: &State) -> ForWatch {
         let mut w = ForWatch::default();
         let Some(o) = itv.single().filter(|_| itv.kv.is_bot()) else { return w };
         let plain_list = |x: &Value| x.single().filter(|l| x.kv.is_bot() && self.heap.kind(*l) == Kind::List && !self.heap.obj(*l).iterator && self.heap.obj(*l).single);
+        let live = self.m.live_iters.contains_key(&o).then(|| state.slot_opt(o, Ns::Attr, super::gens::live_keys()[0])).flatten();
         let list = match (&self.heap.obj(o).payload, self.heap.kind(o)) {
+            // (an iterator over a list: the list as it is at each step)
+            (_, Kind::List) if live.is_some() => live.as_ref().and_then(plain_list),
             (_, Kind::List) => plain_list(itv),
             (Payload::Enumerate(inner, _), _) if self.cursor_of(o, state) == Some(0) => plain_list(inner),
             (Payload::Zip(a, b), _) if self.cursor_of(o, state) == Some(0) => plain_list(a).or_else(|| plain_list(b)),
@@ -282,6 +333,11 @@ impl Analyzer {
             _ => None,
         };
         w.keyed = keyed.map(|d| (d, state.row(d, Ns::Item), state.lens.get(&d)));
+        // (a running generator reads them again at each step)
+        w.reads = itv.pts.iter().chain(live.iter().flat_map(|s| s.pts.iter())).filter(|x| match &self.heap.obj(*x).payload {
+            Payload::View(..) => true,
+            _ => matches!(self.heap.kind(*x), Kind::List | Kind::Dict | Kind::Set) && !self.heap.obj(*x).iterator,
+        }).collect();
         w
     }
 
@@ -292,6 +348,9 @@ impl Analyzer {
         let Some(w) = self.unwind.for_watch.last_mut() else { return };
         if !state.reachable {
             return;
+        }
+        for o in w.reads.iter() {
+            self.gens.read(*o, None);
         }
         if let (Some((l, len0, pos0)), Some(idx)) = (&w.list, idx) {
             if state.lens.get(l) != *len0 || (idx + 1..pos0.len()).any(|j| state.slot(*l, Ns::Pos, intern::key_int(j as i64)) != pos0[j]) {
@@ -314,6 +373,14 @@ impl Analyzer {
     /// A `for` over a list its body changes (`for_watch`): a fixpoint, each round's item any
     /// the list holds at its start (a worklist's appended items too).
     fn for_live(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) {
+        // (an iterator over it: used up, or where it stands not known after a `break`)
+        let jumps = contains_jump(&f.body);
+        if jumps {
+            self.consume_lazy(itv, false, state);
+            for o in itv.pts.iter().filter(|o| self.heap.obj(*o).iterator).collect::<Vec<_>>() {
+                self.set_cursor(o, None, state);
+            }
+        }
         let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let it = an.iterate(itv, node, body_s);
             an.bind_iter_target(&f.target, &it.elem, body_s);
@@ -321,6 +388,9 @@ impl Analyzer {
             an.note_resumes(body_s);
         });
         let mut exit_s = head;
+        if !jumps {
+            self.exhaust(itv, &mut exit_s);
+        }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
         }
@@ -328,9 +398,10 @@ impl Analyzer {
         state.replace_with(exit_s);
     }
 
-    /// The rest of `stmt_for`: the loop over `it`, the items of `itv`.
-    fn for_items(&mut self, f: &'static ast::StmtFor, itv: &Value, it: Iteration, state: &mut State) {
-        let has_jump = contains_jump(&f.body);
+    /// The rest of `stmt_for`: the loop over `it`, the items of `itv` (`stepping`: a one-shot
+    /// iterator the body takes items from too, where it stands not known in the body).
+    fn for_items(&mut self, f: &'static ast::StmtFor, itv: &Value, it: Iteration, state: &mut State, stepping: bool) {
+        let has_jump = contains_jump(&f.body) || stepping;
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
         // follows the unrolled iterations, else it is not known after a loop that may break
         let once = itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single);
@@ -353,7 +424,9 @@ impl Analyzer {
         if self.for_unrolled(f, itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
             return;
         }
-        let Some((prefixed, prefix_breaks)) = self.for_known_prefix(f, itv, &it, once, state) else { return };
+        // (a prefix unrolled sets the cursor per item, which the body moves: not when stepping)
+        let known = if stepping { Some((false, None)) } else { self.for_known_prefix(f, itv, &it, once, state) };
+        let Some((prefixed, prefix_breaks)) = known else { return };
         if let Some(w) = self.unwind.for_watch.last_mut() {
             w.fixpoint = true;
         }
@@ -379,6 +452,10 @@ impl Analyzer {
         if exit_acc.is_none() && back.reachable {
             let own = itv.single().filter(|l| self.heap.obj(*l).single && matches!(self.heap.kind(*l), Kind::List | Kind::Tuple) && back.slots_of(*l) == pre.slots_of(*l) && back.lens.get(l) == pre.lens.get(l));
             self.elements_done(&elem_v, own, &f.target, &back, &ends, &mut exit_s);
+        }
+        // (a one-shot iterator the body took items from too: used up at the loop's end)
+        if stepping && !contains_jump(&f.body) {
+            self.exhaust(itv, &mut exit_s);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
@@ -797,6 +874,8 @@ pub struct ForWatch {
     pub changed: bool,
     /// the loop ran (in part) as a fixpoint over any element
     pub fixpoint: bool,
+    /// the containers it takes each next item from
+    pub reads: Vec<ObjId>,
 }
 
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {
