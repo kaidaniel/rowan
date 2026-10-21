@@ -425,13 +425,6 @@ impl Analyzer {
         touched.sort_unstable();
         touched.dedup();
         let mut lens: rustc_hash::FxHashMap<ObjId, Option<(Option<usize>, usize, u16)>> = touched.iter().map(|o| (*o, in_end.contains(o).then(|| join_len(&entry(self, st, *o), &entry(self, at(*o), *o))))).collect();
-        // (a fact joined with what a state has, or that, where nothing was joined yet)
-        fn join_opt<T>(acc: &mut Option<T>, v: T, j: impl Fn(&T, &T) -> T) {
-            *acc = Some(match acc.take() {
-                Some(a) => j(&a, &v),
-                None => v,
-            });
-        }
         let mut prev = pre;
         for y in ys {
             let base = std::mem::replace(&mut prev, y);
@@ -460,28 +453,11 @@ impl Analyzer {
                 }
             }
         }
-        for ((o, ns), (r, _)) in rows {
-            if let Some(r) = r {
-                st.set_row(o, ns, r);
-            }
-        }
-        for ((o, sk), v) in slots {
-            let Some(v) = v else { continue };
-            st.slots.set(&o, sk, v);
-            if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                st.clear_last(o);
-            }
-        }
-        for (o, kv) in elems {
-            if let Some(kv) = kv {
-                st.elems.insert(o, kv);
-            }
-        }
-        for (o, l) in lens {
-            if let Some(l) = l {
-                st.set_lens(o, l);
-            }
-        }
+        let rows = rows.into_iter().filter_map(|(k, (r, _))| Some((k, r?))).collect();
+        let slots = slots.into_iter().filter_map(|(k, v)| Some((k, v?))).collect();
+        let elems = elems.into_iter().filter_map(|(k, v)| Some((k, v?))).collect();
+        let lens = lens.into_iter().filter_map(|(k, v)| Some((k, v?))).collect();
+        set_facts(st, rows, slots, elems, lens);
     }
 
     /// Run `body` from `state`. A generator it ran whole for a consumer that runs code between
@@ -1309,6 +1285,57 @@ pub(super) fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::
 }
 
 /// (not run on some path, run on some path) for a generator `make_lazy_gen` made
+/// A fact joined with what a state has, or that, where nothing was joined yet.
+fn join_opt<T>(acc: &mut Option<T>, v: T, j: impl Fn(&T, &T) -> T) {
+    *acc = Some(match acc.take() {
+        Some(a) => j(&a, &v),
+        None => v,
+    });
+}
+
+/// Set these facts in `st` (elements changed: the last one not known).
+fn set_facts(st: &mut State, rows: Vec<((ObjId, Ns), Row)>, slots: Vec<((ObjId, SlotKey), Value)>, elems: Vec<(ObjId, KeyVal)>, lens: Vec<(ObjId, (Option<usize>, usize, u16))>) {
+    for ((o, ns), r) in rows {
+        st.set_row(o, ns, r);
+    }
+    for ((o, sk), v) in slots {
+        st.slots.set(&o, sk, v);
+        if matches!(sk.0, Ns::Pos | Ns::Elem) {
+            st.clear_last(o);
+        }
+    }
+    for (o, kv) in elems {
+        st.elems.insert(o, kv);
+    }
+    for (o, l) in lens {
+        st.set_lens(o, l);
+    }
+}
+
+/// `pre` with the facts of what the generator made (`ge.made`) as `st` has them.
+fn made_as_after(pre: &State, st: &State, ge: &GenEffects) -> State {
+    let mut out = pre.copy();
+    for k in ge.rows.iter().filter(|k| ge.made.contains(&k.0)) {
+        if let Some(r) = st.rows.get(k) {
+            out.rows.insert(*k, r);
+        }
+    }
+    for (o, sk) in ge.slots.iter().filter(|k| ge.made.contains(&k.0)) {
+        if let Some(v) = st.slots.get(o, sk) {
+            out.slots.set(o, *sk, v);
+        }
+    }
+    for o in ge.elems.iter().chain(ge.lens.iter()).filter(|o| ge.made.contains(o)) {
+        if let Some(v) = st.elems.get(o) {
+            out.elems.insert(*o, v);
+        }
+        if let Some(l) = st.lens.get(o) {
+            out.set_lens(*o, l);
+        }
+    }
+    out
+}
+
 /// Has `s` facts of object `o` (one a generator's run made: made by then)?
 fn made_there(s: &State, o: ObjId) -> bool {
     s.lens.get(&o).is_some() || s.elems.get(&o).is_some() || s.rows.get(&(o, Ns::Attr)).is_some() || s.rows.get(&(o, Ns::Item)).is_some()
@@ -1462,6 +1489,28 @@ pub fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffec
 }
 
 impl Analyzer {
+    /// The facts of what generator `gid`'s run made (since `mark`) that change between its
+    /// suspension points (`ys`, then its end `st`), of the objects its items reach (what its
+    /// consumer sees); not of iterators it made (their state is their cursor's, `genclose.rs`).
+    fn made_changed(&self, ys: &[State], st: &State, gid: ObjId, mark: u64) -> Footprint {
+        let mut ss: Vec<&State> = ys.iter().filter(|y| y.reachable).collect();
+        ss.extend(st.reachable.then_some(st));
+        let born = |o: ObjId| !self.heap.born_before(o, mark) && o != gid && !self.heap.obj(o).iterator;
+        let mut made = changed_made(&ss, &born);
+        if made.rows.is_empty() && made.slots.is_empty() && made.elems.is_empty() {
+            return made;
+        }
+        let mut targets: Vec<ObjId> = made.rows.iter().map(|k| k.0).chain(made.slots.iter().map(|k| k.0)).chain(made.elems.iter().copied()).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let items: Vec<Value> = ss.iter().flat_map(|y| y.slots_of(gid).into_iter().map(|(_, v)| v)).collect();
+        let seen = self.reach_among(&items, &targets, st, false);
+        made.rows.retain(|k| seen.contains(&k.0));
+        made.slots.retain(|k| seen.contains(&k.0));
+        made.elems.retain(|o| seen.contains(o));
+        made
+    }
+
     /// A generator activation begins (its frame pushed): its object of yielded values, new;
     /// what the activation's site held before (a running activation's yields, put back after).
     pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, foid: ObjId, fi: &super::FuncInfo, ctx: &str, state: &mut State) -> Option<YieldStates> {
@@ -1553,25 +1602,7 @@ impl Analyzer {
         }
         let (closed_at, closed, marked_only) = self.closed_states(gid, closes, finite_end.as_ref());
         if let Some(ys) = gen_yields {
-            let made = {
-                let mut ss: Vec<&State> = ys.iter().filter(|y| y.reachable).collect();
-                ss.extend(st.reachable.then_some(&*st));
-                // (not iterators it made: their state is their cursor's, closing's, `genclose.rs`)
-                let born = |o: ObjId| !self.heap.born_before(o, born_mark) && o != gid && !self.heap.obj(o).iterator;
-                let mut made = changed_made(&ss, &born);
-                // (those its items reach: what its consumer sees of what it made)
-                if !made.rows.is_empty() || !made.slots.is_empty() || !made.elems.is_empty() {
-                    let mut targets: Vec<ObjId> = made.rows.iter().map(|k| k.0).chain(made.slots.iter().map(|k| k.0)).chain(made.elems.iter().copied()).collect();
-                    targets.sort_unstable();
-                    targets.dedup();
-                    let items: Vec<Value> = ss.iter().flat_map(|y| y.slots_of(gid).into_iter().map(|(_, v)| v)).collect();
-                    let seen = self.reach_among(&items, &targets, st, false);
-                    made.rows.retain(|k| seen.contains(&k.0));
-                    made.slots.retain(|k| seen.contains(&k.0));
-                    made.elems.retain(|o| seen.contains(o));
-                }
-                made
-            };
+            let made = self.made_changed(&ys, st, gid, born_mark);
             self.gen_suspension_join(st, pre_bind, &ys, gid, born_mark, &made);
             // the effects per item: before the first, the objects are as before the call
             // (those of an item undone by the end too)
@@ -1593,28 +1624,10 @@ impl Analyzer {
                 lens.dedup();
                 if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
                     let at = self.gens.pos_states.remove(&gid).unwrap_or_default();
+                    let mut ge = GenEffects { rows, slots, elems, lens, made, pre: State::new(), at, end: finite_end, join: st.copy(), taken: Default::default(), closed_at, closed };
                     // (before its first item, what it made is as after the run: joined over its
                     // suspension points)
-                    let mut pre = pre_bind.copy();
-                    for k in rows.iter().filter(|k| made.contains(&k.0)) {
-                        if let Some(r) = st.rows.get(k) {
-                            pre.rows.insert(*k, r);
-                        }
-                    }
-                    for (o, sk) in slots.iter().filter(|k| made.contains(&k.0)) {
-                        if let Some(v) = st.slots.get(o, sk) {
-                            pre.slots.set(o, *sk, v);
-                        }
-                    }
-                    for o in elems.iter().chain(lens.iter()).filter(|o| made.contains(o)) {
-                        if let Some(v) = st.elems.get(o) {
-                            pre.elems.insert(*o, v);
-                        }
-                        if let Some(l) = st.lens.get(o) {
-                            pre.set_lens(*o, l);
-                        }
-                    }
-                    let mut ge = GenEffects { rows, slots, elems, lens, made, pre, at, end: finite_end, join: st.copy(), taken: Default::default(), closed_at, closed };
+                    ge.pre = made_as_after(pre_bind, st, &ge);
                     // (closing it at each of its yields changes nothing there: no closing facts)
                     let same = |p: usize, c: &State| ge.at.get(p).and_then(|a| a.as_ref()).is_some_and(|a| gen_facts_equal(c, a, &ge));
                     if marked_only && ge.closed_at.iter().enumerate().all(|(p, c)| c.as_ref().is_none_or(|c| same(p, c))) {
