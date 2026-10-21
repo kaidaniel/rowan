@@ -29,6 +29,8 @@ pub struct GenRaises {
     /// runs: raised from there when that ends or the loop does
     frame: Option<usize>,
     asked: Option<(State, usize)>,
+    /// the frame depth it ran at
+    depth: usize,
 }
 
 /// A raise kept: its record, how many items the generator had given (None: not known), the
@@ -93,10 +95,11 @@ impl Analyzer {
         if let Some(i) = self.gens.raises.iter().position(|r| r.gid == o).or_else(|| (self.gens.raises.len() >= KEPT).then_some(0)) {
             self.flush_asked(i);
             let old = self.gens.raises.remove(i);
-            old.recs.into_iter().filter(|k| !k.taken).for_each(|k| self.reraise_rec(k.rec));
+            old.recs.into_iter().filter(|k| !k.taken).for_each(|k| self.reraise_recorded(k.rec, old.depth));
         }
         let frame = looped.then_some(self.cx.frames.len());
-        self.gens.raises.push(GenRaises { gid: o, level, pre, after: state.copy(), mark, recs, frame, asked: None });
+        let depth = self.cx.frames.len();
+        self.gens.raises.push(GenRaises { gid: o, level, pre, after: state.copy(), mark, recs, frame, asked: None, depth });
         Some(o)
     }
 
@@ -125,12 +128,26 @@ impl Analyzer {
                 self.flush_asked(i);
             }
         }
-        let mut flushed: Vec<super::RaiseRec> = Vec::new();
+        let mut flushed: Vec<(super::RaiseRec, usize)> = Vec::new();
         for g in self.gens.raises.iter_mut().filter(|r| r.level >= level) {
             g.level = level - 1;
-            flushed.extend(g.recs.iter().filter(|k| !k.taken).map(|k| (k.rec.0.clone(), k.rec.1.copy(), k.rec.2.clone())));
+            flushed.extend(g.recs.iter().filter(|k| !k.taken).map(|k| ((k.rec.0.clone(), k.rec.1.copy(), k.rec.2.clone()), g.depth)));
         }
-        flushed.into_iter().for_each(|r| self.reraise_rec(r));
+        flushed.into_iter().for_each(|(r, d)| self.reraise_recorded(r, d));
+    }
+
+    /// A raise a run at frame depth `depth` recorded, raised as recorded into the running try:
+    /// from a shallower frame now, with the names the try's frame had where it began (the
+    /// recorded ones are the deeper frame's).
+    fn reraise_recorded(&mut self, mut rec: super::RaiseRec, depth: usize) {
+        if let Some(t) = self.unwind.tries.last().filter(|_| depth != self.cx.frames.len()) {
+            rec.1.env = t.pre.env.clone();
+            rec.1.unbound = t.pre.unbound.clone();
+            rec.1.narrowed = t.pre.narrowed.clone();
+            rec.1.ret = t.pre.ret.clone();
+            rec.1.exits = t.pre.exits.clone();
+        }
+        self.reraise_rec(rec);
     }
 
     /// A loop's rounds over `itv` ended at `head`, which each round's start (where it asks for an

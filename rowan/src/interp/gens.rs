@@ -1581,10 +1581,13 @@ impl Analyzer {
                 ys.extend(closed.iter());
                 let fp = gen_footprint(st, pre_bind, &ys);
                 let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
-                let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).chain(made.rows.iter().copied()).collect();
-                let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).chain(made.slots.iter().copied()).collect();
-                let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).chain(made.elems.iter().copied()).collect();
-                let made: FxHashSet<ObjId> = made.rows.iter().map(|k| k.0).chain(made.slots.iter().map(|k| k.0)).chain(made.elems.iter().copied()).collect();
+                // (of what it made, one runtime object each: a merged one keeps its facts joined
+                // over the suspension points at every item)
+                let one = |o: &ObjId| self.heap.obj(*o).single;
+                let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).chain(made.rows.iter().copied().filter(|k| one(&k.0))).collect();
+                let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).chain(made.slots.iter().copied().filter(|k| one(&k.0))).collect();
+                let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).chain(made.elems.iter().copied().filter(one)).collect();
+                let made: FxHashSet<ObjId> = made.rows.iter().map(|k| k.0).chain(made.slots.iter().map(|k| k.0)).chain(made.elems.iter().copied()).filter(one).collect();
                 let mut lens: Vec<ObjId> = slots.iter().map(|(o, _)| *o).chain(elems.iter().copied()).collect();
                 lens.sort_unstable();
                 lens.dedup();
