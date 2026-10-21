@@ -67,6 +67,20 @@ pub struct TryCtx {
     /// the last raise recorded, before collection (a loop of calls raising at one point adds
     /// nothing)
     pub last: Option<(State, Option<ExcNames>, Value)>,
+    /// the classes its handlers catch (`handler_classes`; one may-catch-anything of `caught`
+    /// for a try a model runs) and whether a raise leaving it runs code on its way out (a
+    /// finally block, managers' `__exit__`): what of a raise it can see (`sees`)
+    pub hclasses: Vec<(FxHashSet<String>, bool)>,
+    pub runs: bool,
+}
+
+impl TryCtx {
+    /// Can a raise of class `cls` change what this try's handlers or way out see? Not when
+    /// every handler surely misses it and nothing runs on the way out: the raise only passes
+    /// through, to the tries around it.
+    fn sees(&self, cls: &Option<ExcNames>) -> bool {
+        self.runs || self.hclasses.iter().any(|hc| handler_matches(hc, cls) != Some(false))
+    }
 }
 
 /// What a try context recorded while its body ran (`Analyzer::leave_try`).
@@ -187,7 +201,8 @@ impl Analyzer {
         let (frames, envs, mark) = (self.cx.frames.len(), self.cx.env_stack.len(), self.heap.serial());
         let named = crate::models::exceptions::expand_caught(caught.iter().filter(|n| !super::access::CATCH_ALL.contains(&n.as_str())).cloned().collect());
         let caught = crate::models::exceptions::expand_caught(caught);
-        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None, gen: None });
+        let hclasses = if caught.is_empty() { Vec::new() } else { vec![(caught.clone(), false)] };
+        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None, gen: None, hclasses, runs: false });
     }
 
     /// The try context ends: what it recorded. What callees made since the try began and
@@ -236,6 +251,10 @@ impl Analyzer {
             return true;
         }
         let Some(t) = self.unwind.tries.last() else { return false };
+        // (no running try sees it: it leaves the program, through ways out that run nothing)
+        if !self.unwind.tries.iter().any(|t| t.sees(&cls)) {
+            return true;
+        }
         let (fl, el) = (t.frames, t.envs);
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
@@ -435,6 +454,17 @@ impl Analyzer {
         false
     }
 
+    /// Does `fin` run code on an exceptional way out: a finally block, a manager's `__exit__`
+    /// (not those of `redirect_stdout`, `nullcontext`, a file or a StringIO, which run none)?
+    fn runs_code(&self, fin: &Finally) -> bool {
+        const INERT: &[&str] = &["stdobj.redirect", "stdobj.nullcontext", "stdobj.stringio", "stdobj.file"];
+        let inert = |v: &Value| v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Namespace && matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if INERT.contains(&q.as_str())));
+        match fin {
+            Finally::Block(b) => !b.is_empty(),
+            Finally::Exit(managers) => !managers.iter().all(|(v, _)| inert(v)),
+        }
+    }
+
     /// A finally block run on the way out of its try (not again by a `break` / `continue`
     /// inside it); for a with statement, the managers' `__exit__` (innermost first), with an
     /// unknown exception on an exceptional way out.
@@ -509,14 +539,18 @@ impl Analyzer {
         let has_finally = !fin.is_empty();
         let outer_exits = if has_finally { state.exits.take() } else { None };
         let mut pre = state.copy();
+        // the handlers' classes: which recorded raise each one catches (Python takes the
+        // first handler that matches)
+        let hclasses = self.handler_classes(handlers, &pre);
         self.enter_try(caught, &mut pre);
+        let runs = self.runs_code(fin);
+        if let Some(t) = self.unwind.tries.last_mut() {
+            (t.hclasses, t.runs) = (hclasses.clone(), runs);
+        }
         self.cx.cond_depth += 1;
         self.cx.branch_depth += 1;
         self.exec_block(body, state);
         let TryExit { mut recs, .. } = self.leave_try();
-        // the handlers' classes: which recorded raise each one catches (Python takes the
-        // first handler that matches)
-        let hclasses = self.handler_classes(handlers, &pre);
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();

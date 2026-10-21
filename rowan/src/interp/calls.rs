@@ -445,7 +445,7 @@ impl Analyzer {
                 }
                 let r = self.call_external(&qual, a, state, node, call_ast);
                 if call_ast.is_some() {
-                    crate::models::may_type_error(self, &qual, args, kwargs, &r, state);
+                    crate::models::may_type_error(self, &qual, None, args, kwargs, &r, state);
                 }
                 r
             }
@@ -516,7 +516,7 @@ impl Analyzer {
         };
         let r = self.pure_hint(&call, r, state);
         if call_ast.is_some() {
-            crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
+            crate::models::may_type_error(self, &qual, Some(&recv), &call.args, kwargs, &r, state);
         }
         // (a method of an object rowan knows nothing of, modelled as a dict's: a list's `pop`
         // raises IndexError, a set's KeyError)
