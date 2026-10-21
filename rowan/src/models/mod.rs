@@ -473,7 +473,7 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// A builtin or container method taken for one that raises only on arguments of the wrong
 /// type (`len`, `sorted`, `str.join`, …) may still raise a TypeError where an argument (or a
 /// builtin's result) is not known: a running try records that.
-pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, r: &Value, state: &mut State) {
+pub fn may_type_error(an: &mut Analyzer, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, r: &Value, state: &mut State) {
     if !state.reachable {
         return;
     }
@@ -493,6 +493,14 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
             an.may_raise_here("TypeError", state);
             return;
         }
+    }
+    match takes_types(an, qual, recv, args, kwargs, state) {
+        Some(true) => return,
+        Some(false) => {
+            an.raise_here("TypeError", state);
+            return;
+        }
+        None => {}
     }
     if !an.in_try() {
         return;
@@ -525,6 +533,145 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
     };
     if unknown {
         an.may_raise_here("TypeError", state);
+    }
+}
+
+/// What a parameter of a str method takes.
+#[derive(Clone, Copy)]
+enum P {
+    Str,
+    Int,
+    OptStr,
+    OptInt,
+    /// a str or a tuple of strs (`startswith`)
+    Strs,
+    /// a str of one character (`center`'s fill)
+    Char,
+}
+
+/// A str method's positional parameters, required and optional, and its keyword ones.
+fn str_params(name: &str) -> Option<(&'static [P], &'static [P], &'static [(&'static str, P)])> {
+    use P::*;
+    Some(match name {
+        "lower" | "upper" | "title" | "casefold" | "capitalize" | "swapcase" | "isdigit" | "isalpha" | "isspace" | "isascii" | "isalnum" | "islower" | "isupper" | "istitle" | "isnumeric" | "isdecimal" | "isidentifier" | "isprintable" => (&[], &[], &[]),
+        "strip" | "lstrip" | "rstrip" => (&[], &[OptStr], &[]),
+        "startswith" | "endswith" => (&[Strs], &[OptInt, OptInt], &[]),
+        "replace" => (&[Str, Str], &[Int], &[]),
+        "split" | "rsplit" => (&[], &[OptStr, Int], &[("sep", OptStr), ("maxsplit", Int)]),
+        "find" | "rfind" | "count" => (&[Str], &[OptInt, OptInt], &[]),
+        "partition" | "rpartition" | "removeprefix" | "removesuffix" => (&[Str], &[], &[]),
+        "splitlines" => (&[], &[Int], &[("keepends", Int)]),
+        "expandtabs" => (&[], &[Int], &[("tabsize", Int)]),
+        "zfill" => (&[Int], &[], &[]),
+        "ljust" | "rjust" | "center" => (&[Int], &[Char], &[]),
+        _ => return None,
+    })
+}
+
+/// Is `v` of one of the types `tys` (or None, with `none`)? Some(true) surely, Some(false)
+/// surely not (literals of other types only), None not known (objects, untyped unknowns).
+fn of_types(v: &Value, tys: &[&str], none: bool) -> Option<bool> {
+    if !v.pts.is_empty() {
+        return None;
+    }
+    match &v.kv {
+        KeyVal::Lit(_) | KeyVal::Lits(_) => {
+            let ok = |k: KeyId| (none && intern::with_key(k, |k| matches!(k, intern::Key::None))) || tys.iter().any(|t| crate::domain::key_type(k, t));
+            let ks = crate::domain::kv_literals(&v.kv);
+            if ks.iter().all(ok) {
+                Some(true)
+            } else if !ks.iter().any(ok) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        KeyVal::Data(l, _) => crate::domain::label_type(&intern::str_get(*l)).filter(|t| tys.contains(t)).map(|_| true),
+        _ => None,
+    }
+}
+
+/// Does `v` take parameter `p`'s type (as `of_types`), the method's receiver of type `text`
+/// (str or bytes)?
+fn takes(an: &Analyzer, v: &Value, p: P, text: &str, st: &State) -> Option<bool> {
+    const INT: &[&str] = &["int", "bool"];
+    match p {
+        P::Str => of_types(v, &[text], false),
+        P::Int => of_types(v, INT, false),
+        P::OptStr => of_types(v, &[text], true),
+        P::OptInt => of_types(v, INT, true),
+        P::Strs => of_types(v, &[text], false).or_else(|| (v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| an.heap.kind(o) == Kind::Tuple && items_of_type(an, o, text, st))).then_some(true)),
+        P::Char => match of_types(v, &[text], false) {
+            Some(true) if v.kv.is_literal() => Some(crate::domain::kv_literals(&v.kv).iter().all(|k| intern::key_as_str(k).is_some_and(|t| t.chars().count() == 1) || intern::with_key(k, |k| matches!(k, intern::Key::Bytes(b) if b.len() == 1)))),
+            Some(false) => Some(false),
+            _ => None,
+        },
+    }
+}
+
+/// Are the items of container `o` (no iterator) all of type `ty`?
+fn items_of_type(an: &Analyzer, o: ObjId, ty: &str, st: &State) -> bool {
+    !an.heap.obj(o).iterator && st.slot(o, Ns::Elem, STAR).pts.is_empty() && st.elems.get(&o).is_some_and(|kv| of_types(&Value::kv_only(kv.clone()), &[ty], false) == Some(true))
+}
+
+/// Can Python iterate `v` without running code (or failing): a list, tuple, dict, set or view
+/// (an iterator too with `iterators`: iterating one gives back itself), a str?
+fn plain_iterable(an: &Analyzer, v: &Value, iterators: bool) -> bool {
+    let objs = v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set | Kind::View) && (iterators || !an.heap.obj(o).iterator));
+    objs && (!v.pts.is_empty() || !v.kv.is_bot()) && (v.kv.is_bot() || of_types(&Value::kv_only(v.kv.clone()), &["str"], false) == Some(true))
+}
+
+/// A builtin or container / str method given arguments of the types it takes, whatever they
+/// hold: Some(true) where it raises no TypeError (`len` of a list, `map` of the program's
+/// function over one, `list.append` of anything, `s.endswith(".egg")`), Some(false) where it
+/// surely does (`s.endswith(1)`), None where that is not known here.
+fn takes_types(an: &Analyzer, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, st: &State) -> Option<bool> {
+    let fits = |b: bool| b.then_some(true);
+    // (the program's code, which records its own raises where it runs, as where it is called)
+    let code = |v: &Value| v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class));
+    let none = |v: &Value| v.pts.is_empty() && v.kv.as_lit().is_some_and(|k| intern::with_key(k, |k| matches!(k, intern::Key::None)));
+    if let Some(name) = qual.strip_prefix("str.") {
+        // (bytes' methods are str's: the receiver's type is the text's)
+        let text = recv.and_then(|r| an.value_type(r)).filter(|t| matches!(*t, "str" | "bytes"))?;
+        if name == "join" {
+            let [a] = args else { return None };
+            let strs = of_types(a, &[text], false) == Some(true) || (a.kv.is_bot() && !a.pts.is_empty() && a.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set) && items_of_type(an, o, text, st)));
+            return fits(kwargs.is_empty() && strs);
+        }
+        let (req, opt, kw) = str_params(name)?;
+        if args.len() < req.len() || args.len() > req.len() + opt.len() {
+            return None;
+        }
+        let mut all = true;
+        let pos = args.iter().zip(req.iter().chain(opt.iter()));
+        let named = kwargs.iter().map(|(k, v)| kw.iter().find(|(n, _)| s(n) == *k).map(|(_, p)| (v, *p)));
+        for t in pos.map(|(v, p)| Some((v, *p))).chain(named) {
+            match t.and_then(|(v, p)| takes(an, v, p, text, st)) {
+                Some(true) => {}
+                Some(false) => return Some(false),
+                None => all = false,
+            }
+        }
+        return fits(all);
+    }
+    if !kwargs.is_empty() && !matches!(qual, "builtins.enumerate") {
+        return None;
+    }
+    let start_ok = || kwargs.iter().all(|(k, v)| *k == s("start") && takes(an, v, P::Int, "", st) == Some(true));
+    match (qual, args) {
+        ("builtins.len", [a]) => fits(plain_iterable(an, a, false)),
+        ("builtins.iter", [a]) => fits(plain_iterable(an, a, true)),
+        ("builtins.list" | "builtins.tuple", [a]) => fits(plain_iterable(an, a, false)),
+        ("builtins.list" | "builtins.tuple", []) => Some(true),
+        ("builtins.enumerate", [a]) => fits(plain_iterable(an, a, true) && start_ok()),
+        ("builtins.enumerate", [a, n]) => fits(plain_iterable(an, a, true) && kwargs.is_empty() && takes(an, n, P::Int, "", st) == Some(true)),
+        ("builtins.zip", xs) => fits(xs.iter().all(|x| plain_iterable(an, x, true))),
+        ("builtins.map", [f, xs @ ..]) if !xs.is_empty() => fits(code(f) && xs.iter().all(|x| plain_iterable(an, x, true))),
+        ("builtins.filter", [f, x]) => fits((code(f) || none(f)) && plain_iterable(an, x, true)),
+        ("list.append", [_]) => Some(true),
+        ("list.extend", [a]) => fits(plain_iterable(an, a, false)),
+        ("list.insert", [i, _]) => fits(takes(an, i, P::Int, "", st) == Some(true)),
+        _ => None,
     }
 }
 

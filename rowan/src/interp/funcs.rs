@@ -404,8 +404,8 @@ impl Analyzer {
         }
         // (a name an imported module does not bind, nor anything rowan cannot see: a NameError,
         // and the path goes on, as after any read that fails; the main module's free names are
-        // its inputs)
-        if fr_module != self.program.main_module && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
+        // its inputs, as are those of a module a model wrote, `str(_GROUP)`)
+        if fr_module != self.program.main_module && self.heap.module_info(fr_module).path.is_some() && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
             self.may_raise_here("NameError", state);
         }
         let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm));
