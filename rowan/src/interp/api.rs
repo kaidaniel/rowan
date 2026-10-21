@@ -464,7 +464,7 @@ impl Analyzer {
         self.summaries.ms = ms;
         for (oid, _, _) in self.outermost_functions(|m| self.is_local_module(m)) {
             let fi = self.heap.func_info(oid);
-            if !matches!(fi.node, super::FuncNode::Def(d) if d.is_async || crate::syntax::is_generator(&d.body)) {
+            if !(matches!(fi.node, super::FuncNode::Def(d) if d.is_async) || fi.node.is_generator()) {
                 self.summaries.by_addr.insert(fi.node.addr(), oid);
             }
         }

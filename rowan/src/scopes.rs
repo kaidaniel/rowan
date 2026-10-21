@@ -39,6 +39,11 @@ pub struct Scope {
     pub cells: FxHashSet<String>,
     /// binding occurrences per name (one inside a loop counts twice)
     pub binds: FxHashMap<String, u32>,
+    /// a generator expression's (its first iterable is read in the enclosing scope; a walrus
+    /// in it binds in the nearest enclosing scope that is not one)
+    pub genexp: bool,
+    /// cells a nested function rebinds (`nonlocal`)
+    pub rebound_cells: FxHashSet<String>,
 }
 
 impl Scope {
@@ -53,6 +58,9 @@ impl Scope {
 pub struct Scopes {
     pub scopes: Vec<Scope>,
     pub by_node: FxHashMap<usize, usize>,
+    /// generator expressions that run where they are written (`syntax::eager_genexps`), by
+    /// address
+    pub eager_genexps: FxHashSet<usize>,
     /// module names bound more than once (twice in the text, in a loop, or by a function
     /// through `global`): their value at a call depends on when the call happens
     pub rebound: FxHashSet<String>,
@@ -100,6 +108,21 @@ impl<'a> Collector<'a> {
         let w = if self.loop_depth > 0 { 2 } else { 1 };
         *self.cur().binds.entry(name.clone()).or_insert(0) += w;
         self.cur().locals.insert(name);
+    }
+    /// A walrus target: bound in the nearest scope that is not a generator expression's, and
+    /// declared there (`nonlocal`, or `global` at module level) in those between.
+    fn bind_walrus(&mut self, name: String) {
+        let saved = self.scope;
+        while self.scopes.scopes[self.scope].genexp {
+            let parent = self.scopes.scopes[self.scope].parent.unwrap_or(0);
+            let at_module = self.scopes.scopes[parent].kind == ScopeKind::Module;
+            let sc = self.cur();
+            if at_module { &mut sc.globals_decl } else { &mut sc.nonlocals_decl }.insert(name.clone());
+            sc.uses.insert(name.clone());
+            self.scope = parent;
+        }
+        self.bind(name);
+        self.scope = saved;
     }
     /// The parameters' default values, read in the enclosing scope.
     fn visit_defaults(&mut self, params: &ast::Parameters) {
@@ -239,9 +262,33 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
             }
             ast::Expr::Named(n) => {
                 if let ast::Expr::Name(t) = &*n.target {
-                    self.bind(t.id.to_string());
+                    self.bind_walrus(t.id.to_string());
                 }
                 self.visit_expr(&n.value);
+            }
+            ast::Expr::Call(_) | ast::Expr::List(_) | ast::Expr::Tuple(_) | ast::Expr::Set(_) => {
+                for g in crate::syntax::eager_genexps(expr) {
+                    self.scopes.eager_genexps.insert(node_addr(g));
+                }
+                source_order::walk_expr(self, expr);
+            }
+            // a generator expression is a function of its own (run when its items are taken):
+            // its first iterable is read here, the rest there
+            ast::Expr::Generator(g) if !self.scopes.eager_genexps.contains(&node_addr(expr)) => {
+                self.visit_expr(&g.generators[0].iter);
+                let inner = self.enter(node_addr(expr), ScopeKind::Function);
+                self.scopes.scopes[inner].genexp = true;
+                let saved = (self.scope, self.loop_depth);
+                (self.scope, self.loop_depth) = (inner, 1);
+                for (i, c) in g.generators.iter().enumerate() {
+                    if i > 0 {
+                        self.visit_expr(&c.iter);
+                    }
+                    self.visit_expr(&c.target);
+                    c.ifs.iter().for_each(|e| self.visit_expr(e));
+                }
+                self.visit_expr(&g.elt);
+                (self.scope, self.loop_depth) = saved;
             }
             _ => source_order::walk_expr(self, expr),
         }
@@ -287,6 +334,9 @@ fn resolve(scopes: &mut Scopes, id: usize) {
                     ScopeKind::Function => {
                         if scopes.scopes[pid].is_local(&name) {
                             scopes.scopes[pid].cells.insert(name.clone());
+                            if scopes.scopes[id].nonlocals_decl.contains(&name) {
+                                scopes.scopes[pid].rebound_cells.insert(name.clone());
+                            }
                             scopes.scopes[id].free.insert(name.clone());
                             for mid in &path {
                                 scopes.scopes[*mid].free.insert(name.clone());

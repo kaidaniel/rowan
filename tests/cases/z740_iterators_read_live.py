@@ -108,4 +108,4 @@ h = (x * 10 for x in hs)
 hs.append(3)
 ht = sum(h)
 #@value ht: includes={60}
-#@todo value ht: exactly={60}  (a generator expression's items are made with it: others not known)
+#@value ht: exactly={60}

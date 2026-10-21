@@ -181,6 +181,9 @@ pub struct Modes {
     pub nonempty_comp: usize,
     /// set by a comprehension above for its generator: at least one iteration ran
     pub nonempty_gen: bool,
+    /// the generator expression given alone to a library function that takes all its items at
+    /// once (its address): it runs where it is made (`expr_generator`)
+    pub bulk_genexp: usize,
     /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
     pub loop_converged: bool,
     /// a read on a value of more than `WIDE_READ` objects (its frame depth, site): what it

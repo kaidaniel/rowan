@@ -138,7 +138,7 @@ impl Analyzer {
     /// the one above, at every call site of the recursion: it is the innermost one's recursive
     /// call.
     fn recursion_without_progress(&self, foid: ObjId, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> bool {
-        if self.recursion.depth(foid) < UNKNOWN_ACTIVE || self.frame().func != Some(foid) || matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if crate::syntax::is_generator(&f.body)) {
+        if self.recursion.depth(foid) < UNKNOWN_ACTIVE || self.frame().func != Some(foid) || self.heap.func_info(foid).node.is_generator() {
             return false;
         }
         let Some((e_self, e_args, e_kw)) = self.recursion.by_func.get(&foid).and_then(|v| v.last()).and_then(|k| self.recursion.entry.get(k)) else { return false };
@@ -255,6 +255,7 @@ impl Analyzer {
                     st.reachable = false;
                 }
                 FuncNode::Def(f) => self.with_gen_restart(&mut st, true, &mut |an, s| an.exec_block(&f.body, s)),
+                FuncNode::GenExp(e) => self.genexp_body(e, gen_id.unwrap_or_default(), &mut st),
             }
             if gen_id.is_some() {
                 self.gens.last_reads = self.gens.reads.pop().map(|r| r.2);

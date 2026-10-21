@@ -13,7 +13,6 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::source::{Source, SourceKind};
 use crate::state::{Kind, NAME_KEY_DROPS, State};
-use crate::syntax::is_generator;
 
 use super::{Analyzer, Args, Call, Frame, FrameKind, FuncInfo, FuncNode, MAX_CLONES, Payload};
 
@@ -21,6 +20,15 @@ impl Analyzer {
     // ---------------------------------------------------------------- calls
     /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
     /// generators among them run (`force_gen`), then each callee `fv` may be called.
+    /// Is every callee among `fv` one that takes all of an iterable's items at once?
+    pub(super) fn bulk_consumer(&self, fv: &Value) -> bool {
+        !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
+            Payload::Str(q) if self.heap.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
+            Payload::Method(q, _) => super::BULK_CONSUMERS.contains(&q.as_str()),
+            _ => false,
+        })
+    }
+
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
         let forced = self.force(fv.clone(), state);
         let fv = &forced;
@@ -64,11 +72,7 @@ impl Analyzer {
         }
         // (generators passed or called through a method run now; unless the callee takes all
         // their items at once, code runs between the items)
-        let bulk = !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
-            Payload::Str(q) if self.heap.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
-            Payload::Method(q, _) => super::BULK_CONSUMERS.contains(&q.as_str()),
-            _ => false,
-        });
+        let bulk = self.bulk_consumer(fv);
         for o in fv.pts.iter() {
             if let Payload::Method(_, r) | Payload::Bound(_, r) = &self.heap.obj(o).payload {
                 let r = r.clone();
@@ -286,7 +290,7 @@ impl Analyzer {
     /// Would a call of `f` not run, its function out of its budget (`call_user_inner`)?
     pub(super) fn out_of_budget(&self, f: ObjId) -> bool {
         let fi = self.heap.func_info(f);
-        let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
+        let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || fi.node.is_generator();
         !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0
     }
 
@@ -859,7 +863,7 @@ impl Analyzer {
             && star_args.is_empty()
             && star_kwargs.is_empty()
             && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.cx.frames.len())
-            && matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
+            && self.heap.func_info(foid).node.is_generator();
         if lazy {
             return self.make_lazy_gen(foid, self_v, args.to_vec(), kwargs.clone(), state, node);
         }
@@ -936,14 +940,19 @@ impl Analyzer {
             None => self.receiver_ctx(&self_v, &site),
         };
         // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
-        let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
+        let gen_id = fnode.is_generator().then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
         let new_fr = self.callee_frame(foid, &fi, &ctx);
         let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
         let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
         let saved_files = std::mem::take(&mut self.cx.call_files);
-        (self.cx.call_chain, self.cx.call_files) = chain_extend(&saved_chain, &saved_files, node.module, node.line);
+        // (a generator expression's run is no call site of its own: its calls are those of the
+        // code it is written in)
+        (self.cx.call_chain, self.cx.call_files) = match fnode {
+            FuncNode::GenExp(_) => (saved_chain.clone(), saved_files.clone()),
+            _ => chain_extend(&saved_chain, &saved_files, node.module, node.line),
+        };
         let pre_bind = state.copy();
         // (objects made from here on, by birth: a run again of code makes them anew)
         let born_mark = self.heap.serial();
@@ -1031,7 +1040,9 @@ impl Analyzer {
         new_fr.code = fi.node.addr();
         {
             let mi = self.heap.module_info(fi.module);
-            let mut cells: Vec<String> = mi.scopes.get(fi.scope).cells.iter().cloned().collect();
+            // (a generator expression's own variables are its comprehension's: `comp_cells`)
+            let own = !matches!(fi.node, FuncNode::GenExp(_));
+            let mut cells: Vec<String> = mi.scopes.get(fi.scope).cells.iter().filter(|_| own).cloned().collect();
             cells.sort();
             for name in cells {
                 let cid = self.heap.alloc_raw(Kind::Cell, &format!("cell:{}.{}", fi.qualname, name), ctx, fr_single, &format!("cell {}", name), Payload::None);
@@ -1084,6 +1095,10 @@ impl Analyzer {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let mut bound: IndexMap<StrId, Value> = IndexMap::new();
         let Some(a) = fi.node.params() else {
+            // (a generator expression's iterator)
+            if let (FuncNode::GenExp(_), Some(it)) = (fi.node, args.first()) {
+                bound.insert(s(".0"), it.clone());
+            }
             return bound;
         };
         let positional: Vec<StrId> = a.posonlyargs.iter().chain(a.args.iter()).map(|p| s(p.parameter.name.id.as_str())).collect();

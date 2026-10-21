@@ -476,6 +476,9 @@ impl Analyzer {
         if let Some((pre, born)) = recording {
             self.summaries.last = Some(self.shape_of_result(&ret, &pre, &st, born));
         }
+        // (a generator expression it gives back runs as its caller takes its items: what it
+        // reads, the result needs)
+        self.force_given_genexps(&Args::pos(std::slice::from_ref(&ret)), &mut st);
         if general {
             self.note_contract(fi, &st.reqs, &start_reqs);
         }

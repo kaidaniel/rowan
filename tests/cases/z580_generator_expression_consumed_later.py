@@ -4,6 +4,6 @@ xs = [1, 2]
 g = (w * 2 for w in xs)
 xs.append(-1)
 last = list(g)[-1]
-#@todo value last: exactly={-2}  (generator expressions run when they are made, not when consumed)
+#@value last: exactly={-2}
 h = (w * 2 for w in xs)
 first = next(h)                              #@value first: exactly={2}

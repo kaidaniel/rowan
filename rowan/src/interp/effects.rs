@@ -290,6 +290,11 @@ impl Analyzer {
         let out = match fi.node {
             super::FuncNode::Def(f) => flow.scan(&params, me.map(s), &f.body, None),
             super::FuncNode::Lambda(l) => flow.scan(&params, None, &[], Some(&l.body)),
+            // (its first iterable, read where it was made, is what it is given)
+            super::FuncNode::GenExp(e) => {
+                let ast::Expr::Generator(g) = e else { unreachable!() };
+                flow.genexp(&g.generators[0].iter).scan(&[s(".0")], None, &[], Some(e))
+            }
         };
         let u = std::rc::Rc::new(out);
         self.effects.code_uses.insert(addr, u.clone());
@@ -798,6 +803,7 @@ impl Analyzer {
     pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         self.budget.skipped += 1;
+        self.force_given_genexps(&a, state);
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what
         // the call reaches otherwise reaches the receiver too (`Havoc::guard`); one of several
@@ -1156,10 +1162,8 @@ impl Analyzer {
         }
         seen.push(f);
         let fi = self.heap.func_info(f);
-        if let super::FuncNode::Def(d) = fi.node {
-            if d.is_async || crate::syntax::is_generator(&d.body) {
-                return false;
-            }
+        if matches!(fi.node, super::FuncNode::Def(d) if d.is_async) || fi.node.is_generator() {
+            return false;
         }
         let u = self.code_uses(&fi);
         let quiet = |f: &Flags| !(f.changes || f.held || f.held2 || f.called || f.kept || f.methods || f.rebinds || f.edits);
@@ -1204,6 +1208,7 @@ impl Analyzer {
         }
         self.budget.skipped += 1;
         self.gens.force_at = None;
+        self.force_given_genexps(&a, state);
         let pre = state.copy();
         let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
@@ -1683,7 +1688,7 @@ impl Analyzer {
                 let callers = handler || names.called.contains(&n) && !names.decorated.contains(&n);
                 fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !crate::syntax::is_generator(&d.body) && callers && !names.values.contains(&n)
             }
-            super::FuncNode::Lambda(_) => false,
+            super::FuncNode::Lambda(_) | super::FuncNode::GenExp(_) => false,
         };
         let mut ret: FxHashMap<usize, Flags> = funcs.iter().filter(|fi| by_name(fi)).map(|fi| (fi.node.addr(), Flags::default())).collect();
         let mut chained: Vec<(usize, Level, usize)> = Vec::new();

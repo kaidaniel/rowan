@@ -30,7 +30,7 @@ impl Analyzer {
         let params: Vec<String> = crate::scopes::all_params(fi.node.params()?).iter().map(|p| p.name.id.to_string()).collect();
         let mi = self.heap.module_info(fi.module);
         let scope = mi.scopes.get(fi.scope);
-        let fixed = |n: &str| params.iter().any(|p| p == n) && !scope.binds.contains_key(n) && !scope.cells.contains(n);
+        let fixed = |n: &str| params.iter().any(|p| p == n) && !scope.binds.contains_key(n) && !scope.rebound_cells.contains(n);
         if !self.test_fixed(test, &fixed, pre) {
             return None;
         }

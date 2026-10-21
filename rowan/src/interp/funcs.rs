@@ -42,6 +42,7 @@ impl Analyzer {
             None => match node {
                 FuncNode::Def(f) => f.name.id.to_string(),
                 FuncNode::Lambda(_) => "<lambda>".to_string(),
+                FuncNode::GenExp(_) => "<genexpr>".to_string(),
             },
         };
         let qual = if fr_kind == FrameKind::Module { fname.clone() } else { format!("{}.{}", fr_label, fname) };

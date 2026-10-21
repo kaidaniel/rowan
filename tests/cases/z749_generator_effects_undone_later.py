@@ -16,3 +16,15 @@ seen = G[0]
 rest = list(g)
 after = G[0]
 #@value after: exactly={0}
+H = [0]
+
+
+def setg(v):
+    H[0] = v
+    return v
+
+
+h = (setg(w) for w in [3, 0])
+a = next(h)
+b = H[0]
+#@value b: exactly={3}

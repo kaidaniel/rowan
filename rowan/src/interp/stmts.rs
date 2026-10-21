@@ -836,6 +836,9 @@ impl Analyzer {
         if let Some(v) = st.env.get(&n) {
             return Some(v.clone());
         }
+        if let Some(&cid) = self.frame().cells.get(&n).filter(|_| self.frame().kind == super::FrameKind::Function) {
+            return st.slot_opt(cid, Ns::Cell, super::funcs::cell_key());
+        }
         st.slot_opt(self.frame().module, Ns::Attr, intern::key_of_str(n))
     }
 

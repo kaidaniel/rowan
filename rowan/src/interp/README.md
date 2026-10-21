@@ -74,7 +74,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `exprs.rs` | expressions by kind, displays, subscripts' keys |
 | `ops.rs` | operators, f-strings, `%` formatting |
 | `compare.rs` | comparisons and truth |
-| `comps.rs` | comprehensions |
+| `comps.rs` | comprehensions; a generator expression's run (`genexp_body`) |
 | `funcs.rs` | function objects and decorators, names, assignment targets and unpacking |
 | `iter.rs` | iteration: the items and element of anything iterated |
 | `calls.rs` | calls, construction, frames, binding arguments |

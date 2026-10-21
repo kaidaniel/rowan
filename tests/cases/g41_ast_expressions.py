@@ -62,7 +62,7 @@ lst[0]["m"]                          #@ missing m
 tup[0]["t"]                          #@ ok t
 tup[0]["u"]                          #@ missing u
 
-# Comprehensions
+# Comprehensions (`ge` is never consumed: its read never runs, `ok b` was wrong)
 lc = [{"i": i} for i in range(3)]
 lc[0]["i"]                           #@ ok i
 lc[0]["j"]                           #@ missing j
@@ -70,7 +70,7 @@ dc = {s: {"v": s} for s in ("a", "b")}
 dc["a"]["v"]                         #@ ok a ; ok v
 dc["c"]                              #@ missing c
 sc = {r["a"] for r in [base]}        #@ ok a
-ge = (r["b"] for r in [base])        #@ ok b
+ge = (r["b"] for r in [base])        #@ none b
 nested = [[{"n": 1}] for _ in range(2)]
 nested[0][0]["n"]                    #@ ok n
 inv = {v: k for k, v in {"a": "x", "b": "y"}.items()}
