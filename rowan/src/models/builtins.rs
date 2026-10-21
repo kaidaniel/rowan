@@ -1392,18 +1392,16 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             verdicts.push(b);
             continue;
         }
-        // (the program's function: what the program stored on it, its type's attributes all
-        // dunders; an lru_cache's / singledispatch's: not known here)
+        // (the program's function: what the program stored on it on every path, its type's
+        // attributes all dunders; an lru_cache's / singledispatch's: not known here)
         if an.heap.kind(o) == Kind::Function && !an.heap.func_info(o).is_memo.get() && !an.m.sdispatch.contains_key(&o) && an.has_facts(o, st) {
             let row = st.row(o, Ns::Attr);
             if row.definite.contains(k) {
                 verdicts.push(true);
                 continue;
             }
-            if row.lacks(k) {
-                verdicts.push(false);
-                continue;
-            }
+            // (one it lacks is not decided, as a read of it is not: a call that did not run
+            // may give back this function as an unknown, a store into which misses it)
             return unknown;
         }
         if an.heap.kind(o) != Kind::Instance {
