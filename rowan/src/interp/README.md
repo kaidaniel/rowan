@@ -78,6 +78,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `funcs.rs` | function objects and decorators, names, assignment targets and unpacking |
 | `iter.rs` | iteration: the items and element of anything iterated |
 | `stopearly.rs` | `any` / `all` / `next` / `in` of a generator made for them: run until answered, closed where it stops |
+| `genraise.rs` | a generator's raises where its consumer asks for the item it fails to give: kept by how many items it gave, raised from the consumer's state then |
 | `genclose.rs` | generators closed where nothing holds them any more (a loop's `break` / return / raise, a statement's end, the collector): what GeneratorExit raised at each yield leaves, kept per run |
 | `calls.rs` | calls, construction, frames, binding arguments |
 | `narrow.rs` | tests split into true and false states, narrowing |

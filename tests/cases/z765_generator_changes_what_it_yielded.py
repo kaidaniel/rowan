@@ -58,3 +58,16 @@ def tagged(n):
 ids = [r["id"] for r in tagged(len(seen) + 1)]
 first = ids[0]
 #@value first: includes={0}
+
+
+# What the consumer stores on such an object stays there at the next item.
+marks = []
+for b in gen():
+    b["seen"] = len(marks)
+    marks.append(b["v"])
+kept = b["seen"]
+#@value kept: exactly={1}
+m0 = marks[0]
+#@value m0: exactly={0}
+m1 = marks[1]
+#@value m1: exactly={7}

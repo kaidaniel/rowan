@@ -143,9 +143,9 @@ impl Analyzer {
 
     /// Generator `o` is asked for the items after the first `from` (None: not known) up to
     /// `to` (None: all) in `state`: its raises there (`raise_kept`); those whose place is not
-    /// known, in the innermost try's own frame, once that try ends, from where it was asked
-    /// joined (`GenRaises::asked`: the try joins its raises all the same). Used up (`end`)
-    /// where its body surely raises before its end: nothing goes on.
+    /// known, asked for in its loop's frame, once that loop or the innermost try ends, from where
+    /// it was asked joined (`GenRaises::asked`: the try joins its raises all the same). Used up
+    /// (`end`) where its body surely raises before its end: nothing goes on.
     pub(in crate::interp) fn replay_gen_raises(&mut self, o: ObjId, from: Option<usize>, to: Option<usize>, end: bool, state: &mut State) {
         let Some(g) = self.gens.raises.iter().rposition(|r| r.gid == o).filter(|_| state.reachable) else { return };
         let within = |p: &Option<usize>| p.is_some_and(|p| from.is_none_or(|f| p >= f) && to.is_none_or(|t| p < t));
