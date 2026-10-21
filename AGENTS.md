@@ -93,9 +93,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   *k* sees the effects up to yield *k* (`GenEffects`; at a position not known, or one object for several runs, some yield's;
   joined in where the consumer changed them). If code between items (`note_resume`; unknown code: a key it made
   there-unless-removed too; deletes) changes what the generator reads after a yield (`Gens::watch`, also after the call
-  that started it while held, or a global holds it), it runs again with that changed at each yield, and the changes reachable from it, through classes too (`with_gen_restart`).
+  that started it while held, or a global holds it), it runs again with that changed at each yield, and the changes reachable from it, through classes too (`with_gen_restart`; a `for`'s list is read at each step, `ForWatch::reads`).
   `@contextmanager` bodies run at yields. A `for` over a user iterator (`__iter__` returns self) calls `__next__` each round (`for_user_iterator`).
-  **One-shot iterators** (generators, `iter`, `map`, `filter`, `zip`, `enumerate`, `reversed`; `iterator`) have a cursor from creation (`start_iterator`); what takes items (loops, models, pure calls, unpacking, `in`, `next`) takes them from it (`positions_left`, `items_from_cursor`) and moves it; no `len`, no subscripts.
+  **One-shot iterators** (generators, `iter`, `map`, `filter`, `zip`, `enumerate`, `reversed`; `iterator`) have a cursor from creation (`start_iterator`); what takes items (loops, models, pure calls, unpacking, `in`, `next`) takes them from it (`positions_left`, `items_from_cursor`) and moves it; no `len`, no subscripts. One over a list, dict, set or deque is *live* (`Tables::live_iters`, also `islice`, `chain`, `zip` & co.): where its containers changed since (`\u{1}srcfp`, hashes of their facts), it takes its items again (`sync_live`: `refill_live`, or the model again; a reversed list's from its first index; a generator expression's: any), and a dict's, set's or deque's whose keys changed raises RuntimeError (surely when its size surely differs); used up, it stays so.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
@@ -125,7 +125,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   read: one method per call site, unknown code on them when called); `exec`, `setattr` with unknown names on a class, metaclasses and
   monkey-patching (rebinding a function or class too; a module's function the program calls only by name has no other callers) are unknown or ignored;
   unknown code does not shadow a class attribute on an instance of a library-based class; an unknown beside objects is no instance
-  of the program's or a library's classes (`isinstance`: a builtin's, by its type; it decides and narrows literals by type, typed unknowns against builtin classes, `int(?)` not against `bool`, `kv_isinstance_narrowed`); a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
+  of the program's or a library's classes (`isinstance`: a builtin's, by its type; it decides and narrows literals by type, typed unknowns against builtin classes, `int(?)` not against `bool`, `kv_isinstance_narrowed`); a generator expression runs when made (a container it iterates changed before its items are taken: they are not known). List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items, and a dict's whose insertion order depends on the path, have no order: each is any of them for every order-dependent use (`Iteration::items`; `any_order_items` for sets, `sorted`, comprehensions).
 
 ## Working conventions (the owner's standing instructions)

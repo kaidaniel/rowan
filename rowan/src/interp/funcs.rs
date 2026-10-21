@@ -567,6 +567,7 @@ impl Analyzer {
     /// it the trailing ones, and the starred target a fresh list of the middle. Without a known
     /// length the leading targets keep their positions and the rest take any element.
     fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
+        self.sync_live(v, state, true);
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
         let known = v.single().and_then(|o| self.positions_left(o, state).filter(|(_, l)| *l >= si + after).map(|(c, l)| (o, c, l)));
@@ -615,6 +616,7 @@ impl Analyzer {
     /// on some when a part's length is not known.
     fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
         self.force_gen(v, state, false);
+        self.sync_live(v, state, true);
         let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.positions_left(o, state)) {
             (Kind::List | Kind::Tuple, Some((_, l))) => Some(l != n),
             // (a dict's item, an enumerate's or zip's of two)
@@ -644,6 +646,7 @@ impl Analyzer {
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
         let v = &self.iterable_part(v, state);
         self.force_gen(v, state, false);
+        self.sync_live(v, state, true);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.heap.kind(oid);

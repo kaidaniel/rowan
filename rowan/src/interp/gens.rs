@@ -940,6 +940,129 @@ impl Analyzer {
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(0)), true);
     }
 
+    /// One-shot iterator `o` is used up: it gives nothing more, whatever its containers hold.
+    pub fn end_iterator(&mut self, o: ObjId, state: &mut State) {
+        self.set_cursor_ex(o, None, true, state);
+    }
+
+    /// Live iterator `o` (`Tables::live_iters`) reads `srcs` as they are at each step: what
+    /// they hold now (`live_marks`), and how many items it had (`\u{1}n0`: a reversed list's
+    /// first index + 1; a dict's or set's size, which may not change while it runs).
+    pub fn watch_live(&mut self, o: ObjId, srcs: &Value, state: &mut State) {
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}src"), srcs.clone(), true);
+        let n0 = self.heap.llen(o, state).map_or_else(|| Value::data("n0"), |n| Value::lit(key_int(n as i64)));
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}n0"), n0, true);
+        let (all, keys) = self.live_marks(srcs, state);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}srcfp"), all, true);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}keysfp"), keys, true);
+    }
+
+    /// Generator expression `o` takes its items from `srcs` (`sync_live`).
+    pub(super) fn live_genexpr(&mut self, o: ObjId, srcs: &Value, node: &'static ast::Expr, state: &mut State) {
+        if !srcs.pts.iter().any(|x| self.changing_container(x)) {
+            return;
+        }
+        let n = crate::frontend::node(node);
+        let made = super::Call { qual: "genexpr".into(), recv: None, args: Vec::new(), kwargs: IndexMap::new(), star_args: Vec::new(), star_kwargs: Vec::new(), node: n, call_ast: None, site: format!("L{}", n.line), line: n.line };
+        self.m.live_iters.insert(o, Rc::new(crate::models::LiveIter { call: made, rerun: None }));
+        self.watch_live(o, srcs, state);
+    }
+
+    /// Is `o` a container code may change while an iterator reads it (a list, dict, set, view)?
+    pub fn changing_container(&self, o: ObjId) -> bool {
+        match self.heap.kind(o) {
+            Kind::List => !self.heap.obj(o).iterator,
+            Kind::Dict => !crate::models::pandas::is_series_obj(self, o),
+            Kind::Set | Kind::View => true,
+            _ => false,
+        }
+    }
+
+    /// What `srcs` hold on this path, as two hashes: everything, and their keys (all but a
+    /// dict's values; a view's dict's).
+    fn live_marks(&self, srcs: &Value, state: &State) -> (Value, Value) {
+        use std::hash::{Hash, Hasher};
+        let mut objs: Vec<ObjId> = srcs.pts.iter().collect();
+        for s in srcs.pts.iter() {
+            if let Payload::View(_, r) = &self.heap.obj(s).payload {
+                objs.extend(r.pts.iter());
+            }
+        }
+        let (mut all, mut keys) = (rustc_hash::FxHasher::default(), rustc_hash::FxHasher::default());
+        for o in objs {
+            let head = (o, state.lens.get(&o), state.elems.get(&o), state.rows.get(&(o, Ns::Item)));
+            head.hash(&mut all);
+            head.hash(&mut keys);
+            let dict = self.heap.kind(o) == Kind::Dict;
+            for (sk, v) in state.slots_of(o) {
+                (sk, &v).hash(&mut all);
+                if !(dict && sk.0 == Ns::Item) {
+                    (sk, &v).hash(&mut keys);
+                }
+            }
+        }
+        (Value::lit(key_int(all.finish() as i64)), Value::lit(key_int(keys.finish() as i64)))
+    }
+
+    /// The live iterators among `v` (`Tables::live_iters`) are about to give items: those whose
+    /// containers changed since they took their items take them again (from where they stand);
+    /// a dict's or set's whose keys changed raises RuntimeError (surely when `v` is it alone and
+    /// its size surely differs), its items not known. Not `consume`: `v` is given to a call,
+    /// which may not take items (those are left to where items are taken).
+    pub fn sync_live(&mut self, v: &Value, state: &mut State, consume: bool) {
+        if self.m.live_iters.is_empty() {
+            return;
+        }
+        for o in v.pts.iter() {
+            let Some(call) = self.m.live_iters.get(&o).cloned() else { continue };
+            let Some(srcs) = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}src")) else { continue };
+            if !state.reachable || self.at_end(o, state) {
+                continue;
+            }
+            let (all, keys) = self.live_marks(&srcs, state);
+            if state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}srcfp")).as_ref() == Some(&all) {
+                continue;
+            }
+            // (a dict's, set's or deque's iterator: its size may not change)
+            let keyed = srcs.pts.iter().any(|s| matches!(self.heap.kind(s), Kind::Dict | Kind::Set | Kind::View) || self.m.deques.contains_key(&s));
+            let keys_changed = keyed && state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}keysfp")).as_ref() != Some(&keys);
+            if keys_changed && !consume {
+                continue;
+            }
+            let old = (state.slot(o, Ns::Elem, STAR), state.elems.get(&o));
+            // (a generator expression's items were made at its creation: any others now)
+            let genexpr = call.call.qual == "genexpr";
+            if genexpr {
+                state.set_slot(o, Ns::Elem, STAR, Value::data("genexpr"), true);
+                state.elems.insert(o, DATA);
+            } else {
+                crate::models::builtins::refill_live(self, state, o, &call, &srcs);
+            }
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}srcfp"), all, true);
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}keysfp"), keys, true);
+            if !keys_changed && !genexpr {
+                continue;
+            }
+            let n0 = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}n0")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int);
+            let now = self.heap.llen(o, state).map(|n| n as i64);
+            if keys_changed && v.single() == Some(o) && v.kv.is_bot() && n0.is_some() && now.is_some() && n0 != now {
+                self.raise_here("RuntimeError", state);
+                return;
+            }
+            if keys_changed {
+                self.may_raise_here("RuntimeError", state);
+            }
+            state.drop_obj_ns(o, Ns::Pos);
+            self.heap.set_llen(o, state, None);
+            let e = state.slot(o, Ns::Elem, STAR).join(&old.0);
+            state.set_slot(o, Ns::Elem, STAR, e, true);
+            if let Some(kv) = old.1 {
+                let j = kv_join(&state.elems.get(&o).unwrap_or(DATA), &kv);
+                state.elems.insert(o, j);
+            }
+        }
+    }
+
     /// Is a one-shot iterator used up on this path (its length not known)?
     pub fn at_end(&self, o: ObjId, state: &State) -> bool {
         self.heap.obj(o).iterator && state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end"))
@@ -990,9 +1113,10 @@ impl Analyzer {
         if let Some(o) = v.single() {
             if self.heap.obj(o).iterator && self.heap.obj(o).single {
                 match self.heap.llen(o, state) {
-                    Some(n) => self.set_cursor(o, Some(n), state),
+                    // (a live one stays used up whatever its containers gain)
+                    Some(n) if !self.m.live_iters.contains_key(&o) => self.set_cursor(o, Some(n), state),
                     // (used up, its length not known: at its end all the same)
-                    None => self.set_cursor_ex(o, None, true, state),
+                    _ => self.set_cursor_ex(o, None, true, state),
                 }
                 return;
             }

@@ -266,7 +266,10 @@ impl Analyzer {
         let mut w = ForWatch::default();
         let Some(o) = itv.single().filter(|_| itv.kv.is_bot()) else { return w };
         let plain_list = |x: &Value| x.single().filter(|l| x.kv.is_bot() && self.heap.kind(*l) == Kind::List && !self.heap.obj(*l).iterator && self.heap.obj(*l).single);
+        let live = state.slot_opt(o, Ns::Attr, intern::key_str_lit("\u{1}src")).filter(|_| self.m.live_iters.contains_key(&o));
         let list = match (&self.heap.obj(o).payload, self.heap.kind(o)) {
+            // (an iterator over a list: the list as it is at each step)
+            (_, Kind::List) if live.is_some() => live.as_ref().and_then(plain_list),
             (_, Kind::List) => plain_list(itv),
             (Payload::Enumerate(inner, _), _) if self.cursor_of(o, state) == Some(0) => plain_list(inner),
             (Payload::Zip(a, b), _) if self.cursor_of(o, state) == Some(0) => plain_list(a).or_else(|| plain_list(b)),
@@ -282,6 +285,11 @@ impl Analyzer {
             _ => None,
         };
         w.keyed = keyed.map(|d| (d, state.row(d, Ns::Item), state.lens.get(&d)));
+        // (a running generator reads them again at each step)
+        w.reads = itv.pts.iter().chain(live.iter().flat_map(|s| s.pts.iter())).filter(|x| match &self.heap.obj(*x).payload {
+            Payload::View(..) => true,
+            _ => matches!(self.heap.kind(*x), Kind::List | Kind::Dict | Kind::Set) && !self.heap.obj(*x).iterator,
+        }).collect();
         w
     }
 
@@ -292,6 +300,9 @@ impl Analyzer {
         let Some(w) = self.unwind.for_watch.last_mut() else { return };
         if !state.reachable {
             return;
+        }
+        for o in w.reads.iter() {
+            self.gens.read(*o, None);
         }
         if let (Some((l, len0, pos0)), Some(idx)) = (&w.list, idx) {
             if state.lens.get(l) != *len0 || (idx + 1..pos0.len()).any(|j| state.slot(*l, Ns::Pos, intern::key_int(j as i64)) != pos0[j]) {
@@ -314,6 +325,14 @@ impl Analyzer {
     /// A `for` over a list its body changes (`for_watch`): a fixpoint, each round's item any
     /// the list holds at its start (a worklist's appended items too).
     fn for_live(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) {
+        // (an iterator over it: used up, or where it stands not known after a `break`)
+        let jumps = contains_jump(&f.body);
+        if jumps {
+            self.consume_lazy(itv, false, state);
+            for o in itv.pts.iter().filter(|o| self.heap.obj(*o).iterator).collect::<Vec<_>>() {
+                self.set_cursor(o, None, state);
+            }
+        }
         let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let it = an.iterate(itv, node, body_s);
             an.bind_iter_target(&f.target, &it.elem, body_s);
@@ -321,6 +340,9 @@ impl Analyzer {
             an.note_resumes(body_s);
         });
         let mut exit_s = head;
+        if !jumps {
+            self.exhaust(itv, &mut exit_s);
+        }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
         }
@@ -797,6 +819,8 @@ pub struct ForWatch {
     pub changed: bool,
     /// the loop ran (in part) as a fixpoint over any element
     pub fixpoint: bool,
+    /// the containers it takes each next item from
+    pub reads: Vec<ObjId>,
 }
 
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {

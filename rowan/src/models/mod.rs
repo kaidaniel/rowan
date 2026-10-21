@@ -62,6 +62,13 @@ use stdlib::*;
 /// A library function's model: what a call of it gives, and what it does to the state.
 pub type Model = fn(&mut Analyzer, &mut State, &Call) -> Value;
 
+/// What made a live iterator (`Tables::live_iters`): the call, and the model to run it again
+/// on its inputs as they are now (None: `builtins::refill_live`'s own way).
+pub struct LiveIter {
+    pub call: Call,
+    pub rerun: Option<Model>,
+}
+
 /// Library functions known to have no effect on what they are given (`noeffect`), by prefix.
 pub const ALLOWLIST_PREFIXES: &[&str] = &[
     "logging.", "print", "warnings.", "time.", "datetime.", "re.", "math.", "random.", "os.", "shutil.", "glob.", "subprocess.", "io.",
@@ -953,6 +960,9 @@ pub struct Tables {
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
+    /// one-shot iterators over containers, reading them as they are at each step (`iter(xs)`,
+    /// `reversed`, `map`, `filter`): the call that made each (`Analyzer::sync_live`)
+    pub live_iters: FxHashMap<ObjId, Rc<LiveIter>>,
     /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
     pub torch_on: bool,
     /// torch itself is imported (numpy alone turns the tensor model on too, but keeps exact
@@ -972,6 +982,9 @@ impl Tables {
                     let j = t.get(s).map_or(v.clone(), |w| w.join(&v));
                     t.insert(*s, j);
                 }
+            }
+            if let Some(c) = self.live_iters.get(r).cloned() {
+                self.live_iters.entry(*s).or_insert(c);
             }
             for t in [&mut self.counters, &mut self.ci_dicts, &mut self.zip_strict] {
                 if t.contains(r) {

@@ -93,6 +93,9 @@ fn pure_value(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
     if !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
         return None;
     }
+    for a in &c.args {
+        an.sync_live(a, st, true);
+    }
     let q = c.qual.as_str();
     let (family, name) = q.rsplit_once('.')?;
     let as_seq = SEQ_OK.contains(&name) || family == "statistics" || (family == "str" && name == "join") || crate::models::pytext::seq_arg(family, name);

@@ -116,6 +116,13 @@ impl Analyzer {
                 let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
                 if let Some(o) = v.single() {
                     self.start_iterator(o, state);
+                    // (its first iterable is taken when it is made, the items as they are asked
+                    // for: a container among it changed before, the items are not known)
+                    let first = &g.generators[0];
+                    if matches!(first.iter, ast::Expr::Name(_)) && !first.is_async {
+                        let src = self.eval(&first.iter, state);
+                        self.live_genexpr(o, &src, node, state);
+                    }
                 }
                 v
             }
