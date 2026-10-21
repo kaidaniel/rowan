@@ -815,7 +815,7 @@ impl Analyzer {
             };
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
-        let returned = self.returned_args(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs));
+        let returned = self.returned_args(foid, self_v, &Args::new(args, kwargs, star_args, star_kwargs), state);
         // (a getter: the attribute it returns, read here; it changes nothing, it may raise)
         if let Some(v) = self.getter_result(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs), node, state) {
             self.flag_may_raise(state);
@@ -893,25 +893,114 @@ impl Analyzer {
         }
     }
 
-    /// What a skipped call's result may be of its arguments: those given for the parameters
-    /// its code returns themselves (`return xs`, `return a or b`, `kept_returned`,
-    /// `returns_params`); a parameter not given by name or position: anything given.
-    fn returned_args(&mut self, foid: ObjId, self_v: Option<&Value>, positional: &[String], a: &Args) -> Value {
+    /// What a skipped call's result may be of what its code is given and reads: the arguments
+    /// given for the parameters its code returns themselves (`return xs`, `return a or b`,
+    /// `kept_returned`, `returns_params`; a parameter not given by name or position: anything
+    /// given), and what else its `return`s give (`returned_aliases`).
+    fn returned_args(&mut self, foid: ObjId, self_v: Option<&Value>, a: &Args, state: &State) -> Value {
         let fi = self.heap.func_info(foid);
         let uses = self.code_uses(&fi);
-        let recv_name = self_v.and_then(|_| fi.node.params()).and_then(|ps| ps.posonlyargs.iter().chain(ps.args.iter()).next()).map(|a| s(a.parameter.name.id.as_str()));
+        // (most code gives back nothing it is given or reads: nothing to look up)
+        let aliasing = |(o, l): &(Origin, Level)| *l != Level::Copy && matches!(o, Origin::Param(_) | Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..));
+        if uses.kept_returned.is_empty() && uses.returns_params.is_empty() && !uses.returns.iter().any(aliasing) {
+            return Value::new();
+        }
+        let params = || fi.node.params().into_iter().flat_map(|p| p.posonlyargs.iter().chain(p.args.iter()));
+        let recv_name = self_v.and_then(|_| params().next()).map(|a| s(a.parameter.name.id.as_str()));
         let given = |p: StrId| -> Value {
             if let (Some(r), Some(v)) = (recv_name, self_v) {
                 if r == p {
                     return v.clone();
                 }
             }
-            match (positional.iter().position(|x| x.as_str() == &*intern::str_get(p)).and_then(|i| a.pos.get(i)), a.kw.get(&p)) {
+            let at = params().skip(usize::from(self_v.is_some())).position(|x| s(x.parameter.name.id.as_str()) == p);
+            match (at.and_then(|i| a.pos.get(i)), a.kw.get(&p)) {
                 (Some(v), _) | (None, Some(v)) => v.clone(),
                 _ => a.pos.iter().chain(a.kw.values()).chain(a.star).chain(a.star_kw).fold(Value::new(), |acc, v| acc.join(v)),
             }
         };
-        uses.kept_returned.iter().chain(uses.returns_params.iter()).fold(Value::new(), |acc, p| acc.join(&given(*p)))
+        let own = uses.kept_returned.iter().chain(uses.returns_params.iter()).fold(Value::new(), |acc, p| acc.join(&given(*p)));
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        let mut out = own;
+        self.returned_aliases(foid, Some(&given), state, 3, &mut seen, &mut out);
+        out
+    }
+
+    /// What the `return`s of `foid`'s code give back (`CodeUses::returns`) of what it is given
+    /// (`given`: None, not known) and reads: the globals and module attributes themselves, their
+    /// parts under a literal key, of what they hold the program's functions and classes (a
+    /// registry's: `return REG.get(name, fn)`), and the same of the program's functions it calls
+    /// by name (`depth` deep). What else they hold is taken as for unknown code (no instance of
+    /// the program's: known to be hard).
+    fn returned_aliases(&mut self, foid: ObjId, given: Option<&dyn Fn(StrId) -> Value>, state: &State, depth: usize, seen: &mut FxHashSet<ObjId>, out: &mut Value) {
+        if !seen.insert(foid) || !matches!(self.heap.obj(foid).payload, Payload::Func(_)) {
+            return;
+        }
+        let fi = self.heap.func_info(foid);
+        let uses = self.code_uses(&fi);
+        for &(o, l) in uses.returns.iter() {
+            let v = match o {
+                Origin::Param(p) => match given {
+                    Some(g) => g(p),
+                    None => continue,
+                },
+                Origin::Name(n) => self.callee_value(&fi, &uses, (n, None), state).unwrap_or_default(),
+                // (of a value that is no module: its attribute)
+                Origin::NameAttr(n, a) => match self.callee_value(&fi, &uses, (n, Some(a)), state) {
+                    Some(v) => v,
+                    None => {
+                        let base = self.callee_value(&fi, &uses, (n, None), state).unwrap_or_default();
+                        join_values(base.pts.iter().map(|b| state.slot(b, Ns::Attr, key_str_lit(&str_get(a)))).collect::<Vec<_>>())
+                    }
+                },
+                Origin::Result(n, m) => {
+                    for f in self.program_callees(&fi, &uses, (n, m), state, false).unwrap_or_default().into_iter().filter(|_| depth > 0) {
+                        self.returned_aliases(f, None, state, depth - 1, seen, out);
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let part = match l {
+                Level::Own => Value::objs(v.pts.clone()),
+                Level::Part(k) => join_values(v.pts.iter().map(|x| state.slot(x, Ns::Item, k)).collect::<Vec<_>>()),
+                Level::Held => self.code_held(&v, state),
+                Level::Copy => continue,
+            };
+            *out = out.join(&Value::objs(part.pts));
+        }
+    }
+
+    /// The program's functions and classes `v` holds: its items' and attributes' values, and
+    /// theirs (a registry's, an instance's dict of handlers), at most 64 objects looked at.
+    fn code_held(&self, v: &Value, state: &State) -> Value {
+        let mut found: Vec<ObjId> = Vec::new();
+        let mut level: Vec<ObjId> = v.pts.iter().collect();
+        let mut looked = 0;
+        for _ in 0..2 {
+            let mut next: Vec<ObjId> = Vec::new();
+            for o in level {
+                if matches!(self.heap.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External | Kind::Unknown) {
+                    continue;
+                }
+                looked += 1;
+                if looked > 64 {
+                    break;
+                }
+                state.slots.each(&o, &mut |_, x| {
+                    for p in x.pts.iter() {
+                        match self.heap.kind(p) {
+                            Kind::Function | Kind::Class => found.push(p),
+                            _ => next.push(p),
+                        }
+                    }
+                });
+            }
+            level = next;
+        }
+        found.sort_unstable();
+        found.dedup();
+        Value::objs(crate::domain::ObjSet::from_vec(found))
     }
 
     /// A skipped call's arguments its code keeps (`Seen::kept`) put where the program may read
@@ -1110,6 +1199,7 @@ impl Analyzer {
         }
         self.budget.skipped += 1;
         self.gens.force_at = None;
+        let pre = state.copy();
         let recv = join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
         let text = call_ast.and_then(|c| crate::syntax::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
         let mut removed: Vec<(ObjId, Removes)> = Vec::new();
@@ -1127,7 +1217,9 @@ impl Analyzer {
         super::unknown::may_have_removed(&self.heap, &removed, state);
         self.flag_may_raise(state);
         let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
-        join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
+        // (and what each one's code gives back of what it is given and reads)
+        let given: Vec<Value> = fns.iter().map(|(f, r)| self.returned_args(*f, r.as_ref(), &a, &pre)).collect();
+        join_values(std::iter::once(r).chain(back).chain(given).collect::<Vec<_>>())
     }
 
     /// The arguments of a call of `foid` that does not run, as what its code may change of

@@ -1513,14 +1513,23 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // (the program's function: what the program stored on it on every path, its type's
         // attributes all dunders; an lru_cache's / singledispatch's: not known here)
-        if an.heap.kind(o) == Kind::Function && !an.heap.func_info(o).is_memo.get() && !an.m.sdispatch.contains_key(&o) && an.has_facts(o, st) {
+        if an.heap.kind(o) == Kind::Function && an.plain_function(o) && an.has_facts(o, st) {
             let row = st.row(o, Ns::Attr);
             if row.definite.contains(k) {
                 verdicts.push(true);
                 continue;
             }
-            // (one it lacks is not decided, as a read of it is not: a call that did not run
-            // may give back this function as an unknown, a store into which misses it)
+            // (one it surely lacks: a call that did not run gives back the functions its code
+            // may, `returned_aliases`)
+            if row.lacks(k) {
+                verdicts.push(false);
+                continue;
+            }
+            // (stored on some paths only: either)
+            if row.closed() {
+                verdicts.extend([true, false]);
+                continue;
+            }
             return unknown;
         }
         if an.heap.kind(o) != Kind::Instance {
@@ -1565,7 +1574,7 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     } else if verdicts.iter().all(|b| !*b) {
         Value::lit(intern::key_bool(false))
     } else {
-        unknown
+        Value::lit(intern::key_bool(true)).join(&Value::lit(intern::key_bool(false)))
     }
 }
 

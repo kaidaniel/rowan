@@ -207,7 +207,12 @@ impl Analyzer {
                 };
                 let mut probe = state.copy();
                 let tv = self.eval(target, &mut probe);
-                !tv.pts.is_empty() && tv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound))
+                // (also the program's class, `@Parser`: an instance of it; an instance: its `__call__`)
+                !tv.pts.is_empty() && tv.pts.iter().all(|o| match self.heap.kind(o) {
+                    Kind::Function | Kind::Bound | Kind::Instance => true,
+                    Kind::Class => self.heap.class_info_opt(o).is_some(),
+                    _ => false,
+                })
             };
             if !user_target && (KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register")) {
                 continue;

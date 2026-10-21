@@ -28,10 +28,10 @@ k2.tag = 2
 h2 = hasattr(k2, "tag")
 #@value h2: exactly={True}
 h3 = hasattr(k2, "other")
-#@value h3: includes={False}
-#@todo value h3: exactly={False}  (an attribute a function lacks: a call that does not run may give it back as an unknown, its stores missing it)
+#@value h3: exactly={False}
+# (an attribute a function lacks: a call that does not run gives back the functions its code may)
 z = getattr(k2, "tag", "-")
 #@value z: exactly={2}
 w = getattr(k2, "other", "-")
-#@value w: includes={"-"}
-#@todo value w: exactly={"-"}  (as h3)
+#@value w: exactly={"-"}
+# (as h3)

@@ -219,7 +219,13 @@ impl Analyzer {
                         }
                         v
                     }
-                    // (an attribute the program did not give it: it may not have it)
+                    // (an attribute the program surely did not give it: an AttributeError — a call
+                    // that did not run gives back the functions its code may, `returned_aliases`)
+                    None if single && !name.starts_with("__") && self.plain_function(oid) && self.has_facts(oid, state) && state.row(oid, Ns::Attr).lacks(nk) => {
+                        self.raise_here("AttributeError", state);
+                        Value::new()
+                    }
+                    // (one it may not have)
                     None => {
                         self.may_raise_here("AttributeError", state);
                         Value::data(&format!("L{}", node.line))
@@ -478,6 +484,14 @@ impl Analyzer {
                 Value::obj(b)
             }
         })
+    }
+
+    /// Is `f` a plain function of the program, whose attributes are what the program gave it
+    /// (not a property, static or class method, cached property, lru_cache or singledispatch
+    /// function: those have attributes of their own)?
+    pub fn plain_function(&self, f: ObjId) -> bool {
+        let fi = self.heap.func_info(f);
+        !(fi.is_property.get() || fi.is_static.get() || fi.is_classmethod.get() || fi.is_cached.get() || fi.is_memo.get() || self.m.sdispatch.contains_key(&f))
     }
 
     /// A function's `__name__` / `__qualname__` / `__module__` / `__wrapped__` / `__doc__` (a

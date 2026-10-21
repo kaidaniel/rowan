@@ -29,8 +29,8 @@ back = f3.__wrapped__ is f0
 #@todo value back: exactly={True}  (as same)
 f3.tag = 1
 t0 = getattr(f0, "tag", "-")
-#@value t0: includes={"-"}
-#@todo value t0: exactly={"-"}  (a function's attribute not stored is not decided)
+#@value t0: exactly={"-"}
+# (the store was into the wrapper, not into f0)
 t3 = f3.tag
 #@value t3: exactly={1}
 f0.mark = "m"
