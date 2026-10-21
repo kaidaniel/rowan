@@ -121,8 +121,9 @@ impl Analyzer {
 
     /// What ordering `a` and `b` (`<` & co.) that no dunder or model ordered may raise (true:
     /// surely): a TypeError where their types do not surely order (numbers with numbers, texts
-    /// with texts), surely for literals no pair of which orders; unknown objects' comparisons
-    /// are unknown code, other objects' (containers, instances without order methods) may fail.
+    /// with texts), surely for literals no pair of which orders; other objects' (unknown ones,
+    /// which are no instances of the program's classes: their order methods raise none of its
+    /// exceptions; containers; instances without order methods) may fail as Python's do.
     fn ordering_raises(&mut self, a: &Value, b: &Value, state: &mut State) -> bool {
         let model = |v: &Value| matches!(v.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with('\u{1}'));
         if self.unwind.tries.is_empty() || model(a) || model(b) || crate::models::pandas::is_seriesish(self, a) || crate::models::pandas::is_seriesish(self, b) {
@@ -130,10 +131,6 @@ impl Analyzer {
         }
         let objs = a.pts.union(&b.pts).filter(|o| !matches!(self.heap.obj(o).ty, Some("int" | "float" | "bool" | "str" | "bytes")));
         if objs.iter().any(|o| self.heap.kind(o) == Kind::Frame) {
-            return false;
-        }
-        if objs.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External)) {
-            self.flag_may_raise(state);
             return false;
         }
         if !objs.is_empty() {
