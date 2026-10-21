@@ -535,6 +535,18 @@ def closing(xs):
             G[0] = v
     finally:
         G[0] = G[0] + 100
+def wrap(it):
+    for v in it:
+        yield v * 2
+def deleg(xs):
+    yield from closing(xs)
+def take(xs):
+    h = closing(xs)
+    return next(h, -1)
+def first(xs):
+    for v in closing(xs):
+        return v
+    return -1
 n = len(sys.argv)
 xs = [1, 2]
 x = 0
@@ -561,8 +573,7 @@ def gens_op() -> list:
         ["g = (setg(w) for w in xs)", f"{x} = G[0]", f"{y} = next(g, {v})"], ["g = (G[0] + w for w in xs)", f"G[0] = {v}", f"{x} = next(g, {v})"],
         [f"{x} = sum(lazy({k}))"], ["g = (setg(w) for w in xs)", f"{x} = next(g, {v})", f"{y} = G[0]", f"{x} = sum(g)"],
         # consumers that stop early: the items after the deciding one are not taken (a generator
-        # made for one alone is closed there: `closing`'s finally runs; used only so — one that
-        # another generator iterates is closed with it, which rowan does not model)
+        # made for one alone is closed there: `closing`'s finally runs, and that of one it iterates)
         [f"{x} = int(any(setg(w) > {k} for w in xs))"], [f"{x} = int(all(setg(w) < {k} for w in xs))"],
         [f"{x} = int({v} in (setg(w) for w in xs))"], [f"{x} = next((setg(w) for w in xs if w > {k}), {v})"],
         [f"{x} = int(any(bump()))"], [f"{x} = int(all(evens(xs)))"], [f"{x} = next(evens(xs), {v})"], [f"{x} = int({v} not in evens(xs))"],
@@ -570,6 +581,16 @@ def gens_op() -> list:
         ["g = bump()", f"{x} = int(any(g))", f"{y} = G[0]", f"{x} = next(g, {v})"], ["g = evens(xs)", f"{x} = int(all(w > {k} for w in g))", f"{y} = next(g, {v})"],
         ["it = iter(xs)", f"{x} = int({v} in it)", f"{y} = next(it, {v})"], ["it = iter(xs)", f"{x} = int(all(it))", f"{y} = len(list(it))"],
         ["g = counter(n)", f"{x} = int(any(w > {k} for w in g))", f"{y} = sum(g)"],
+        # generators closed where nothing holds them any more: a loop leaving one made for it, a
+        # name rebound or deleted, a function's local, a temporary, the generator holding one
+        [f"{x} = int(any(w > {k} for w in closing(xs)))"], [f"{x} = next(wrap(closing(xs)), {v})"], [f"{x} = next(deleg(xs), {v})"],
+        ["for w in closing(xs):", "    break"], ["for w in closing(xs):", f"    if w == {k}:", "        break", f"    {x} = w"],
+        ["g = closing(xs)", f"{x} = next(g, {v})", "g = None"], ["g = closing(xs)", f"{x} = next(g, {v})", f"{y} = next(g, {v})", "del g"],
+        ["g = closing(xs)", f"{x} = next(g, {v})", f"G[0] = {v}", "g = None"], [f"{x} = take(xs)"], [f"{x} = first(xs)"],
+        ["g = wrap(closing(xs))", f"{x} = next(g, {v})", f"{y} = G[0]", "g = None"], ["g = deleg(xs)", f"{x} = next(g, {v})", "g = 0"],
+        ["g = (w + 1 for w in closing(xs))", f"{x} = next(g, {v})", "g = None"], [f"{x} = len(list(zip(closing(xs), [{v}])))"],
+        ["g = closing(xs)", f"{x} = next(g, {v})", "if n > 3:", "    hold = g", "g = None"],
+        ["try:", "    for w in closing(xs):", "        raise ValueError(w)", "except ValueError:", f"    {x} = G[0]"],
     ])
 
 

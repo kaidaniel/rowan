@@ -335,6 +335,11 @@ impl Analyzer {
         }
     }
 
+    /// Does generator `o`'s run change objects older than it (its effects per item)?
+    pub fn gen_has_effects(&self, o: ObjId) -> bool {
+        self.gens.eff.contains_key(&o)
+    }
+
     /// Is a try statement (or a model's catching frame) running?
     pub fn in_try(&self) -> bool {
         !self.unwind.tries.is_empty()

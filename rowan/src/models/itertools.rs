@@ -600,23 +600,40 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     );
 }
 
+/// Models that use up the iterators they are given.
+const FULL: &[&str] = &[
+    "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
+    "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
+    "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
+];
+/// Calls that keep or look at an object, taking no items from it.
+const NONE: &[&str] = &["list.append", "list.insert", "set.add", "dict.setdefault", "builtins.id", "builtins.isinstance", "builtins.type", "builtins.callable", "builtins.repr", "builtins.print", "builtins.hash"];
+
 /// What a model call does to the one-shot iterators it is given: a full consumer uses
 /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
 /// itself; anything else leaves their position unknown.
 pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, state: &mut State) {
     // (one-shot iterators, and lazy iterators over them)
     let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((an.heap.obj(*o).iterator && an.heap.obj(*o).single && matches!(an.heap.kind(*o), Kind::List | Kind::Zip | Kind::Enumerate)) || an.m.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+    let q = call.qual.as_str();
+    // (a generator that stands for several, with effects: where each stands is not known, but
+    // used up by a full consumer)
+    let several: Vec<u32> = call.args.iter().chain(call.star_args.iter()).flat_map(|a| a.pts.iter()).filter(|o| an.heap.obj(*o).iterator && !an.heap.obj(*o).single && an.gen_has_effects(*o) && r.single() != Some(*o)).collect();
+    for o in several {
+        if FULL.contains(&q) {
+            an.exhaust(&Value::obj(o), state);
+        } else if !NONE.contains(&q) && q != "builtins.next" {
+            an.set_cursor(o, None, state);
+        }
+    }
     if its.is_empty() {
         return;
     }
-    let q = call.qual.as_str();
-    const FULL: &[&str] = &[
-        "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
-        "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
-        "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
-    ];
     const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
     if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
+        return;
+    }
+    if NONE.contains(&q) {
         return;
     }
     // (`next`, and `any` / `all` of a one-shot iterator: their models move its cursor)
@@ -625,7 +642,7 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
     }
     if FULL.contains(&q) {
         for (_, o) in its {
-            an.exhaust(&Value::obj(o), state);
+            an.exhaust_whole(&Value::obj(o), state);
         }
         return;
     }

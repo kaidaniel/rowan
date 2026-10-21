@@ -166,22 +166,36 @@ impl Analyzer {
     fn expr_yield_from(&mut self, y: &'static ast::ExprYieldFrom, state: &mut State) -> Value {
         let v = self.eval(&y.value, state);
         let nd = frontend::node(&*y.value);
+        // (one made for it alone is closed where a raise — GeneratorExit at a yield — leaves it)
+        let fresh = self.fresh_gen(&v, &y.value, state);
         let it = self.iterate(&v, &nd, state);
-        match it.items {
-            // known items: yielded one by one, in order
-            Some(items) => {
-                for (i, item) in items.into_iter().enumerate() {
-                    self.yield_value(item, state, (y as *const _ as usize, i + 1));
+        self.closing_loop(fresh, usize::MAX, state, &mut |an, st| {
+            let closing = an.gens.fresh_loops.last().map(|l| l.2).filter(|_| fresh.is_some());
+            match &it.items {
+                // known items: yielded one by one, in order
+                Some(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        if let Some(o) = closing {
+                            an.set_cursor(o, Some(i + 1), st);
+                        }
+                        an.yield_value(item.clone(), st, (y as *const _ as usize, i + 1));
+                    }
+                }
+                _ => {
+                    if let Some(o) = closing {
+                        an.set_cursor(o, None, st);
+                    }
+                    // an unknown number of items: positions after this are unknown
+                    if let Some(gid) = an.yield_value(it.elem.flat(), st, (y as *const _ as usize, 0)) {
+                        an.heap.set_llen(gid, st, None);
+                        st.drop_obj_ns(gid, Ns::Pos);
+                    }
                 }
             }
-            _ => {
-                // an unknown number of items: positions after this are unknown
-                if let Some(gid) = self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0)) {
-                    self.heap.set_llen(gid, state, None);
-                    state.drop_obj_ns(gid, Ns::Pos);
-                }
+            if let Some(o) = closing {
+                an.exhaust(&Value::obj(o), st);
             }
-        }
+        });
         // the value: the delegated generator's return value
         let rk = key_str_lit("\u{1}genret");
         if !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| state.slot_opt(o, Ns::Attr, rk).is_some()) {

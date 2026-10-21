@@ -175,6 +175,12 @@ impl Analyzer {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
         self.heap.push_copy_roots(since, work);
+        self.held_by_analyzer(work, unwind);
+    }
+
+    /// What the analyzer holds beyond the state and its side tables (`gc_pinned`): exceptions
+    /// in flight, the callers' names, the managers of running with statements, …
+    pub(in crate::interp) fn held_by_analyzer(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (a raise state is one path: the exceptions other raises took to the running tries are
         // other paths')
         let recorded = self.unwind.tries.iter().filter(|_| unwind.is_none()).flat_map(|t| t.recs.iter().map(|r| &r.2));
@@ -449,6 +455,12 @@ impl Analyzer {
         // whenever that path is read: its rows belong to the input, never garbage)
         for o in fresh {
             if !reached.contains(&o) && !input_part(self, o) {
+                // (a suspended generator dropped: closed — in a raise state maybe, as the
+                // traceback keeps the frames it leaves until its handler ends)
+                if self.gens.closable.contains_key(&o) && self.may_close(o, state) {
+                    let how = if unwind.is_some() { super::genclose::Close::Maybe } else { super::genclose::Close::Sure };
+                    self.close_gen(o, state, how);
+                }
                 state.forget_obj(o);
             }
         }

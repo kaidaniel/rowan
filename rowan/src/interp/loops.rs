@@ -240,8 +240,17 @@ impl Analyzer {
         if self.for_user_iterator(f, &itv, &iter_node, state) {
             return;
         }
+        // (one made for it alone is closed where the loop leaves it: `genclose.rs`)
+        let fresh = self.fresh_gen(&itv, &f.iter, state);
         self.force_gen(&itv, state, true);
         self.gens.for_iters.push(itv.pts.clone());
+        let level = self.unwind.loop_stack.len() + 1;
+        self.closing_loop(fresh, level, state, &mut |an, st| an.stmt_for_items(f, &itv, &iter_node, st));
+    }
+
+    /// A `for` loop's items, over what it iterates (`itv`, run if a generator).
+    fn stmt_for_items(&mut self, f: &'static ast::StmtFor, itv: &Value, iter_node: &frontend::Node, state: &mut State) {
+        let (itv, iter_node) = (itv.clone(), *iter_node);
         if self.for_stepping(f, &itv, &iter_node, state) {
             return;
         }
@@ -401,14 +410,19 @@ impl Analyzer {
     /// The rest of `stmt_for`: the loop over `it`, the items of `itv` (`stepping`: a one-shot
     /// iterator the body takes items from too, where it stands not known in the body).
     fn for_items(&mut self, f: &'static ast::StmtFor, itv: &Value, it: Iteration, state: &mut State, stepping: bool) {
-        let has_jump = contains_jump(&f.body) || stepping;
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
         // follows the unrolled iterations, else it is not known after a loop that may break
         let once = itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single);
-        let c0 = once.and_then(|o| self.cursor_of(o, state)).unwrap_or(0);
+        // (a generator with closing facts stands where the loop is at each item, where a
+        // return or a raise closes it, `genclose.rs`; its effects the body sees are each item's)
+        let gen = itv.single().filter(|o| self.heap.obj(*o).iterator && self.closes_on_drop(*o));
+        let closing = gen.is_some();
+        let has_jump = contains_jump(&f.body) || stepping || closing;
+        let at = once.and_then(|o| self.cursor_of(o, state));
+        let c0 = at.unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the
-        // cursor follows), the rest of the loop runs on from there
-        if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
+        // cursor follows), the rest of the loop runs on from there (where it stands known)
+        if let (Some(o), None, true, Some(_)) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_)), at) {
             if self.for_known_first_items(f, o, c0, state) {
                 return;
             }
@@ -421,7 +435,7 @@ impl Analyzer {
                 self.exhaust(itv, state);
             }
         }
-        if self.for_unrolled(f, itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
+        if self.for_unrolled(f, itv, &it, once.or(gen).filter(|_| has_jump).map(|o| (o, c0)), closing, state) {
             return;
         }
         // (a prefix unrolled sets the cursor per item, which the body moves: not when stepping)
@@ -431,7 +445,7 @@ impl Analyzer {
             w.fixpoint = true;
         }
         // (a loop that may break off: where the iterator stands after it is not known)
-        if let (Some(o), true) = (once, has_jump) {
+        if let (Some(o), true) = (once.or(gen), has_jump) {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
@@ -447,6 +461,10 @@ impl Analyzer {
             an.note_resumes(body_s);
         });
         let mut exit_s = head.copy();
+        // (where it surely ends: used up)
+        if closing {
+            self.exhaust(itv, &mut exit_s);
+        }
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         if exit_acc.is_none() && back.reachable {
@@ -473,7 +491,7 @@ impl Analyzer {
     /// rejoining at the next one and `break` at the exit; over a closed dict with some keys only
     /// maybe there, a maybe one runs on one path and is skipped on the other. `cursor`: a
     /// one-shot iterator a `break` may leave, and where it stood. False: not unrolled.
-    fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, state: &mut State) -> bool {
+    fn for_unrolled(&mut self, f: &'static ast::StmtFor, itv: &Value, it: &Iteration, cursor: Option<(ObjId, usize)>, end: bool, state: &mut State) -> bool {
         let unrolled = match &it.items {
             Some(items) if (items.len() <= UNROLL_MAX || self.distinct_objects(items)) && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), cursor)),
             None => self.maybe_dict_items(itv, state).map(|items| (items, None)),
@@ -485,7 +503,7 @@ impl Analyzer {
             self.exec_block(&f.orelse, state);
         }
         // (a one-shot iterator a `break` may leave: run to the end, used up)
-        if cursor.is_some() && state.reachable {
+        if (cursor.is_some() || end) && state.reachable {
             self.exhaust(itv, state);
         }
         join_breaks(state, breaks);

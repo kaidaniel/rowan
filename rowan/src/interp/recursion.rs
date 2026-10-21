@@ -55,6 +55,15 @@ impl Recursion {
         self.active.contains(key)
     }
 
+    /// The arguments of the running activations (their callers hold them until they return).
+    pub(in crate::interp) fn running_args(&self, work: &mut Vec<ObjId>) {
+        for k in &self.active {
+            if let Some((r, args, kw)) = self.entry.get(k) {
+                r.iter().chain(args.iter()).chain(kw.values()).for_each(|v| v.push_objs(work));
+            }
+        }
+    }
+
     /// How many activations of `foid` are running.
     pub(in crate::interp) fn depth(&self, foid: ObjId) -> usize {
         self.by_func.get(&foid).map(|v| v.len()).unwrap_or(0)
