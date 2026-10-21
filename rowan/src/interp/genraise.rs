@@ -99,7 +99,9 @@ impl Analyzer {
         }
         let frame = looped.then_some(self.cx.frames.len());
         let depth = self.cx.frames.len();
-        self.gens.raises.push(GenRaises { gid: o, level, pre, after: state.copy(), mark, recs, frame, asked: None, depth });
+        // (the states are for raising its raises: none kept, none held)
+        let (pre, after) = if recs.is_empty() { (State::bottom(), State::bottom()) } else { (pre, state.copy()) };
+        self.gens.raises.push(GenRaises { gid: o, level, pre, after, mark, recs, frame, asked: None, depth });
         Some(o)
     }
 

@@ -467,6 +467,10 @@ impl Analyzer {
         let outer_exits = state.exits.take();
         let mut pre = state.copy();
         self.enter_try(FxHashSet::default(), &mut pre);
+        // (a raise leaving the loop closes `o`: its code runs)
+        if let Some(t) = self.unwind.tries.last_mut() {
+            t.runs = true;
+        }
         self.gens.fresh_loops.push((level, self.cx.frames.len(), o));
         body(self, state);
         self.gens.fresh_loops.pop();
