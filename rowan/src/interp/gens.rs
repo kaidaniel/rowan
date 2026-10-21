@@ -225,6 +225,9 @@ pub struct Gens {
     /// generators run whole whose body surely raises before its end, and the running tries then
     /// (`Analyzer::try_mark`)
     pub raising: FxHashMap<ObjId, (usize, u64)>,
+    /// the raises of generators run whole for the running `for` loops, taken where they ask
+    /// for items (`genraise.rs`)
+    pub raises: Vec<super::genraise::GenRaises>,
 }
 
 impl Gens {
@@ -941,6 +944,11 @@ impl Analyzer {
     /// cursor stands after its last item is suspended at its last yield until asked for more.
     pub(in crate::interp) fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
         self.note_resume(o, state);
+        // (asked for the items up to there: its raises there, `genraise.rs`)
+        if !self.gens.raises.is_empty() {
+            let from = self.cursor_of(o, state);
+            self.replay_gen_raises(o, from, c.filter(|_| !at_end), at_end, state);
+        }
         let cv = match c {
             Some(n) => Value::lit(key_int(n as i64)),
             None if at_end => Value::data("cursor-end"),
@@ -981,6 +989,10 @@ impl Analyzer {
     /// An item of generator `o` was taken at a position not known: its effects are those of
     /// some yield or of its end, not those before its first item.
     pub fn gen_took_item(&mut self, o: ObjId, state: &mut State) {
+        if !self.gens.raises.is_empty() {
+            let from = self.cursor_of(o, state);
+            self.replay_gen_raises(o, from, None, false, state);
+        }
         self.note_closable(o);
         self.note_ended(o, false, state);
         self.set_holds(o, false, state);
@@ -1021,7 +1033,14 @@ impl Analyzer {
     }
 
     /// `note_resume` for what the innermost running `for` iterates.
-    pub(in crate::interp) fn note_resumes(&mut self, state: &State) {
+    pub(in crate::interp) fn note_resumes(&mut self, state: &mut State) {
+        // (asked for its next item: its raises after the items it may have given, `genraise.rs`)
+        if let Some(objs) = self.gens.for_iters.last().filter(|_| !self.gens.raises.is_empty()).cloned() {
+            for o in objs.iter() {
+                let from = self.cursor_of(o, state);
+                self.replay_gen_raises(o, from, None, false, state);
+            }
+        }
         if let Some(objs) = self.gens.for_iters.last().filter(|_| !self.gens.watch.is_empty()).cloned() {
             for o in objs.iter() {
                 self.note_resume(o, state);
