@@ -524,6 +524,10 @@ impl Analyzer {
                     self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                 }
                 if !guarded {
+                    // (no handler catches it: a finally that runs code still sees its raise)
+                    if cls.tier != Tier::Proven && self.finally_sees() {
+                        self.may_raise_here(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
+                    }
                     self.unguarded_read(oid, ns, k, &cls, &mut row, node, state, single_target, is_lit);
                 }
                 let v = self.literal_key_value(oid, ns, k, &cls, &row, &row0, state, is_lit);

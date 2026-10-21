@@ -5,7 +5,7 @@
 # `self._text` took that path again (two runs per read, eight per `write`; 1.67M runs in
 # click+rich). On that path `__getattr__` is a call that does not run (its result unknown, what
 # its code reaches possibly changed, as for any unknown code's doing): the value is the
-# attribute's or unknown, as an attribute unknown code may have replaced is on any instance.
+# attribute's or unknown, as an attribute unknown code may have replaced is on any instance. Bound 150 → 200: `self.flush()`'s handler also starts where the stream's `flush` may be missing.
 import sys
 import weakref
 
@@ -67,4 +67,4 @@ b = out.buffer
 #@value b: unknown
 n = out.write("x")
 #@value n: untyped
-#@tabulations <= 150
+#@tabulations <= 200

@@ -150,6 +150,8 @@ impl Analyzer {
         let mut parts: Vec<Value> = Vec::new();
         let guarded = self.is_guarded(Ns::Attr) || !report;
         let caught = report && self.catches(Ns::Attr);
+        // (one that may fail raises to a handler, or to a finally that runs code)
+        let raises = caught || (report && self.finally_sees());
         // (a value that may also be a scalar — a str, a number — may have the attribute: no
         // object's lack of it makes the read fail for sure)
         let scalar = self.may_be_scalar(obj);
@@ -178,7 +180,7 @@ impl Analyzer {
                     Value::obj(vid)
                 }
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
-                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, caught, single),
+                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, raises, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.heap.class_info_opt(oid).is_some() => {
                     let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
                     crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
@@ -195,7 +197,7 @@ impl Analyzer {
                 Kind::Frame => crate::models::pandas::frame_getattr(self, oid, name, node, state, guarded),
                 Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
                 Kind::Locidx if matches!(&self.heap.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => self.accessor_attr(oid, name, node, state),
-                Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
+                Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded, raises),
                 // an lru_cache'd function's cache_info / cache_clear
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.heap.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
@@ -1082,7 +1084,7 @@ impl Analyzer {
     /// A read of attribute `name` of an object rowan cannot see: a dict or str method name
     /// gives that method (bound to it), another method name an unknown method; else what its
     /// row holds (a placeholder for an input's attribute).
-    pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
+    pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, raises: bool) -> Value {
         // (its class, as `type(x)`: calling it does not give it the object, so not a method of it)
         if name == "__class__" {
             return Value::data(&format!("type@L{}", node.line));
@@ -1127,6 +1129,10 @@ impl Analyzer {
             if cls.tier == Tier::Input && !self.mode.callee_nodes.contains(&node.addr) {
                 self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
             }
+        }
+        // (an object that may lack it: an AttributeError a running try sees)
+        if raises && !matches!(cls.tier, Tier::Proven | Tier::Likely) {
+            self.may_raise_here("AttributeError", state);
         }
         let ph = self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
         if !ph.pts.is_empty() {

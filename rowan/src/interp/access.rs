@@ -72,6 +72,12 @@ impl Analyzer {
         self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
+    /// A running try's `finally` (a `with`'s `__exit__`) runs code: a read that may fail
+    /// raises to it although no handler catches its exception.
+    pub fn finally_sees(&self) -> bool {
+        self.unwind.tries.iter().any(|t| t.runs)
+    }
+
     /// Is a failing read in namespace `ns` here the program's own way, not a finding: a running
     /// handler names its exception (`except KeyError:`, a caller's too), or catches everything
     /// around the read in its own function. A catch-all of a caller (a CLI runner's `except
