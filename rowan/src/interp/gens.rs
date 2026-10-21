@@ -200,6 +200,8 @@ pub struct Gens {
     pub yield_states: FxHashMap<ObjId, YieldStates>,
     /// a `with` over a `@contextmanager` call: its body runs at the generator's yield
     pub cm_hook: Option<CmHook>,
+    /// consumers that stop early running a generator made for them alone (`stopearly.rs`)
+    pub stop_hooks: Vec<super::stopearly::StopHook>,
     /// `@contextmanager` generators whose with body is running: (their frame depth, their env
     /// at the yield, the env stack's length then, their possibly-unbound names then), so a try
     /// in the generator around the yield sees its own names when the body raises
@@ -300,16 +302,7 @@ impl Analyzer {
                 let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial(), resumed: None, own_hits: Vec::new() };
                 self.gens.watch.push(w);
             }
-            if !r.pts.contains(o) && state.reachable {
-                // (its body did not run — past its budget, cut at the deadline: unknown code
-                // gives any number of unknown items, and returns something unknown)
-                let it = self.iterate(&r, &lg.node, state);
-                let e = self.elem_value(&it.elem, &lg.node, "gen");
-                self.add_elem(o, &e, state);
-                self.heap.set_llen(o, state, None);
-                state.drop_obj_ns(o, Ns::Pos);
-                state.set_slot(o, Ns::Attr, key_str_lit("\u{1}genret"), Value::data("generator result"), true);
-            }
+            self.gen_body_not_run(o, &r, &lg.node, state);
             if let Some(mut b) = before {
                 let j = state.join(&mut b);
                 state.replace_with(j);
@@ -324,6 +317,21 @@ impl Analyzer {
             state.slots.remove(&o, &(Ns::Attr, key_str_lit("\u{1}lazyargs")));
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
         }
+    }
+
+    /// Generator `o`'s run gave `r`: when that is not `o`, its body did not run (past its budget,
+    /// cut at the deadline): unknown code gives any number of unknown items, and returns
+    /// something unknown.
+    pub(super) fn gen_body_not_run(&mut self, o: ObjId, r: &Value, node: &Node, state: &mut State) {
+        if r.pts.contains(o) || !state.reachable {
+            return;
+        }
+        let it = self.iterate(r, node, state);
+        let e = self.elem_value(&it.elem, node, "gen");
+        self.add_elem(o, &e, state);
+        self.heap.set_llen(o, state, None);
+        state.drop_obj_ns(o, Ns::Pos);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}genret"), Value::data("generator result"), true);
     }
 
     /// The generator expressions among a call's arguments run, as for a library function: a
@@ -869,13 +877,13 @@ impl Analyzer {
                     continue;
                 }
                 match (full && !some, n, self.cursor_of(src, state)) {
-                    (true, Some(n), Some(c)) => {
-                        let end = match self.heap.llen(src, state) {
-                            Some(len) => (c + n).min(len),
-                            None => c + n,
-                        };
-                        self.set_cursor(src, Some(end), state);
-                    }
+                    (true, Some(n), Some(c)) => match self.heap.llen(src, state) {
+                        // (asked for more than it has: used up)
+                        Some(len) if c + n > len => self.set_cursor_ex(src, Some(len), true, state),
+                        // (just its last item: a generator may be suspended there or ended)
+                        Some(len) if c + n == len && self.gens.eff.contains_key(&src) => self.set_cursor(src, None, state),
+                        _ => self.set_cursor(src, Some(c + n), state),
+                    },
                     (true, None, _) => {
                         self.exhaust(&Value::obj(src), state);
                     }
@@ -894,7 +902,8 @@ impl Analyzer {
         self.set_cursor_ex(o, c, false, state)
     }
 
-    /// `set_cursor`; `at_end`: used up (its length may not be known).
+    /// `set_cursor`; `at_end`: used up (its length may not be known). A generator whose
+    /// cursor stands after its last item is suspended at its last yield until asked for more.
     pub(in crate::interp) fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
         self.note_resume(o, state);
         let cv = match c {
@@ -906,7 +915,7 @@ impl Analyzer {
         let tk = key_str_lit("\u{1}effpos");
         let Some(expected) = effects_given(state, o, &ge) else { return };
         let equal = gen_facts_equal(state, expected, &ge);
-        let ended = at_end || matches!((c, self.heap.llen(o, state)), (Some(k), Some(n)) if k >= n);
+        let ended = at_end;
         let (target, ntag): (&State, String) = match c {
             // (used up: at its end, also when it yields nothing)
             _ if ended && ge.end.is_some() => (ge.end.as_ref().unwrap(), "end".into()),
@@ -986,7 +995,7 @@ impl Analyzer {
     /// (a live one's `\u{1}done`).
     pub fn end_iterator(&mut self, o: ObjId, state: &mut State) {
         match self.heap.llen(o, state) {
-            Some(n) => self.set_cursor(o, Some(n), state),
+            Some(n) => self.set_cursor_ex(o, Some(n), true, state),
             None => self.set_cursor_ex(o, None, true, state),
         }
         if self.m.live_iters.contains_key(&o) {
@@ -1214,7 +1223,7 @@ fn gen_footprint(st: &State, pre: &State, ys: &[&State]) -> Footprint {
     fp
 }
 
-fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
+pub(super) fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
     match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
         Some(v) => {
             let ks = kv_literals(&v.kv);

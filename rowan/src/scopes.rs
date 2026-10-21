@@ -91,6 +91,8 @@ struct Collector<'a> {
     scopes: &'a mut Scopes,
     scope: usize,
     loop_depth: u32,
+    /// try statements the walk is in (in the running function)
+    try_depth: u32,
 }
 
 impl<'a> Collector<'a> {
@@ -172,13 +174,12 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 }
                 let inner = self.enter(node_addr(f), ScopeKind::Function);
                 self.visit_params(inner, &f.parameters);
-                let saved = (self.scope, self.loop_depth);
+                let saved = (self.scope, self.loop_depth, self.try_depth);
                 self.scope = inner;
                 self.loop_depth = 0;
-                for s in &f.body {
-                    self.visit_stmt(s);
-                }
-                (self.scope, self.loop_depth) = saved;
+                self.try_depth = 0;
+                self.visit_body(&f.body);
+                (self.scope, self.loop_depth, self.try_depth) = saved;
             }
             ast::Stmt::ClassDef(c) => {
                 self.bind(c.name.id.to_string());
@@ -232,8 +233,23 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 source_order::walk_stmt(self, stmt);
                 self.loop_depth -= 1;
             }
+            ast::Stmt::Try(_) => {
+                self.try_depth += 1;
+                source_order::walk_stmt(self, stmt);
+                self.try_depth -= 1;
+            }
             _ => source_order::walk_stmt(self, stmt),
         }
+    }
+
+    fn visit_body(&mut self, body: &'b [ast::Stmt]) {
+        // (in a function, out of any try: `syntax::consumed_next_genexps`)
+        if self.try_depth == 0 && self.scopes.scopes[self.scope].kind == ScopeKind::Function && !self.scopes.scopes[self.scope].genexp {
+            for g in crate::syntax::consumed_next_genexps(body) {
+                self.scopes.eager_genexps.insert(node_addr(g));
+            }
+        }
+        source_order::walk_body(self, body);
     }
 
     fn visit_expr(&mut self, expr: &'b ast::Expr) {
@@ -378,7 +394,7 @@ pub fn analyse(module: &ast::ModModule) -> Scopes {
     scopes.scopes.push(Scope { kind: ScopeKind::Module, parent: None, ..Default::default() });
     scopes.by_node.insert(node_addr(module), 0);
     {
-        let mut coll = Collector { scopes: &mut scopes, scope: 0, loop_depth: 0 };
+        let mut coll = Collector { scopes: &mut scopes, scope: 0, loop_depth: 0, try_depth: 0 };
         for s in &module.body {
             coll.visit_stmt(s);
         }

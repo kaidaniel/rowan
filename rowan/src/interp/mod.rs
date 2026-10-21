@@ -48,6 +48,7 @@ pub mod loops;
 pub mod narrow;
 pub mod ops;
 pub mod stmts;
+pub mod stopearly;
 pub mod summary;
 
 // What the models, the report and the driver see.

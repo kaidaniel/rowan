@@ -70,6 +70,10 @@ impl Analyzer {
                 self.gens.read(o, None);
             }
         }
+        // (`any`, `all`, `next` of a generator made for them: it runs until they are answered)
+        if let Some(r) = self.stop_early_call(fv, call_ast, &args, &Args::new(&args, &kwargs, &star_args, &star_kwargs), state) {
+            return r;
+        }
         // (generators passed or called through a method run now; unless the callee takes all
         // their items at once, code runs between the items)
         let bulk = self.bulk_consumer(fv);
@@ -963,7 +967,8 @@ impl Analyzer {
                 fr.pre_call = Some(super::PreCall(self.heap.mark(), pre_rc));
             }
         }
-        let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len());
+        // (a `@contextmanager`'s with body, a consumer that stops early: run at its yields)
+        let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len()) || (gen_id.is_some() && self.stop_hook_begins());
         self.bind_params(&fi, &self_v, a, state, node);
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
         if let Some(gid) = gen_id {

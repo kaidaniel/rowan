@@ -200,6 +200,9 @@ impl Analyzer {
         for (_, env, _, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
+        for h in &self.gens.stop_hooks {
+            h.result.iter().for_each(|v| v.push_objs(work));
+        }
         for cells in &self.cx.comp_cells {
             work.extend(cells.values().copied());
         }

@@ -88,7 +88,8 @@ pub struct Fact {
     /// `x += 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
     /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
-    /// call chain into the function, the file of its last call, the objects given; at most `PASSED`)
+    /// call chain into the function, the file of its last call, the objects given and what they
+    /// held then; at most `PASSED`)
     pub param_of: Option<ObjId>,
     pub passed: Vec<(Chain, u32, Vec<ObjId>)>,
 }
@@ -535,7 +536,8 @@ impl Analyzer {
             f.param_of = Some(foid);
             let file = self.cx.call_files.last().copied().unwrap_or(0);
             if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, m, _)| *c == self.cx.call_chain && *m == file) {
-                f.passed.push((self.cx.call_chain.clone(), file, v.pts.to_vec()));
+                // (what they hold too: a call that raises leaves nothing of them at the end)
+                f.passed.push((self.cx.call_chain.clone(), file, crate::interp::facts::held_objects(&self.heap, v.pts.to_vec(), state)));
             }
         }
     }

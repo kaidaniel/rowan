@@ -619,7 +619,8 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
     if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
         return;
     }
-    if q == "builtins.next" {
+    // (`next`, and `any` / `all` of a one-shot iterator: their models move its cursor)
+    if q == "builtins.next" || (matches!(q, "builtins.any" | "builtins.all") && its.iter().all(|(_, o)| !an.m.lazy_src.contains_key(o))) {
         return;
     }
     if FULL.contains(&q) {

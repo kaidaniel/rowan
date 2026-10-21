@@ -1048,10 +1048,9 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     return st.slot(g, Ns::Pos, intern::key_int(cur));
                 }
                 if cur >= 0 && (cur as usize) >= n {
-                    // exhausted: the default, else StopIteration (a live iterator: for good)
-                    if an.m.live_iters.contains_key(&g) {
-                        an.end_iterator(g, st);
-                    }
+                    // exhausted: the default, else StopIteration (a live iterator: for good;
+                    // a generator: run to its end)
+                    an.end_iterator(g, st);
                     return match c.args.get(1) {
                         Some(d) => d.clone(),
                         None => {
@@ -2591,6 +2590,40 @@ pub(super) fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub(super) fn m_any_all(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_any = c.qual == "builtins.any";
     let Some(a) = c.args.first() else { return Value::data("any") };
+    // a one-shot iterator: its items taken until one decides, where it then stands (a held
+    // generator runs whole all the same: `stopearly.rs` for one made for the call)
+    if let Some(o) = a.single().filter(|o| a.kv.is_bot() && an.heap.obj(*o).iterator && an.heap.obj(*o).single) {
+        an.sync_live(a, st, true);
+        if let Some((c0, n)) = an.positions_left(o, st) {
+            for i in c0..c0 + n {
+                let v = st.slot(o, Ns::Pos, intern::key_int(i as i64));
+                match an.truthiness(&v, st) {
+                    Some(b) if b == is_any => {
+                        an.set_cursor(o, Some(i + 1), st);
+                        return Value::lit(intern::key(intern::Key::Bool(is_any)));
+                    }
+                    Some(_) if i + 1 == c0 + n => {
+                        an.end_iterator(o, st);
+                        return Value::lit(intern::key(intern::Key::Bool(!is_any)));
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            if n == 0 {
+                an.end_iterator(o, st);
+                return Value::lit(intern::key(intern::Key::Bool(!is_any)));
+            }
+        }
+        let r = m_any_all_items(an, st, c, is_any, a);
+        an.set_cursor(o, None, st);
+        return r;
+    }
+    m_any_all_items(an, st, c, is_any, a)
+}
+
+/// `any` / `all` over what iterating `a` gives at once.
+fn m_any_all_items(an: &mut Analyzer, st: &mut State, c: &Call, is_any: bool, a: &Value) -> Value {
     let Some(items) = an.iterate(a, &c.node, st).items else { return Value::data("any") };
     let mut unknown = false;
     for v in &items {

@@ -93,6 +93,33 @@ fn yields(body: &[ast::Stmt]) -> bool {
     false
 }
 
+/// How a generator body may be stopped at a yield by a consumer that stops early: None when it
+/// delegates (`yield from`); else whether code of its own may catch the GeneratorExit raised
+/// there and go on (an `except` clause, a with statement's `__exit__`).
+pub fn stop_early_shape(body: &[ast::Stmt]) -> Option<bool> {
+    struct V(bool, bool);
+    impl<'a> SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            self.0 |= matches!(e, ast::Expr::YieldFrom(_));
+            if !matches!(e, ast::Expr::Lambda(_) | ast::Expr::Generator(_)) {
+                source_order::walk_expr(self, e);
+            }
+        }
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            match st {
+                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => return,
+                ast::Stmt::Try(t) if !t.handlers.is_empty() => self.1 = true,
+                ast::Stmt::With(_) => self.1 = true,
+                _ => {}
+            }
+            source_order::walk_stmt(self, st);
+        }
+    }
+    let mut v = V(false, false);
+    body.iter().for_each(|st| v.visit_stmt(st));
+    (!v.0).then_some(v.1)
+}
+
 /// The last part of a callee as written: `json.loads` → `loads`, `f(x)(y)` → `f`; another
 /// expression's text.
 pub fn dotted_last(n: &ast::Expr) -> String {
@@ -143,6 +170,9 @@ pub fn contains_call(e: &ast::Expr) -> bool {
     found
 }
 
+/// Functions that take an iterable's items at once, by the name they are called by.
+const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "bytes", "bytearray", "join", "extend", "update", "Counter", "deque", "OrderedDict", "cat", "concat", "concatenate", "stack"];
+
 /// The generator expressions whose items are all taken before any other code runs, which
 /// therefore run where they are written, as list comprehensions (their names the enclosing
 /// code's), among a call's or a display's parts: one unpacked (`f(*g)`, `[*g, x]`, taken as it
@@ -150,7 +180,6 @@ pub fn contains_call(e: &ast::Expr) -> bool {
 /// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`; by name: one bound to something else runs so
 /// too, as before generator expressions were lazy) with nothing evaluated after it.
 pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
-    const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "any", "all", "bytes", "bytearray", "join", "extend", "update", "Counter", "deque", "OrderedDict", "cat", "concat", "concatenate", "stack"];
     let parts: &[ast::Expr] = match e {
         ast::Expr::Call(c) => &c.arguments.args,
         ast::Expr::List(l) => &l.elts,
@@ -164,6 +193,35 @@ pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
     }).collect();
     if let Some(g) = e.as_call_expr().and_then(|c| sole_genexp(c).filter(|_| TAKE_ALL.contains(&callee_name(c)))) {
         out.push(g);
+    }
+    out
+}
+
+/// Generator expressions a body assigns to a name that its next statement first of all gives
+/// whole to a function taking every item at once (`entries = (…)` then `for e in
+/// sorted(entries):`, `return dict(items)`): nothing runs between, so they may run where
+/// written (a raise in them then leaves the name unbound: not for bodies in a `try`).
+pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<&ast::Expr> {
+    let mut out = Vec::new();
+    for w in body.windows(2) {
+        let ast::Stmt::Assign(a) = &w[0] else { continue };
+        let ([ast::Expr::Name(n)], g @ ast::Expr::Generator(ge)) = (&a.targets[..], &*a.value) else { continue };
+        if ge.generators.iter().any(|c| c.is_async) || has_await(g) {
+            continue;
+        }
+        let first: Option<&ast::Expr> = match &w[1] {
+            ast::Stmt::For(f) => Some(&f.iter),
+            ast::Stmt::Return(r) => r.value.as_deref(),
+            ast::Stmt::Assign(x) => Some(&x.value),
+            ast::Stmt::AnnAssign(x) => x.value.as_deref(),
+            ast::Stmt::Expr(e) => Some(&e.value),
+            _ => None,
+        };
+        let Some(ast::Expr::Call(c)) = first else { continue };
+        let sole = matches!(&c.arguments.args[..], [ast::Expr::Name(x)] if x.id == n.id) && c.arguments.keywords.iter().all(|k| k.arg.is_some() && runs_no_code(&k.value));
+        if sole && TAKE_ALL.contains(&callee_name(c)) && matches!(&*c.func, ast::Expr::Name(_)) {
+            out.push(g);
+        }
     }
     out
 }
@@ -188,7 +246,7 @@ fn callee_name(c: &ast::ExprCall) -> &str {
 
 /// Does evaluating `e` run none of the program's code but operators' dunders (names, constants,
 /// lambdas, operators, tests and tuples or lists of them)?
-fn runs_no_code(e: &ast::Expr) -> bool {
+pub fn runs_no_code(e: &ast::Expr) -> bool {
     match e {
         ast::Expr::Name(_) | ast::Expr::Lambda(_) | ast::Expr::NumberLiteral(_) | ast::Expr::StringLiteral(_) | ast::Expr::BytesLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) | ast::Expr::EllipsisLiteral(_) => true,
         ast::Expr::If(x) => runs_no_code(&x.test) && runs_no_code(&x.body) && runs_no_code(&x.orelse),
