@@ -161,6 +161,8 @@ pub struct Unwind {
     /// the block, not running yet): a `break` / `continue` runs those of its loop first
     pub finally_stack: Vec<(usize, std::rc::Rc<Finally>, bool)>,
     pub loop_stack: Vec<LoopCtx>,
+    /// what the running `for` loops watch of what they iterate (innermost last)
+    pub for_watch: Vec<super::loops::ForWatch>,
     /// the call being evaluated: where an exception a model raises is allocated
     pub exc_node: Option<Node>,
     pub item_exc: Option<&'static str>,
