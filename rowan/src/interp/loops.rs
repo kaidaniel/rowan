@@ -418,6 +418,8 @@ impl Analyzer {
         let gen = itv.single().filter(|o| self.heap.obj(*o).iterator && self.closes_on_drop(*o));
         let closing = gen.is_some();
         let has_jump = contains_jump(&f.body) || stepping || closing;
+        // (a generator with effects the loop uses up: the body sees each item's, its end after)
+        let stepped = has_jump || once.is_some_and(|o| self.gens.eff.contains_key(&o));
         let at = once.and_then(|o| self.cursor_of(o, state));
         let c0 = at.unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the
@@ -427,7 +429,7 @@ impl Analyzer {
                 return;
             }
         }
-        if once.is_none() || !has_jump {
+        if once.is_none() || !stepped {
             if has_jump {
                 // (a lazy iterator a loop may break off: its sources' positions are not known)
                 self.consume_lazy(itv, false, state);
@@ -435,7 +437,7 @@ impl Analyzer {
                 self.exhaust(itv, state);
             }
         }
-        if self.for_unrolled(f, itv, &it, once.or(gen).filter(|_| has_jump).map(|o| (o, c0)), closing, state) {
+        if self.for_unrolled(f, itv, &it, once.or(gen).filter(|_| stepped).map(|o| (o, c0)), closing, state) {
             return;
         }
         // (a prefix unrolled sets the cursor per item, which the body moves: not when stepping)
@@ -445,7 +447,7 @@ impl Analyzer {
             w.fixpoint = true;
         }
         // (a loop that may break off: where the iterator stands after it is not known)
-        if let (Some(o), true) = (once.or(gen), has_jump) {
+        if let (Some(o), true) = (once.or(gen), stepped) {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
@@ -462,7 +464,7 @@ impl Analyzer {
         });
         let mut exit_s = head.copy();
         // (where it surely ends: used up)
-        if closing {
+        if closing || (stepped && !has_jump) {
             self.exhaust(itv, &mut exit_s);
         }
         let elem_v = it.elem.value_part();

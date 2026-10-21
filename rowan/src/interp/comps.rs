@@ -99,8 +99,8 @@ impl Analyzer {
         let gn = frontend::node(&g.iter);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        // (a generator with closing facts stands where the items are then)
-        let once = self.stops_in(&itv).or_else(|| itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single && self.closes_on_drop(*o)));
+        // (a generator with effects or closing facts stands where the items are then)
+        let once = self.stops_in(&itv).or_else(|| itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single && (self.closes_on_drop(*o) || self.gens.eff.contains_key(o))));
         let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
         if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {
             self.exhaust(&exhaust_after, state);
