@@ -40,10 +40,10 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   summaries; a target bound to one of the records a summary (or an input's element) stands for
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
   running `try` (`TryCtx`) records the state at every point of its body and callees that may
-  raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`; with the try's frame's names and
+  raise (a raise, a read that may fail, also where no handler catches it and only a `finally` / `__exit__` that runs code sees it (`finally_sees`), an operator (types that may not fit, a divisor that may be 0, `scalar_binop_raises`; an unknown object's: unknown code), a model's raise, any unknown call: class `any_exc`; with the try's frame's names and
   possibly-unbound ones), joined per class (an object a raise leaves half-built, also in a with body, is dropped there unless this path holds it, `drop_unreached`);
   handlers start from the raises they may catch (binding those of their classes), the rest go on through the `finally` to the
-  enclosing try; one no running try sees (each handler surely misses it, no `finally` or `__exit__` runs code: `TryCtx::sees`) is not recorded. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
+  enclosing try (those every handler around surely misses leave the program: the `finally` runs once from their states joined, `leaves_program`); one no running try sees (each handler surely misses it, no `finally` or `__exit__` runs code: `TryCtx::sees`) is not recorded. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site (a decorator of the program's, its class — not a followed package's — or instance too, is called with the function; one not modelled leaves it `opaque`) (its defaults what `__defaults__` / `__kwdefaults__` hold once read or set), in a
   context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
