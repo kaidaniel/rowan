@@ -488,6 +488,10 @@ def tries_op() -> list:
         ["try:", f"    {x} = fin_read(D)", "except KeyError:", f"    {x} = log[-1]"], ["try:", "    try:", f"        {x} = D['a']", "    finally:", f"        {y} = {v}", "except LookupError:", "    pass"],
         ["try:", f"    {x} = 10 // {y}", "except ZeroDivisionError:", f"    {x} = 'zd'", "except TypeError:", f"    {x} = 'te'"],
         ["try:", f"    {x} = {y} + {v}", "except TypeError:", f"    {x} = 'te'"],
+        ["try:", f"    {x} = {y} < {v}", "except TypeError:", f"    {x} = 'lt'"],
+        ["try:", f"    {x} = {y}.strip", f"    {x} = {x}()", "except AttributeError:", f"    {x} = 'ae'"],
+        ["try:", f"    {x} = '%d' % {y}", "except TypeError:", f"    {x} = 'fd'"],
+        ["try:", f"    {x} = '%s/%c' % ({y}, {v}) if n > 2 else '%s' % ({y}, {v})", "except (TypeError, OverflowError):", f"    {x} = 'fc'"],
         [f"{x} = {v}"], [f"log.append({x})"],
     ])
 

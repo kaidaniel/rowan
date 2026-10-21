@@ -101,6 +101,9 @@ impl Analyzer {
             if let Some(r) = self.seq_compare(op, a, b, state) {
                 return r;
             }
+            if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && self.ordering_raises(a, b, state) {
+                return Value::new();
+            }
         }
         if let Some(r) = self.compare_const(op, a, b, right, state) {
             return lit(r);
@@ -114,6 +117,47 @@ impl Analyzer {
             return Value::with_kv(both.filter(|o| self.heap.kind(o) == Kind::Frame), DATA);
         }
         Value::data("bool")
+    }
+
+    /// What ordering `a` and `b` (`<` & co.) that no dunder or model ordered may raise (true:
+    /// surely): a TypeError where their types do not surely order (numbers with numbers, texts
+    /// with texts), surely for literals no pair of which orders; unknown objects' comparisons
+    /// are unknown code, other objects' (containers, instances without order methods) may fail.
+    fn ordering_raises(&mut self, a: &Value, b: &Value, state: &mut State) -> bool {
+        let model = |v: &Value| matches!(v.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with('\u{1}'));
+        if self.unwind.tries.is_empty() || model(a) || model(b) || crate::models::pandas::is_seriesish(self, a) || crate::models::pandas::is_seriesish(self, b) {
+            return false;
+        }
+        let objs = a.pts.union(&b.pts).filter(|o| !matches!(self.heap.obj(o).ty, Some("int" | "float" | "bool" | "str" | "bytes")));
+        if objs.iter().any(|o| self.heap.kind(o) == Kind::Frame) {
+            return false;
+        }
+        if objs.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External)) {
+            self.flag_may_raise(state);
+            return false;
+        }
+        if !objs.is_empty() {
+            self.may_raise_here("TypeError", state);
+            return false;
+        }
+        if a.pts.is_empty() && b.pts.is_empty() && a.kv.is_literal() && b.kv.is_literal() {
+            let (la, lb) = (kv_literals(&a.kv), kv_literals(&b.kv));
+            let outcomes: Vec<Option<bool>> = la.iter().flat_map(|x| lb.iter().map(move |y| literals_order(x, y))).collect();
+            if !outcomes.is_empty() && outcomes.iter().all(|o| *o == Some(false)) {
+                self.raise_here("TypeError", state);
+                return true;
+            }
+            if outcomes.iter().any(|o| *o != Some(true)) {
+                self.may_raise_here("TypeError", state);
+            }
+            return false;
+        }
+        let num = |t: Option<&str>| matches!(t, Some("int" | "float" | "bool"));
+        let (ta, tb) = (self.value_type(a), self.value_type(b));
+        if !(num(ta) && num(tb) || ta == tb && matches!(ta, Some("str" | "bytes"))) {
+            self.may_raise_here("TypeError", state);
+        }
+        false
     }
 
     /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
@@ -681,6 +725,24 @@ impl Analyzer {
 /// How Python orders two literals (None: they do not compare).
 pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
     crate::models::pyvalues::py_cmp(x, y)
+}
+
+/// Whether ordering two literals works (true), surely raises TypeError (false: builtin scalars
+/// of kinds that do not order, `1 < "a"`, `None < None`), or is not known here (None).
+fn literals_order(x: KeyId, y: KeyId) -> Option<bool> {
+    use intern::Key;
+    let kind = |k: KeyId| intern::with_key(k, |k| match k {
+        Key::Int(_) | Key::Float(_) | Key::Bool(_) => Some(0),
+        Key::Str(_) => Some(1),
+        Key::Bytes(_) => Some(2),
+        Key::None => Some(3),
+        Key::Ellipsis => Some(4),
+        _ => None,
+    });
+    match (kind(x), kind(y)) {
+        (Some(p), Some(q)) => Some(p == q && p <= 2),
+        _ => crate::models::pyvalues::py_cmp(x, y).map(|_| true),
+    }
 }
 
 /// Python's `==` on two literals (`1 == 1.0 == True`); Enum members and identity-hashed
