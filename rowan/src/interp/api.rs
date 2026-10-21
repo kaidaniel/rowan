@@ -340,6 +340,12 @@ impl Analyzer {
         self.gens.eff.contains_key(&o)
     }
 
+    /// Are the raises of `o` taken where it is asked for items: a generator whose run's raises
+    /// are kept (`genraise.rs`), an iterator over a builtin container (which raises nothing)?
+    pub fn raises_where_asked(&self, o: ObjId) -> bool {
+        self.m.live_iters.contains_key(&o) || self.gens.raises.iter().any(|r| r.gid == o)
+    }
+
     /// Is a try statement (or a model's catching frame) running?
     pub fn in_try(&self) -> bool {
         !self.unwind.tries.is_empty()

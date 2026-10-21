@@ -242,12 +242,13 @@ impl Analyzer {
         }
         // (one made for it alone is closed where the loop leaves it: `genclose.rs`)
         let fresh = self.fresh_gen(&itv, &f.iter, state);
-        let raises = self.gens.raises.len();
-        self.force_gen_for_loop(&itv, state);
+        let deferred = self.force_gen_deferring(&itv, state, true);
         self.gens.for_iters.push(itv.pts.clone());
         let level = self.unwind.loop_stack.len() + 1;
         self.closing_loop(fresh, level, state, &mut |an, st| an.stmt_for_items(f, &itv, &iter_node, st));
-        self.gens.raises.truncate(raises);
+        if let Some(o) = deferred {
+            self.loop_gen_raises_end(o, fresh.is_some());
+        }
     }
 
     /// A `for` loop's items, over what it iterates (`itv`, run if a generator).
@@ -399,6 +400,7 @@ impl Analyzer {
             an.note_resumes(body_s);
         });
         let mut exit_s = head;
+        self.gen_raises_at_rounds(itv, &exit_s);
         if !jumps {
             self.exhaust(itv, &mut exit_s);
         }
@@ -422,7 +424,7 @@ impl Analyzer {
         let has_jump = contains_jump(&f.body) || stepping || closing;
         // (a generator with effects the loop uses up: the body sees each item's, its end after)
         // (or one that may raise: where the loop asks for the item it fails to give, `genraise.rs`)
-        let stepped = has_jump || once.is_some_and(|o| self.gens.eff.contains_key(&o) || self.gens.raises.last().is_some_and(|r| r.gid == o && !r.recs.is_empty()));
+        let stepped = has_jump || once.is_some_and(|o| self.gens.eff.contains_key(&o) || self.raises_kept(o));
         let at = once.and_then(|o| self.cursor_of(o, state));
         let c0 = at.unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the
@@ -466,6 +468,7 @@ impl Analyzer {
             an.note_resumes(body_s);
         });
         let mut exit_s = head.copy();
+        self.gen_raises_at_rounds(itv, &exit_s);
         // (where it surely ends: used up)
         if closing || (stepped && !has_jump) {
             self.exhaust(itv, &mut exit_s);

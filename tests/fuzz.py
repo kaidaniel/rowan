@@ -610,6 +610,8 @@ def gens_op() -> list:
          "except KeyError:", f"    {x} = len(seen) + G[0]"],
         ["seen = []", "try:", f"    {y} = len([seen.append(w) for w in fails2({{'b': {v}}})])", "except KeyError:", f"    {x} = len(seen)"],
         ["seen = []", "try:", "    for w in fails(xs):", "        seen.append(w)", f"        if w == {k}:", "            break", "except ValueError:", f"    {x} = -len(seen)"],
+        ["seen = []", f"g = fails2({random.choice(['{}', '{"a": 1}', '{"a": 1, "b": 2}'])})", "try:", "    seen.append(next(g))", "    seen.append(G[0])",
+         f"    seen.append(next(g, {v}))", "except KeyError:", f"    {x} = len(seen)", f"{y} = len(seen)"],
     ])
 
 

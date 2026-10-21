@@ -86,10 +86,11 @@ impl Analyzer {
         let itv = self.iterable_part(&itv, state);
         // (one made for it alone is closed where a raise leaves it: `genclose.rs`)
         let fresh = self.fresh_gen(&itv, &g.iter, state);
-        let raises = self.gens.raises.len();
-        self.force_gen_for_loop(&itv, state);
+        let deferred = self.force_gen_deferring(&itv, state, true);
         self.closing_loop(fresh, usize::MAX, state, &mut |an, st| an.comp_gen_items(gens, i, limit, &itv, nonempty, st, body, own));
-        self.gens.raises.truncate(raises);
+        if let Some(o) = deferred {
+            self.loop_gen_raises_end(o, fresh.is_some());
+        }
     }
 
     /// Generator level `i`'s items, of what it iterates (`itv`, run if a generator).
@@ -102,7 +103,7 @@ impl Analyzer {
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         // (a generator with effects, closing facts or raises stands where the items are then)
-        let stands = |an: &Analyzer, o: &ObjId| an.closes_on_drop(*o) || an.gens.eff.contains_key(o) || an.gens.raises.last().is_some_and(|r| r.gid == *o && !r.recs.is_empty());
+        let stands = |an: &Analyzer, o: &ObjId| an.closes_on_drop(*o) || an.gens.eff.contains_key(o) || an.raises_kept(*o);
         let once = self.stops_in(&itv).or_else(|| itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single && stands(self, o)));
         let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
         if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {

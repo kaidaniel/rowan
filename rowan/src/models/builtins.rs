@@ -1019,6 +1019,18 @@ fn one_shot(an: &mut Analyzer, v: Value, st: &mut State) -> Value {
 }
 
 pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let r = next_item(an, st, c);
+    // (what else asking for an item may raise: anything, but of a generator whose raises are
+    // taken where it is asked, or of an iterator over a builtin container)
+    let known = c.args.first().is_some_and(|a| a.kv.is_bot() && !a.pts.is_empty() && a.pts.iter().all(|o| an.raises_where_asked(o)));
+    if !known {
+        an.flag_may_raise(st);
+    }
+    r
+}
+
+/// `next`'s item (StopIteration raised where it may have ended without a default).
+fn next_item(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("next") };
     an.sync_live(a, st, true);
     // a generator with known yields: the item at the cursor, which moves on

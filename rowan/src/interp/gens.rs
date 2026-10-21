@@ -1033,14 +1033,7 @@ impl Analyzer {
     }
 
     /// `note_resume` for what the innermost running `for` iterates.
-    pub(in crate::interp) fn note_resumes(&mut self, state: &mut State) {
-        // (asked for its next item: its raises after the items it may have given, `genraise.rs`)
-        if let Some(objs) = self.gens.for_iters.last().filter(|_| !self.gens.raises.is_empty()).cloned() {
-            for o in objs.iter() {
-                let from = self.cursor_of(o, state);
-                self.replay_gen_raises(o, from, None, false, state);
-            }
-        }
+    pub(in crate::interp) fn note_resumes(&mut self, state: &State) {
         if let Some(objs) = self.gens.for_iters.last().filter(|_| !self.gens.watch.is_empty()).cloned() {
             for o in objs.iter() {
                 self.note_resume(o, state);

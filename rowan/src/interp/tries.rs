@@ -195,6 +195,10 @@ impl Analyzer {
     /// is garbage in a raise state: a try around a large recursion would otherwise join every
     /// callee's objects into its handlers.
     pub fn leave_try(&mut self) -> TryExit {
+        // (a generator's raises kept for its consumer's asking, `genraise.rs`: the rest here)
+        if !self.gens.raises.is_empty() {
+            self.flush_gen_raises(self.unwind.tries.len());
+        }
         let Some(t) = self.unwind.tries.pop() else { return TryExit { recs: Vec::new(), pos: Vec::new() } };
         let (mut recs, pos): (Vec<RaiseRec>, Vec<Option<usize>>) = t.recs.into_iter().filter_map(|(c, sts, e, p)| Some(((c, sts.finish()?, e), p))).unzip();
         for (_, st, exc) in recs.iter_mut() {
