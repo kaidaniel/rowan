@@ -228,8 +228,8 @@ impl Analyzer {
         // (a generator expression allocates as the code it is written in: its frame's context)
         let genexp = self.heap.func_info(foid).node.is_genexp();
         let ctx = if genexp { self.frame().ctx.clone() } else { self.receiver_ctx(&self_v, &site) };
-        let q = self.heap.func_info(foid).qualname.clone();
-        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", q), Payload::None);
+        let label = if genexp { "generator expression".to_string() } else { format!("generator {}", self.heap.func_info(foid).qualname) };
+        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
         self.start_iterator(gid, state);
         let mut self_v = self_v;
         let pending = self.gens.lazy.get(&gid).filter(|_| lazy_state(state, gid).0).cloned();
