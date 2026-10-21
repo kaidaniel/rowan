@@ -77,6 +77,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `comps.rs` | comprehensions; a generator expression's run (`genexp_body`) |
 | `funcs.rs` | function objects and decorators, names, assignment targets and unpacking |
 | `iter.rs` | iteration: the items and element of anything iterated |
+| `stopearly.rs` | `any` / `all` / `next` / `in` of a generator made for them: run until answered, closed where it stops |
 | `calls.rs` | calls, construction, frames, binding arguments |
 | `narrow.rs` | tests split into true and false states, narrowing |
 | `guards.rs` | tests of a function's own parameters along a path (`only if` requirements) |

@@ -528,6 +528,13 @@ def lazy(k):
     out = (w + t for w in xs)
     t = k + 1
     return out
+def closing(xs):
+    try:
+        for v in xs:
+            yield v
+            G[0] = v
+    finally:
+        G[0] = G[0] + 100
 n = len(sys.argv)
 xs = [1, 2]
 x = 0
@@ -553,6 +560,16 @@ def gens_op() -> list:
         [f"g = (w + {y} for w in xs)", f"{y} = {v}", f"{x} = list(g)[-1] if xs else {v}"], ["g = (w for w in xs)", f"xs.append({v})", f"{x} = len(list(g))"],
         ["g = (setg(w) for w in xs)", f"{x} = G[0]", f"{y} = next(g, {v})"], ["g = (G[0] + w for w in xs)", f"G[0] = {v}", f"{x} = next(g, {v})"],
         [f"{x} = sum(lazy({k}))"], ["g = (setg(w) for w in xs)", f"{x} = next(g, {v})", f"{y} = G[0]", f"{x} = sum(g)"],
+        # consumers that stop early: the items after the deciding one are not taken (a generator
+        # made for one alone is closed there: `closing`'s finally runs; used only so — one that
+        # another generator iterates is closed with it, which rowan does not model)
+        [f"{x} = int(any(setg(w) > {k} for w in xs))"], [f"{x} = int(all(setg(w) < {k} for w in xs))"],
+        [f"{x} = int({v} in (setg(w) for w in xs))"], [f"{x} = next((setg(w) for w in xs if w > {k}), {v})"],
+        [f"{x} = int(any(bump()))"], [f"{x} = int(all(evens(xs)))"], [f"{x} = next(evens(xs), {v})"], [f"{x} = int({v} not in evens(xs))"],
+        [f"{x} = int({v} in closing(xs))"], [f"{x} = next(closing(xs), {v})"], [f"{x} = int(any(closing(counter(n))))"],
+        ["g = bump()", f"{x} = int(any(g))", f"{y} = G[0]", f"{x} = next(g, {v})"], ["g = evens(xs)", f"{x} = int(all(w > {k} for w in g))", f"{y} = next(g, {v})"],
+        ["it = iter(xs)", f"{x} = int({v} in it)", f"{y} = next(it, {v})"], ["it = iter(xs)", f"{x} = int(all(it))", f"{y} = len(list(it))"],
+        ["g = counter(n)", f"{x} = int(any(w > {k} for w in g))", f"{y} = sum(g)"],
     ])
 
 

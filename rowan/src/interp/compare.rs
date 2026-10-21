@@ -146,7 +146,7 @@ impl Analyzer {
             ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => self.compare_identity(op, a, b),
             ast::CmpOp::In | ast::CmpOp::NotIn if self.mixed(b) => None,
             ast::CmpOp::In | ast::CmpOp::NotIn if b.pts.iter().any(|o| self.heap.obj(o).iterator) => {
-                let found = self.in_iterator(a, b, &lits, state);
+                let found = self.in_iterator(a, b, right, &lits, state);
                 found.map(|f| if op == ast::CmpOp::In { f } else { !f })
             }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
@@ -244,7 +244,11 @@ impl Analyzer {
     /// `a in it` of a one-shot iterator: it takes items until one equals `a` (or to its end).
     /// Decided for a literal among the known items left, the iterator then just past it (or
     /// used up); else where it stands after is not known.
-    fn in_iterator(&mut self, a: &Value, b: &Value, lits: &KeySet, state: &mut State) -> Option<bool> {
+    fn in_iterator(&mut self, a: &Value, b: &Value, right: &'static ast::Expr, lits: &KeySet, state: &mut State) -> Option<bool> {
+        // (a generator made for this test: it runs until an item equals `a`)
+        if let Some(r) = self.stop_early(super::stopearly::Stop::In(a.clone()), b, right, state) {
+            return self.truthiness(&r, state);
+        }
         self.force_gen(b, state, false);
         self.sync_live(b, state, true);
         let one = b.single().filter(|_| b.kv.is_bot() && a.pts.is_empty() && lits.len() == 1);
@@ -262,7 +266,7 @@ impl Analyzer {
                     return Some(true);
                 }
                 if i + 1 == c0 + n {
-                    self.set_cursor(o, Some(c0 + n), state);
+                    self.set_cursor_ex(o, Some(c0 + n), true, state);
                     return Some(false);
                 }
             }

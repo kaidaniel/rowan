@@ -244,6 +244,28 @@ fn param_contract(an: &Analyzer, foid: ObjId, name: StrId) -> J {
     J::Array(needs.into_iter().map(|n| json!({"path": n.path, "always": n.always, "only_if": n.only_if})).collect())
 }
 
+/// `roots` and the objects they hold in `st`, at any depth (at most 512).
+pub fn held_objects(heap: &crate::interp::Heap, roots: Vec<ObjId>, st: &crate::state::State) -> Vec<ObjId> {
+    let mut reach: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+    let mut out: Vec<ObjId> = Vec::new();
+    let mut work = roots;
+    while let Some(o) = work.pop() {
+        if reach.len() > 512 || !reach.insert(o) {
+            continue;
+        }
+        out.push(o);
+        if matches!(heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
+            continue;
+        }
+        for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
+            for (_, v) in st.obj_slots(o, ns) {
+                work.extend(v.pts.iter());
+            }
+        }
+    }
+    out
+}
+
 /// Whether what the program's calls at `sites` passed for a parameter has what the function
 /// reads of it: the worst of the accesses of those calls' runs (in the function, its callees
 /// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠~ ⚠ ✗).
@@ -253,19 +275,8 @@ fn call_check(an: &Analyzer, f: &Fact, sites: &[CallSite]) -> J {
     if passed.is_empty() {
         return J::Null;
     }
-    // (what they passed and what it holds)
-    let mut reach: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
-    let mut work: Vec<ObjId> = passed.iter().flat_map(|(_, _, o)| o.iter().copied()).collect();
-    while let Some(o) = work.pop() {
-        if reach.len() > 512 || !reach.insert(o) || matches!(an.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
-            continue;
-        }
-        for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
-            for (_, v) in st.obj_slots(o, ns) {
-                work.extend(v.pts.iter());
-            }
-        }
-    }
+    // (what they passed and what it held then and holds at the end)
+    let reach: rustc_hash::FxHashSet<ObjId> = held_objects(&an.heap, passed.iter().flat_map(|(_, _, o)| o.iter().copied()).collect(), st).into_iter().collect();
     // (a chain into the function: the access's chain goes through it)
     let within = |vc: &[u32], c: &[u32]| (0..vc.len()).any(|p| vc[..=p].len() <= c.len() && c.ends_with(&vc[..=p]) && vc[p] == *c.last().unwrap());
     const ORDER: [Tier; 6] = [Tier::Missing, Tier::Possibly, Tier::LikelyMissing, Tier::Input, Tier::Likely, Tier::Proven];

@@ -53,7 +53,11 @@ impl Analyzer {
         let site = (elt as *const ast::Expr as usize, 0);
         self.comp(&g.generators, limit, state, &mut |an, st| {
             let v = an.eval(elt, st);
-            an.yield_value(v, st, site);
+            if an.at_stop_hook() {
+                an.stop_at_yield(v, st);
+            } else {
+                an.yield_value(v, st, site);
+            }
         }, gid);
     }
 
@@ -85,11 +89,19 @@ impl Analyzer {
         self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own) {
+        // (a generator expression run for a consumer that stops early may stop at any item: a
+        // one-shot iterator it takes them from stands after each one, as a `for` that may
+        // break, `unroll_for`)
+        let once = itv.single().filter(|o| self.at_stop_hook() && self.heap.obj(*o).iterator && self.heap.obj(*o).single);
+        let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
+        if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {
             self.exhaust(&exhaust_after, state);
             return;
         }
         self.cx.comp_known.push(false);
+        if let Some(o) = once {
+            self.set_cursor(o, None, state);
+        }
         let depth = i16::try_from(self.cx.cond_depth).unwrap_or(i16::MAX);
         let mut elem = it.elem.clone();
         if it.exhaustive && understood {
@@ -168,7 +180,7 @@ impl Analyzer {
     /// closed dict with some keys only maybe there: one iteration per key, a maybe one joined
     /// with skipping it. False: not known.
     #[allow(clippy::too_many_arguments)]
-    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::iter::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::iter::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId, cursor: Option<(ObjId, usize)>) -> bool {
         if let Some(items) = it.any_order_items() {
             let same = self.identical_summaries(items);
             if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
@@ -178,7 +190,7 @@ impl Analyzer {
                 let unordered = it.unordered;
                 self.cx.comp_unordered += usize::from(unordered);
                 let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();
-                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own, cursor);
                 self.cx.comp_unordered -= usize::from(unordered);
                 return true;
             }
@@ -186,7 +198,7 @@ impl Analyzer {
         }
         match self.maybe_dict_items(itv, state).filter(|its| its.len() <= limit) {
             Some(items) => {
-                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own, cursor);
                 true
             }
             None => false,
@@ -197,52 +209,67 @@ impl Analyzer {
     /// keeps it straight-line (positions survive), an undecided one makes the iteration
     /// conditional (joined with skipping the item).
     #[allow(clippy::too_many_arguments)]
-    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[(Value, bool)], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
+    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[(Value, bool)], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId, cursor: Option<(ObjId, usize)>) {
         self.cx.comp_known.push(true);
         for (idx, (item, sure)) in items.iter().enumerate() {
+            if !state.reachable {
+                break;
+            }
             let mut s2 = state.copy();
+            if let Some((o, c0)) = cursor {
+                self.set_cursor(o, Some(c0 + idx + 1), &mut s2);
+            }
             self.frame_mut().unroll.push(idx);
             // (an item there on some paths only: its iteration is conditional)
             let maybe = usize::from(!*sure);
             self.cx.comp_maybe += maybe;
             self.cx.cond_depth += maybe as i32;
-            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own) && *sure;
+            self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
             self.cx.comp_maybe -= maybe;
             self.cx.cond_depth -= maybe as i32;
             self.frame_mut().unroll.pop();
-            if s2.reachable {
-                let j = if decided { s2 } else { state.join(&mut s2) };
-                state.replace_with(j);
-            }
+            // (the item's iteration, a filter's skip included; one that may not be there: or
+            // not; one that raised or stopped its consumer everywhere: the items after it are
+            // not taken)
+            let j = if *sure { s2 } else { state.join(&mut s2) };
+            state.replace_with(j);
         }
         self.cx.comp_known.pop();
     }
 
-    /// Runs one iteration of generator `i`; returns whether every filter was decided (then
-    /// the iteration was straight-line code).
-    pub(super) fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, limit: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+    /// Runs one iteration of generator `i`: `st` after it, joined with where a filter dropped
+    /// the item (the state its test left).
+    pub(super) fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, limit: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
         self.comp_bind(&g.target, it, st);
         let mut decided = true;
+        let mut dropped: Option<State> = None;
         for cond in &g.ifs {
-            let sp = self.split(cond, st.copy());
+            let mut sp = self.split(cond, st.copy());
             decided &= !sp.f.reachable;
+            if sp.f.reachable {
+                dropped = Some(match dropped {
+                    Some(mut d) => d.join(&mut sp.f),
+                    None => sp.f,
+                });
+            }
             st.replace_with(sp.t);
             if !st.reachable {
-                return decided;
+                break;
             }
         }
-        let conditional = !decided && !understood;
-        if conditional {
-            self.cx.cond_depth += 1;
+        if st.reachable {
+            // (an item a filter may drop has no position of its own, understood filter or not)
+            let conditional = !decided && !understood;
+            self.cx.cond_depth += i32::from(conditional);
+            self.cx.comp_maybe += usize::from(!decided);
+            self.comp_gen(gens, i + 1, limit, st, body, own);
+            self.cx.comp_maybe -= usize::from(!decided);
+            self.cx.cond_depth -= i32::from(conditional);
         }
-        // (an item a filter may drop has no position of its own, understood filter or not)
-        self.cx.comp_maybe += usize::from(!decided);
-        self.comp_gen(gens, i + 1, limit, st, body, own);
-        self.cx.comp_maybe -= usize::from(!decided);
-        if conditional {
-            self.cx.cond_depth -= 1;
+        if let Some(mut d) = dropped {
+            let j = if st.reachable { st.join(&mut d) } else { d };
+            st.replace_with(j);
         }
-        decided
     }
 
     /// Binds a comprehension's target to an item (each pass over any item a view of its own),

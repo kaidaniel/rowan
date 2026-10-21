@@ -201,6 +201,11 @@ impl Analyzer {
             self.run_cm_body(v, state);
             return self.none_v.clone();
         }
+        // (a consumer that stops early takes it here)
+        if self.at_stop_hook() {
+            self.stop_at_yield(v, state);
+            return self.none_v.clone();
+        }
         // (a bare `yield` yields None)
         self.yield_value(v, state, (y as *const _ as usize, 0));
         // the value of the `yield` expression: what `send` passes, None when iterated
@@ -250,7 +255,9 @@ impl Analyzer {
         // once, or to unknown code, which runs it at the call, nothing evaluated after it: run
         // here, as `Scopes::eager_genexps` are)
         let unknown = |o: u32| self.heap.kind(o) == Kind::Unknown || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q.starts_with("unknown."));
-        let at_once = self.bulk_consumer(&fv) || (!fv.pts.is_empty() && fv.pts.iter().all(unknown));
+        // (not `any` / `all`, which stop early: `stopearly.rs`)
+        let stops = fv.single().is_some_and(|o| self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "builtins.any" | "builtins.all"));
+        let at_once = (self.bulk_consumer(&fv) && !stops) || (!fv.pts.is_empty() && fv.pts.iter().all(unknown));
         self.mode.bulk_genexp = crate::syntax::sole_genexp(c).filter(|_| at_once).map_or(0, |g| g as *const ast::Expr as usize);
         let r = self.call_value(&fv, &nd, Some(c), state, None);
         self.unwind.exc_node = saved_node;
