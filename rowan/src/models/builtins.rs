@@ -1289,7 +1289,8 @@ pub(super) fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         match c.args[1].kv.as_lit().and_then(intern::key_as_str) {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),
             None => {
-                let recs = an.record_objects(&c.args[0]);
+                // (a function's attributes too)
+                let recs: Vec<ObjId> = c.args[0].pts.iter().filter(|o| an.heap.is_record(*o) || an.heap.kind(*o) == Kind::Function).collect();
                 let strong = recs.len() == 1 && an.heap.obj(recs[0]).single;
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
@@ -1664,7 +1665,7 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
-        if let Some(inst) = a.single().filter(|o| an.heap.kind(*o) == Kind::Instance) {
+        if let Some(inst) = a.single().filter(|o| matches!(an.heap.kind(*o), Kind::Instance | Kind::Function)) {
             an.m.attr_mirrors.insert(oid, inst);
         }
     }

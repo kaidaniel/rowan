@@ -172,7 +172,7 @@ impl Analyzer {
                     Some(c) => Value::obj(c),
                     None => Value::data(&format!("L{}", node.line)),
                 },
-                Kind::Namespace | Kind::Instance if name == "__dict__" => {
+                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
                     let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
                     self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)

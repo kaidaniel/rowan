@@ -244,6 +244,14 @@ impl Havoc {
                 (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial | Kind::Module, _) => {
                     self.code.push(o);
                     code.push(o);
+                    // (a function's attributes: unknown code may set any)
+                    if k == Kind::Function {
+                        let r0 = state.rows.get(&(o, Ns::Attr)).unwrap_or_else(Row::new);
+                        let r = r0.mutate(site);
+                        if r != r0 {
+                            state.set_row(o, Ns::Attr, r);
+                        }
+                    }
                     continue;
                 }
                 (Kind::Method, Payload::Method(_, recv)) => {
