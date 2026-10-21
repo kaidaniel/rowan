@@ -761,6 +761,25 @@ impl Analyzer {
         Some(out)
     }
 
+    /// Instance `oid`'s `name`, a `cached_property` of class `c` (`cv`) whose value `cached` it
+    /// holds on some paths only: where it does, that; on the others the getter runs and caches
+    /// it there. The read cannot fail.
+    #[allow(clippy::too_many_arguments)]
+    fn cached_on_some_paths(&mut self, oid: u32, c: u32, name: &str, cached: Value, cv: &Value, node: &Node, state: &mut State, guarded: bool) -> Value {
+        let nk = key_str_lit(name);
+        let mut fresh = state.copy();
+        self.narrow_record(&Value::obj(oid), Ns::Attr, nk, false, &mut fresh);
+        let got = if fresh.reachable { self.bound_outs(cv, oid, c, name, node, &mut fresh) } else { Value::new() };
+        let row = state.row(oid, Ns::Attr).narrow_in(nk, self.heap.obj(oid).single);
+        state.set_row_narrowed(oid, Ns::Attr, row);
+        let joined = state.join(&mut fresh);
+        state.replace_with(joined);
+        if !guarded {
+            self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+        }
+        cached.join(&got)
+    }
+
     /// A read of attribute `name` of an instance of the program's classes: a library base's
     /// attribute, `__getattr__`, the instance's own slot, else the class's (`bound_outs`), with
     /// the verdict of its row (a class attribute is there for every instance).
@@ -794,6 +813,13 @@ impl Analyzer {
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail where the class surely has it)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).map(|c| self.class_lookup_on_path(c, name, state));
+            // (a `functools.cached_property` cached on some paths only: the others run its getter)
+            if let (Some(c), Some((defs, _)), true) = (cls_of, &class_attr, row.present.contains(nk)) {
+                let cv = self.class_values(defs, nk, state);
+                if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_cached.get()) {
+                    return self.cached_on_some_paths(oid, c, name, v, &cv, node, state, guarded);
+                }
+            }
             let mut class_v: Option<Value> = None;
             if let (true, Some((defs, sure))) = (row.present.contains(nk), class_attr) {
                 let cv = self.class_values(&defs, nk, state);
