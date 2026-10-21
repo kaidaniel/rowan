@@ -314,7 +314,7 @@ impl Analyzer {
         let mut w = ForWatch::default();
         let Some(o) = itv.single().filter(|_| itv.kv.is_bot()) else { return w };
         let plain_list = |x: &Value| x.single().filter(|l| x.kv.is_bot() && self.heap.kind(*l) == Kind::List && !self.heap.obj(*l).iterator && self.heap.obj(*l).single);
-        let live = state.slot_opt(o, Ns::Attr, intern::key_str_lit("\u{1}src")).filter(|_| self.m.live_iters.contains_key(&o));
+        let live = self.m.live_iters.contains_key(&o).then(|| state.slot_opt(o, Ns::Attr, super::gens::live_keys()[0])).flatten();
         let list = match (&self.heap.obj(o).payload, self.heap.kind(o)) {
             // (an iterator over a list: the list as it is at each step)
             (_, Kind::List) if live.is_some() => live.as_ref().and_then(plain_list),

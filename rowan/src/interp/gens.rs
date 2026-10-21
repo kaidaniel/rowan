@@ -137,6 +137,22 @@ pub struct GenWatch {
     pub own_hits: Vec<Hit>,
 }
 
+thread_local! {
+    static LIVE_KEYS: std::cell::Cell<Option<[intern::KeyId; 2]>> = const { std::cell::Cell::new(None) };
+}
+
+/// The keys of the containers a live iterator reads and of the function a `map` calls
+/// (`\u{1}src`, `\u{1}fn`: `Analyzer::sync_live`), interned once per thread.
+pub fn live_keys() -> [intern::KeyId; 2] {
+    LIVE_KEYS.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let k = [key_str_lit("\u{1}src"), key_str_lit("\u{1}fn")];
+            c.set(Some(k));
+            k
+        })
+    })
+}
+
 /// A generator call whose body has not run: it runs at the first consumption, from the state
 /// there (`force_gen`), in the call's own site and context, so the generator object is the same.
 pub struct LazyGen {
