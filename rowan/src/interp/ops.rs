@@ -272,6 +272,10 @@ impl Analyzer {
         if let Some(r) = self.split_hinted(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
             return r;
         }
+        let scalar = |v: &Value| v.pts.iter().all(|o| matches!(self.heap.obj(o).ty, Some("int" | "float" | "bool" | "str" | "bytes")));
+        if scalar(a) && scalar(b) && self.scalar_binop_raises(op, a, b, state) {
+            return Value::new();
+        }
         let r = self.binop_untyped(op, a, b, node, state);
         let ty = binop_type(op, self.value_type(a), self.value_type(b));
         self.as_type(r, ty, true)
@@ -357,7 +361,74 @@ impl Analyzer {
         if !frames.is_empty() {
             return Value::with_kv(frames, DATA);
         }
+        // (no dunder or model took the objects)
+        self.objects_op_raises(&both, state);
         Value::data(&format!("L{}", node.line))
+    }
+
+    /// An operator on objects `both` no dunder or model decided: unknown objects' operators are
+    /// unknown code (any raise), the others' a TypeError.
+    fn objects_op_raises(&mut self, both: &ObjSet, state: &mut State) {
+        // (an unknown of a builtin type, an annotated parameter's: a scalar's, `scalar_binop_raises`)
+        let both = both.filter(|o| !matches!(self.heap.obj(o).ty, Some("int" | "float" | "bool" | "str" | "bytes")));
+        if both.is_empty() || self.unwind.tries.is_empty() {
+            return;
+        }
+        if both.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External)) {
+            self.flag_may_raise(state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+    }
+
+    /// What `a op b` of scalars may raise (true: surely): a TypeError where their types do not
+    /// surely fit, a ZeroDivisionError for `/`, `//`, `%` by what may be zero (surely: numeric
+    /// literals by 0), for `**` a ZeroDivisionError (`0 ** -1`) or an OverflowError, a
+    /// ValueError for a shift by what may be negative. Two literals Python computes raise
+    /// nothing; `text % args` is formatting's, the models' own labels (tensors, dims) theirs.
+    fn scalar_binop_raises(&mut self, op: ast::Operator, a: &Value, b: &Value, state: &mut State) -> bool {
+        use ast::Operator::*;
+        let model_label = |v: &Value| matches!(v.kv, KeyVal::Data(l, _) if intern::str_get(l).starts_with('\u{1}'));
+        if self.unwind.tries.is_empty() || model_label(a) || model_label(b) {
+            return false;
+        }
+        if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
+            let name = match op { Add => "add", Sub => "sub", Mult => "mul", Div => "truediv", FloorDiv => "floordiv", Mod => "mod", Pow => "pow", LShift => "lshift", RShift => "rshift", BitOr => "or_", BitXor => "xor", BitAnd => "and_", MatMult => "" };
+            if crate::models::pyvalues::operator_call(name, &[x, y]).is_some() {
+                return false;
+            }
+        }
+        let (ta, tb) = (self.value_type(a), self.value_type(b));
+        if op == Mod && (matches!(ta, Some("str" | "bytes")) || a.kv.as_lit().and_then(intern::key_as_str).is_some()) {
+            return false;
+        }
+        let num = |t: Option<&str>| matches!(t, Some("int" | "bool" | "float"));
+        if binop_type(op, ta, tb).is_none() && !(op == Pow && num(ta) && num(tb)) {
+            self.may_raise_here("TypeError", state);
+        }
+        let zero = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(0) | intern::Key::Bool(false)) || matches!(k, intern::Key::Float(f) if f64::from_bits(*f) == 0.0));
+        let unknown = |v: &Value| !v.pts.is_empty() || matches!(v.kv, KeyVal::Data(_, _) | KeyVal::KeysOf(_));
+        let (la, lb) = (kv_literals(&a.kv), kv_literals(&b.kv));
+        match op {
+            Div | FloorDiv | Mod if !matches!(ta, Some("str" | "bytes")) => {
+                if !unknown(a) && !unknown(b) && !lb.is_empty() && lb.iter().all(zero) && !la.is_empty() && la.iter().all(intern::key_is_number) {
+                    self.raise_here("ZeroDivisionError", state);
+                    return true;
+                }
+                if unknown(b) || lb.iter().any(zero) {
+                    self.may_raise_here("ZeroDivisionError", state);
+                }
+            }
+            Pow if unknown(a) || unknown(b) || (!la.is_empty() && !lb.is_empty()) => {
+                self.may_raise_here("ZeroDivisionError", state);
+                self.may_raise_here("OverflowError", state);
+            }
+            LShift | RShift if unknown(b) || lb.iter().any(|k| intern::key_as_int(k).is_some_and(|n| n < 0)) => {
+                self.may_raise_here("ValueError", state);
+            }
+            _ => {}
+        }
+        false
     }
 
     /// `a op b` where the program's dunders or a library model decide it: `__add__` & co., a
@@ -545,8 +616,14 @@ impl Analyzer {
         // object, which may be any text: that object stands for the rest of the result)
         let unknown_only = |v: &Value| v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown);
         match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
-            (Some(x), _) if a.pts.is_empty() && unknown_only(b) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::with_kv(b.pts.clone(), self.affix(&b.kv, &x, ""))),
-            (_, Some(y)) if b.pts.is_empty() && unknown_only(a) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::with_kv(a.pts.clone(), self.affix(&a.kv, "", &y))),
+            (Some(x), _) if a.pts.is_empty() && unknown_only(b) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => {
+                self.objects_op_raises(both, state);
+                return Some(Value::with_kv(b.pts.clone(), self.affix(&b.kv, &x, "")));
+            }
+            (_, Some(y)) if b.pts.is_empty() && unknown_only(a) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => {
+                self.objects_op_raises(both, state);
+                return Some(Value::with_kv(a.pts.clone(), self.affix(&a.kv, "", &y)));
+            }
             _ => {}
         }
         // two lists with known positions: the concatenation's positions
@@ -562,6 +639,10 @@ impl Analyzer {
         }
         let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
         if !lists.is_empty() {
+            // (a list and what may be no list: a TypeError, unknown code's for an unknown)
+            if lists.len() < both.len() || !a.kv.is_bot() || !b.kv.is_bot() || a.pts.is_empty() || b.pts.is_empty() {
+                self.objects_op_raises(both, state);
+            }
             // (the elements of every alternative of either side: a list's, an unknown's)
             let acc = join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
@@ -573,6 +654,7 @@ impl Analyzer {
         // either; a slice or concatenation stands for its sequences)
         let unknowns = |v: &Value| !v.pts.is_empty() && matches!(v.kv, KeyVal::Bot | KeyVal::Data(_, _)) && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown && !self.is_any(o));
         if unknowns(a) && unknowns(b) {
+            self.objects_op_raises(both, state);
             let bases: Vec<u32> = both.iter().flat_map(|o| self.slice_base(o).map(|s| s.to_vec()).unwrap_or_else(|| vec![o])).collect();
             let sid = self.elems_of(&crate::domain::ObjSet::from_vec(bases), "", state);
             return Some(Value::obj(sid));

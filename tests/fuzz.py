@@ -446,8 +446,18 @@ class Sup:
     def __exit__(self, t, e, tb):
         log.append("out")
         return t is not None and issubclass(t, E2)
+def fin_read(d):
+    r = 0
+    try:
+        r = 1
+        d["a"]
+        r = 2
+    finally:
+        log.append(r)
+    return r
 log = []
 n = len(sys.argv)
+D = {"a": 1} if n > 99 else {"b": 2}
 x = 0
 y = 1
 z = "s\""""
@@ -475,6 +485,9 @@ def tries_op() -> list:
         ["try:", f"    {x} = int({y})", "except (TypeError, ValueError):", f"    {x} = {v}"],
         ["i = 0", "while True:", "    i += 1", "    try:", "        if i > n:", "            break", f"        {x} = boom(i)", "    except E1:", "        continue",
          "    finally:", f"        {y} = i"],
+        ["try:", f"    {x} = fin_read(D)", "except KeyError:", f"    {x} = log[-1]"], ["try:", "    try:", f"        {x} = D['a']", "    finally:", f"        {y} = {v}", "except LookupError:", "    pass"],
+        ["try:", f"    {x} = 10 // {y}", "except ZeroDivisionError:", f"    {x} = 'zd'", "except TypeError:", f"    {x} = 'te'"],
+        ["try:", f"    {x} = {y} + {v}", "except TypeError:", f"    {x} = 'te'"],
         [f"{x} = {v}"], [f"log.append({x})"],
     ])
 
