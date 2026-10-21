@@ -31,5 +31,5 @@ def guarded(d):
 
 
 g = guarded({"a": 1})
-#@value g: includes={True}
-#@todo value g: exactly={True}  (a generator that raises before its end: `list` of it is taken as of an endless one, its yields joined, not as surely raising)
+#@value g: exactly={True}
+# (a generator whose body surely raises before its end: `list` of it raises there, nothing after it runs)

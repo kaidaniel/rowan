@@ -22,6 +22,8 @@ impl Analyzer {
             }
             self.exec_stmt(st, state);
             self.after_stmt(st, state);
+            // (generators nothing holds any more are closed: `genclose.rs`)
+            self.close_unheld(state);
         }
     }
 
@@ -81,7 +83,8 @@ impl Analyzer {
                 // (a generator the loop runs: what the body changes, it may read at its yields)
                 let depth = self.gens.for_iters.len();
                 self.with_gen_restart(state, false, &mut |an, st| an.stmt_for(f, st));
-                if let Some(used) = self.gens.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body)) {
+                // (a loop whose body yields: the consumer's code runs between the items)
+                if let Some(used) = self.gens.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body) && !crate::syntax::is_generator(&f.body)) {
                     self.gen_used_up(&used, state);
                 }
                 self.gens.for_iters.truncate(depth);
@@ -121,6 +124,10 @@ impl Analyzer {
             if st.reachable {
                 self.run_finally(&fin, &mut st, false);
             }
+        }
+        // (a loop over a generator made for it alone drops it: closed)
+        if matches!(node, ast::Stmt::Break(_)) {
+            self.close_at_break(n, &mut st);
         }
         if let (true, Some(ctx)) = (st.reachable, self.unwind.loop_stack.last_mut()) {
             let acc = if matches!(node, ast::Stmt::Break(_)) { &mut ctx.breaks } else { &mut ctx.continues };
@@ -640,6 +647,15 @@ impl Analyzer {
                 }
                 ast::Expr::Name(nm) => {
                     state.env.shift_remove(&s(nm.id.as_str()));
+                    // (a module's global: no longer bound there)
+                    let fr = self.frame();
+                    let global = fr.kind == super::FrameKind::Module || (fr.kind == super::FrameKind::Function && self.heap.module_info(fr.module).scopes.get(fr.scope).globals_decl.contains(nm.id.as_str()));
+                    if global {
+                        let (m, k) = (fr.module, intern::key_str_lit(nm.id.as_str()));
+                        state.slots.remove(&m, &(Ns::Attr, k));
+                        let r = state.row(m, Ns::Attr).delete(k, true);
+                        state.set_row(m, Ns::Attr, r);
+                    }
                 }
                 _ => {}
             }

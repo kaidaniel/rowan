@@ -91,6 +91,10 @@ pub struct GenEffects {
     /// joined over the yields and the end, when each yield has its state in `at`: after an
     /// item was taken, at a position not known
     pub taken: std::cell::OnceCell<Option<State>>,
+    /// the facts after it is closed at its k-th yield (GeneratorExit raised there, `genclose.rs`),
+    /// and joined over the yields (None: closing it changes nothing)
+    pub closed_at: Vec<Option<State>>,
+    pub closed: Option<State>,
 }
 
 impl GenEffects {
@@ -208,6 +212,19 @@ pub struct Gens {
     pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize, std::sync::Arc<Vec<StrId>>)>,
     /// generators stored into a module's global (watched after the call that started them)
     pub global_held: FxHashSet<ObjId>,
+    /// the generator runs whole in progress: where GeneratorExit raised at their yields lands
+    /// (`genclose.rs`)
+    pub bounds: Vec<super::genclose::GenBound>,
+    /// generators with closing facts asked for items, and the frame depth where they last were
+    pub closable: FxHashMap<ObjId, usize>,
+    /// the loops running over a generator made for them alone: (their loop level, their frame
+    /// depth, the generator)
+    pub fresh_loops: Vec<(usize, usize, ObjId)>,
+    /// what a generator's suspended frame holds of generators with closing facts
+    pub holds: FxHashMap<ObjId, Value>,
+    /// generators run whole whose body surely raises before its end, and the running tries then
+    /// (`Analyzer::try_mark`)
+    pub raising: FxHashMap<ObjId, (usize, u64)>,
 }
 
 impl Gens {
@@ -232,6 +249,11 @@ impl Analyzer {
         let ctx = if genexp { self.frame().ctx.clone() } else { self.receiver_ctx(&self_v, &site) };
         let label = if genexp { "generator expression".to_string() } else { format!("generator {}", self.heap.func_info(foid).qualname) };
         let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
+        // (the one made here before, suspended with closing facts, is this object no more: it
+        // may be dropped now, as when its name is bound again — `genclose.rs`)
+        if self.may_close(gid, state) {
+            self.close_gen(gid, state, super::genclose::Close::Maybe);
+        }
         self.start_iterator(gid, state);
         let mut self_v = self_v;
         let pending = self.gens.lazy.get(&gid).filter(|_| lazy_state(state, gid).0).cloned();
@@ -522,7 +544,8 @@ impl Analyzer {
     /// attribute of its receiver for the next call).
     fn close_watches(&mut self, wmark: usize, pre: &State, state: &State) {
         let at = if state.reachable { state } else { state.exits.as_deref().unwrap_or(state) };
-        let mut gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).filter(|g| self.may_resume(*g, at)).collect();
+        let held = self.gens.bounds.last().filter(|b| b.depth == self.cx.frames.len());
+        let mut gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).filter(|g| self.may_resume(*g, at) || held.is_some_and(|b| b.holds.contains(g))).collect();
         gids.sort_unstable();
         gids.dedup();
         let kept = if gids.is_empty() {
@@ -530,8 +553,10 @@ impl Analyzer {
         } else {
             let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
             let mut kept = self.reach_among(&roots, &gids, at, false);
-            // (a generator a global holds is resumed by later calls)
-            kept.extend(gids.iter().filter(|g| self.gens.global_held.contains(g)));
+            // (a generator a global holds is resumed by later calls; one the frame of a
+            // generator run whole holds, as that one is resumed: `genclose.rs`)
+            let held = self.gens.bounds.last().filter(|b| b.depth == self.cx.frames.len());
+            kept.extend(gids.iter().filter(|g| self.gens.global_held.contains(g) || held.is_some_and(|b| b.holds.contains(g))));
             kept
         };
         let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
@@ -773,6 +798,8 @@ impl Analyzer {
         // (a generator expression's positioned as a comprehension's: its object is one generator)
         let positional = (self.frame().single || self.heap.func_info(foid).node.is_genexp()) && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.heap.llen(gid, state) };
+        // (the position of this yield, for the state GeneratorExit raised here leaves)
+        let mut pos: Option<usize> = None;
         match (positional, ll) {
             (true, Some(n)) if n < super::UNROLL_MAX => {
                 state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
@@ -797,6 +824,7 @@ impl Analyzer {
                 if conflict_now {
                     self.gens.pos_conflict.insert((gid, n));
                 }
+                pos = self.gens.pos_states.get(&gid).and_then(|ps| ps[n].as_ref()).map(|_| n);
             }
             // (the yields so far keep their positions: a known prefix)
             (_, Some(n)) if n > 0 => {
@@ -833,6 +861,15 @@ impl Analyzer {
                 }
             }
         }
+        self.record_yield_state(gid, site, state);
+        self.consumer_between(gid, state);
+        self.close_point(pos, state);
+        Some(gid)
+    }
+
+    /// The state at a yield of generator `gid`'s running activation (`site`: the suspension
+    /// point with the unrolled loop positions), for its caller (`gen_suspension_join`).
+    fn record_yield_state(&mut self, gid: ObjId, site: (usize, usize), state: &State) {
         const MAX_YIELD_STATES: usize = 4096;
         let key = (site.0, site.1, self.frame().unroll.clone());
         // (in a loop's fixpoint a later round's state at a suspension point covers the
@@ -849,8 +886,6 @@ impl Analyzer {
             let mut h = here;
             last.1 = last.1.join(&mut h);
         }
-        self.consumer_between(gid, state);
-        Some(gid)
     }
 
     /// A one-shot iterator iterated to its end: later iterations see nothing.
@@ -908,9 +943,16 @@ impl Analyzer {
         self.note_resume(o, state);
         let cv = match c {
             Some(n) => Value::lit(key_int(n as i64)),
-            None => Value::data(if at_end { "cursor-end" } else { "cursor" }),
+            None if at_end => Value::data("cursor-end"),
+            // (one with closing facts that may not have started: that kept, `may_be_unstarted`)
+            None if self.closes_on_drop(o) && self.may_be_unstarted(o, state) => Value::lit(key_int(0)).join(&Value::data("cursor")),
+            None => Value::data("cursor"),
         };
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), cv, true);
+        // (where its frame is suspended, it holds what its names do: `genclose.rs`)
+        self.note_closable(o);
+        self.note_ended(o, at_end, state);
+        self.set_holds(o, at_end || c == Some(0), state);
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let tk = key_str_lit("\u{1}effpos");
         let Some(expected) = effects_given(state, o, &ge) else { return };
@@ -939,6 +981,9 @@ impl Analyzer {
     /// An item of generator `o` was taken at a position not known: its effects are those of
     /// some yield or of its end, not those before its first item.
     pub fn gen_took_item(&mut self, o: ObjId, state: &mut State) {
+        self.note_closable(o);
+        self.note_ended(o, false, state);
+        self.set_holds(o, false, state);
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let Some(expected) = effects_given(state, o, &ge) else { return };
         if !gen_facts_equal(state, expected, &ge) {
@@ -989,6 +1034,8 @@ impl Analyzer {
     pub fn start_iterator(&mut self, o: ObjId, state: &mut State) {
         self.heap.obj_mut(o).iterator = true;
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(0)), true);
+        // (a new one: not closed, not used up — `genclose.rs`)
+        self.reset_closing(o, state);
     }
 
     /// One-shot iterator `o` is used up: it gives nothing more, whatever its containers hold
@@ -1168,6 +1215,18 @@ impl Analyzer {
         }
     }
 
+    /// `v` is used up at once by a call that runs no code between its items (`list(gen)`,
+    /// `sum`): as `exhaust`; a generator whose body surely raises before its end, run where
+    /// the tries running now recorded its raises, raises there (nothing goes on after it).
+    pub fn exhaust_whole(&mut self, v: &Value, state: &mut State) {
+        if v.single().is_some_and(|o| self.gens.raising.get(&o) == Some(&self.try_mark())) {
+            self.consume_lazy(v, true, state);
+            state.reachable = false;
+            return;
+        }
+        self.exhaust(v, state);
+    }
+
     /// `v` is used up (`list(gen)`, a `for` to its end): a lazy generator runs, an iterator's
     /// cursor goes to its end, a generator's effects are all given.
     pub fn exhaust(&mut self, v: &Value, state: &mut State) {
@@ -1190,13 +1249,15 @@ impl Analyzer {
 }
 
 /// The facts of a generator's effects its consumer was last given in `state` (`set_cursor_ex`).
-fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects) -> Option<&'a State> {
+pub(super) fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects) -> Option<&'a State> {
     let tag = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}effpos")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_str).map(|s| s.to_string());
     match tag.as_deref() {
         Some("pre") => Some(&ge.pre),
         Some("join") => Some(&ge.join),
         Some("taken") => ge.taken(),
         Some("end") => ge.end.as_ref(),
+        Some("closed") => ge.closed.as_ref(),
+        Some(t) if t.starts_with("closed") => t["closed".len()..].parse::<usize>().ok().and_then(|k| ge.closed_at.get(k)).and_then(|x| x.as_ref()),
         Some(t) => t.strip_prefix("at").and_then(|k| k.parse::<usize>().ok()).and_then(|k| ge.at.get(k)).and_then(|x| x.as_ref()),
         None => None,
     }
@@ -1234,7 +1295,7 @@ pub(super) fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
 }
 
 /// Do two states agree on the facts a generator's effects concern?
-fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool {
+pub(super) fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool {
     ge.rows.iter().all(|k| a.rows.get(k) == b.rows.get(k))
         && ge.slots.iter().all(|(o, sk)| a.slots.get(o, sk) == b.slots.get(o, sk))
         && ge.elems.iter().all(|o| a.elems.get(o) == b.elems.get(o))
@@ -1243,7 +1304,7 @@ fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool
 
 /// Join `src`'s facts about a generator's affected objects into `dst`'s: those the generator
 /// changed by then (from what it was given, `ge.pre`); the others are the consumer's as they are.
-fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+pub(super) fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
     let pre = &ge.pre;
     for k in &ge.rows {
         if let (Some(a), Some(b)) = (dst.rows.get(k), src.rows.get(k)) {
@@ -1353,18 +1414,46 @@ impl Analyzer {
         saved
     }
 
+    /// A generator activation ended: what its site held before it (`gen_activation_begin`), back.
+    pub(super) fn gen_yields_restore(&mut self, saved: Option<(ObjId, Option<YieldStates>)>) {
+        match saved {
+            Some((gid, Some(v))) => {
+                self.gens.yield_states.insert(gid, v);
+            }
+            Some((gid, None)) => {
+                self.gens.yield_states.remove(&gid);
+            }
+            None => {}
+        }
+    }
+
     /// A generator activation's body ran (to `st`): the generator's body runs at the call,
     /// eagerly, but its caller sees the heap only where the body is suspended: before the first
     /// item, at a yield, or at its end. The objects that existed before the call and that the
     /// body changed hold the join of those states (`gen_suspension_join`), and its effects per
     /// item are kept (`GenEffects`).
-    pub(super) fn gen_activation_end(&mut self, gid: ObjId, gen_cm: bool, st: &mut State, pre_bind: &State, born_mark: u64) {
+    pub(super) fn gen_activation_end(&mut self, gid: ObjId, gen_cm: bool, st: &mut State, pre_bind: &State, born_mark: u64, closes: Option<super::genclose::GenBound>) {
         let gen_yields = (!gen_cm).then(|| self.gens.yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default());
         // (a generator that ran to its end: the state there, for a consumer that uses it up)
         let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };
+        // (a run whole that ends nowhere and has no endless loop raises before its end: using it
+        // up raises there, where the tries that recorded its raises run — `exhaust`)
+        match (&closes, st.reachable) {
+            (Some(b), false) if !b.endless && !self.budget.hard_cut && !self.budget.lib_abort.get() => {
+                let m = self.try_mark();
+                self.gens.raising.insert(gid, m);
+            }
+            _ => {
+                self.gens.raising.remove(&gid);
+            }
+        }
         // a generator whose body never ends (`while True: yield …`): the caller resumes from
         // one of its yields, and the yields go on (their number is unknown)
         if !st.reachable {
+            // (one that raises before its end, every yield after as many items: that many)
+            let raises = self.gens.raising.contains_key(&gid);
+            let lens: Vec<Option<usize>> = self.gens.yield_states.get(&gid).into_iter().flat_map(|v| v.states()).filter(|s| s.reachable).map(|s| self.heap.llen(gid, s)).collect();
+            let exact = lens.first().copied().flatten().filter(|n| raises && lens.iter().all(|m| *m == Some(*n)));
             let joined = self.gens.yield_states.remove(&gid).and_then(|v| {
                 let mut it = v.list.into_iter().map(|(_, s)| s);
                 let mut acc = it.next()?;
@@ -1380,16 +1469,23 @@ impl Analyzer {
                 while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
                     p += 1;
                 }
-                ys.set_lens(gid, (None, p, 0));
+                match exact {
+                    Some(n) => self.heap.set_llen(gid, &mut ys, Some(n)),
+                    None => ys.set_lens(gid, (None, p, 0)),
+                }
                 *st = ys;
             }
         }
+        let (closed_at, closed, marked_only) = self.closed_states(gid, closes, finite_end.as_ref());
         if let Some(ys) = gen_yields {
             self.gen_suspension_join(st, pre_bind, &ys, gid, born_mark);
             // the effects per item: before the first, the objects are as before the call
             // (those of an item undone by the end too)
             if st.reachable {
-                let fp = gen_footprint(st, pre_bind, &ys.iter().filter(|y| y.reachable).collect::<Vec<_>>());
+                let mut ys: Vec<&State> = ys.iter().filter(|y| y.reachable).collect();
+                // (and what closing it changes)
+                ys.extend(closed.iter());
+                let fp = gen_footprint(st, pre_bind, &ys);
                 let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
@@ -1399,7 +1495,13 @@ impl Analyzer {
                 lens.dedup();
                 if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
                     let at = self.gens.pos_states.remove(&gid).unwrap_or_default();
-                    let ge = GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy(), taken: Default::default() };
+                    let mut ge = GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy(), taken: Default::default(), closed_at, closed };
+                    // (closing it at each of its yields changes nothing there: no closing facts)
+                    let same = |p: usize, c: &State| ge.at.get(p).and_then(|a| a.as_ref()).is_some_and(|a| gen_facts_equal(c, a, &ge));
+                    if marked_only && ge.closed_at.iter().enumerate().all(|(p, c)| c.as_ref().is_none_or(|c| same(p, c))) {
+                        ge.closed = None;
+                        ge.closed_at.clear();
+                    }
                     gen_copy_facts(st, pre_bind, &ge);
                     st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
                     self.gens.eff.insert(gid, Rc::new(ge));

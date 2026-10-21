@@ -84,12 +84,23 @@ impl Analyzer {
             None => self.eval(&g.iter, state),
         };
         let itv = self.iterable_part(&itv, state);
+        // (one made for it alone is closed where a raise leaves it: `genclose.rs`)
+        let fresh = self.fresh_gen(&itv, &g.iter, state);
+        self.force_gen(&itv, state, true);
+        self.closing_loop(fresh, usize::MAX, state, &mut |an, st| an.comp_gen_items(gens, i, limit, &itv, nonempty, st, body, own));
+    }
+
+    /// Generator level `i`'s items, of what it iterates (`itv`, run if a generator).
+    #[allow(clippy::too_many_arguments)]
+    fn comp_gen_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, nonempty: bool, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
+        let g = &gens[i];
+        let itv = itv.clone();
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
-        self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        let once = self.stops_in(&itv);
+        // (a generator with closing facts stands where the items are then)
+        let once = self.stops_in(&itv).or_else(|| itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single && self.closes_on_drop(*o)));
         let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
         if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {
             self.exhaust(&exhaust_after, state);

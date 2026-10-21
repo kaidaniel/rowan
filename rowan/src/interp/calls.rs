@@ -970,20 +970,14 @@ impl Analyzer {
         // (a `@contextmanager`'s with body, a consumer that stops early: run at its yields)
         let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len()) || (gen_id.is_some() && self.stop_hook_begins());
         self.bind_params(&fi, &self_v, a, state, node);
+        // (a run whole: where GeneratorExit raised at its yields leaves its body, `genclose.rs`)
+        let bound = gen_id.is_some() && !gen_cm && self.bound_begin(fnode);
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
+        let closes = if bound { self.gens.bounds.pop() } else { None };
         if let Some(gid) = gen_id {
-            self.gen_activation_end(gid, gen_cm, &mut st, &pre_bind, born_mark);
+            self.gen_activation_end(gid, gen_cm, &mut st, &pre_bind, born_mark, closes);
         }
-        if let Some((gid, prev)) = saved_yields {
-            match prev {
-                Some(v) => {
-                    self.gens.yield_states.insert(gid, v);
-                }
-                None => {
-                    self.gens.yield_states.remove(&gid);
-                }
-            }
-        }
+        self.gen_yields_restore(saved_yields);
         *state = st.copy();
         if let Some(gid) = gen_id {
             // what `yield from` the generator evaluates to: its return value

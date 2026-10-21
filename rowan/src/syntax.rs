@@ -120,6 +120,62 @@ pub fn stop_early_shape(body: &[ast::Stmt]) -> Option<bool> {
     (!v.0).then_some(v.1)
 }
 
+/// Has a function body (not its nested functions) a `while` loop whose test is a constant that
+/// is true (`while True:`, `while 1:`): code that may run on without end?
+pub fn has_endless_loop(body: &[ast::Stmt]) -> bool {
+    struct V(bool);
+    impl<'a> SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, _: &'a ast::Expr) {}
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            match st {
+                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => return,
+                ast::Stmt::While(w) => {
+                    self.0 |= match &*w.test {
+                        ast::Expr::BooleanLiteral(b) => b.value,
+                        ast::Expr::NumberLiteral(n) => !matches!(&n.value, ast::Number::Int(i) if i.as_u8() == Some(0)),
+                        e => is_constant(e),
+                    };
+                }
+                _ => {}
+            }
+            source_order::walk_stmt(self, st);
+        }
+    }
+    let mut v = V(false);
+    body.iter().for_each(|st| v.visit_stmt(st));
+    v.0
+}
+
+/// May a function body's own `except` clauses catch GeneratorExit (a bare `except:`, one naming
+/// GeneratorExit or BaseException)?
+pub fn catches_generator_exit(body: &[ast::Stmt]) -> bool {
+    struct V(bool);
+    impl<'a> SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, _: &'a ast::Expr) {}
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            match st {
+                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => return,
+                ast::Stmt::Try(t) => {
+                    for h in &t.handlers {
+                        let ast::ExceptHandler::ExceptHandler(h) = h;
+                        let names: Vec<String> = match h.type_.as_deref() {
+                            None => vec!["BaseException".into()],
+                            Some(ast::Expr::Tuple(tp)) => tp.elts.iter().map(dotted_last).collect(),
+                            Some(e) => vec![dotted_last(e)],
+                        };
+                        self.0 |= names.iter().any(|n| n == "GeneratorExit" || n == "BaseException");
+                    }
+                }
+                _ => {}
+            }
+            source_order::walk_stmt(self, st);
+        }
+    }
+    let mut v = V(false);
+    body.iter().for_each(|st| v.visit_stmt(st));
+    v.0
+}
+
 /// The last part of a callee as written: `json.loads` → `loads`, `f(x)(y)` → `f`; another
 /// expression's text.
 pub fn dotted_last(n: &ast::Expr) -> String {

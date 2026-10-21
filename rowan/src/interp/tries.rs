@@ -204,6 +204,12 @@ impl Analyzer {
         TryExit { recs }
     }
 
+    /// Which try contexts are running: how many, and the innermost one's start (its allocation
+    /// serial then).
+    pub(in crate::interp) fn try_mark(&self) -> (usize, u64) {
+        (self.unwind.tries.len(), self.unwind.tries.last().map_or(0, |t| t.mark))
+    }
+
     /// The exception classes the running try contexts catch (innermost last).
     pub fn guards(&self) -> impl DoubleEndedIterator<Item = &FxHashSet<String>> {
         self.unwind.tries.iter().map(|t| &t.caught)
@@ -215,6 +221,10 @@ impl Analyzer {
     pub(in crate::interp) fn record_raise_state(&mut self, state: &mut State) -> bool {
         let mut exc = self.unwind.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
         let cls = self.unwind.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
+        // (GeneratorExit raised at a yield, leaving the body of the generator run whole there)
+        if self.record_close(&cls, state) {
+            return true;
+        }
         let Some(t) = self.unwind.tries.last() else { return false };
         let (fl, el) = (t.frames, t.envs);
         let mut here = state.copy();
@@ -581,6 +591,8 @@ impl Analyzer {
             }
             let mut st2 = st.copy();
             if !fin.is_empty() {
+                // (GeneratorExit raised at a yield runs code on its way out: `genclose.rs`)
+                self.note_close_ran(cls);
                 st2.reachable = true;
                 st2.ret = None;
                 st2.exits = None;

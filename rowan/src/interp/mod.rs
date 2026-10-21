@@ -38,6 +38,7 @@ pub mod flows;
 pub mod inert;
 pub mod funcs;
 pub mod gc;
+pub mod genclose;
 pub mod guards;
 pub mod items;
 pub mod iter;
