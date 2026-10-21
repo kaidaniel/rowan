@@ -544,6 +544,11 @@ def fails(xs):
             raise ValueError(v)
         G[0] = v
         yield v
+def boxes():
+    box = {"v": 0}
+    yield box
+    box["v"] += 5
+    yield box
 def fails2(d):
     G[0] += 1
     yield d.get("a", 0)
@@ -610,6 +615,9 @@ def gens_op() -> list:
          "except KeyError:", f"    {x} = len(seen) + G[0]"],
         ["seen = []", "try:", f"    {y} = len([seen.append(w) for w in fails2({{'b': {v}}})])", "except KeyError:", f"    {x} = len(seen)"],
         ["seen = []", "try:", "    for w in fails(xs):", "        seen.append(w)", f"        if w == {k}:", "            break", "except ValueError:", f"    {x} = -len(seen)"],
+        # an object the generator made and yielded, changed after: as it is at each item
+        ["for b in boxes():", f"    {x} = b['v'] + {x} % 7"], [f"{x} = [b['v'] for b in boxes()][0]"], ["g = boxes()", "b = next(g)", f"{x} = b['v']", "next(g)", f"{y} = b['v']"],
+        ["for b in boxes():", "    b['v'] = 3", f"    {x} = b['v'] + {y} % 5", f"{y} = b['v']"],
         ["seen = []", f"g = fails2({random.choice(['{}', '{"a": 1}', '{"a": 1, "b": 2}'])})", "try:", "    seen.append(next(g))", "    seen.append(G[0])",
          f"    seen.append(next(g, {v}))", "except KeyError:", f"    {x} = len(seen)", f"{y} = len(seen)"],
     ])
