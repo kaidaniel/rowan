@@ -237,6 +237,7 @@ impl Registry {
         r(&["memo.cache_info", "memo.cache_clear"], m_memo);
         r(&["functools.reduce"], m_reduce);
         r(&["functools.update_wrapper"], singledispatch::m_update_wrapper);
+        r(&["functools.lru_cache", "functools.cache", "functools.lru_cache.decorating"], singledispatch::m_lru_cache);
         r(&["itertools.chain", "itertools.chain.from_iterable"], m_chain);
         r(&["partial.*"], m_partial_call);
         r(&["logging.getLogger", "logging.getLogger.getChild", "structlog.get_logger", "loguru.logger.bind"], m_get_logger);

@@ -167,7 +167,7 @@ impl FuncNode {
 
 /// A function object of the program (`Payload::Func`): what its `def` made. The flags are set
 /// by its decorators after it is made (`apply_decorators`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuncInfo {
     pub node: FuncNode,
     pub name: String,

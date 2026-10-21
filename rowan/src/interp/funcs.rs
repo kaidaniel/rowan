@@ -189,7 +189,7 @@ impl Analyzer {
                 continue;
             }
             // functools: singledispatch (and its `register`), lru_cache / cache, wraps
-            if crate::models::singledispatch::functools_decorator(self, &q, d, fobj, fi.as_deref(), state) {
+            if crate::models::singledispatch::functools_decorator(self, &q, d, fobj, &mut fv, state) {
                 continue;
             }
             if q.starts_with("fastapi.") {
