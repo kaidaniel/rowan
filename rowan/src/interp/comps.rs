@@ -428,7 +428,7 @@ impl Analyzer {
 /// call something run as one summary iteration standing for all of them (its objects
 /// summaries, the count kept): unrolled, every forward would run each layer's methods again
 /// (a GPT of 12 blocks of 8 heads: 96 head runs per forward).
-fn comp_unroll_limit(gens: &[ast::Comprehension], parts: &[&ast::Expr], torch: bool) -> usize {
+pub(super) fn comp_unroll_limit(gens: &[ast::Comprehension], parts: &[&ast::Expr], torch: bool) -> usize {
     let costly = |e: &ast::Expr| matches!(e, ast::Expr::Call(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Await(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Named(_));
     if !parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
         return 64;

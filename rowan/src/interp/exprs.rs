@@ -245,6 +245,11 @@ impl Analyzer {
             }
         }
         let nd = frontend::node(node);
+        // (`any` / `all` / `next` of a generator expression written there: its items run here
+        // until the answer is known)
+        if let Some(r) = self.stop_early_written(&fv, c, state) {
+            return r;
+        }
         let saved_node = self.unwind.exc_node.replace(nd);
         if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
             if fv.kv.is_bot() && self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {

@@ -50,18 +50,83 @@ impl Analyzer {
     /// alone: its answer (None: not such a call; the callee's model takes the generator).
     pub(super) fn stop_early_call(&mut self, fv: &Value, call: Option<&'static ast::ExprCall>, args: &[Value], a: &Args, state: &mut State) -> Option<Value> {
         let c = call?;
-        let f = fv.single().filter(|f| fv.kv.is_bot() && self.heap.kind(*f) == Kind::External)?;
         if !a.kw.is_empty() || !a.star.is_empty() || !a.star_kw.is_empty() || c.arguments.args.len() != args.len() {
             return None;
         }
-        let stop = match (self.heap.external_qual(f).as_str(), args.len()) {
+        let stop = self.stop_of(fv, args.len(), || args.get(1).cloned())?;
+        self.stop_early(stop, &args[0], &c.arguments.args[0], state)
+    }
+
+    /// The consumer a call of `fv` with `n` arguments is (`default`: next's second one).
+    fn stop_of(&self, fv: &Value, n: usize, default: impl FnOnce() -> Option<Value>) -> Option<Stop> {
+        let f = fv.single().filter(|f| fv.kv.is_bot() && self.heap.kind(*f) == Kind::External)?;
+        Some(match (self.heap.external_qual(f).as_str(), n) {
             ("builtins.any", 1) => Stop::Any,
             ("builtins.all", 1) => Stop::All,
             ("builtins.next", 1) => Stop::Next(None),
-            ("builtins.next", 2) => Stop::Next(Some(args[1].clone())),
+            ("builtins.next", 2) => Stop::Next(Some(default()?)),
+            _ => return None,
+        })
+    }
+
+    /// `any(<genexp>)`, `all(…)`, `next(…[, d])` with the generator expression written as the
+    /// argument (next's default running no code): its items run here, as a comprehension's,
+    /// until answered (no frame of its own: nothing else holds it, nothing runs before it).
+    pub(super) fn stop_early_written(&mut self, fv: &Value, c: &'static ast::ExprCall, state: &mut State) -> Option<Value> {
+        if !c.arguments.keywords.is_empty() {
+            return None;
+        }
+        let (g, rest) = match &c.arguments.args[..] {
+            [g @ ast::Expr::Generator(_)] => (g, None),
+            [g @ ast::Expr::Generator(_), d] if crate::syntax::runs_no_code(d) => (g, Some(d)),
             _ => return None,
         };
-        self.stop_early(stop, &args[0], &c.arguments.args[0], state)
+        if crate::syntax::has_await(g) || matches!(g, ast::Expr::Generator(ge) if ge.generators.iter().any(|c| c.is_async)) {
+            return None;
+        }
+        let d = rest.map(|d| self.eval(d, &mut state.copy()));
+        let stop = self.stop_of(fv, c.arguments.args.len(), || d)?;
+        Some(self.stop_early_in_place(stop, g, state))
+    }
+
+    /// `x in <genexp>` (x's value `a`): run here until an item equals it.
+    pub(super) fn in_genexp_in_place(&mut self, a: &Value, g: &'static ast::Expr, state: &mut State) -> Value {
+        self.stop_early_in_place(Stop::In(a.clone()), g, state)
+    }
+
+    /// Generator expression `ge`'s items run here for consumer `stop` (`stop_early_written`).
+    fn stop_early_in_place(&mut self, stop: Stop, ge: &'static ast::Expr, state: &mut State) -> Value {
+        let ast::Expr::Generator(g) = ge else { return Value::new() };
+        let nd = frontend::node(ge);
+        let own = self.alloc_at(Kind::List, &nd, state, &format!("genexp@L{}", nd.line), super::Payload::None, None, crate::domain::Ns::Item, None, None);
+        let mut names: Vec<intern::StrId> = g.generators.iter().flat_map(|c| crate::syntax::names_in(&c.target)).map(|n| intern::s(&n)).collect();
+        names.sort_unstable();
+        names.dedup();
+        let outer: Vec<Option<Value>> = names.iter().map(|n| state.env.get(n).cloned()).collect();
+        let mut pre = state.copy();
+        self.enter_try(FxHashSet::from_iter(["GeneratorExit".to_string()]), &mut pre);
+        let depth = self.cx.frames.len() - 1;
+        self.gens.stop_hooks.push(StopHook { depth, stop: stop.clone(), expr: ge, entered: true, result: None });
+        let limit = super::comps::comp_unroll_limit(&g.generators, &[&g.elt], self.is_torch_module(self.frame().module));
+        let elt: &'static ast::Expr = &g.elt;
+        self.comp(&g.generators, limit, state, &mut |an, st| {
+            let v = an.eval(elt, st);
+            an.stop_at_yield(v, st);
+        }, own);
+        // (where it stopped: the comprehension's variables are its own, as after it)
+        let restore = |st: &mut State| {
+            for (n, v) in names.iter().zip(&outer) {
+                match v {
+                    Some(v) => {
+                        st.env.insert(*n, v.clone());
+                    }
+                    None => {
+                        st.env.shift_remove(n);
+                    }
+                }
+            }
+        };
+        self.finish_stop(&stop, false, true, state, &restore)
     }
 
     /// The consumer `stop` of generator `g`, made by `expr` and by nothing else, not run yet: its
@@ -84,17 +149,32 @@ impl Analyzer {
         self.enter_try(FxHashSet::from_iter(["GeneratorExit".to_string()]), &mut pre);
         self.gens.stop_hooks.push(StopHook { depth: self.cx.frames.len(), stop: stop.clone(), expr, entered: false, result: None });
         let r = self.call_user(lg.foid, lg.self_v.clone(), Args::new(&lg.args, &lg.kwargs, &[], &[]), state, &lg.node, false);
+        self.cx.call_chain = saved;
+        self.cx.call_files = saved_files;
+        let ran = self.gens.stop_hooks.last().is_some_and(|h| h.entered) && r.pts.contains(o);
+        let result = self.finish_stop(&stop, resumes, ran, state, &|_| {});
+        state.slots.remove(&o, &(crate::domain::Ns::Attr, intern::key_str_lit("\u{1}lazyargs")));
+        state.set_slot(o, crate::domain::Ns::Attr, intern::key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
+        if !ran {
+            self.gen_body_not_run(o, &r, &lg.node, state);
+            return None;
+        }
+        Some(result)
+    }
+
+    /// After a run for consumer `stop` (its hook and GeneratorExit try still running): the
+    /// states where it stopped and was closed (`restore`d) joined with its end's (`ran`: it ran
+    /// there; `resumes`: its code may go on after GeneratorExit), and the consumer's answer.
+    fn finish_stop(&mut self, stop: &Stop, resumes: bool, ran: bool, state: &mut State, restore: &dyn Fn(&mut State)) -> Value {
         // (the answers where it stopped are the collector's roots until taken: `gc_pinned`)
         let exit = self.leave_try();
         let hook = self.gens.stop_hooks.pop().expect("stop hook");
-        self.cx.call_chain = saved;
-        self.cx.call_files = saved_files;
-        // (where it stopped and was closed: the consumer goes on from there)
         let mut closed: Option<State> = None;
         for rec in exit.recs {
             match &rec.0 {
                 Some((names, _)) if names.first().is_some_and(|n| n == "GeneratorExit") => {
                     let mut st = rec.1;
+                    restore(&mut st);
                     closed = Some(match closed {
                         Some(mut c) => c.join(&mut st),
                         None => st,
@@ -103,11 +183,10 @@ impl Analyzer {
                 _ => self.reraise_rec(rec),
             }
         }
-        let ran = hook.entered && r.pts.contains(o);
         // the answer where it ran to its end (where its code went on after GeneratorExit, too)
         let mut result = hook.result.clone().unwrap_or_default();
         if state.reachable && ran {
-            match &stop {
+            match stop {
                 Stop::Any | Stop::In(_) => result = result.join(&bool_v(false)),
                 Stop::All => result = result.join(&bool_v(true)),
                 Stop::Next(Some(d)) => result = result.join(d),
@@ -119,13 +198,7 @@ impl Analyzer {
             let j = if state.reachable { state.join(&mut c) } else { c };
             state.replace_with(j);
         }
-        state.slots.remove(&o, &(crate::domain::Ns::Attr, intern::key_str_lit("\u{1}lazyargs")));
-        state.set_slot(o, crate::domain::Ns::Attr, intern::key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
-        if !ran {
-            self.gen_body_not_run(o, &r, &lg.node, state);
-            return None;
-        }
-        Some(result)
+        result
     }
 
     /// Does a consumer that stops early run the generator whose activation begins here? Marks

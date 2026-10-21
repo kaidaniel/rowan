@@ -16,6 +16,17 @@ impl Analyzer {
         // (each comparator is evaluated once, as Python does; a false link of a chain ends it)
         let nd = frontend::node(node);
         let mut left = self.eval(&c.left, state);
+        // (`x in <generator expression>`: its items run here until one equals x)
+        if let ([op @ (ast::CmpOp::In | ast::CmpOp::NotIn)], [g @ ast::Expr::Generator(ge)]) = (&c.ops[..], &c.comparators[..]) {
+            if !ge.generators.iter().any(|c| c.is_async) && state.reachable {
+                let r = self.in_genexp_in_place(&left, g, state);
+                return match (r.kv.as_lit().filter(|_| r.pts.is_empty()), op) {
+                    (Some(k), ast::CmpOp::NotIn) => Value::lit(intern::key_bool(k != intern::key_bool(true))),
+                    (Some(_), _) => r,
+                    (None, _) => Value::data("bool"),
+                };
+            }
+        }
         let mut all_true = true;
         for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
             let b = self.eval(cmp, state);
