@@ -324,9 +324,9 @@ impl Analyzer {
         if !st.reachable {
             return;
         }
-        let fp = st.footprint(pre);
-        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
         let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
+        let fp = gen_footprint(st, pre, &ys);
+        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
         // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
         // copies of one another changed by the body, sharing structure: each is diffed against
         // the one before it (the first against `pre`), and only the keys the diff names are
@@ -1192,6 +1192,26 @@ fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects)
 }
 
 /// (not run on some path, run on some path) for a generator `make_lazy_gen` made
+/// What a generator's run changed of the facts it had at the call (`pre`): at its end (`st`) or
+/// at any of its yields (`ys`, in order: each diffed against the one before), sorted.
+fn gen_footprint(st: &State, pre: &State, ys: &[&State]) -> Footprint {
+    let mut fp = st.footprint(pre);
+    let mut prev = pre;
+    for y in ys {
+        fp.rows.extend(y.rows.diff_keys(&prev.rows));
+        fp.slots.extend(y.slots.diff_keys(&prev.slots));
+        fp.elems.extend(y.elems.diff_keys(&prev.elems));
+        prev = y;
+    }
+    fp.rows.sort_unstable();
+    fp.rows.dedup();
+    fp.slots.sort_unstable();
+    fp.slots.dedup();
+    fp.elems.sort_unstable();
+    fp.elems.dedup();
+    fp
+}
+
 fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
     match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
         Some(v) => {
@@ -1348,8 +1368,9 @@ impl Analyzer {
         if let Some(ys) = gen_yields {
             self.gen_suspension_join(st, pre_bind, &ys, gid, born_mark);
             // the effects per item: before the first, the objects are as before the call
+            // (those of an item undone by the end too)
             if st.reachable {
-                let fp = st.footprint(pre_bind);
+                let fp = gen_footprint(st, pre_bind, &ys.iter().filter(|y| y.reachable).collect::<Vec<_>>());
                 let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
