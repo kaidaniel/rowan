@@ -190,6 +190,9 @@ pub struct FuncInfo {
     pub is_cached: Cell<bool>,
     /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
     pub is_memo: Cell<bool>,
+    /// decorated by what rowan takes to give it back unchanged (a decorator not modelled,
+    /// `typing.overload`, …): what the name holds may be another object
+    pub opaque: Cell<bool>,
 }
 
 impl FuncInfo {

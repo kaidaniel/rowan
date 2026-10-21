@@ -91,6 +91,7 @@ impl Analyzer {
             is_contextmanager: std::cell::Cell::new(false),
             is_cached: std::cell::Cell::new(false),
             is_memo: std::cell::Cell::new(false),
+            opaque: std::cell::Cell::new(false),
         };
         let n = node.node();
         let has_closure = !info.closure.is_empty();
@@ -207,14 +208,20 @@ impl Analyzer {
                 };
                 let mut probe = state.copy();
                 let tv = self.eval(target, &mut probe);
-                // (also the program's class, `@Parser`: an instance of it; an instance: its `__call__`)
+                // (also the program's class, `@Parser`: an instance of it; an instance: its `__call__`
+                // — a followed package's class, `@nx._dispatchable`, is taken to give the function
+                // back, its construction often past what following allows)
                 !tv.pts.is_empty() && tv.pts.iter().all(|o| match self.heap.kind(o) {
                     Kind::Function | Kind::Bound | Kind::Instance => true,
-                    Kind::Class => self.heap.class_info_opt(o).is_some(),
+                    Kind::Class => self.heap.class_info_opt(o).is_some_and(|ci| !self.heap.module_info(ci.module).library),
                     _ => false,
                 })
             };
             if !user_target && (KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register")) {
+                // (most give back another object in fact: what is known of it is not the function's)
+                if let (Some(fi), false) = (&fi, matches!(q.as_str(), "abc.abstractmethod" | "typing.final" | "typing.no_type_check")) {
+                    fi.opaque.set(true);
+                }
                 continue;
             }
             if q.starts_with("user:") || user_target {
@@ -234,6 +241,9 @@ impl Analyzer {
             }
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
             self.findings.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
+            if let Some(fi) = &fi {
+                fi.opaque.set(true);
+            }
         }
         fv
     }

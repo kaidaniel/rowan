@@ -44,7 +44,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   possibly-unbound ones), joined per class (an object a raise leaves half-built, also in a with body, is dropped there unless this path holds it, `drop_unreached`);
   handlers start from the raises they may catch (binding those of their classes), the rest go on through the `finally` to the
   enclosing try. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
-* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site (a decorator of the program's, its class or instance too, is called with the function) (its defaults what `__defaults__` / `__kwdefaults__` hold once read or set), in a
+* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site (a decorator of the program's, its class — not a followed package's — or instance too, is called with the function; one not modelled leaves it `opaque`) (its defaults what `__defaults__` / `__kwdefaults__` hold once read or set), in a
   context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of

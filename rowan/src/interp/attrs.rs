@@ -487,11 +487,12 @@ impl Analyzer {
     }
 
     /// Is `f` a plain function of the program, whose attributes are what the program gave it
-    /// (not a property, static or class method, cached property, lru_cache or singledispatch
-    /// function: those have attributes of their own)?
+    /// (not a property, static or class method, cached property, lru_cache, singledispatch or
+    /// contextmanager function, nor one a decorator not modelled gave back: those may be
+    /// objects with attributes of their own)?
     pub fn plain_function(&self, f: ObjId) -> bool {
         let fi = self.heap.func_info(f);
-        !(fi.is_property.get() || fi.is_static.get() || fi.is_classmethod.get() || fi.is_cached.get() || fi.is_memo.get() || self.m.sdispatch.contains_key(&f))
+        !(fi.is_property.get() || fi.is_static.get() || fi.is_classmethod.get() || fi.is_cached.get() || fi.is_memo.get() || fi.is_contextmanager.get() || fi.opaque.get() || self.m.sdispatch.contains_key(&f))
     }
 
     /// A function's `__name__` / `__qualname__` / `__module__` / `__wrapped__` / `__doc__` (a
