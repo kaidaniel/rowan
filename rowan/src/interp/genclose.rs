@@ -279,7 +279,8 @@ impl Analyzer {
         // installs its own facts joined with these, as they then differ from those given)
         if how == Close::Maybe {
             if let (Some(ge), Some((_, t))) = (&ge, &target) {
-                super::gens::gen_join_facts(state, t, ge);
+                let given = super::gens::effects_given(state, o, ge).unwrap_or(&ge.pre).copy();
+                super::gens::gen_join_facts(state, t, ge, &given);
             }
             let c = state.slot(o, Ns::Attr, ck).join(&Value::data("cursor-end"));
             state.set_slot(o, Ns::Attr, ck, c, true);
@@ -292,7 +293,8 @@ impl Analyzer {
                 super::gens::gen_copy_facts(state, t, ge);
                 state.set_slot(o, Ns::Attr, tk, Value::lit(key_str_lit(tag)), true);
             } else {
-                super::gens::gen_join_facts(state, t, ge);
+                let base = super::gens::effects_given(state, o, ge).unwrap_or(&ge.pre).copy();
+                super::gens::gen_join_facts(state, t, ge, &base);
                 state.set_slot(o, Ns::Attr, tk, Value::data("effpos"), true);
             }
         }

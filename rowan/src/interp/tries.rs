@@ -58,8 +58,12 @@ pub struct TryCtx {
     /// reaches after the unwind, is garbage in a raise state)
     pub pre: State,
     pub mark: u64,
-    /// the raises recorded, per class: (class, the states, the exceptions), joined when it ends
-    pub recs: Vec<(Option<ExcNames>, Joins, Value)>,
+    /// the raises recorded, per class: (class, the states, the exceptions, how many items the
+    /// generator `gen` had given then), joined when it ends
+    pub recs: Vec<(Option<ExcNames>, Joins, Value, Option<usize>)>,
+    /// a generator run whole for a loop: its raises are taken where the loop asks for the item
+    /// it fails to give (`genraise.rs`), kept apart by how many it gave before
+    pub gen: Option<ObjId>,
     /// the last raise recorded, before collection (a loop of calls raising at one point adds
     /// nothing)
     pub last: Option<(State, Option<ExcNames>, Value)>,
@@ -69,6 +73,8 @@ pub struct TryCtx {
 pub struct TryExit {
     /// the states and exceptions at the recorded raises, joined per class
     pub recs: Vec<RaiseRec>,
+    /// per raise, how many items its generator had given (`TryCtx::gen`; None: not known)
+    pub pos: Vec<Option<usize>>,
 }
 
 impl TryExit {
@@ -181,7 +187,7 @@ impl Analyzer {
         let (frames, envs, mark) = (self.cx.frames.len(), self.cx.env_stack.len(), self.heap.serial());
         let named = crate::models::exceptions::expand_caught(caught.iter().filter(|n| !super::access::CATCH_ALL.contains(&n.as_str())).cloned().collect());
         let caught = crate::models::exceptions::expand_caught(caught);
-        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
+        self.unwind.tries.push(TryCtx { caught, named, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None, gen: None });
     }
 
     /// The try context ends: what it recorded. What callees made since the try began and
@@ -189,8 +195,12 @@ impl Analyzer {
     /// is garbage in a raise state: a try around a large recursion would otherwise join every
     /// callee's objects into its handlers.
     pub fn leave_try(&mut self) -> TryExit {
-        let Some(t) = self.unwind.tries.pop() else { return TryExit { recs: Vec::new() } };
-        let mut recs: Vec<RaiseRec> = t.recs.into_iter().filter_map(|(c, sts, e)| Some((c, sts.finish()?, e))).collect();
+        // (a generator's raises kept for its consumer's asking, `genraise.rs`: the rest here)
+        if !self.gens.raises.is_empty() {
+            self.flush_gen_raises(self.unwind.tries.len());
+        }
+        let Some(t) = self.unwind.tries.pop() else { return TryExit { recs: Vec::new(), pos: Vec::new() } };
+        let (mut recs, pos): (Vec<RaiseRec>, Vec<Option<usize>>) = t.recs.into_iter().filter_map(|(c, sts, e, p)| Some(((c, sts.finish()?, e), p))).unzip();
         for (_, st, exc) in recs.iter_mut() {
             let mut roots: Vec<ObjId> = Vec::new();
             self.state_roots(st, t.envs, t.frames, &mut roots);
@@ -201,7 +211,7 @@ impl Analyzer {
             exc.push_objs(&mut roots);
             self.collect_since(t.mark, &t.pre, roots, st, Some(t.envs));
         }
-        TryExit { recs }
+        TryExit { recs, pos }
     }
 
     /// Which try contexts are running: how many, and the innermost one's start (its allocation
@@ -288,8 +298,9 @@ impl Analyzer {
         }
         // (joined per class: a handler takes every raise of a class or none of them; what
         // callees made is collected when the try ends)
+        let pos = self.unwind.tries.last().unwrap().gen.and_then(|g| super::genraise::items_given(&self.heap, g, &here));
         let recs = &mut self.unwind.tries.last_mut().unwrap().recs;
-        match recs.iter_mut().find(|r| r.0 == cls) {
+        match recs.iter_mut().find(|r| r.0 == cls && r.3 == pos) {
             Some(r) => {
                 r.1.add(here);
                 r.2 = r.2.join(&exc);
@@ -297,7 +308,7 @@ impl Analyzer {
             None => {
                 let mut j = crate::state::Joins::default();
                 j.add(here);
-                recs.push((cls, j, exc));
+                recs.push((cls, j, exc, pos));
             }
         }
         true
@@ -502,7 +513,7 @@ impl Analyzer {
         self.cx.cond_depth += 1;
         self.cx.branch_depth += 1;
         self.exec_block(body, state);
-        let TryExit { mut recs } = self.leave_try();
+        let TryExit { mut recs, .. } = self.leave_try();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
         let hclasses = self.handler_classes(handlers, &pre);

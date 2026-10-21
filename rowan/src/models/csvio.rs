@@ -882,7 +882,10 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
         for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
             let nd = node.sub(3_000_000 + i as u32);
             for fo in f.pts.iter() {
-                if an.heap.kind(fo) == Kind::Function {
+                // (a @contextmanager generator entered: run on to its end)
+                if an.heap.kind(fo) == Kind::List && an.heap.obj(fo).iterator {
+                    an.exhaust(&Value::obj(fo), st);
+                } else if an.heap.kind(fo) == Kind::Function {
                     an.call_user(fo, None, Args::new(&args, &kwargs, &[], &[]), st, &nd, false);
                 } else {
                     an.call_value(&Value::obj(fo), &nd, None, st, Some(args.clone()));
@@ -903,7 +906,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
             f
         }
         "enter_context" => {
-            // (a @contextmanager generator ran to its end when called: its yielded value)
+            // (a @contextmanager generator: its yielded value, the rest run at the stack's exit)
             let Some(cm) = c.args.first().cloned() else { return Value::data("context") };
             let mut outs = Vec::new();
             for o in cm.pts.iter() {
@@ -914,6 +917,11 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
                             Some(items) if !items.is_empty() => items[0].clone(),
                             _ => an.elem_value(&it.elem, &c.node, "el"),
                         });
+                        let at = an.cursor_of(o, st).filter(|_| cm.pts.len() == 1).map(|c| c + 1);
+                        an.set_cursor(o, at, st);
+                        for s in recv.pts.iter() {
+                            an.m.exit_callbacks.entry(s).or_default().push((Value::obj(o), Vec::new(), IndexMap::new()));
+                        }
                     }
                     Kind::Instance => {
                         let v = an.call_method_if_defined(&Value::obj(o), "__enter__", &c.node, st).unwrap_or_else(|| Value::obj(o));

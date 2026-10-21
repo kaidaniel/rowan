@@ -538,6 +538,22 @@ def closing(xs):
 def wrap(it):
     for v in it:
         yield v * 2
+def fails(xs):
+    for v in xs:
+        if v > 3:
+            raise ValueError(v)
+        G[0] = v
+        yield v
+def boxes():
+    box = {"v": 0}
+    yield box
+    box["v"] += 5
+    yield box
+def fails2(d):
+    G[0] += 1
+    yield d.get("a", 0)
+    G[0] += 10
+    yield d["b"]
 def deleg(xs):
     yield from closing(xs)
 def take(xs):
@@ -591,6 +607,19 @@ def gens_op() -> list:
         ["g = (w + 1 for w in closing(xs))", f"{x} = next(g, {v})", "g = None"], [f"{x} = len(list(zip(closing(xs), [{v}])))"],
         ["g = closing(xs)", f"{x} = next(g, {v})", "if n > 3:", "    hold = g", "g = None"],
         ["try:", "    for w in closing(xs):", "        raise ValueError(w)", "except ValueError:", f"    {x} = G[0]"],
+        # a loop's body sees each item's effects; a generator's raise reaches the loop where it
+        # asks for the item the generator fails to give, after the body ran for those before
+        ["for w in bump():", f"    {x} = G[0] + w"], [f"{x} = [G[0] for w in bump()][-1]"], [f"{x} = [G[0] + w for w in evens(xs)][0] if xs else {v}"],
+        ["seen = []", "try:", "    for w in fails(xs):", "        seen.append(G[0])", "except ValueError:", f"    {x} = len(seen)"],
+        ["seen = []", "try:", f"    for w in fails2({random.choice(['{}', '{"a": 1}', '{"a": 1, "b": 2}'])}):", "        seen.append(G[0])", f"    {y} = {v}",
+         "except KeyError:", f"    {x} = len(seen) + G[0]"],
+        ["seen = []", "try:", f"    {y} = len([seen.append(w) for w in fails2({{'b': {v}}})])", "except KeyError:", f"    {x} = len(seen)"],
+        ["seen = []", "try:", "    for w in fails(xs):", "        seen.append(w)", f"        if w == {k}:", "            break", "except ValueError:", f"    {x} = -len(seen)"],
+        # an object the generator made and yielded, changed after: as it is at each item
+        ["for b in boxes():", f"    {x} = b['v'] + {x} % 7"], [f"{x} = [b['v'] for b in boxes()][0]"], ["g = boxes()", "b = next(g)", f"{x} = b['v']", "next(g)", f"{y} = b['v']"],
+        ["for b in boxes():", "    b['v'] = 3", f"    {x} = b['v'] + {y} % 5", f"{y} = b['v']"],
+        ["seen = []", f"g = fails2({random.choice(['{}', '{"a": 1}', '{"a": 1, "b": 2}'])})", "try:", "    seen.append(next(g))", "    seen.append(G[0])",
+         f"    seen.append(next(g, {v}))", "except KeyError:", f"    {x} = len(seen)", f"{y} = len(seen)"],
     ])
 
 

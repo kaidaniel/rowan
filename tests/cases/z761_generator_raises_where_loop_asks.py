@@ -20,8 +20,8 @@ def loop(d):
 ok, n = loop({"a": 1})
 #@value ok: includes={False}
 #@value n: includes={1}
-#@todo value ok: exactly={False}  (a generator's raises are taken where it runs whole, at the loop's start, and its loop's end is not known to be unreached)
-#@todo value n: exactly={1}  (its handler's state is the loop's start's: the normal end's joined in keeps it sound)
+#@value ok: exactly={False}
+#@value n: exactly={1}
 
 
 def collect(d):
