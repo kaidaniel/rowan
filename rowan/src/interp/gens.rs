@@ -940,9 +940,16 @@ impl Analyzer {
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(0)), true);
     }
 
-    /// One-shot iterator `o` is used up: it gives nothing more, whatever its containers hold.
+    /// One-shot iterator `o` is used up: it gives nothing more, whatever its containers hold
+    /// (a live one's `\u{1}done`).
     pub fn end_iterator(&mut self, o: ObjId, state: &mut State) {
-        self.set_cursor_ex(o, None, true, state);
+        match self.heap.llen(o, state) {
+            Some(n) => self.set_cursor(o, Some(n), state),
+            None => self.set_cursor_ex(o, None, true, state),
+        }
+        if self.m.live_iters.contains_key(&o) {
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}done"), Value::lit(intern::key_bool(true)), true);
+        }
     }
 
     /// Live iterator `o` (`Tables::live_iters`) reads `srcs` as they are at each step: what
@@ -950,6 +957,7 @@ impl Analyzer {
     /// first index + 1; a dict's or set's size, which may not change while it runs).
     pub fn watch_live(&mut self, o: ObjId, srcs: &Value, state: &mut State) {
         state.set_slot(o, Ns::Attr, key_str_lit("\u{1}src"), srcs.clone(), true);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}done"), Value::lit(intern::key_bool(false)), true);
         let n0 = self.heap.llen(o, state).map_or_else(|| Value::data("n0"), |n| Value::lit(key_int(n as i64)));
         state.set_slot(o, Ns::Attr, key_str_lit("\u{1}n0"), n0, true);
         let (all, keys) = self.live_marks(srcs, state);
@@ -1063,9 +1071,9 @@ impl Analyzer {
         }
     }
 
-    /// Is a one-shot iterator used up on this path (its length not known)?
+    /// Is a one-shot iterator used up on this path (its length not known; a live one, at all)?
     pub fn at_end(&self, o: ObjId, state: &State) -> bool {
-        self.heap.obj(o).iterator && state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end"))
+        self.heap.obj(o).iterator && (state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end")) || state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}done")) == Some(Value::lit(intern::key_bool(true))))
     }
 
     /// The items of one-shot iterator `o` from where it stands, of `items` all it gives from
@@ -1112,12 +1120,9 @@ impl Analyzer {
         self.consume_lazy(v, true, state);
         if let Some(o) = v.single() {
             if self.heap.obj(o).iterator && self.heap.obj(o).single {
-                match self.heap.llen(o, state) {
-                    // (a live one stays used up whatever its containers gain)
-                    Some(n) if !self.m.live_iters.contains_key(&o) => self.set_cursor(o, Some(n), state),
-                    // (used up, its length not known: at its end all the same)
-                    _ => self.set_cursor_ex(o, None, true, state),
-                }
+                // (used up, its length not known: at its end all the same; a live one stays used
+                // up whatever its containers gain)
+                self.end_iterator(o, state);
                 return;
             }
         }
