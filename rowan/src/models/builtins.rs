@@ -343,6 +343,20 @@ fn fill_seq(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, kind: Kind,
     }
     // (a copy of a list / tuple whose length is one of a few: the same alternatives, each
     // with its positions — reversed, from each one's end)
+    // (a one-shot iterator standing where it differs by path: as many items as are left on each,
+    // `list(it)` after a `next(it)` on one branch)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter") && an.heap.llen(oid, st).is_none() && an.heap.obj(oid).single {
+        if let Some((o, n, alts)) = src.and_then(|a| a.single().filter(|_| a.kv.is_bot())).filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).iterator).and_then(|o| Some((o, an.heap.llen(o, st)?, an.cursor_alternatives(o, st)?))) {
+            if alts.len() > 1 && n <= 15 {
+                let mask = alts.iter().fold(0u16, |m, c| m | (1 << (n - c)));
+                for j in 0..n - alts[0] {
+                    let v = join_values(alts.iter().filter(|c| *c + j < n).map(|c| st.slot(o, Ns::Pos, intern::key_int((c + j) as i64))).collect::<Vec<_>>());
+                    st.set_slot(oid, Ns::Pos, intern::key_int(j as i64), v, true);
+                }
+                st.set_lens(oid, (None, 0, mask));
+            }
+        }
+    }
     // (an iterator's from its start only)
     if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.iter" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
         if let Some(src) = src.and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple) && (!an.heap.obj(*s).iterator || an.cursor_of(*s, st) == Some(0))) {

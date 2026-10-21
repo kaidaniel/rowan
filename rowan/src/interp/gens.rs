@@ -826,6 +826,12 @@ impl Analyzer {
             let some = was.is_some_and(|ks| ks.contains(intern::key_bool(true)));
             state.set_slot(lo, Ns::Attr, done, Value::lit(intern::key_bool(true)), true);
             for (src, n) in srcs {
+                // (used up: so are the sources it takes all of, on the paths it was used up on
+                // before too)
+                if let (true, None) = (full, n) {
+                    self.exhaust(&Value::obj(src), state);
+                    continue;
+                }
                 match (full && !some, n, self.cursor_of(src, state)) {
                     (true, Some(n), Some(c)) => {
                         let end = match self.heap.llen(src, state) {
@@ -1104,6 +1110,27 @@ impl Analyzer {
             None if self.at_end(o, state) => Some((0, 0)),
             None => None,
         }
+    }
+
+    /// Where a one-shot iterator of known length may stand on the paths joined here (each one's
+    /// cursor: a number, or at its end), None where some path's is not known.
+    pub fn cursor_alternatives(&self, o: ObjId, state: &State) -> Option<Vec<usize>> {
+        let n = self.heap.llen(o, state)?;
+        let Some(v) = state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) else { return Some(vec![0]) };
+        if !v.pts.is_empty() {
+            return None;
+        }
+        let (mut out, lits) = match &v.kv {
+            KeyVal::Data(l, h) if &*intern::str_get(*l) == "cursor-end" && !h.contains(STAR) => (vec![n], h.clone()),
+            kv if kv.is_literal() => (Vec::new(), kv_literals(kv)),
+            _ => return None,
+        };
+        for k in lits.iter() {
+            out.push(intern::key_as_int(k).filter(|c| *c >= 0)?.min(n as i64) as usize);
+        }
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
     }
 
     /// How many items a one-shot iterator has given (None: not known).
