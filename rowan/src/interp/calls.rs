@@ -973,7 +973,7 @@ impl Analyzer {
             // what `yield from` the generator evaluates to: its return value
             state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
             // (one-shot: what a consumer takes is gone for the next one)
-            self.heap.obj_mut(gid).iterator = true;
+            self.start_iterator(gid, state);
             ret = Value::obj(gid);
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();

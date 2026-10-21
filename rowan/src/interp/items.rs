@@ -246,6 +246,15 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
                 parts.push(Value::obj(oid));
             }
+            // (a one-shot iterator — a generator, `map(…)`'s — is not subscriptable)
+            Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).iterator => {
+                if obj.pts.len() == 1 && obj.kv.is_bot() {
+                    self.raise_here("TypeError", state);
+                } else {
+                    self.may_raise_here("TypeError", state);
+                }
+                return;
+            }
             Kind::List | Kind::Tuple | Kind::Set => { if self.item_of_sequence(oid, kind, key, node, state, single_target, parts) { return; } }
             Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.m.series), DATA)),
             Kind::Frame if ns == Ns::Item => {

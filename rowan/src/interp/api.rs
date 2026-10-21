@@ -26,7 +26,8 @@
 //!   - operations: `binop`, `truthiness`, `truth_of`, `instance_less`, `isinstance_classes`,
 //!     `instance_of`, `hierarchy_closed`, `value_type`, `as_type`;
 //!   - iteration: `iterate`, `iterable_part`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`,
-//!     `cursor_of`, `set_cursor`, `exhaust`, `gen_took_item`;
+//!     `cursor_of`, `set_cursor`, `exhaust`, `gen_took_item`, one-shot iterators'
+//!     `start_iterator`, `at_end`, `items_from_cursor`, `positions_left`;
 //!   - calls: `call_value`, `call_one`, `call_user`, `call_external`, `unknown_call`,
 //!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
 //!     `decorator_qualname`;
@@ -36,7 +37,7 @@
 //!     `reraise_rec`, `guards`;
 //!   - verdicts and requirements: `verdict`, `verdict_guarded`, `is_guarded`,
 //!     `require_providers`, `require_providers_k`;
-//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`;
+//!   - also `obj_edges` (what an object refers to), `has_facts` (made on this path, not collected), `strip_annotation`, `slice_label_bounds`;
 //!   - the driver's: `new`, `run`, `was_cut`, `set_cancel`, and for runs on demand
 //!     `main_block_unrun`, `on_demand`, `general_run_at`, `general_run_of`,
 //!     `outermost_functions`.

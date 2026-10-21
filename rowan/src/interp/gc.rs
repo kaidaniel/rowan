@@ -17,7 +17,7 @@ impl Analyzer {
     /// length entry in the state, and only the collector (at returns and loop exits) forgets
     /// an object's facts: an object without them was never made on this path or was
     /// collected, and needs no reachability walk.
-    pub(in crate::interp) fn has_facts(&self, oid: ObjId, state: &State) -> bool {
+    pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
         state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 

@@ -7,13 +7,13 @@ use ruff_python_ast as ast;
 use crate::domain::{DATA, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
 use crate::frontend;
 use crate::intern::{self, s};
-use crate::state::{is_any, link_view, view_hits, view_of, Kind, State};
+use crate::state::{is_any, link_view, view_hits, view_of, Kind, LenFact, State};
 use crate::syntax::{collect_assigned, contains_jump, is_constant};
 use crate::source::{source_is_data, SourceId};
 
 use super::iter::{Elem, Iteration};
 use super::stmts::{add_facts, cond_facts_for};
-use super::{Analyzer, LoopCtx, RECEIVERS_MAX, UNROLL_MAX};
+use super::{Analyzer, LoopCtx, Payload, RECEIVERS_MAX, UNROLL_MAX};
 
 /// Rounds a loop runs to its fixpoint before its state is widened (`loop_fixpoint`).
 pub const LOOP_MAX_ITER: usize = 40;
@@ -224,6 +224,7 @@ impl Analyzer {
             }
             let skipped = if *sure { None } else { Some(state.copy()) };
             self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
+            self.for_watch_step(Some(idx), state);
             join_breaks(state, skipped);
         }
         breaks
@@ -242,6 +243,93 @@ impl Analyzer {
         self.force_gen(&itv, state, true);
         self.gens.for_iters.push(itv.pts.clone());
         let it = self.iterate(&itv, &iter_node, state);
+        // (a list the body changes where the next items come from: Python takes each item as
+        // the list is then — run again, each round's item any the list holds then)
+        let watch = self.for_watch(&itv, state);
+        let redo = watch.list.is_some().then(|| (state.copy(), self.findings.mark()));
+        self.unwind.for_watch.push(watch);
+        self.for_items(f, &itv, it, state);
+        let w = self.unwind.for_watch.pop().unwrap_or_default();
+        if let (Some((pre, mark)), Some((l, _, _))) = (redo, &w.list) {
+            let differs = |a: &State, b: &State| a.lens.get(l) != b.lens.get(l) || a.elems.get(l) != b.elems.get(l) || a.slot_opt(*l, Ns::Elem, intern::STAR) != b.slot_opt(*l, Ns::Elem, intern::STAR);
+            if w.changed || (w.fixpoint && differs(&pre, state)) {
+                self.findings.drop_since(mark);
+                state.replace_with(pre);
+                self.for_live(f, &itv, &iter_node, state);
+            }
+        }
+    }
+
+    /// What a `for` watches of what it iterates (`ForWatch`): a list whose positions its items
+    /// are (the list, an `enumerate`'s or `zip`'s at its start), a dict's or set's keys.
+    fn for_watch(&self, itv: &Value, state: &State) -> ForWatch {
+        let mut w = ForWatch::default();
+        let Some(o) = itv.single().filter(|_| itv.kv.is_bot()) else { return w };
+        let plain_list = |x: &Value| x.single().filter(|l| x.kv.is_bot() && self.heap.kind(*l) == Kind::List && !self.heap.obj(*l).iterator && self.heap.obj(*l).single);
+        let list = match (&self.heap.obj(o).payload, self.heap.kind(o)) {
+            (_, Kind::List) => plain_list(itv),
+            (Payload::Enumerate(inner, _), _) if self.cursor_of(o, state) == Some(0) => plain_list(inner),
+            (Payload::Zip(a, b), _) if self.cursor_of(o, state) == Some(0) => plain_list(a).or_else(|| plain_list(b)),
+            _ => None,
+        };
+        if let Some(l) = list {
+            let n = self.heap.llen(l, state).unwrap_or(0);
+            w.list = Some((l, state.lens.get(&l), (0..n).map(|i| state.slot(l, Ns::Pos, intern::key_int(i as i64))).collect()));
+        }
+        let keyed = match (&self.heap.obj(o).payload, self.heap.kind(o)) {
+            (_, Kind::Dict | Kind::Set) if self.heap.obj(o).single => Some(o),
+            (Payload::View(_, recv), Kind::View) => recv.single().filter(|d| self.heap.kind(*d) == Kind::Dict && self.heap.obj(*d).single),
+            _ => None,
+        };
+        w.keyed = keyed.map(|d| (d, state.row(d, Ns::Item), state.lens.get(&d)));
+        w
+    }
+
+    /// After an iteration of the running `for` (item `idx` when unrolled): its list changed
+    /// where the items after it come from (`ForWatch::changed`), its dict's or set's keys
+    /// changed (a RuntimeError at the next step: surely, when its size surely differs).
+    fn for_watch_step(&mut self, idx: Option<usize>, state: &mut State) {
+        let Some(w) = self.unwind.for_watch.last_mut() else { return };
+        if !state.reachable {
+            return;
+        }
+        if let (Some((l, len0, pos0)), Some(idx)) = (&w.list, idx) {
+            if state.lens.get(l) != *len0 || (idx + 1..pos0.len()).any(|j| state.slot(*l, Ns::Pos, intern::key_int(j as i64)) != pos0[j]) {
+                w.changed = true;
+            }
+        }
+        let Some((d, r0, l0)) = w.keyed.clone() else { return };
+        let r = state.row(d, Ns::Item);
+        if r.present == r0.present && r.definite == r0.definite && r.mutators == r0.mutators && r.sources == r0.sources && state.lens.get(&d) == l0 {
+            return;
+        }
+        let sure = r.closed() && r0.closed() && r.present == r.definite && r0.present == r0.definite && r.present.len() != r0.present.len();
+        if sure {
+            self.raise_here("RuntimeError", state);
+        } else {
+            self.may_raise_here("RuntimeError", state);
+        }
+    }
+
+    /// A `for` over a list its body changes (`for_watch`): a fixpoint, each round's item any
+    /// the list holds at its start (a worklist's appended items too).
+    fn for_live(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) {
+        let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
+            let it = an.iterate(itv, node, body_s);
+            an.bind_iter_target(&f.target, &it.elem, body_s);
+            an.exec_block(&f.body, body_s);
+            an.note_resumes(body_s);
+        });
+        let mut exit_s = head;
+        if !f.orelse.is_empty() && exit_s.reachable {
+            self.exec_block(&f.orelse, &mut exit_s);
+        }
+        join_breaks(&mut exit_s, exit_acc);
+        state.replace_with(exit_s);
+    }
+
+    /// The rest of `stmt_for`: the loop over `it`, the items of `itv`.
+    fn for_items(&mut self, f: &'static ast::StmtFor, itv: &Value, it: Iteration, state: &mut State) {
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
         // follows the unrolled iterations, else it is not known after a loop that may break
@@ -257,15 +345,18 @@ impl Analyzer {
         if once.is_none() || !has_jump {
             if has_jump {
                 // (a lazy iterator a loop may break off: its sources' positions are not known)
-                self.consume_lazy(&itv, false, state);
+                self.consume_lazy(itv, false, state);
             } else {
-                self.exhaust(&itv, state);
+                self.exhaust(itv, state);
             }
         }
-        if self.for_unrolled(f, &itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
+        if self.for_unrolled(f, itv, &it, once.filter(|_| has_jump).map(|o| (o, c0)), state) {
             return;
         }
-        let Some((prefixed, prefix_breaks)) = self.for_known_prefix(f, &itv, &it, once, state) else { return };
+        let Some((prefixed, prefix_breaks)) = self.for_known_prefix(f, itv, &it, once, state) else { return };
+        if let Some(w) = self.unwind.for_watch.last_mut() {
+            w.fixpoint = true;
+        }
         // (a loop that may break off: where the iterator stands after it is not known)
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
@@ -278,6 +369,7 @@ impl Analyzer {
             let hits0 = view_hits();
             an.exec_block(&f.body, body_s);
             ends = an.view_ends(&views, hits0, body_s);
+            an.for_watch_step(None, body_s);
             // (a generator's next item is asked for at the back edge)
             an.note_resumes(body_s);
         });
@@ -692,6 +784,21 @@ impl Analyzer {
 }
 
 /// `state` joined with `other` (its replacement when `state` is unreachable).
+/// What a running `for` watches of the container it iterates (`Analyzer::for_watch`): Python
+/// takes each next item from a list as it is then, and a dict or set whose keys change raises
+/// RuntimeError at the next step.
+#[derive(Default)]
+pub struct ForWatch {
+    /// a list whose positions the items are: its length and positions at the start
+    pub list: Option<(ObjId, Option<LenFact>, Vec<Value>)>,
+    /// a dict or set whose keys are iterated: its keys' row and length at the start
+    pub keyed: Option<(ObjId, Row, Option<LenFact>)>,
+    /// an unrolled iteration changed the list where later items come from
+    pub changed: bool,
+    /// the loop ran (in part) as a fixpoint over any element
+    pub fixpoint: bool,
+}
+
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {
     if let Some(mut o) = other {
         // (a state that is unreachable still gives its returns: a loop's `else: return`)

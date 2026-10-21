@@ -9,7 +9,7 @@ use crate::models::pyvalues::{self, PyResult};
 use crate::state::{Kind, State};
 
 /// A literal key for a value: a literal, or a tuple (a list where `as_seq`) of literals.
-fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool) -> Option<KeyId> {
+fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool, len: bool) -> Option<KeyId> {
     if v.pts.is_empty() {
         return v.kv.as_lit();
     }
@@ -19,9 +19,11 @@ fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool) -> Option<KeyId> {
     let o: ObjId = v.single()?;
     match an.heap.kind(o) {
         Kind::Tuple => an.heap.literal_tuple(o, st, 0),
-        Kind::List if as_seq => {
-            let n = an.heap.llen(o, st)?;
-            let items: Option<Vec<KeyId>> = (0..n)
+        // (a one-shot iterator: the items from where it stands, `try_pure` uses it up; it has
+        // no length)
+        Kind::List if as_seq && !(an.heap.obj(o).iterator && len) => {
+            let (c, n) = an.positions_left(o, st)?;
+            let items: Option<Vec<KeyId>> = (c..c + n)
                 .map(|i| {
                     let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
                     x.kv.as_lit().filter(|_| x.pts.is_empty())
@@ -76,16 +78,27 @@ fn key_value(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId, sfx: &str) -
 const BUILTINS: &[&str] = &["abs", "round", "pow", "divmod", "min", "max", "int", "float", "str", "bool", "chr", "ord", "hex", "oct", "bin", "len", "repr", "ascii", "format"];
 const SEQ_OK: &[&str] = &["min", "max", "len"];
 
-/// Some(value) when the call is on literals and computed exactly.
+/// Some(value) when the call is on literals and computed exactly; the one-shot iterators it
+/// was given used up.
 pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
+    let r = pure_value(an, st, c)?;
+    let its: Vec<&Value> = c.args.iter().filter(|a| a.pts.iter().any(|o| an.heap.obj(o).iterator)).collect();
+    for a in its {
+        an.exhaust(a, st);
+    }
+    Some(r)
+}
+
+fn pure_value(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
     if !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
         return None;
     }
     let q = c.qual.as_str();
     let (family, name) = q.rsplit_once('.')?;
     let as_seq = SEQ_OK.contains(&name) || family == "statistics" || (family == "str" && name == "join") || crate::models::pytext::seq_arg(family, name);
-    let args: Option<Vec<KeyId>> = c.args.iter().map(|a| lit_of(an, st, a, as_seq)).collect();
-    let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit_of(an, st, v, false).map(|x| (intern::str_get(*k).to_string(), x))).collect();
+    let len = q == "builtins.len";
+    let args: Option<Vec<KeyId>> = c.args.iter().map(|a| lit_of(an, st, a, as_seq, len)).collect();
+    let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit_of(an, st, v, false, len).map(|x| (intern::str_get(*k).to_string(), x))).collect();
     match family {
         // `bytes(...)`, `str(b, encoding)`
         "builtins" if name == "bytes" || (name == "str" && (c.args.len() > 1 || !c.kwargs.is_empty())) => {

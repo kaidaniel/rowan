@@ -240,6 +240,8 @@ impl Analyzer {
                     its.push(state.slot(oid, Ns::Pos, key_int(i as i64)));
                 }
             }
+            // (a one-shot iterator used up: nothing more)
+            (_, Some(_), None) if self.at_end(oid, state) => {}
             _ => acc.items = None,
         }
         acc.elems.push(self.elem_of(&Value::obj(oid), node, state));
@@ -357,11 +359,15 @@ impl Analyzer {
             }
             (k, v) => (k, v),
         };
-        match (ki_items, vi_items, acc.items.as_mut()) {
-            (Some(kit), Some(vit), Some(its)) => {
-                // zip stops at the shorter input
+        // (zip stops at the shorter input; a one-shot iterator: from where it stands)
+        let pairs = match (ki_items, vi_items) {
+            (Some(kit), Some(vit)) => self.items_from_cursor(oid, kit.into_iter().zip(vit).collect(), state),
+            _ => None,
+        };
+        match (pairs, acc.items.as_mut()) {
+            (Some(pairs), Some(its)) => {
                 let ctx = self.frame().ctx.clone();
-                for (k, val) in kit.into_iter().zip(vit.into_iter()) {
+                for (k, val) in pairs {
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
                     self.heap.obj_mut(pid).payload = Payload::Pair(k, val);
                     its.push(Value::obj(pid));
@@ -378,12 +384,16 @@ impl Analyzer {
     fn iter_enumerate(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { return };
         let ii = self.iterate(&inner, node, state);
-        match (ii.items, acc.items.as_mut(), start) {
-            (Some(inner_items), Some(its), Some(start)) => {
-                // known items: (index, item) pairs with literal indices
+        // (known items: (index, item) pairs with literal indices, from where it stands)
+        let pairs = match (ii.items, start) {
+            (Some(inner_items), Some(start)) => self.items_from_cursor(oid, inner_items.into_iter().enumerate().map(|(i, x)| (start + i as i64, x)).collect(), state),
+            _ => None,
+        };
+        match (pairs, acc.items.as_mut()) {
+            (Some(pairs), Some(its)) => {
                 let ctx = self.frame().ctx.clone();
-                for (i, item) in inner_items.into_iter().enumerate() {
-                    let idx = Value::lit(key_int(start + i as i64));
+                for (i, item) in pairs {
+                    let idx = Value::lit(key_int(i));
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
                     self.heap.obj_mut(pid).payload = Payload::Pair(idx, item);
                     its.push(Value::obj(pid));

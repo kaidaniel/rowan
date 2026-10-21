@@ -269,7 +269,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 } else {
                     an.heap.set_llen(lid, st, None);
                 }
-                an.heap.obj_mut(lid).iterator = true;
+                an.start_iterator(lid, st);
                 return Value::obj(lid);
             }
             _ => return Value::data(name),
@@ -315,7 +315,7 @@ pub fn as_completed(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     st.set_slot(lid, Ns::Elem, intern::STAR, e.clone(), true);
     st.elems.insert(lid, e.kv.clone());
     an.heap.set_llen(lid, st, None);
-    an.heap.obj_mut(lid).iterator = true;
+    an.start_iterator(lid, st);
     Value::obj(lid)
 }
 

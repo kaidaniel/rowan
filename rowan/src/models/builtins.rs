@@ -44,7 +44,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         } else {
             for x in src.pts.iter() {
                 match an.heap.kind(x) {
-                    Kind::Zip => {
+                    Kind::Zip if an.cursor_of(x, st) == Some(0) => {
                         let Payload::Zip(ks, vs) = an.heap.obj(x).payload.clone() else { continue };
                         // both lengths known: the pairs zip makes (it stops at the shorter)
                         if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
@@ -82,7 +82,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             an.store_key(oid, Ns::Item, &kel, &vel, false, &c.node, st);
                         }
                     }
-                    Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
+                    Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Zip | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
                         let it = an.iterate(&Value::obj(x), &c.node, st);
                         match (&it.elem, &it.items) {
                             (_, Some(items)) => {
@@ -197,9 +197,13 @@ pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         if c.qual == "builtins.iter" {
-            an.heap.obj_mut(oid).iterator = true;
+            an.start_iterator(oid, st);
         } else {
             an.exhaust(a, st);
+        }
+        // (one-shot as `iter`'s)
+        if c.qual == "builtins.reversed" {
+            an.start_iterator(oid, st);
         }
         match &it.elem {
             Elem::Pair(k, v) => {
@@ -827,7 +831,8 @@ pub(super) fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 tuples.push(an.alloc_positional(Kind::Tuple, &c.node, Some(vals), Value::new(), kv, st));
                 an.frame_mut().unroll.pop();
             }
-            return an.alloc_positional(Kind::List, &c.node, Some(tuples), Value::new(), DATA, st);
+            let v = an.alloc_positional(Kind::List, &c.node, Some(tuples), Value::new(), DATA, st);
+            return one_shot(an, v, st);
         }
         // (not every input's items known: tuples of their items, how many not known)
         if c.star_args.is_empty() {
@@ -836,13 +841,15 @@ pub(super) fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.elem_value(&e, &c.node, "zn")
             }).collect();
             let t = an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", Some(elems), Value::new(), DATA, st);
-            return an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
+            let v = an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
+            return one_shot(an, v, st);
         }
     }
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
     let oid = an.alloc_at(Kind::Zip, &c.node, st, &format!("zip@L{}", c.line), Payload::Zip(a.clone(), b.clone()), None, Ns::Item, None, None);
     an.heap.obj_mut(oid).payload = Payload::Zip(a.clone(), b.clone());
+    an.start_iterator(oid, st);
     // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
     let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
     if strict {
@@ -870,7 +877,16 @@ pub(super) fn m_enumerate(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
     };
     let oid = an.alloc_at(Kind::Enumerate, &c.node, st, &format!("enumerate@L{}", c.line), Payload::Enumerate(a.clone(), start), None, Ns::Item, None, None);
     an.heap.obj_mut(oid).payload = Payload::Enumerate(a, start);
+    an.start_iterator(oid, st);
     Value::obj(oid)
+}
+
+/// `v`'s objects one-shot iterators (`zip`'s list of tuples).
+fn one_shot(an: &mut Analyzer, v: Value, st: &mut State) -> Value {
+    for o in v.pts.iter() {
+        an.start_iterator(o, st);
+    }
+    v
 }
 
 pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -915,7 +931,13 @@ pub(super) fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(g) = a.single() {
         an.gen_took_item(g, st);
     }
+    // (a zip or enumerate: one item further, where it stood known and an item there)
+    if let Some(g) = a.single().filter(|g| an.heap.obj(*g).iterator && matches!(an.heap.kind(*g), Kind::Zip | Kind::Enumerate)) {
+        let next = an.cursor_of(g, st).filter(|_| matches!(&it.items, Some(items) if !items.is_empty())).map(|c| c + 1);
+        an.set_cursor(g, next, st);
+    }
     let item = match it.elem {
+        Elem::Pair(..) if matches!(&it.items, Some(items) if !items.is_empty()) => it.items.as_ref().unwrap()[0].clone(),
         Elem::Pair(k, v) => {
             let ctx = an.frame().ctx.clone();
             let pid = an.heap.alloc_raw(Kind::Pair, &format!("pair:{}", c.site), &ctx, true, "pair", Payload::Pair(k, v));
@@ -1370,6 +1392,18 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             verdicts.push(b);
             continue;
         }
+        // (the program's function: what the program stored on it on every path, its type's
+        // attributes all dunders; an lru_cache's / singledispatch's: not known here)
+        if an.heap.kind(o) == Kind::Function && !an.heap.func_info(o).is_memo.get() && !an.m.sdispatch.contains_key(&o) && an.has_facts(o, st) {
+            let row = st.row(o, Ns::Attr);
+            if row.definite.contains(k) {
+                verdicts.push(true);
+                continue;
+            }
+            // (one it lacks is not decided, as a read of it is not: a call that did not run
+            // may give back this function as an unknown, a store into which misses it)
+            return unknown;
+        }
         if an.heap.kind(o) != Kind::Instance {
             return unknown;
         }
@@ -1509,8 +1543,9 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("map@L{}", c.line));
+    let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
     an.heap.set_llen(oid, st, None);
+    an.start_iterator(oid, st);
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
         if c.qual.ends_with("filter") {
@@ -2423,6 +2458,16 @@ pub(super) fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if !v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).contains(intern::key_none()) {
         let rest = Value::with_kv(v.pts.clone(), crate::domain::kv_exclude(&v.kv, &KeySet::one(intern::key_none())).unwrap_or(crate::domain::BOT));
+        return m_len(an, st, &Call { args: vec![rest], ..c.clone() });
+    }
+    // (a one-shot iterator has no length)
+    if v.pts.iter().any(|o| an.heap.obj(o).iterator) {
+        let rest = Value::with_kv(v.pts.filter(|o| !an.heap.obj(o).iterator), v.kv.clone());
+        if rest.empty() {
+            an.raise_here("TypeError", st);
+            return Value::new();
+        }
+        an.may_raise_here("TypeError", st);
         return m_len(an, st, &Call { args: vec![rest], ..c.clone() });
     }
     // the length of a placeholder: decided per call site where it is a known container
