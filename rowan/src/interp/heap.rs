@@ -169,6 +169,10 @@ impl FuncNode {
             FuncNode::Lambda(_) | FuncNode::GenExp(_) => &[],
         }
     }
+    /// Is it a generator expression's?
+    pub(in crate::interp) fn is_genexp(&self) -> bool {
+        matches!(self, FuncNode::GenExp(_))
+    }
     /// Does a call of it make a generator (a `def` that yields, a generator expression)?
     pub(in crate::interp) fn is_generator(&self) -> bool {
         match self {

@@ -1041,7 +1041,7 @@ impl Analyzer {
         {
             let mi = self.heap.module_info(fi.module);
             // (a generator expression's own variables are its comprehension's: `comp_cells`)
-            let own = !matches!(fi.node, FuncNode::GenExp(_));
+            let own = !fi.node.is_genexp();
             let mut cells: Vec<String> = mi.scopes.get(fi.scope).cells.iter().filter(|_| own).cloned().collect();
             cells.sort();
             for name in cells {

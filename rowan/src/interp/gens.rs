@@ -226,7 +226,7 @@ impl Analyzer {
     pub(super) fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
         let site = self.callee_site(node);
         // (a generator expression allocates as the code it is written in: its frame's context)
-        let genexp = matches!(self.heap.func_info(foid).node, super::FuncNode::GenExp(_));
+        let genexp = self.heap.func_info(foid).node.is_genexp();
         let ctx = if genexp { self.frame().ctx.clone() } else { self.receiver_ctx(&self_v, &site) };
         let q = self.heap.func_info(foid).qualname.clone();
         let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", q), Payload::None);
@@ -330,7 +330,7 @@ impl Analyzer {
     /// call that does not run takes their items as unknown code does.
     pub(super) fn force_given_genexps(&mut self, a: &Args, state: &mut State) {
         for v in a.pos.iter().chain(a.kw.values()).chain(a.star.iter()) {
-            let genexps = v.pts.filter(|o| self.gens.lazy.get(&o).is_some_and(|lg| matches!(self.heap.func_info(lg.foid).node, super::FuncNode::GenExp(_))));
+            let genexps = v.pts.filter(|o| self.gens.lazy.get(&o).is_some_and(|lg| self.heap.func_info(lg.foid).node.is_genexp()));
             if !genexps.is_empty() {
                 self.force_gen(&Value::objs(genexps), state, true);
             }
@@ -762,10 +762,8 @@ impl Analyzer {
         // straight-line yields keep their order; in a branch too (a length per path, joined
         // to the shorter known prefix, like appends)
         let in_branch = self.cx.cond_depth > 0;
-        // (a generator expression's items are positioned as a list comprehension's: its object
-        // stands for one runtime generator)
-        let genexp = matches!(self.heap.func_info(foid).node, super::FuncNode::GenExp(_));
-        let positional = (self.frame().single || genexp) && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
+        // (a generator expression's positioned as a comprehension's: its object is one generator)
+        let positional = (self.frame().single || self.heap.func_info(foid).node.is_genexp()) && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.heap.llen(gid, state) };
         match (positional, ll) {
             (true, Some(n)) if n < super::UNROLL_MAX => {
@@ -1329,7 +1327,7 @@ impl Analyzer {
         // the yielded values of this activation (a generator expression's: none yet, those of
         // an earlier activation at this site are not this one's)
         let gid = match saved {
-            None if matches!(fi.node, super::FuncNode::GenExp(_)) => {
+            None if fi.node.is_genexp() => {
                 state.drop_obj_ns(ygid, Ns::Pos);
                 state.drop_obj_ns(ygid, Ns::Elem);
                 ygid
