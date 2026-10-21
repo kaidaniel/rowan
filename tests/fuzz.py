@@ -520,6 +520,14 @@ def evens(xs):
             yield v
         else:
             G[0] = v
+def setg(v):
+    G[0] = v
+    return v
+def lazy(k):
+    t = k
+    out = (w + t for w in xs)
+    t = k + 1
+    return out
 n = len(sys.argv)
 xs = [1, 2]
 x = 0
@@ -541,6 +549,10 @@ def gens_op() -> list:
         ["g = (w * 2 for w in xs)", f"{x} = list(g)[-1] if xs else {v}"], [f"{x} = sorted(counter(4), key=lambda w: -w)[0]"],
         [f"{x} = [w for w in chain2(counter({k}), xs)][0]"], [f"{x} = {x} % 100"], [f"xs = list(acc(xs))"], [f"{x} = len(xs)"],
         ["it = iter(xs)", f"{x} = next(it, {v})", f"{y} = next(it, {v})"], [f"{x} = list(zip(counter(n), xs))[-1][0] if n and xs else {v}"],
+        # generator expressions run as their items are taken: names as they are then, effects then
+        [f"g = (w + {y} for w in xs)", f"{y} = {v}", f"{x} = list(g)[-1] if xs else {v}"], ["g = (w for w in xs)", f"xs.append({v})", f"{x} = len(list(g))"],
+        ["g = (setg(w) for w in xs)", f"{x} = G[0]", f"{y} = next(g, {v})"], ["g = (G[0] + w for w in xs)", f"G[0] = {v}", f"{x} = next(g, {v})"],
+        [f"{x} = sum(lazy({k}))"], ["g = (setg(w) for w in xs)", f"{x} = next(g, {v})", f"{y} = G[0]", f"{x} = sum(g)"],
     ])
 
 

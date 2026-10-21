@@ -17,7 +17,7 @@ the ones above it:
 | `serve.rs` | `rowan serve`: the editor's server (analyses on threads of their own, cached per file and its imports, functions answered one at a time when hovered) |
 | **syntax** | |
 | `frontend.rs` | parsing with ruff, private-name mangling, leaked trees, node positions and text (a node's address is its identity) |
-| `scopes.rs` | which names of each function, lambda and class body are locals, cells, free or globals |
+| `scopes.rs` | which names of each function, lambda, generator expression and class body are locals, cells, free or globals |
 | `syntax.rs` | questions the tree alone answers: attribute chains, names used, whether a body yields, returns, jumps, assigns |
 | **domains** | |
 | `intern.rs` | interned keys (Python literals usable as dict keys), strings, sources and lenses; `IdSet`, the sorted id set every set is |

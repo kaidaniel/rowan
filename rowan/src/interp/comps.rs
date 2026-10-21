@@ -44,6 +44,28 @@ impl Analyzer {
         }
     }
 
+    /// A generator expression's run (its frame's `.0` the iterator its first iterable gave
+    /// where it was made): its generators, a yield per item.
+    pub(super) fn genexp_body(&mut self, e: &'static ast::Expr, gid: ObjId, state: &mut State) {
+        let ast::Expr::Generator(g) = e else { return };
+        let limit = comp_unroll_limit(&g.generators, &[&g.elt], self.is_torch_module(self.frame().module));
+        let elt: &'static ast::Expr = &g.elt;
+        let site = (elt as *const ast::Expr as usize, 0);
+        self.comp(&g.generators, limit, state, &mut |an, st| {
+            let v = an.eval(elt, st);
+            an.yield_value(v, st, site);
+        }, gid);
+    }
+
+    /// Level 0 of the running generator expression's own generators: the iterator it was given.
+    fn genexp_iterator(&self, gens: &'static [ast::Comprehension], i: usize, state: &State) -> Option<Value> {
+        let f = self.frame().func.filter(|_| i == 0)?;
+        match self.heap.func_info(f).node {
+            super::FuncNode::GenExp(ast::Expr::Generator(g)) if std::ptr::eq(g.generators.as_ptr(), gens.as_ptr()) => state.env.get(&s(".0")).cloned(),
+            _ => None,
+        }
+    }
+
     /// Generator level `i` of a comprehension: its items unrolled when known (up to `limit`),
     /// else a fixpoint over any item; its filters split the state; the next level, or `body`.
     pub(super) fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
@@ -53,7 +75,10 @@ impl Analyzer {
         }
         let g = &gens[i];
         let nonempty = std::mem::take(&mut self.mode.nonempty_gen);
-        let itv = self.eval(&g.iter, state);
+        let itv = match self.genexp_iterator(gens, i, state) {
+            Some(v) => v,
+            None => self.eval(&g.iter, state),
+        };
         let itv = self.iterable_part(&itv, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);

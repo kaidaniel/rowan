@@ -133,6 +133,9 @@ impl Payload {
 pub enum FuncNode {
     Def(&'static ast::StmtFunctionDef),
     Lambda(&'static ast::ExprLambda),
+    /// a generator expression (an `Expr::Generator`): a generator function of the iterator
+    /// its first iterable gave
+    GenExp(&'static ast::Expr),
 }
 
 impl FuncNode {
@@ -141,12 +144,14 @@ impl FuncNode {
         match self {
             FuncNode::Def(f) => Some(&f.parameters),
             FuncNode::Lambda(l) => l.parameters.as_deref(),
+            FuncNode::GenExp(_) => None,
         }
     }
     pub(in crate::interp) fn node(&self) -> Node {
         match self {
             FuncNode::Def(f) => frontend::node(*f),
             FuncNode::Lambda(l) => frontend::node(*l),
+            FuncNode::GenExp(g) => frontend::node(*g),
         }
     }
     /// Its address: the identity of the function's code (all closures of one `def` share it).
@@ -154,13 +159,26 @@ impl FuncNode {
         match self {
             FuncNode::Def(f) => *f as *const _ as usize,
             FuncNode::Lambda(l) => *l as *const _ as usize,
+            FuncNode::GenExp(g) => *g as *const _ as usize,
         }
     }
     /// A `def`'s statements (a lambda's body is an expression: none).
     pub(in crate::interp) fn body(&self) -> &'static [ast::Stmt] {
         match self {
             FuncNode::Def(f) => &f.body,
-            FuncNode::Lambda(_) => &[],
+            FuncNode::Lambda(_) | FuncNode::GenExp(_) => &[],
+        }
+    }
+    /// Is it a generator expression's?
+    pub(in crate::interp) fn is_genexp(&self) -> bool {
+        matches!(self, FuncNode::GenExp(_))
+    }
+    /// Does a call of it make a generator (a `def` that yields, a generator expression)?
+    pub(in crate::interp) fn is_generator(&self) -> bool {
+        match self {
+            FuncNode::Def(f) => crate::syntax::is_generator(&f.body),
+            FuncNode::Lambda(_) => false,
+            FuncNode::GenExp(_) => true,
         }
     }
 }

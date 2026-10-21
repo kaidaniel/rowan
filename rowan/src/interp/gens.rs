@@ -225,12 +225,20 @@ impl Analyzer {
     /// one site before either is consumed: one run with their arguments joined.
     pub(super) fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
         let site = self.callee_site(node);
-        let ctx = self.receiver_ctx(&self_v, &site);
-        let q = self.heap.func_info(foid).qualname.clone();
-        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", q), Payload::None);
+        // (a generator expression allocates as the code it is written in: its frame's context)
+        let genexp = self.heap.func_info(foid).node.is_genexp();
+        let ctx = if genexp { self.frame().ctx.clone() } else { self.receiver_ctx(&self_v, &site) };
+        let label = if genexp { "generator expression".to_string() } else { format!("generator {}", self.heap.func_info(foid).qualname) };
+        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
         self.start_iterator(gid, state);
         let mut self_v = self_v;
-        if let Some(old) = self.gens.lazy.get(&gid).filter(|_| lazy_state(state, gid).0) {
+        let pending = self.gens.lazy.get(&gid).filter(|_| lazy_state(state, gid).0).cloned();
+        // (a new generator, not one made here and not run yet: younger than every mark, as a
+        // strong allocation is)
+        if pending.is_none() && self.heap.obj(gid).single {
+            self.heap.renew(gid);
+        }
+        if let Some(old) = pending {
             self_v = match (&self_v, &old.self_v) {
                 (Some(a), Some(b)) => Some(a.join(b)),
                 (a, b) => a.clone().or_else(|| b.clone()),
@@ -318,15 +326,26 @@ impl Analyzer {
         }
     }
 
+    /// The generator expressions among a call's arguments run, as for a library function: a
+    /// call that does not run takes their items as unknown code does.
+    pub(super) fn force_given_genexps(&mut self, a: &Args, state: &mut State) {
+        for v in a.pos.iter().chain(a.kw.values()).chain(a.star.iter()) {
+            let genexps = v.pts.filter(|o| self.gens.lazy.get(&o).is_some_and(|lg| self.heap.func_info(lg.foid).node.is_genexp()));
+            if !genexps.is_empty() {
+                self.force_gen(&Value::objs(genexps), state, true);
+            }
+        }
+    }
+
     /// The heap a generator's caller sees (see the call): the touched objects older than
     /// `mark` (but the generator's own item list) joined over `pre`, the yield states and `st`.
     pub(super) fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: &[State], gid: ObjId, mark: u64) {
         if !st.reachable {
             return;
         }
-        let fp = st.footprint(pre);
-        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
         let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
+        let fp = gen_footprint(st, pre, &ys);
+        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
         // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
         // copies of one another changed by the body, sharing structure: each is diffed against
         // the one before it (the first against `pre`), and only the keys the diff names are
@@ -743,7 +762,8 @@ impl Analyzer {
         // straight-line yields keep their order; in a branch too (a length per path, joined
         // to the shorter known prefix, like appends)
         let in_branch = self.cx.cond_depth > 0;
-        let positional = self.frame().single && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
+        // (a generator expression's positioned as a comprehension's: its object is one generator)
+        let positional = (self.frame().single || self.heap.func_info(foid).node.is_genexp()) && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.heap.llen(gid, state) };
         match (positional, ll) {
             (true, Some(n)) if n < super::UNROLL_MAX => {
@@ -987,17 +1007,6 @@ impl Analyzer {
         state.set_slot(o, Ns::Attr, key_str_lit("\u{1}keysfp"), keys, true);
     }
 
-    /// Generator expression `o` takes its items from `srcs` (`sync_live`).
-    pub(super) fn live_genexpr(&mut self, o: ObjId, srcs: &Value, node: &'static ast::Expr, state: &mut State) {
-        if !srcs.pts.iter().any(|x| self.changing_container(x)) {
-            return;
-        }
-        let n = crate::frontend::node(node);
-        let made = super::Call { qual: "genexpr".into(), recv: None, args: Vec::new(), kwargs: IndexMap::new(), star_args: Vec::new(), star_kwargs: Vec::new(), node: n, call_ast: None, site: format!("L{}", n.line), line: n.line };
-        self.m.live_iters.insert(o, Rc::new(crate::models::LiveIter { call: made, rerun: None }));
-        self.watch_live(o, srcs, state);
-    }
-
     /// Is `o` a container code may change while an iterator reads it (a list, dict, set, view)?
     pub fn changing_container(&self, o: ObjId) -> bool {
         match self.heap.kind(o) {
@@ -1060,17 +1069,10 @@ impl Analyzer {
                 continue;
             }
             let old = (state.slot(o, Ns::Elem, STAR), state.elems.get(&o));
-            // (a generator expression's items were made at its creation: any others now)
-            let genexpr = call.call.qual == "genexpr";
-            if genexpr {
-                state.set_slot(o, Ns::Elem, STAR, Value::data("genexpr"), true);
-                state.elems.insert(o, DATA);
-            } else {
-                crate::models::builtins::refill_live(self, state, o, &call, &srcs);
-            }
+            crate::models::builtins::refill_live(self, state, o, &call, &srcs);
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}srcfp"), all, true);
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}keysfp"), keys, true);
-            if !keys_changed && !genexpr {
+            if !keys_changed {
                 continue;
             }
             let n0 = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}n0")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int);
@@ -1192,6 +1194,26 @@ fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects)
 }
 
 /// (not run on some path, run on some path) for a generator `make_lazy_gen` made
+/// What a generator's run changed of the facts it had at the call (`pre`): at its end (`st`) or
+/// at any of its yields (`ys`, in order: each diffed against the one before), sorted.
+fn gen_footprint(st: &State, pre: &State, ys: &[&State]) -> Footprint {
+    let mut fp = st.footprint(pre);
+    let mut prev = pre;
+    for y in ys {
+        fp.rows.extend(y.rows.diff_keys(&prev.rows));
+        fp.slots.extend(y.slots.diff_keys(&prev.slots));
+        fp.elems.extend(y.elems.diff_keys(&prev.elems));
+        prev = y;
+    }
+    fp.rows.sort_unstable();
+    fp.rows.dedup();
+    fp.slots.sort_unstable();
+    fp.slots.dedup();
+    fp.elems.sort_unstable();
+    fp.elems.dedup();
+    fp
+}
+
 fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
     match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
         Some(v) => {
@@ -1298,14 +1320,22 @@ impl Analyzer {
     /// A generator activation begins (its frame pushed): its object of yielded values, new;
     /// what the activation's site held before (a running activation's yields, put back after).
     pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, foid: ObjId, fi: &super::FuncInfo, ctx: &str, state: &mut State) -> Option<YieldStates> {
-        // the yielded values of this activation
-        let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(ctx));
-        self.heap.set_llen(gid, state, Some(0));
-        state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
         // (a new activation: not consumed yet, its own item states; a running one's
         // yields are put back after it)
         // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
         let saved = self.gens.yield_states.remove(&ygid);
+        // the yielded values of this activation (a generator expression's: none yet, those of
+        // an earlier activation at this site are not this one's)
+        let gid = match saved {
+            None if fi.node.is_genexp() => {
+                state.drop_obj_ns(ygid, Ns::Pos);
+                state.drop_obj_ns(ygid, Ns::Elem);
+                ygid
+            }
+            _ => self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(ctx)),
+        };
+        self.heap.set_llen(gid, state, Some(0));
+        state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
         state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
         state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
         self.gens.pos_states.remove(&gid);
@@ -1348,8 +1378,9 @@ impl Analyzer {
         if let Some(ys) = gen_yields {
             self.gen_suspension_join(st, pre_bind, &ys, gid, born_mark);
             // the effects per item: before the first, the objects are as before the call
+            // (those of an item undone by the end too)
             if st.reachable {
-                let fp = st.footprint(pre_bind);
+                let fp = gen_footprint(st, pre_bind, &ys.iter().filter(|y| y.reachable).collect::<Vec<_>>());
                 let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let slots: Vec<(ObjId, SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();

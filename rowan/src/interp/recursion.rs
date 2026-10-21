@@ -138,7 +138,7 @@ impl Analyzer {
     /// the one above, at every call site of the recursion: it is the innermost one's recursive
     /// call.
     fn recursion_without_progress(&self, foid: ObjId, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> bool {
-        if self.recursion.depth(foid) < UNKNOWN_ACTIVE || self.frame().func != Some(foid) || matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if crate::syntax::is_generator(&f.body)) {
+        if self.recursion.depth(foid) < UNKNOWN_ACTIVE || self.frame().func != Some(foid) || self.heap.func_info(foid).node.is_generator() {
             return false;
         }
         let Some((e_self, e_args, e_kw)) = self.recursion.by_func.get(&foid).and_then(|v| v.last()).and_then(|k| self.recursion.entry.get(k)) else { return false };
@@ -227,6 +227,24 @@ impl Analyzer {
         Value::new()
     }
 
+    /// A call's body run once from `st` (its parameters bound): a lambda's expression, a
+    /// `def`'s statements, a generator expression's generators.
+    fn run_body(&mut self, fnode: FuncNode, gen_id: Option<ObjId>, st: &mut State) {
+        match fnode {
+            FuncNode::Lambda(l) => {
+                let v = self.eval(&l.body, st);
+                // (a body that raised on every path returns nothing)
+                if st.reachable {
+                    st.ret = Some(v);
+                    st.record_exit();
+                }
+                st.reachable = false;
+            }
+            FuncNode::Def(f) => self.with_gen_restart(st, true, &mut |an, s| an.exec_block(&f.body, s)),
+            FuncNode::GenExp(e) => self.genexp_body(e, gen_id.unwrap_or_default(), st),
+        }
+    }
+
     /// The rounds of a call's body from `state` (its parameters bound): one, or for a recursive
     /// activation until its result and state are stable, then widened. Its result and end state.
     pub(super) fn run_rounds(&mut self, key: &ActKey, fi: &FuncInfo, gen_id: Option<ObjId>, pre_bind: &State, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> (Value, State) {
@@ -244,18 +262,7 @@ impl Analyzer {
             if let Some(g) = gen_id {
                 self.gens.reads.push((g, false, Default::default()));
             }
-            match fnode {
-                FuncNode::Lambda(l) => {
-                    let v = self.eval(&l.body, &mut st);
-                    // (a body that raised on every path returns nothing)
-                    if st.reachable {
-                        st.ret = Some(v);
-                        st.record_exit();
-                    }
-                    st.reachable = false;
-                }
-                FuncNode::Def(f) => self.with_gen_restart(&mut st, true, &mut |an, s| an.exec_block(&f.body, s)),
-            }
+            self.run_body(fnode, gen_id, &mut st);
             if gen_id.is_some() {
                 self.gens.last_reads = self.gens.reads.pop().map(|r| r.2);
             }

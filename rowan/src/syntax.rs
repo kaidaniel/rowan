@@ -143,6 +143,72 @@ pub fn contains_call(e: &ast::Expr) -> bool {
     found
 }
 
+/// The generator expressions whose items are all taken before any other code runs, which
+/// therefore run where they are written, as list comprehensions (their names the enclosing
+/// code's), among a call's or a display's parts: one unpacked (`f(*g)`, `[*g, x]`, taken as it
+/// is reached), and the sole argument of a builtin or method that takes an iterable's items at
+/// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`; by name: one bound to something else runs so
+/// too, as before generator expressions were lazy) with nothing evaluated after it.
+pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
+    const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "any", "all", "bytes", "bytearray", "join", "extend", "update", "Counter", "deque", "OrderedDict", "cat", "concat", "concatenate", "stack"];
+    let parts: &[ast::Expr] = match e {
+        ast::Expr::Call(c) => &c.arguments.args,
+        ast::Expr::List(l) => &l.elts,
+        ast::Expr::Tuple(t) => &t.elts,
+        ast::Expr::Set(s) => &s.elts,
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<&ast::Expr> = parts.iter().filter_map(|p| match p {
+        ast::Expr::Starred(st) if matches!(&*st.value, ast::Expr::Generator(_)) => Some(&*st.value),
+        _ => None,
+    }).collect();
+    if let Some(g) = e.as_call_expr().and_then(|c| sole_genexp(c).filter(|_| TAKE_ALL.contains(&callee_name(c)))) {
+        out.push(g);
+    }
+    out
+}
+
+/// A call's sole argument when it is a generator expression and nothing is evaluated after it
+/// but code that runs none of the program's (`runs_no_code`).
+pub fn sole_genexp(c: &ast::ExprCall) -> Option<&ast::Expr> {
+    match c.arguments.args.as_ref() {
+        [g @ ast::Expr::Generator(_)] if c.arguments.keywords.iter().all(|k| k.arg.is_some() && runs_no_code(&k.value)) => Some(g),
+        _ => None,
+    }
+}
+
+/// The last name of what a call calls (`f` of `f(…)`, `join` of `s.join(…)`).
+fn callee_name(c: &ast::ExprCall) -> &str {
+    match &*c.func {
+        ast::Expr::Name(n) => n.id.as_str(),
+        ast::Expr::Attribute(a) => a.attr.as_str(),
+        _ => "",
+    }
+}
+
+/// Does evaluating `e` run none of the program's code but operators' dunders (names, constants,
+/// lambdas, operators, tests and tuples or lists of them)?
+fn runs_no_code(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Name(_) | ast::Expr::Lambda(_) | ast::Expr::NumberLiteral(_) | ast::Expr::StringLiteral(_) | ast::Expr::BytesLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) | ast::Expr::EllipsisLiteral(_) => true,
+        ast::Expr::If(x) => runs_no_code(&x.test) && runs_no_code(&x.body) && runs_no_code(&x.orelse),
+        ast::Expr::BoolOp(x) => x.values.iter().all(runs_no_code),
+        ast::Expr::Compare(x) => runs_no_code(&x.left) && x.comparators.iter().all(runs_no_code),
+        ast::Expr::BinOp(x) => runs_no_code(&x.left) && runs_no_code(&x.right),
+        ast::Expr::UnaryOp(x) => runs_no_code(&x.operand),
+        ast::Expr::Tuple(x) => x.elts.iter().all(runs_no_code),
+        ast::Expr::List(x) => x.elts.iter().all(runs_no_code),
+        _ => false,
+    }
+}
+
+/// Does an expression contain an `await` (anywhere inside it)?
+pub fn has_await(e: &ast::Expr) -> bool {
+    let mut found = false;
+    each_expr(e, &mut |x| found |= matches!(x, ast::Expr::Await(_)));
+    found
+}
+
 /// Is the expression a literal constant (str, bytes, number, bool, None, `...`)?
 pub fn is_constant(e: &ast::Expr) -> bool {
     matches!(

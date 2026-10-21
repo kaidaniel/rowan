@@ -121,18 +121,25 @@ impl Analyzer {
         }
     }
 
-    /// A generator expression: run when made, a one-shot iterator over its items. Its first
-    /// iterable is taken then, its items as they are asked for: a container among it changed
-    /// before, they are not known (`live_genexpr`).
+    /// A generator expression: a generator (`FuncNode::GenExp`) of the iterator its first
+    /// iterable gives here, its body run when its items are taken (`force_gen`); one whose items
+    /// are all taken before other code runs (`Scopes::eager_genexps`), or an `async` one: run
+    /// here, a one-shot iterator over its items.
     fn expr_generator(&mut self, g: &'static ast::ExprGenerator, node: &'static ast::Expr, state: &mut State) -> Value {
+        let addr = node as *const ast::Expr as usize;
+        let eager = std::mem::take(&mut self.mode.bulk_genexp) == addr || self.heap.module_info(self.frame().module).scopes.eager_genexps.contains(&addr);
+        if !eager && !g.generators.iter().any(|c| c.is_async) && !crate::syntax::has_await(node) {
+            let nd = frontend::node(node);
+            let src = self.eval(&g.generators[0].iter, state);
+            let iter_f = self.heap.alloc_raw(Kind::External, "ext:builtins.iter", "", true, "iter", Payload::Str("builtins.iter".into()));
+            let it = self.call_value(&Value::obj(iter_f), &nd, None, state, Some(vec![src]));
+            let f = self.make_function(super::FuncNode::GenExp(node), state, None);
+            let Some(foid) = f.single().filter(|_| state.reachable) else { return Value::new() };
+            return self.make_lazy_gen(foid, None, vec![it, f], Default::default(), state, &nd);
+        }
         let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
         if let Some(o) = v.single() {
             self.start_iterator(o, state);
-            let first = &g.generators[0];
-            if matches!(first.iter, ast::Expr::Name(_)) && !first.is_async {
-                let src = self.eval(&first.iter, state);
-                self.live_genexpr(o, &src, node, state);
-            }
         }
         v
     }
@@ -239,6 +246,12 @@ impl Analyzer {
                 self.mode.nonempty_comp = a as *const ast::Expr as usize;
             }
         }
+        // (a generator expression given alone to a library function that takes all its items at
+        // once, or to unknown code, which runs it at the call, nothing evaluated after it: run
+        // here, as `Scopes::eager_genexps` are)
+        let unknown = |o: u32| self.heap.kind(o) == Kind::Unknown || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q.starts_with("unknown."));
+        let at_once = self.bulk_consumer(&fv) || (!fv.pts.is_empty() && fv.pts.iter().all(unknown));
+        self.mode.bulk_genexp = crate::syntax::sole_genexp(c).filter(|_| at_once).map_or(0, |g| g as *const ast::Expr as usize);
         let r = self.call_value(&fv, &nd, Some(c), state, None);
         self.unwind.exc_node = saved_node;
         // (flagged after the call: what the call requires of its inputs, it requires on

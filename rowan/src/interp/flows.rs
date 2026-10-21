@@ -431,6 +431,8 @@ pub struct Flow<'a> {
     /// the first parameter (a method's receiver), what the code does with it, the locals bound
     /// once to a template, and how deep in nested functions the scan is
     first: Option<StrId>,
+    /// a generator expression's first iterable (by address): its parameter `.0`
+    genexp_first: usize,
     recv: RecvUse,
     named: FxHashMap<StrId, Option<Like>>,
     depth: u32,
@@ -440,7 +442,13 @@ pub struct Flow<'a> {
 impl<'a> Flow<'a> {
     /// A scan of code whose own names `locals` picks, `me` its receiver's name, in package `pkg`.
     pub fn new(locals: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
-        Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
+        Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
+    }
+
+    /// For a generator expression's code: its first iterable `it` stands for its parameter `.0`.
+    pub fn genexp(mut self, it: &'static Expr) -> Self {
+        self.genexp_first = it as *const Expr as usize;
+        self
     }
 
     /// Scan a function: its parameters, then its body (imports first: a use before the import
@@ -743,6 +751,9 @@ impl<'a> Flow<'a> {
     /// Where the value of `e` may come from (empty: a value made here, or unknown).
     fn srcs(&self, e: &Expr) -> Vec<Src> {
         let held = |v: Vec<Src>| v.into_iter().map(|(o, _)| (o, Level::Held)).collect::<Vec<Src>>();
+        if e as *const Expr as usize == self.genexp_first {
+            return vec![(Origin::Param(s(".0")), Level::Own)];
+        }
         match e {
             Expr::Name(n) => {
                 let n = n.id.as_str();

@@ -953,16 +953,26 @@ pub(super) fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let v = an.alloc_positional(Kind::List, &c.node, Some(tuples), Value::new(), DATA, st);
             return one_shot(an, v, st);
         }
-        // (not every input's items known: tuples of their items, how many not known)
-        if c.star_args.is_empty() {
-            let elems: Vec<Value> = c.args.clone().iter().map(|x| {
-                let e = an.iterate(x, &c.node, st).elem;
-                an.elem_value(&e, &c.node, "zn")
-            }).collect();
-            let t = an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", Some(elems), Value::new(), DATA, st);
-            let v = an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
-            return one_shot(an, v, st);
-        }
+        // (not every input's items known: tuples of their items, how many not known; with
+        // `*rows` of items not known, of any length)
+        let elems: Vec<Value> = c.args.clone().iter().map(|x| {
+            let e = an.iterate(x, &c.node, st).elem;
+            an.elem_value(&e, &c.node, "zn")
+        }).collect();
+        let t = if c.star_args.is_empty() {
+            an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", Some(elems), Value::new(), DATA, st)
+        } else {
+            let mut parts = elems;
+            for sa in &c.star_args {
+                let e = an.iterate(sa, &c.node, st).elem;
+                let row = an.elem_value(&e, &c.node, "zr");
+                let e = an.iterate(&row, &c.node, st).elem;
+                parts.push(an.elem_value(&e, &c.node, "zn"));
+            }
+            an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", None, join_values(parts), DATA, st)
+        };
+        let v = an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
+        return one_shot(an, v, st);
     }
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
