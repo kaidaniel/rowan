@@ -157,7 +157,8 @@ impl Fact {
             match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
                 // (`X | ?` is `?`: anything)
                 Some((_, d)) if *d == "?" || desc == "?" => *d = "?".into(),
-                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
+                // (each alternative once: `Context(…) | ?`, not `Context(…) | ? | Context(…) | ?`)
+                Some((_, d)) if *d != desc => *d = crate::interp::render::join_alternatives(&[d.clone(), desc]),
                 Some(_) => {}
                 None => self.legend.push((sym, desc)),
             }

@@ -62,7 +62,12 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     // (an unknown's literals it may be: `8080 | ?`)
     let lits = if v.kv.is_literal() { kv_literals(&v.kv) } else { v.kv.hint() };
     if !lits.is_empty() {
-        let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| short_literal(key_display(*k))).collect();
+        // (an object standing for itself as a key, by identity: the object, `_HelpAction(…)`)
+        let ident = |k: KeyId| an.heap.keys.identity_objs.borrow().get(&k).copied();
+        let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| match ident(*k) {
+            Some(o) => render_object(an, state, o, depth + 1, seen),
+            None => short_literal(key_display(*k)),
+        }).collect();
         if ls.len() > 4 {
             ls.truncate(4);
             ls.push("…".into());
@@ -183,10 +188,11 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             }
             render_record(an, state, o, Ns::Attr, Some(&name), depth, seen)
         }
+        // (a lambda by its line, also one a class body or function made: `<lambda on line 6>`)
         Kind::Function => {
             let l = an.heap.obj(o).label.trim_start_matches("def ").to_string();
-            match l.strip_prefix("lambda@L") {
-                Some(line) => format!("<lambda on line {}>", line),
+            match l.rsplit_once("lambda@L").filter(|(pre, n)| (pre.is_empty() || pre.ends_with('.')) && n.chars().all(|c| c.is_ascii_digit())) {
+                Some((_, line)) => format!("<lambda on line {}>", line),
                 None => l,
             }
         }
@@ -400,6 +406,27 @@ fn opaque_name(label: &str) -> String {
         b => b,
     };
     format!("<{}>", name)
+}
+
+/// An object an unknown call was given, as the legend of what the call may return names it:
+/// a container or instance as Python writes one, cut (`{…}`, `[…]`, `Settings(…)`), a model's
+/// object by its type (`<Match>`), else its name; `…` for one named by how it was made.
+pub fn given_text(an: &Analyzer, o: ObjId) -> String {
+    let label = an.heap.obj(o).label.to_string();
+    match an.heap.kind(o) {
+        Kind::Dict => "{…}".into(),
+        Kind::List => "[…]".into(),
+        Kind::Tuple => "(…)".into(),
+        Kind::Set => "{…}".into(),
+        Kind::Frame => "DataFrame[…]".into(),
+        Kind::Instance => match an.heap.instance_class(o).and_then(|c| an.heap.class_info_opt(c)) {
+            Some(ci) => format!("{}(…)", ci.name),
+            None => "object(…)".into(),
+        },
+        _ if label.contains(char::is_whitespace) => "…".into(),
+        _ if label.contains('@') => opaque_name(&label),
+        _ => label,
+    }
 }
 
 /// Keys the models keep for themselves (`"\u{1}text"`): never shown.
