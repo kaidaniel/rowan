@@ -224,6 +224,11 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   // a function nothing calls: only the value for any call
   const z = hover(idx, src, 27, "z");
   assert(z.includes("```python\nz = k + 1\n```") && !z.includes("In Calls"), z);
+  // a unary operator's unknown is named by the expression too (was `?`)
+  const z780 = path.join(root, "tests", "cases", "z780_unknowns_named_by_expression.py");
+  const src780 = fs.readFileSync(z780, "utf8").split("\n");
+  const neg = hover(indexResult(facts(z780)), src780, 7, "neg");
+  assert(neg.includes("```python\nneg = -f\n```"), neg);
   // a method: on any instance (its `__init__` given any arguments), apart from the program's
   const v = hover(idx, src, 38, "v");
   assert(v.includes("```python\nv = 0 | int(?)\n```") && v.includes("**In Calls**\n- `4` on line 49."), v);

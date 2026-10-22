@@ -1052,6 +1052,8 @@ impl Analyzer {
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable.
     pub(in crate::interp) fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
+        crate::state::mark_found(oid, Ns::Item, &Row::top());
+        crate::state::mark_found(oid, Ns::Attr, &Row::top());
         if !state.has_row(oid, Ns::Item) {
             state.set_row(oid, Ns::Item, Row::top());
             state.set_row(oid, Ns::Attr, Row::top());
@@ -1125,14 +1127,15 @@ impl Analyzer {
         let nk = key_str_lit(name);
         // (a dict's or a scalar's method: the object may be of another type, an AttributeError
         // a running try sees; a str's methods of one annotated `str` are there)
-        let method = DICT_METHOD_NAMES.contains(&name) || is_scalar_method(name);
+        let opaque = self.heap.obj(oid).opaque;
+        let method = !opaque && (DICT_METHOD_NAMES.contains(&name) || is_scalar_method(name));
         if raises && method && !(STR_METHOD_NAMES.contains(&name) && self.heap.obj(oid).ty == Some("str")) {
             self.may_raise_here("AttributeError", state);
         }
-        if DICT_METHOD_NAMES.contains(&name) {
+        if DICT_METHOD_NAMES.contains(&name) && !opaque {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
         }
-        if is_scalar_method(name) {
+        if is_scalar_method(name) && !opaque {
             // a mutating method of a list-like unknown: facts about tests on it are void
             if matches!(name, "append" | "extend" | "insert" | "remove" | "clear" | "sort" | "reverse" | "pop") {
                 self.kill_facts_on(&[oid], state);
@@ -1295,7 +1298,17 @@ impl Analyzer {
             }
             // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
             if !self.mode.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
+                let before = state.row(oid, Ns::Attr).mutators.clone();
                 self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
+                // (a call of it that did not run, unknown code to its receiver: it takes the
+                // name to store, likely there after, as a skipped method's own stores are)
+                let row = state.row(oid, Ns::Attr);
+                if state.reachable && !row.present.contains(nk) && row.mutators != before {
+                    let mut d = row.store(nk, true).data();
+                    d.definite = d.definite.remove(nk);
+                    state.set_row(oid, Ns::Attr, Row::from_data(d));
+                    state.set_slot(oid, Ns::Attr, nk, Value::obj(crate::interp::any_object(&mut self.heap)), true);
+                }
                 return true;
             }
         }

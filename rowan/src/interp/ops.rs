@@ -107,10 +107,29 @@ impl Analyzer {
         let c = self.eval(&b.right, state);
         let nd = frontend::node(node);
         let r = self.binop(b.op, &a, &c, &nd, state);
-        // an unknown result is named by the expression (`1 + b`), of its type when known
+        self.named_by_expr(r, &nd)
+    }
+
+    /// A call's or unary operator's unknown result of no name and type (`d.copy()` of an
+    /// unknown `d`, `-n`) named by the expression, as a binary operator's is.
+    pub(super) fn named_call(&self, r: Value, nd: &Node) -> Value {
+        let KeyVal::Data(l, _) = &r.kv else { return r };
+        let l = intern::str_get(*l);
+        // (a label with a type, a name or a model's meaning is kept)
+        let unnamed = l.is_empty() || &*l == "copy" || (l.starts_with('L') && l[1..].chars().all(|c| c.is_ascii_digit()));
+        // (the tensor model reads a named unknown as one that may be a tensor)
+        if !r.pts.is_empty() || !unnamed || self.m.torch_on {
+            return r;
+        }
+        self.named_by_expr(r, nd)
+    }
+
+    /// An operator's unknown result named by the expression (`1 + b`, `-n`), of its type when
+    /// known.
+    fn named_by_expr(&self, r: Value, nd: &Node) -> Value {
         if let (true, KeyVal::Data(l, _)) = (r.pts.is_empty(), &r.kv) {
             let (l, h) = (intern::str_get(*l), r.kv.hint());
-            let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
+            let text = frontend::text_at(nd).split_whitespace().collect::<Vec<_>>().join(" ");
             if !l.starts_with('\u{1}') && !text.is_empty() && text.len() <= 60 {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
@@ -215,7 +234,11 @@ impl Analyzer {
             }
         }
         let r = self.unary_untyped(u, v, node, state);
-        self.as_type(r, ty, false)
+        let r = self.as_type(r, ty, false);
+        if u.op == ast::UnaryOp::Not {
+            return r;
+        }
+        self.named_call(r, &frontend::node(node))
     }
 
     /// `op v` (`not`, `-`, `+`, `~`) before the result's type is applied.
@@ -310,7 +333,7 @@ impl Analyzer {
                 let oid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, None);
                 self.copy_into(oid, Ns::Item, a, state, true, &intern::KeySet::new());
                 self.copy_into(oid, Ns::Item, b, state, true, &intern::KeySet::new());
-                return Value::obj(oid);
+                return self.with_rest(op, a, b, Kind::Dict, Value::obj(oid), node, state);
             }
         }
         if op == ast::Operator::Add {
@@ -750,6 +773,19 @@ impl Analyzer {
         Some(self.alloc_positional(kind, node, None, Value::objs(e.pts.clone()), e.kv, state))
     }
 
+    /// `r`, what `a op b` gives where either is of `kind` (a list, a dict), and what it gives
+    /// where neither is: `"k" + "s"`, an unknown text's (`[1] if c else s`).
+    fn with_rest(&mut self, op: ast::Operator, a: &Value, b: &Value, kind: Kind, r: Value, node: &Node, state: &mut State) -> Value {
+        let rest = |an: &Analyzer, v: &Value| Value::with_kv(v.pts.filter(|o| an.heap.kind(o) != kind), v.kv.clone());
+        let (ra, rb) = (rest(self, a), rest(self, b));
+        let empty = |v: &Value| v.pts.is_empty() && v.kv.is_bot();
+        if empty(&ra) || empty(&rb) {
+            return r;
+        }
+        let other = self.binop(op, &ra, &rb, node, state);
+        r.join(&other)
+    }
+
     /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.
     fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
@@ -790,7 +826,7 @@ impl Analyzer {
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
             state.elems.insert(oid, acc.kv);
-            return Some(Value::obj(oid));
+            return Some(self.with_rest(ast::Operator::Add, a, b, Kind::List, Value::obj(oid), node, state));
         }
         // (two unknowns — sequences, texts, numbers, arrays: as sequences, the elements of
         // either; a slice or concatenation stands for its sequences)

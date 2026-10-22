@@ -391,6 +391,9 @@ impl Analyzer {
         // recursive walk over unknown values, rich's pretty printer)
         let rctx: String = self.frame().ctx.rsplit('/').next().unwrap_or("").to_string();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
+        // (a library's object: `ContextVar(…).get()` is no dict's `get`; a skipped call of the
+        // program's code gives back the program's values)
+        self.heap.obj_mut(rid).opaque |= !classes_followed;
         // everything it can reach through what it is given may have changed: keys, values,
         // items, lengths; and it may call the program's functions it is given
         let (found, met) = self.havoc_given(&vals, rid, site_id, state);

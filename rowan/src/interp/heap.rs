@@ -325,6 +325,9 @@ pub struct Obj {
     /// an unknown known to be of a builtin type (`domain::TYPE_NAMES`): a parameter annotated
     /// so, in a run for any call
     pub ty: Option<&'static str>,
+    /// an object a library call rowan does not model made: its methods are its own (not a
+    /// dict's or a str's, as an input's data may have)
+    pub opaque: bool,
 }
 
 
@@ -395,7 +398,7 @@ pub struct Heap {
 
 impl Default for Heap {
     fn default() -> Heap {
-        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
+        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false };
         Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default() }
     }
 }
@@ -544,6 +547,7 @@ impl Heap {
             iterator: site.starts_with("gen:"),
             born: self.serial,
             ty: None,
+            opaque: false,
         });
         self.serial += 1;
         self.defs += usize::from(matches!(kind, Kind::Function | Kind::Class | Kind::Module));
