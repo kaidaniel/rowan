@@ -75,6 +75,7 @@ MEASURE_REF = "5aaa094fcfdb82c6f59c0936ef6358423204a547"
 FUZZ_SEEDS = (1001, 2001, 3001)
 FUZZ_N = 100
 CASE_TIMEOUT_S = 60  # per golden case / fuzz program
+CASE_MEMORY_MB = 3000  # likewise (several run at once under the guard's 16 GB for all)
 BENCH_TIMEOUT_S = 180
 PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
@@ -190,11 +191,29 @@ def build(rel: dict, cache: Path) -> Path | None:
     return out
 
 
+WRAPPER = r"""#!/usr/bin/perl
+# rowan, killed past %(t)d s or %(mb)d MB of RSS (an old release may blow up on a newer test)
+my $pid = fork() // die;
+if (!$pid) { exec('%(bin)s', @ARGV) or die; }
+my ($t0, $n) = (time, 0);
+while (1) {
+  my $r = waitpid($pid, 1);
+  if ($r == $pid) { exit($? & 127 ? 128 + ($? & 127) : $? >> 8); }
+  select(undef, undef, undef, $n++ < 20 ? 0.01 : 0.2);
+  next if $n < 20;
+  my $rss = `ps -o rss= -p $pid` + 0;
+  if ($rss > %(mb)d * 1024 || time - $t0 > %(t)d) { kill 9, $pid; waitpid($pid, 0); kill 9, $$; }
+}
+"""
+
+
 def with_timeout(binary: Path) -> Path:
-    """A wrapper that kills the binary after CASE_TIMEOUT_S (SIGALRM survives the exec)."""
+    """A wrapper that kills the binary after CASE_TIMEOUT_S or past CASE_MEMORY_MB, and then
+    itself by SIGKILL (the harness sees `exit -9`: a cut case)."""
     w = binary.parent / "rowan-t"
-    if not w.exists():
-        w.write_text(f"#!/bin/sh\nexec perl -e 'alarm {CASE_TIMEOUT_S}; exec @ARGV or die' '{binary}' \"$@\"\n")
+    text = WRAPPER % {"t": CASE_TIMEOUT_S, "mb": CASE_MEMORY_MB, "bin": binary}
+    if not w.exists() or w.read_text() != text:
+        w.write_text(text)
         w.chmod(0o755)
     return w
 
@@ -226,7 +245,10 @@ def save_data(data: dict) -> None:
             # (the family indices, derived: what the Pages overview plots)
             r["index"] = indices(r)
         tmp = DATA.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+        # (one release per line: a new release is a one-line diff)
+        head = {k: v for k, v in data.items() if k != "releases"}
+        rels = ",\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) for r in data["releases"])
+        tmp.write_text(json.dumps(head, ensure_ascii=False)[:-1] + ',\n"releases":[\n' + rels + "\n]}\n")
         tmp.replace(DATA)
 
 
@@ -247,10 +269,17 @@ def entry(data: dict, rel: dict) -> dict:
         return next(r for r in data["releases"] if r["tag"] == rel["tag"])
 
 
+def failed(r) -> bool:
+    """Not measured, or the measurement itself failed (an error, a fuzz seed without checks)."""
+    if not r or "error" in r:
+        return True
+    return any("error" in x for x in r.get("seeds", {}).values()) or r.get("checks") == 0
+
+
 def same_engine(data: dict, rel: dict, family: str) -> dict | None:
     """A family measured on another release with the same engine (the same rowan/ tree)."""
     for r in data["releases"]:
-        if r["tree"] == rel["tree"] and r["tag"] != rel["tag"] and family in r:
+        if r["tree"] == rel["tree"] and r["tag"] != rel["tag"] and not failed(r.get(family)):
             return r[family]
     return None
 
@@ -285,7 +314,7 @@ def why(problems: list[str]) -> str:
     text = " ".join(problems)
     if "scoreboard: unreadable" in text:
         return "unreadable"
-    if "exit -14" in text:
+    if "exit -9)" in text or "exit -14)" in text:
         return "timeouts"
     if any(p.startswith("rowan failed") or p.startswith("bad JSON") for p in problems):
         return "crashed"
@@ -433,7 +462,7 @@ def cmd_run(a) -> None:
     keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"]}
 
     def todo(e: dict, fam: str) -> bool:
-        return fam in fams and (fam in redo or any(k not in e for k in keys[fam]))
+        return fam in fams and (fam in redo or any(failed(e.get(k)) for k in keys[fam]))
 
     mset = measure_set(cache)
     for rel in rels:
@@ -455,7 +484,7 @@ def cmd_run(a) -> None:
         if todo(e, "soundness"):
             for k, f in (("golden", lambda: measure_golden(b, mset, None, logdir(rel) / "golden.log")),
                          ("fuzz", lambda: measure_fuzz(b, mset, logdir(rel)))):
-                if k in e and "soundness" not in redo:
+                if not failed(e.get(k)) and "soundness" not in redo:
                     continue
                 print(f"[{rel['tag']}] {k}", file=sys.stderr, flush=True)
                 put(data, e, k, same_engine(data, rel, k) or f())
@@ -580,7 +609,7 @@ def label(e: dict) -> str:
 def noise(data: dict) -> dict:
     """Relative spread (max/min - 1) of each program's wall time over the repeats, the worst
     over the releases repeated, and of the wall-time geometric mean."""
-    worst, gm = {}, []
+    worst, gm, gr = {}, [], []
     for e in data["releases"]:
         reps = e.get("bench_repeats", []) + ([{k: v for k, v in e["bench"].items()}] if e.get("bench") else [])
         if len(reps) < 2:
@@ -593,7 +622,11 @@ def noise(data: dict) -> dict:
         gms = [x for x in gms if x]
         if len(gms) >= 2:
             gm.append(max(gms) / min(gms) - 1)
-    return {"wall_spread": worst, "geomean_spread": max(gm) if gm else None}
+        grs = [x for x in (geomean([r[p].get("rss_mb") for p in PROGRAMS if p in r]) for r in reps) if x]
+        if len(grs) >= 2:
+            gr.append(max(grs) / min(grs) - 1)
+    return {"wall_spread": {p: round(v, 4) for p, v in worst.items()}, "geomean_spread": max(gm) if gm else None,
+            "rss_geomean_spread": max(gr) if gr else None}
 
 
 def cmd_report(a) -> None:
@@ -628,7 +661,7 @@ def cmd_report(a) -> None:
             x, y = h(idx[k - 1]), h(idx[k])
             if x is not None and y is not None:
                 deltas.append((y - x, rels[k]))
-        deltas.sort(key=lambda t: -t[0])
+        deltas = sorted((t for t in deltas if t[0] > 0), key=lambda t: -t[0])
         w(f"\n**Top 10, {name}**\n")
         w("| release | change | pull requests |")
         w("| --- | --- | --- |")
@@ -636,7 +669,9 @@ def cmd_report(a) -> None:
             w(f"| {e['tag']} | {d:+.2f} | {'; '.join(f'#{p['n']} {p['title']}' for p in e.get('prs', []))} |")
     w(f"\nNoise (repeats): {json.dumps(nz)}")
     w("\n" + flattening(rels, idx, heads))
-    w("\n" + stop_check(rels, idx, nz))
+    rows: list = []
+    w("\n" + stop_check(rels, idx, nz, rows=rows))
+    data["stop"] = {"criterion": f"3 consecutive releases with no held-out metric moving beyond noise and 0 unsound fresh-seed fuzz checks", "rows": rows, "noise": nz}
     text = "\n".join(lines)
     save_data(data)
     if a.md:
@@ -672,13 +707,12 @@ HELD_OUT = {
 }
 
 
-def stop_check(rels: list[dict], idx: list[dict], nz: dict, k: int = 3) -> str:
+def stop_check(rels: list[dict], idx: list[dict], nz: dict, k: int = 3, rows: list | None = None) -> str:
     """The stop criterion: stop after K consecutive releases in which no held-out metric moved
     beyond its noise threshold and fresh-seed fuzzing found nothing unsound. Prints, for the
     last releases, which metrics moved."""
     out = [f"Stop criterion: {k} consecutive releases with no held-out metric moving beyond noise and 0 unsound fresh-seed fuzz checks.", "",
            "| release | " + " | ".join(HELD_OUT) + " | quiet? |", "| --- |" + " --- |" * (len(HELD_OUT) + 1)]
-    gm = nz.get("geomean_spread") or 0.05
     quiet_run = 0
     for j in range(1, len(rels)):
         cells, quiet = [], True
@@ -692,16 +726,21 @@ def stop_check(rels: list[dict], idx: list[dict], nz: dict, k: int = 3) -> str:
                 moved = b > 0 or a != b
                 cells.append(f"{b}")
             elif thr is None:
-                moved = abs(b / a - 1) > gm if a else False
+                # (twice the largest spread of repeated runs, at least 2%)
+                spread = nz.get("rss_geomean_spread" if "RSS" in name else "geomean_spread") or 0.05
+                moved = abs(b / a - 1) > max(2 * spread, 0.02) if a else False
                 cells.append(f"{100 * (b / a - 1):+.1f}%" + ("*" if moved else ""))
             else:
                 moved = abs(b - a) > thr
                 cells.append(f"{b - a:+.2f}" + ("*" if moved else ""))
             quiet &= not moved
         quiet_run = quiet_run + 1 if quiet else 0
+        if rows is not None:
+            rows.append({"tag": rels[j]["tag"], "cells": dict(zip(HELD_OUT, cells)), "quiet": quiet, "in_a_row": quiet_run})
         if j >= len(rels) - 12:
             out.append(f"| {rels[j]['tag']} | " + " | ".join(cells) + f" | {'yes' if quiet else 'no'} ({quiet_run} in a row) |")
-    out.append(f"\n(* moved beyond noise; time and memory: the repeats' geomean spread {100 * gm:.1f}%)")
+    out.append(f"\n(* moved beyond noise: time and memory, twice the repeats' largest geomean spread ({100 * (nz.get('geomean_spread') or 0):.1f}% / "
+               f"{100 * (nz.get('rss_geomean_spread') or 0):.1f}%), at least 2%; counts and shares, the thresholds in HELD_OUT)")
     return "\n".join(out)
 
 
