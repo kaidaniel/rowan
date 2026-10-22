@@ -425,6 +425,10 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
         return format!("`del` (line {})", l);
     }
     if let Some((f, x)) = site.strip_prefix("param ").and_then(|r| r.rsplit_once('.')) {
+        // (a lambda's by its line: `the lambda on line 17`)
+        if let Some(l) = f.rsplit_once("lambda@L").map(|(_, l)| l).filter(|l| l.chars().all(|c| c.is_ascii_digit())) {
+            return format!("argument `{}` of the lambda on line {}", x, l);
+        }
         return format!("argument `{}` of `{}`", x, clean(f));
     }
     if let Some(x) = site.strip_prefix("name ") {

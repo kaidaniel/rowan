@@ -453,6 +453,13 @@ assert(u8z.includes("```python\n_ = a(b)(a)\n```"), u8z);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ---- a lambda's argument: of the lambda on its line (not `summary.lambda@L17`; the second lambda's `s`)
+{
+  const p117 = path.join(root, "tests", "pandas", "small", "p117_agg_lambda_named.py");
+  const h = hover(indexResult(facts(p117)), fs.readFileSync(p117, "utf8").split("\n"), 17, "s", 3);
+  assert(h.includes("- `?`: unknown (argument `s` of the lambda on line 17)"), h);
+}
+
 // ---- tensors (nanoGPT's attention): the shape in the function's own terms, dims named by
 // the locals that hold them, the line's requirement, what calls gave
 const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
