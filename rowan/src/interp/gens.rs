@@ -659,31 +659,17 @@ impl Analyzer {
     /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found;
     /// modules and functions end a path, classes too unless `classes`: their attributes).
     pub(super) fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State, classes: bool) -> FxHashSet<ObjId> {
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        let mut work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
-        while let Some(o) = work.pop() {
-            if !seen.insert(o) {
-                continue;
+        let work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
+        let mut edges = |o: ObjId, work: &mut Vec<ObjId>| match self.heap.kind(o) {
+            Kind::Module | Kind::Function => {}
+            Kind::Class if !classes => {}
+            Kind::Class => {
+                self.obj_edges(o, st, work);
+                work.extend(self.heap.class_info_opt(o).map(|ci| ci.bases.clone()).unwrap_or_default());
             }
-            self.budget.walk_visit();
-            if targets.binary_search(&o).is_ok() {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    break;
-                }
-            }
-            match self.heap.kind(o) {
-                Kind::Module | Kind::Function => {}
-                Kind::Class if !classes => {}
-                Kind::Class => {
-                    self.obj_edges(o, st, &mut work);
-                    work.extend(self.heap.class_info_opt(o).map(|ci| ci.bases.clone()).unwrap_or_default());
-                }
-                _ => self.obj_edges(o, st, &mut work),
-            }
-        }
-        found
+            _ => self.obj_edges(o, st, work),
+        };
+        self.find_among(work, targets, usize::MAX, true, &mut edges).unwrap_or_default()
     }
 
     /// At a `@contextmanager` generator's yield: the with body runs in the caller's frame with

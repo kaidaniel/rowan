@@ -40,7 +40,6 @@ impl Analyzer {
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
     /// stops when every one is found).
     pub(in crate::interp) fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
         let mut work: Vec<ObjId> = Vec::new();
         self.state_roots(state, usize::MAX, usize::MAX, &mut work);
         // (a walk over a large heap is bounded: past the budget the targets not found yet are
@@ -48,25 +47,33 @@ impl Analyzer {
         // walk that proves an object dead on a large heap visits all of it, and on email's 20k
         // visits per walk gave the same verdicts as 500)
         const WALK_BUDGET: usize = 200;
-        let budget = WALK_BUDGET;
+        let mut sorted = targets.to_vec();
+        sorted.sort_unstable();
+        self.find_among(work, &sorted, WALK_BUDGET, true, &mut |o, work| self.obj_edges(o, state, work)).unwrap_or_else(|_| targets.iter().copied().collect())
+    }
+
+    /// Which of `targets` (sorted) a walk from `work` reaches, `edges` pushing what each object
+    /// refers to (one walk for all; it stops when every one is found); Err (what it found by
+    /// then) past `limit` objects. `count`: its visits are walk visits (`Budget::walk_visit`).
+    pub(in crate::interp) fn find_among(&self, mut work: Vec<ObjId>, targets: &[ObjId], limit: usize, count: bool, edges: &mut dyn FnMut(ObjId, &mut Vec<ObjId>)) -> Result<FxHashSet<ObjId>, FxHashSet<ObjId>> {
+        let mut found: FxHashSet<ObjId> = FxHashSet::default();
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
             if !seen.insert(o) {
                 continue;
             }
-            self.budget.walk_visit();
-            if seen.len() > budget {
-                return targets.iter().copied().collect();
+            if seen.len() > limit {
+                return Err(found);
             }
-            if targets.contains(&o) {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    return found;
-                }
+            if count {
+                self.budget.walk_visit();
             }
-            self.obj_edges(o, state, &mut work);
+            if targets.binary_search(&o).is_ok() && found.insert(o) && found.len() == targets.len() {
+                break;
+            }
+            edges(o, &mut work);
         }
-        found
+        Ok(found)
     }
 
     /// The objects `o` refers to: its slots and element kinds in `state`, its payload, and what
