@@ -64,7 +64,10 @@ impl Analyzer {
                 self.load_attr(&obj, a.attr.id.as_str(), &nd, state, true)
             }
             ast::Expr::Subscript(sub) => self.expr_subscript(sub, node, state),
-            ast::Expr::Call(c) => self.expr_call(c, node, state),
+            ast::Expr::Call(c) => {
+                let r = self.expr_call(c, node, state);
+                self.named_call(r, &frontend::node(node))
+            }
             ast::Expr::Dict(d) => self.expr_dict(d, node, state),
             ast::Expr::List(l) => self.container(node, Kind::List, &l.elts, state),
             ast::Expr::Tuple(t) => self.container(node, Kind::Tuple, &t.elts, state),

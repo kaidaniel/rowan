@@ -107,10 +107,29 @@ impl Analyzer {
         let c = self.eval(&b.right, state);
         let nd = frontend::node(node);
         let r = self.binop(b.op, &a, &c, &nd, state);
-        // an unknown result is named by the expression (`1 + b`), of its type when known
+        self.named_by_expr(r, &nd)
+    }
+
+    /// A call's or unary operator's unknown result of no name and type (`d.copy()` of an
+    /// unknown `d`, `-n`) named by the expression, as a binary operator's is.
+    pub(super) fn named_call(&self, r: Value, nd: &Node) -> Value {
+        let KeyVal::Data(l, _) = &r.kv else { return r };
+        let l = intern::str_get(*l);
+        // (a label with a type, a name or a model's meaning is kept)
+        let unnamed = l.is_empty() || &*l == "copy" || (l.starts_with('L') && l[1..].chars().all(|c| c.is_ascii_digit()));
+        // (the tensor model reads a named unknown as one that may be a tensor)
+        if !r.pts.is_empty() || !unnamed || self.m.torch_on {
+            return r;
+        }
+        self.named_by_expr(r, nd)
+    }
+
+    /// An operator's unknown result named by the expression (`1 + b`, `-n`), of its type when
+    /// known.
+    fn named_by_expr(&self, r: Value, nd: &Node) -> Value {
         if let (true, KeyVal::Data(l, _)) = (r.pts.is_empty(), &r.kv) {
             let (l, h) = (intern::str_get(*l), r.kv.hint());
-            let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
+            let text = frontend::text_at(nd).split_whitespace().collect::<Vec<_>>().join(" ");
             if !l.starts_with('\u{1}') && !text.is_empty() && text.len() <= 60 {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
@@ -215,7 +234,11 @@ impl Analyzer {
             }
         }
         let r = self.unary_untyped(u, v, node, state);
-        self.as_type(r, ty, false)
+        let r = self.as_type(r, ty, false);
+        if u.op == ast::UnaryOp::Not {
+            return r;
+        }
+        self.named_call(r, &frontend::node(node))
     }
 
     /// `op v` (`not`, `-`, `+`, `~`) before the result's type is applied.
