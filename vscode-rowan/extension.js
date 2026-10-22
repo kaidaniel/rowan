@@ -185,7 +185,25 @@ function prettyValue(text, width = VALUE_WIDTH) {
       }
       lines.push(cur + p.open);
       const pad = " ".repeat(indent + 2);
+      // (items that say no more than a name, `Emax~=?`, `"id": ?`, `**?`, `…`: as many to a
+      // line as fit, in their order)
+      const bare = (item) => /^(\*\*\?|…|[\w"'.~?]+(=|: )\?)$/.test(flatParts(item));
+      let packed = null;
       p.items.forEach((item, k) => {
+        const comma = k < p.items.length - 1 ? "," : "";
+        if (bare(item) && (packed !== null || (k + 1 < p.items.length && bare(p.items[k + 1])))) {
+          const piece = flatParts(item) + comma;
+          if (packed !== null && packed.length + 1 + piece.length > width) {
+            lines.push(packed);
+            packed = null;
+          }
+          packed = packed === null ? pad + piece : packed + " " + piece;
+          if (!(k + 1 < p.items.length && bare(p.items[k + 1]))) {
+            lines.push(packed);
+            packed = null;
+          }
+          return;
+        }
         // (an item too wide that is one of three or more values: one per line, `| B`; of two,
         // `10.0 | json.loads(text)["t"]`, it reads as well whole)
         const alts = alternatives(flatParts(item));

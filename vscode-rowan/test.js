@@ -392,8 +392,19 @@ assert.deepStrictEqual(prettyValue('Spinner(frames=list["-" | "/"] | list["a" | 
   "  interval=?",
   ")",
 ]);
+// (items that say no more than a name, `Emax~=?`: as many to a line as fit, in their order;
+// one that says more, on its own line)
+assert.deepStrictEqual(prettyValue("Context(Emax~=?, Emin~=?, _ignored_flags~=?, capitals~=?, clamp~=?, flags~=?, prec~=3, rounding~=?, **?)"), [
+  "Context(",
+  // (with `clamp~=?,` the line would be 61 columns, past 60)
+  "  Emax~=?, Emin~=?, _ignored_flags~=?, capitals~=?,",
+  "  clamp~=?, flags~=?,",
+  "  prec~=3,",
+  "  rounding~=?, **?",
+  ")",
+]);
 // (a list in typing notation around one long item: `list[{` … `}]`)
-assert.deepStrictEqual(prettyValue('list[{"avg": row["total"] / row["n"], "count": ?, **?}]', 40), ["list[{", '  "avg": row["total"] / row["n"],', '  "count": ?,', "  **?", "}]"]);
+assert.deepStrictEqual(prettyValue('list[{"avg": row["total"] / row["n"], "count": ?, **?}]', 40), ["list[{", '  "avg": row["total"] / row["n"],', '  "count": ?, **?', "}]"]);
 // one of several long values: one per line
 const alt = prettyValue('OrderRepo(orders={}) | OrderRepo(_seq=0, by_customer=Counter({}), lines={}, orders={})', 50);
 assert.strictEqual(alt[0], "  OrderRepo(orders={})", alt.join("\n"));
