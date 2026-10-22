@@ -65,8 +65,7 @@ Hovering `row`:
 > - `{"id": 3, "name": "eve"}` on line 11.
 >
 > **Notes**
-> - `(only if x)`: needed only on calls where `x` holds of the arguments as passed
-> - ✗: fails on every path
+> - `(only if x)` needed only on calls where `x` holds of the arguments as passed · ✗ fails on every path
 
 `row["since"]` on line 5 is underlined: *key "since" is never set (via L10)*. Hovering `ada`
 shows the value computed exactly, string methods included:
@@ -109,7 +108,7 @@ Hovering `cfg` on line 6:
 > - `cfg["database"]["host"]`
 > - `cfg["database"]["name"]`
 > - `cfg["database"]["user"]`
-> - `cfg["trace_level"]` on some paths
+> - on some paths: `cfg["trace_level"]`
 
 Nested reads are traced back to where the data came from; `.get` reads require nothing, and a
 read behind a condition is needed on some paths only.
@@ -168,7 +167,7 @@ its `df` on line 16 gives the columns the CSV file must have:
 > - `df["ts"]`
 >
 > **Notes**
-> - `**?`: other keys may exist
+> - `**?` other keys may exist
 
 ### PyTorch: shapes in the function's own terms
 
@@ -229,7 +228,7 @@ Hovering `x`:
 > - `Tensor[2, 10, 32]` on line 26: ✗ (Linear(64 -> 192) given last dim 32)
 >
 > **Notes**
-> - ✗: fails on every path
+> - ✗ fails on every path
 
 Line 15 is underlined: *shape mismatch: Linear(64 -> 192) given last dim 32 (via L26)*.
 
@@ -323,12 +322,13 @@ type or default when known), followed by up to four sections:
 
 * **Requirements**: what the code reads of a parameter for any call of its function
   (`row["id"]`, `row["since"]` *(only if `admin`)*, `x.dim() == 3`), or of an input read on that
-  line (`cfg = json.loads(…)`); *on some paths* when a read is behind a condition;
+  line (`cfg = json.loads(…)`); those behind a condition together, *on some paths: …*;
 * **In Calls**: what each of your program's own calls gives (or passes, for a parameter), with
-  the reads that fail for it (`✗ row["since"]`);
+  the reads that fail for it (`✗ row["since"]`); the values one line gives, together (`10 | 14`);
 * **Allocation Sites**: where its objects were made, and keys they never have there;
-* **Notes**: what each mark and notation used above means; last, when the analysis was cut
-  short or ran function by function.
+* **Notes**: where the unknowns come from and what the names the value mentions are; when the
+  analysis was cut short or ran function by function; last, one line saying what each mark and
+  notation used above means (the tables below).
 
 | in values | means |
 | --- | --- |

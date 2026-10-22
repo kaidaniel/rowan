@@ -9,7 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, factsAt, indexResult, prettyValue, hoverValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents, followArgs, sitePackagesOf } = require("./extension.js");
+const { renderHover, shortCalls, factsAt, indexResult, prettyValue, hoverValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents, followArgs, sitePackagesOf } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -46,7 +46,8 @@ const a01src = fs.readFileSync(a01, "utf8").split("\n");
 const a01idx = indexResult(facts(a01));
 const r8 = hover(a01idx, a01src, 8, "r");
 assert(r8.includes('```python\nr = {"id": u.id, "role"?: "admin"}\n```'), r8);
-assert(r8.includes('**Notes**\n- `"k"?`: possible key'), r8);
+// (what the notation means, the same in every hover: one legend line, last)
+assert(r8.includes('**Notes**\n- `"k"?` possible key'), r8);
 assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
 // ---- a name rebound from its own value: the hover shows what the line binds, not old | new
 {
@@ -103,17 +104,17 @@ assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```\n\n**Allocation Si
   assert(h.split("\n").filter((l) => l.endsWith(" on line 83 in dp/api.py.")).length === 1, h);
 }
 // (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
-// entry, not two alike)
+// value, not two alike; the three values line 93 gives, one line: `A | B | C` on line 93)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");
 const s57calls = s57.split("\n").filter((l) => l.startsWith("- `Settings(") && l.endsWith(" on line 93."));
-assert(s57calls.length === 3 && new Set(s57calls).size === 3, s57);
+assert(s57calls.length === 1 && s57calls[0].split(" | Settings(").length === 3 && new Set(s57calls[0].split(" | ")).size === 3, s57);
 // (the legend explains only marks the shown value uses: `**?` and `[*]` are in the cut parts)
 const a002idx = indexResult(facts(a002));
 const a002src = fs.readFileSync(a002, "utf8").split("\n");
 const set96 = hover(a002idx, a002src, 96, "settings");
 // (Notes explain the marks the hover shows, not those of parts the cuts leave out)
 const [body96, notes96] = set96.split("**Notes**");
-assert(notes96.includes("- `**?`: other keys") === body96.includes("**?") && notes96.includes("- `[*]`: any element") === body96.includes("[*]") && notes96.includes("- `a | b`: either a or b"), set96);
+assert(notes96.includes("`**?` other keys") === body96.includes("**?") && notes96.includes("`[*]` any element") === body96.includes("[*]") && notes96.includes("`a | b` a or b"), set96);
 // (an access that works has no mark: the hover says what may fail; `cfg` is `settings_from`'s
 // parameter, so what it reads of it is said; the objects its calls pass were made on line 92)
 const cfg63 = hover(a002idx, a002src, 63, "cfg");
@@ -142,7 +143,7 @@ const z535src = fs.readFileSync(z535, "utf8").split("\n");
 const z535idx = indexResult(facts(z535));
 const row11 = hover(z535idx, z535src, z535src.indexOf("def contract(row, admin):") + 1, "row");
 assert(row11.includes('**Requirements**\n- `row["id"]` (only if `not admin`)\n- `row["role"]` (only if `admin`)'), row11);
-assert(row11.includes("- `(only if x)`: needed only on calls where `x` holds of the arguments as passed"), row11);
+assert(row11.includes("`(only if x)` needed only on calls where `x` holds of the arguments as passed"), row11);
 // (in the body too, where it holds the argument of its name; a name built from it has none)
 const rowBody = hover(z535idx, z535src, z535src.indexOf('        return row["role"]') + 1, "row");
 assert(rowBody.includes("```python\nrow = (parameter)\n```\n\n**Requirements**\n") && rowBody.includes('- `row["role"]` (only if `admin`)'), rowBody);
@@ -158,7 +159,7 @@ assert(userBody && !userBody.includes("Requirements"), userBody);
   const row = hover(idx, src, at("def make_user("), "row");
   assert(row.includes('```python\nrow = (parameter)\n```\n\n**Requirements**\n- `row["id"]`\n- `row["name"]`\n- `row["since"]` (only if `admin`)'), row);
   assert(row.includes(`- \`{"id": 1, "name": " ann "}\` on line ${at("a = make_user(")}.`) && row.includes(`- \`{"id": 2, "name": "bob"}\` on line ${at("b = make_user(")}: ✗ \`row["since"]\``), row);
-  assert(!row.includes("✓") && row.includes("- ✗: fails on every path"), row);
+  assert(!row.includes("✓") && row.includes("✗ fails on every path"), row);
   const order = hover(idx, src, at("def total("), "order");
   assert(order.includes('**Requirements**\n- `order["items"][*]["price"]`\n- `order["items"][*]["qty"]`'), order);
   assert(order.includes(` on line ${at("t = total(")}.`) && order.includes(` on line ${at("    u = total(")}: ✗ \`item["price"]\``), order);
@@ -167,12 +168,18 @@ assert(userBody && !userBody.includes("Requirements"), userBody);
   const gsrc = fs.readFileSync(g, "utf8").split("\n");
   const line = gsrc.findIndex((l, i) => l.includes("def forward(self, x)") && gsrc[i + 1].includes("B, T, C = x.size()")) + 1;
   const x = hover(indexResult(facts(g)), gsrc, line, "x");
-  assert(x.includes("```python\nx = (parameter)\n```\n\n**Requirements**\n- `x.dim() == 3`\n- `x.shape[2] == self.n_embd`\n\n**In Calls**\n- `Tensor[3, 10, 32]` on line "), x);
+  // (what line 113 passes: the training batch, then generate's growing windows, on one line)
+  assert(x.includes("```python\nx = (parameter)\n```\n\n**Requirements**\n- `x.dim() == 3`\n- `x.shape[2] == self.n_embd`\n\n**In Calls**\n- `Tensor[3, 10, 32] | Tensor[1, 4, 32] | "), x);
 }
 // an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
 assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
 assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
+// code in a Note's words past 40 characters: a call by its callee, other code cut; the words
+// between the code spans as they were
+assert.strictEqual(shortCalls("may have been changed by `self._render_buffer(self._buffer[:], self.options)` on line 177 in console.py, a call rowan no longer follows or `x.y` on line 3"),
+  "may have been changed by `self._render_buffer(…)` on line 177 in console.py, a call rowan no longer follows or `x.y` on line 3");
+assert.strictEqual(shortCalls("the result of `json.loads(os.environ.get(\"DIGEST_OPTS\", \"{}\"))[\"places\"]` on line 111"), "the result of `json.loads(os.environ.get(\"DIGEST_OPTS\"…` on line 111");
 
 // ---- a parameter needs the same in the body as at its `def`: what the function reads of it (not
 // `cfg["verbose"]`, read of the input by the module code); an `__init__` whose class has a subclass too
@@ -201,7 +208,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert(hover(idx, src, 15, "i").startsWith("```python\ni = int(?)\n```"), hover(idx, src, 15, "i"));
   assert(hover(idx, src, 20, "j").startsWith("```python\nj = int(?)\n```"), hover(idx, src, 20, "j"));
   assert(hover(idx, src, 27, "parts").startsWith("```python\nparts = list[str(?)]\n```"), hover(idx, src, 27, "parts"));
-  assert(hover(idx, src, 27, "parts").includes("- `str(?)`: a str not known statically"), hover(idx, src, 27, "parts"));
+  assert(hover(idx, src, 27, "parts").includes("`str(?)` a str not known statically"), hover(idx, src, 27, "parts"));
   // a word count: keys stored under str keys are str (was `dict[?, int(?)]`, `k = ?`)
   const z643 = path.join(root, "tests", "cases", "z643_keys_of_a_builtin_type.py");
   const src3 = fs.readFileSync(z643, "utf8").split("\n");
@@ -216,11 +223,12 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const idx = indexResult(facts(z532));
   const y = hover(idx, src, 6, "y");
   assert(y.includes("```python\ny = 3 | x\n```") && y.includes("**In Calls**\n- `3` on line 44.\n- `7` on line 45."), y);
-  assert(y.includes("- `a | b`: either a or b"), y);
+  assert(y.includes("`a | b` a or b"), y);
   const b = hover(idx, src, 6, "b");
   assert(b.includes("```python\nb = (parameter) bool(?)\n```") && b.includes("**In Calls**\n- `False` on line 44.\n- `True` on line 45."), b);
   const m = hover(idx, src, 13, "m");
-  assert(m.includes("```python\nm = n * 2\n```") && m.includes("**In Calls**\n- `10` on line 46.\n- `14` on line 46."), m);
+  // (the two values line 46's calls give: one line)
+  assert(m.includes("```python\nm = n * 2\n```") && m.includes("**In Calls**\n- `10 | 14` on line 46."), m);
   // a function nothing calls: only the value for any call
   const z = hover(idx, src, 27, "z");
   assert(z.includes("```python\nz = k + 1\n```") && !z.includes("In Calls"), z);
@@ -232,7 +240,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   // a method: on any instance (its `__init__` given any arguments), apart from the program's
   const v = hover(idx, src, 38, "v");
   assert(v.includes("```python\nv = 0 | int(?)\n```") && v.includes("**In Calls**\n- `4` on line 49."), v);
-  assert(v.includes("- `int(?)`: an int not known statically"), v);
+  assert(v.includes("`int(?)` an int not known statically"), v);
   // a method nothing calls: on any instance, not only one made with `__init__`'s defaults
   const a = hover(idx, src, 58, "a");
   assert(a.includes("```python\na = self.size * self.size\n```") && !a.includes("In Calls"), a);
@@ -248,7 +256,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const size = hover(idx, src, 13, "size");
   assert(size.includes("```python\nsize = int(?)\n```"), size);
   const shown = hover(idx, src, 43, "shown");
-  assert(shown.includes("```python\nshown = str(?)\n```") && shown.includes("- `str(?)`: a str not known statically") && !shown.includes("- `?`:"), shown);
+  assert(shown.includes("```python\nshown = str(?)\n```") && shown.includes("`str(?)` a str not known statically") && !shown.includes("- `?`:") && !shown.includes("`?` unknown"), shown);
 }
 
 // ---- a parameter's headline: `(parameter)`, with what any call may pass when something is
@@ -290,16 +298,16 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert.strictEqual(head("nums", 7), "nums = list[int(?)]");
   const out = hover(idx, src, 8, "out");
   assert(out.includes('out = {"nums": list[int(?)], "sizes": dict[?, int(?)]}'), out);
-  assert(out.includes("- `int(?)`: an int not known statically"), out);
+  assert(out.includes("`int(?)` an int not known statically"), out);
   // (a builtin container annotation: with its parts' types)
   assert.strictEqual(head("hits", 12), "hits = (parameter) list[dict[str(?), str(?)]]");
   assert.strictEqual(head("opt", 12), "opt = (parameter) None | dict[str(?), list[int(?) | None]]");
   assert.strictEqual(head("t", 12), "t = (parameter) tuple[int(?), ...]");
-  assert(hover(idx, src, 12, "hits").includes("- `str(?)`: a str not known statically"), hover(idx, src, 12, "hits"));
+  assert(hover(idx, src, 12, "hits").includes("`str(?)` a str not known statically"), hover(idx, src, 12, "hits"));
   // (typing notation for a container of unknown length or keys: each with its legend line)
-  assert(hover(idx, src, 7, "nums").includes("- `list[x]`: a list of any length whose items are `x`"), hover(idx, src, 7, "nums"));
-  assert(hover(idx, src, 6, "sizes").includes("- `dict[k, v]`: a dict of any size whose keys are `k` and values `v`"), hover(idx, src, 6, "sizes"));
-  assert(hover(idx, src, 12, "t").includes("- `tuple[x, ...]`: a tuple of any length whose items are `x`"), hover(idx, src, 12, "t"));
+  assert(hover(idx, src, 7, "nums").includes("`list[x]` a list of any length of `x`"), hover(idx, src, 7, "nums"));
+  assert(hover(idx, src, 6, "sizes").includes("`dict[k, v]` a dict of any size, keys `k`, values `v`"), hover(idx, src, 6, "sizes"));
+  assert(hover(idx, src, 12, "t").includes("`tuple[x, ...]` a tuple of any length of `x`"), hover(idx, src, 12, "t"));
   assert(!hover(idx, src, 12, "t").includes("`list[x]`"), hover(idx, src, 12, "t"));
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
@@ -374,6 +382,18 @@ assert.deepStrictEqual(prettyValue("E(args=(str(?),)) | ?"), ["E(args=(str(?),))
 assert.deepStrictEqual(prettyValue("[(1,), (2, 3)]"), ["[(1,), (2, 3)]"]);
 assert.strictEqual(lines.join("").replace(/\s+/g, ""), repo.replace(/\s+/g, ""));
 assert.deepStrictEqual(prettyValue('{"t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"], **?}', 40), ["{", '  "t": 10.0 | json.loads(os.environ["APP_CONFIG"])["timeout"],', "  **?", "}"]);
+// an item too wide that is one of three or more values: one per line, under its key
+assert.deepStrictEqual(prettyValue('Spinner(frames=list["-" | "/"] | list["a" | "b"] | list[?] | ?, interval=?)', 40), [
+  "Spinner(",
+  '  frames=list["-" | "/"]',
+  '  | list["a" | "b"]',
+  "  | list[?]",
+  "  | ?,",
+  "  interval=?",
+  ")",
+]);
+// (a list in typing notation around one long item: `list[{` … `}]`)
+assert.deepStrictEqual(prettyValue('list[{"avg": row["total"] / row["n"], "count": ?, **?}]', 40), ["list[{", '  "avg": row["total"] / row["n"],', '  "count": ?,', "  **?", "}]"]);
 // one of several long values: one per line
 const alt = prettyValue('OrderRepo(orders={}) | OrderRepo(_seq=0, by_customer=Counter({}), lines={}, orders={})', 50);
 assert.strictEqual(alt[0], "  OrderRepo(orders={})", alt.join("\n"));
@@ -396,6 +416,30 @@ assert(!x1.includes("**?") && !x1.includes("unknown"), x1);
 const u8z = hover(zi, zsrc, 8, "_");
 assert(u8z.includes("```python\n_ = a(b)(a)\n```"), u8z);
 
+// ---- what unknown code was given, and so may return, as Python: `Settings(…)`, `{…}`, not where
+// it was made (`Settings@L10`)
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rowan-given-"));
+  const f = path.join(dir, "given.py");
+  fs.writeFileSync(f, ["import thirdparty", "", "", "class Settings:", "    def __init__(self):", "        self.debug = False", "", "", 'base = {"a": 1}', "s = Settings()", "r = thirdparty.build(base, s)", "t = r", ""].join("\n"));
+  const h = hover(indexResult(facts(f)), fs.readFileSync(f, "utf8").split("\n"), 12, "t");
+  assert(h.includes("```python\nt = thirdparty.build(base, s)\n```") && h.includes(" | Settings(…) | {…} | ?`") && !h.includes("@L"), h);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ---- an object in a set (a key by identity) as Python, not `<Action@L14 #14>`; a lambda a
+// method makes by its line, not `class Formatter.__init__.lambda@L10`
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rowan-ident-"));
+  const f = path.join(dir, "ident.py");
+  fs.writeFileSync(f, ["import sys", "", "", "class Action:", "    pass", "", "", "class Formatter:", "    def __init__(self):", "        self.decolor = lambda t: t", "", "", "seen = set()", "for a in [Action() for _ in sys.argv]:", "    seen.add(a)", "f = Formatter()", ""].join("\n"));
+  const idx = indexResult(facts(f));
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  assert(hover(idx, src, 15, "seen").startsWith("```python\nseen = set[Action()]\n```"), hover(idx, src, 15, "seen"));
+  assert(hover(idx, src, 16, "f").startsWith("```python\nf = Formatter(decolor=<lambda on line 10>)\n```"), hover(idx, src, 16, "f"));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ---- tensors (nanoGPT's attention): the shape in the function's own terms, dims named by
 // the locals that hold them, the line's requirement, what calls gave
 const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
@@ -404,8 +448,9 @@ const gi = indexResult(facts(g));
 const qkv = hover(gi, gsrc, 64, "qkv");
 assert(qkv.includes("```python\nqkv = Tensor[B, T, 3*self.n_embd]\n```"), qkv);
 // (Notes: only the dims the value uses — no `C`; what the line needs of `x` is said at `x`)
-assert(qkv.endsWith("**Notes**\n- `B`: `x.shape[0]`\n- `T`: `x.shape[1]`") && !qkv.includes("Requirements"), qkv);
-assert(qkv.includes("**In Calls**\n- `Tensor[3, 10, 96]` on line "), qkv);
+// (the calls of line 113 give several shapes, one line: `a | b` in the legend)
+assert(qkv.endsWith("**Notes**\n- `B`: `x.shape[0]`\n- `T`: `x.shape[1]`\n- `a | b` a or b (by path or call)") && !qkv.includes("Requirements"), qkv);
+assert(qkv.includes("**In Calls**\n- `Tensor[3, 10, 96] | Tensor[1, 4, 96] | "), qkv);
 const gx = hover(gi, gsrc, 64, "x");
 assert(gx.includes("x = Tensor[B, T, C]") && gx.includes("- `B, T, C`: `x.shape`"), gx);
 
@@ -580,7 +625,7 @@ const etl = path.join(root, "examples", "etl_report.py");
   assert(s109.startsWith("```python\ns = Summary(n_orders=int(?), region=str(?), total=?)\n```"), s109);
   const sum109 = hover(idx, src, 109, "summaries");
   assert(sum109.startsWith("```python\nsummaries = list[Summary(n_orders=int(?), region=str(?), total=?)]\n```"), sum109);
-  assert(sum109.includes("- `list[x]`: a list of any length whose items are `x`"), sum109);
+  assert(sum109.includes("`list[x]` a list of any length of `x`"), sum109);
   assert(!s109.includes("`list[x]`"), s109);
 }
 const files = [
@@ -590,7 +635,7 @@ const files = [
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),
   path.join(root, "tests", "pandas", "models", fs.readdirSync(path.join(root, "tests", "pandas", "models")).filter((f) => f.endsWith(".py"))[0]),
 ];
-const INTERNAL = [/PH@/, /\bM\d+:L\d+/, /#\d{3,}/, /\bparam [\w.]+\.\w/, /\b(item|attr)\[/, /\bdef \w/, /\bresult of [^`]*@L/, /\u0001/];
+const INTERNAL = [/PH@/, /\w@L\d/, /\bM\d+:L\d+/, /#\d{3,}/, /\bparam [\w.]+\.\w/, /\b(item|attr)\[/, /\bdef \w/, /\bresult of [^`]*@L/, /\u0001/];
 /** What each notation a Note explains looks like where it is used. */
 const USES = {
   "?": (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/m.test(t.replace(/\*\*\?/g, "").replace(/\b\w+\(\?\)/g, "T")),
@@ -609,14 +654,14 @@ const USES = {
 };
 const MARKS = ["✗", "⚠~", "⚠", "◌"];
 /** How a whole program's or a function's run was cut: its Note's opening words. */
-const CUT_NOTE = /^- (analysed on demand: |from the module's own code only |the whole program's analysis was cut )/;
+const CUT_NOTE = /^- (analysed alone, for any call |from the module's own code only |the analysis stopped at its )/;
 /**
  * The owner's format: `name = value` in a code block, then only the sections Requirements, In
  * Calls, Allocation Sites and Notes, in that order, each a non-empty list; Requirements only of
  * a parameter (`(parameter)`) or of an input the line reads (`facts`); no mark for an access
  * that works; every mark and notation the hover shows explained in its Notes, and every Note
  * about something the hover shows (a symbol, a notation, a mark: above it, or in another
- * Note's description), the Note on a cut analysis last and only for one.
+ * Note's description), the Note on a cut analysis last but for the legend line, and only for one.
  */
 function checkFormat(h, name, where, facts = []) {
   for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
@@ -635,23 +680,43 @@ function checkFormat(h, name, where, facts = []) {
     assert(param || input, `Requirements of a name that is not a parameter in ${where}`);
   }
   const [body, notesPart = ""] = h.split("**Notes**");
-  const notes = notesPart.split("\n").filter((l) => l.startsWith("- "));
+  const bulletsAll = notesPart.split("\n").filter((l) => l.startsWith("- "));
+  // (the legend: the last Note, `mark meaning` entries joined by " · ", neither a keyed Note
+  // nor the cut note)
+  const lastNote = bulletsAll[bulletsAll.length - 1];
+  const hasLegend = lastNote !== undefined && !/^- `[^`]*`: /.test(lastNote) && !CUT_NOTE.test(lastNote);
+  const notes = hasLegend ? bulletsAll.slice(0, -1) : bulletsAll;
+  const entries = hasLegend ? lastNote.slice(2).split(" · ") : [];
+  /** The marks or notations a legend entry explains: "`int(?)`, `str(?)` …" → int(?), str(?); "✗ …" → ✗. */
+  const entryKeys = (e) => {
+    const mark = MARKS.find((m) => e.startsWith(`${m} `));
+    if (mark) return [mark];
+    const lead = /^((?:`[^`]*`(?:, )?)+) /.exec(e);
+    assert(lead, `a legend entry without a mark in ${where}: ${e}`);
+    return [...lead[1].matchAll(/`([^`]*)`/g)].map((m) => m[1]);
+  };
+  const legendKeys = entries.flatMap(entryKeys);
   const code = body.replace(/\(only if `[^`]*`\)/g, "");
   // (every mark and notation used is explained)
-  const explained = (key) => notes.some((l) => l.startsWith(`- \`${key}\`:`));
+  const explained = (key) => legendKeys.includes(key) || notes.some((l) => l.startsWith(`- \`${key}\`:`));
   for (const [key, used] of Object.entries(USES)) if (used(key === "(only if x)" ? body : code)) assert(explained(key), `unexplained ${key} in ${where}`);
   for (const m of (code.match(/\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/g) || [])) assert(explained(m), `unexplained ${m} in ${where}`);
-  for (const m of MARKS) if (body.replace(/⚠~/g, m === "⚠" ? "" : "⚠~").includes(m)) assert(notes.some((l) => l.startsWith(`- ${m}: `)), `unexplained ${m} in ${where}`);
-  // (every Note is about something shown: above it, or in another Note's description)
+  for (const m of MARKS) if (body.replace(/⚠~/g, m === "⚠" ? "" : "⚠~").includes(m)) assert(legendKeys.includes(m), `unexplained ${m} in ${where}`);
+  // (every Note and legend entry is about something shown: above it, or in a Note's description)
+  const descs = notes.map((x) => x.replace(/^- `[^`]*`: /, ""));
+  const shownFor = (key, rest) => {
+    if (MARKS.includes(key)) return body.includes(key);
+    if (USES[key]) return USES[key](rest);
+    if (/^\w+\(\?\)$/.test(key)) return rest.includes(key);
+    return false;
+  };
+  for (const key of legendKeys) assert(shownFor(key, [body, ...descs].join("\n")), `unused ${key} in ${where}`);
   notes.forEach((l, k) => {
-    const rest = [body, ...notes.filter((_, j) => j !== k).map((x) => x.replace(/^- `[^`]*`: /, ""))].join("\n");
-    if (CUT_NOTE.test(l)) return assert(k === notes.length - 1 && facts.some((f) => f.run), `cut note not last, or for a whole run, in ${where}`);
-    const mark = MARKS.find((m) => l.startsWith(`- ${m}: `));
-    if (mark) return assert(body.includes(mark), `unused ${mark} in ${where}`);
+    const rest = [body, ...descs.filter((_, j) => j !== k)].join("\n");
+    if (CUT_NOTE.test(l)) return assert(k === notes.length - 1 && facts.some((f) => f.run), `cut note not last before the legend, or for a whole run, in ${where}`);
     const key = (/^- `([^`]*)`: /.exec(l) || [])[1];
     assert(key !== undefined, `a Note without a key in ${where}`);
-    if (USES[key]) return assert(USES[key](rest), `unused ${key} in ${where}`);
-    if (/^\w+\(\?\)$/.test(key)) return assert(rest.includes(key), `unused ${key} in ${where}`);
+    if (USES[key] || /^\w+\(\?\)$/.test(key)) return assert(shownFor(key, rest), `unused ${key} in ${where}`);
     // (a symbol: a name the value mentions, with what is known of it)
     const word = (w) => new RegExp(`(^|[^\\w.])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\w])`).test(body);
     assert(key.split(", ").some(word), `unused symbol ${key} in ${where}`);
@@ -674,13 +739,14 @@ async function onDemand() {
   assert.deepStrictEqual(b.span, [1, 5]);
   const bidx = indexResult(b.result);
   const d5 = hover(bidx, a01src, 5, "d");
-  assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?`: possible key'), d5);
+  assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?` possible key'), d5);
   const u2 = hover(bidx, a01src, 2, "user");
   assert(u2.includes("```python\nuser = (parameter)\n```\n\n**Requirements**\n- `user.id`") && !u2.includes("In Calls"), u2);
   // (its callees past the work a run on demand may do: the note says their calls were unknown)
   const cutCallees = indexResult({ ...b.result, analysis: { ...b.result.analysis, callees_cut: 16384 } });
   const d5c = hover(cutCallees, a01src, 5, "d");
-  assert(/\n- analysed on demand: this function alone, for any call, in [^\n]*, because the whole program's analysis took too long; past 16,384 statements, the calls made by the functions it calls were taken as unknown code$/.test(d5c), d5c);
+  // (then the legend: `"role"?` is a possible key)
+  assert(/\n- analysed alone, for any call \(in [^\n)]*\): the whole program's analysis took too long; past its work limit, the calls made by the functions it calls count as code rowan cannot see\n- `"k"\?` possible key$/.test(d5c), d5c);
   // (and the engine says when it happened: `main` calls functions that call others, past a
   // budget of 5 statements)
   const deploy = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
@@ -714,8 +780,8 @@ async function onDemand() {
       const where = `${path.basename(f)}:${line} ${name} (on demand)\n${h}`;
       checkFormat(h, name, where, fs_);
       assert(!h.includes("**In Calls**"), where);
-      // (said last: the function was analysed alone, for any call, and how long it took)
-      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long(; past [\d,]+ statements, the calls made by the functions it calls were taken as unknown code)?$/.test(h), where);
+      // (said last but for the legend: the function was analysed alone, for any call, and how long it took)
+      assert(/\n- analysed alone, for any call \(in [^\n)]*\): the whole program's analysis took too long(; past its work limit, the calls made by the functions it calls count as code rowan cannot see)?(\n- (?!`[^`]*`: )[^\n]*)?$/.test(h), where);
     }
   }
   stopServers();
@@ -751,13 +817,13 @@ async function early() {
   const cutRes = JSON.parse(execFileSync(bin, [f, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "ms=1" }, maxBuffer: 64 * 1024 * 1024 }).toString());
   assert(cutRes.analysis.cut, JSON.stringify(cutRes.analysis));
   const cutRows = hover(indexResult(cutRes), fsrc, 1, "ROWS");
-  assert(/\n- the whole program's analysis was cut at its 1 ms deadline \(after [\d,]+ statements?\): code it had not reached by then is taken as unknown code, so values may say less than they could$/.test(cutRows), cutRows);
+  assert(/\n- the analysis stopped at its 1 ms time limit: code it had not reached counts as code rowan cannot see, so values may say less than they could(\n- (?!`[^`]*`: )[^\n]*)?$/.test(cutRows), cutRows);
   checkFormat(cutRows, "ROWS", cutRows, indexResult(cutRes).facts.get("1:ROWS"));
   if (!res.pending) return `whole program at once (${first} ms)`;
   assert(res.on_demand && first < 5000, `early answer: on demand at once (${first} ms)`);
   // (the module code's document: said so, while the whole program's analysis goes on)
   const rows = hover(indexResult(res), fsrc, 1, "ROWS");
-  assert(rows.endsWith("\n- from the module's own code only (its functions are analysed when you hover them), because the whole program's analysis is still running"), rows);
+  assert(/\n- from the module's own code only \(functions are analysed when you hover them\): the whole program's analysis is still running(\n- (?!`[^`]*`: )[^\n]*)?$/.test(rows), rows);
   const ev = await Promise.race([got, new Promise((r) => setTimeout(() => r(null), 60000))]);
   assert(ev && ev.ok && !ev.result.on_demand && ev.result.facts.length > 0, "the whole program's document follows");
   return `module code at ${first} ms, whole program at ${ev.ms} ms`;

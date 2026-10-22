@@ -36,20 +36,27 @@ const MARK_TEXT = {
  */
 const TYPED = /\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/g;
 const UNKNOWN = (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/.test(t.replace(/\*\*\?/g, "").replace(TYPED, "T"));
-/** The builtin types of the unknowns `t` shows (`int(?)`, `str(?)`), each with its Note. */
-const typedNotes = (t) => [...new Set([...t.matchAll(TYPED)].map((m) => m[1]))].map((ty) => `\`${ty}(?)\`: ${/^[aeiou]/.test(ty) ? "an" : "a"} ${ty} not known statically`);
+/**
+ * The builtin types of the unknowns `t` shows, as one legend entry: "`int(?)` an int not known
+ * statically", "`int(?)`, `str(?)` an int, a str not known statically"; null for none.
+ */
+const typedLegend = (t) => {
+  const tys = [...new Set([...t.matchAll(TYPED)].map((m) => m[1]))];
+  if (!tys.length) return null;
+  return `${tys.map((ty) => `\`${ty}(?)\``).join(", ")} ${tys.map((ty) => `${/^[aeiou]/.test(ty) ? "an" : "a"} ${ty}`).join(", ")} not known statically`;
+};
 const NOTATION = [
   [(t) => /["'\w]\?[:=]/.test(t), '"k"?', "possible key"],
   [(t) => /["'\w]~[:=]/.test(t), '"k"~', "there unless code rowan cannot see removed it"],
   [(t) => t.includes("**?"), "**?", "other keys may exist"],
-  [(t) => / \| |(^|\n)\s*\| /.test(t), "a | b", "either a or b (depending on the path or the call)"],
-  [(t) => /\bTensor\[\*\]/.test(t), "Tensor[*]", "a tensor of unknown number of dimensions"],
+  [(t) => / \| |(^|\n)\s*\| /.test(t), "a | b", "a or b (by path or call)"],
+  [(t) => /\bTensor\[\*\]/.test(t), "Tensor[*]", "a tensor of any number of dimensions"],
   [(t) => /\[\*\]/.test(t.replace(/\bTensor\[\*\]/g, "")), "[*]", "any element"],
   // (containers of unknown length or keys, in typing notation: `list[x]` is not a list of one x)
-  [(t) => /(^|[^\w.])list\[/.test(t), "list[x]", "a list of any length whose items are `x`"],
-  [(t) => /(^|[^\w.])set\[/.test(t), "set[x]", "a set of any size whose items are `x`"],
-  [(t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t), "tuple[x, ...]", "a tuple of any length whose items are `x`"],
-  [(t) => /(^|[^\w.])dict\[/.test(t), "dict[k, v]", "a dict of any size whose keys are `k` and values `v`"],
+  [(t) => /(^|[^\w.])list\[/.test(t), "list[x]", "a list of any length of `x`"],
+  [(t) => /(^|[^\w.])set\[/.test(t), "set[x]", "a set of any size of `x`"],
+  [(t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t), "tuple[x, ...]", "a tuple of any length of `x`"],
+  [(t) => /(^|[^\w.])dict\[/.test(t), "dict[k, v]", "a dict of any size, keys `k`, values `v`"],
   [(t) => t.includes("…"), "…", "not shown"],
   [(t) => t.includes(" (only if `"), "(only if x)", "needed only on calls where `x` holds of the arguments as passed"],
 ];
@@ -165,14 +172,33 @@ function prettyValue(text, width = VALUE_WIDTH) {
       // (a call or subscript with one argument stays whole: `json.loads(text)["id"]`; a
       // container with one long item breaks)
       const container = p.open !== "(" && !/[\w)\]"'.]$/.test(cur);
-      if (cur.length + flat.length <= width || p.items.length === 0 || (p.items.length < 2 && !container)) {
+      const fits = cur.length + flat.length <= width;
+      // (a container in typing notation with one long item, `list[{…}]`: around the item, which
+      // breaks, `list[{` … `}]`)
+      if (!fits && p.open === "[" && p.items.length === 1 && /(^|[^\w.])(list|set|frozenset)$/.test(cur)) {
+        cur = emit(p.items[0], indent, cur + p.open) + p.close;
+        continue;
+      }
+      if (fits || p.items.length === 0 || (p.items.length < 2 && !container)) {
         cur += flat;
         continue;
       }
       lines.push(cur + p.open);
       const pad = " ".repeat(indent + 2);
       p.items.forEach((item, k) => {
-        const last = emit(item, indent + 2, pad);
+        // (an item too wide that is one of three or more values: one per line, `| B`; of two,
+        // `10.0 | json.loads(text)["t"]`, it reads as well whole)
+        const alts = alternatives(flatParts(item));
+        let last;
+        if (alts.length > 2 && pad.length + flatParts(item).length > width) {
+          last = emit(parseValue(alts[0])[0] || [], indent + 2, pad);
+          for (const a of alts.slice(1)) {
+            lines.push(last);
+            last = emit(parseValue(a)[0] || [], indent + 4, pad + "| ");
+          }
+        } else {
+          last = emit(item, indent + 2, pad);
+        }
         lines.push(last + (k < p.items.length - 1 ? "," : ""));
       });
       cur = " ".repeat(indent) + p.close;
@@ -247,6 +273,20 @@ function fromText(t) {
   return t.startsWith("argument ") || t.startsWith("the ") ? t : `from ${t}`;
 }
 
+/**
+ * Code in a Note's words cut to what names it where it is long: a call to its callee
+ * (`context._raise_error(…)`), other code to its first characters (`"<span …`).
+ */
+function shortCalls(t) {
+  if (!t) return t;
+  // (the parts between backticks, the odd ones, are code)
+  return t.split("`").map((part, k) => {
+    if (k % 2 === 0 || part.length <= 40) return part;
+    const call = /^([\w.]+)\(.*\)$/s.exec(part);
+    return call ? `${call[1]}(…)` : part.slice(0, 39) + "…";
+  }).join("`");
+}
+
 /** A call where it is: "`drop()` (line 57, …)" as "`drop()` on line 57, …". */
 const CALL_AT = /^(`[^`]*`) \(([^()]*?)line (\d+)(.*)\)$/;
 function callText(t) {
@@ -291,8 +331,9 @@ function paramValue(text, name, type) {
 /**
  * What the code needs of the name. A parameter (at its `def`, for any call: `contract`; in the
  * body, where it holds the argument of its name, what the code reads of it: `required`): tensor
- * shapes (`x.dim() == 3`) and the access paths it reads, always first, then under a test of the
- * arguments (`(only if admin)`), then on some paths. Any other name: what the program reads of
+ * shapes (`x.dim() == 3`) and the access paths it reads, always first (one line each), then
+ * those under one test of the arguments on one line (`(only if admin)`), then those read on some
+ * paths on one line. Any other name: what the program reads of
  * an input it gets on this line (`cfg = json.loads(text)`: `cfg["name"]`, the columns of
  * `pd.read_csv(…)`), else nothing (what its function needs is said at its parameters).
  */
@@ -302,17 +343,27 @@ function requirementLines(f) {
   const input = objs.some((o) => (o.origin && !o.origin.file && o.origin.line === f.line) || (o.from || []).some((t) => t.endsWith(`(line ${f.line})`)));
   if (!param && !input) return [];
   const reads = (f.param ? f.contract : f.required) || [];
-  const rank = (r) => (r.always ? 0 : r.only_if ? 1 : 2);
   const out = (param ? f.requires || [] : []).map((r) => "`" + r + "`");
-  for (const r of [...reads].sort((a, b) => rank(a) - rank(b))) {
-    out.push("`" + r.path + "`" + (r.always ? "" : r.only_if ? ` (only if \`${r.only_if}\`)` : " on some paths"));
-  }
+  for (const r of reads) if (r.always) out.push("`" + r.path + "`");
+  // (reads under the same test of the arguments, and those on some paths: one line each)
+  const byTest = new Map();
+  for (const r of reads) if (!r.always && r.only_if) byTest.set(r.only_if, (byTest.get(r.only_if) || []).concat([r.path]));
+  for (const [test, paths] of byTest) out.push(`${pathList(paths)} (only if \`${test}\`)`);
+  const some = reads.filter((r) => !r.always && !r.only_if).map((r) => r.path);
+  if (some.length) out.push(`on some paths: ${pathList(some)}`);
   return out;
+}
+
+/** Access paths as code, comma-separated: at most `max`, the rest counted. */
+function pathList(paths, max = 10) {
+  const shown = paths.length > max ? paths.slice(0, max - 1) : paths;
+  return shown.map((p) => "`" + p + "`").join(", ") + (paths.length > max ? ` and ${paths.length - shown.length} more` : "");
 }
 
 /**
  * What the program's own calls gave, apart from the value for any call: "`3` on line 5.", values
- * the cut makes alike once with all their lines (calls in other files: "on line 83 in dp/api.py");
+ * the cut makes alike once with all their lines (calls in other files: "on line 83 in dp/api.py"),
+ * values given at the same lines with the same outcome on one line (`10 | 14` on line 46);
  * a parameter's: what fails in the function for what they pass, the worst mark first
  * (`✗ \`row["since"]\``), nothing when it all works.
  */
@@ -337,7 +388,15 @@ function callLines(f, marks) {
     return `: ${mark}` + (fails ? " " + fails : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
   };
   const where = (m) => [m.lines.length ? onLines(m.lines) : null, ...Object.entries(m.files).map(([file, ls]) => `${onLines(ls)} in ${file}`)].filter(Boolean).join("; ");
-  return [...merged].map(([t, m]) => "`" + t + "`" + (where(m) ? " " + where(m) : "") + check(m.check));
+  // (values given at the same places with the same outcome: one line, `10 | 14` on line 46)
+  const byTail = new Map();
+  for (const [t, m] of merged) {
+    const tail = (where(m) ? " " + where(m) : "") + check(m.check);
+    const alts = byTail.get(tail) || [];
+    for (const a of alternatives(t)) if (!alts.includes(a)) alts.push(a);
+    byTail.set(tail, alts);
+  }
+  return [...byTail].map(([tail, alts]) => "`" + alts.filter((a) => a !== "?").concat(alts.includes("?") ? ["?"] : []).join(" | ") + "`" + tail);
 }
 
 /** "on line 5", "on lines 5, 9, 12 and 2 more" */
@@ -396,20 +455,18 @@ function siteLines(f, shown) {
 function runNote(run) {
   if (!run) return null;
   const ctx = run.parent || run;
-  const n = (x) => Number(x).toLocaleString("en-US");
   const secs = (ms) => (ms < 1 ? "under 1 ms" : ms < 1000 ? `${Math.round(ms)} ms` : `${Math.round(ms / 100) / 10} s`);
-  const stmts = (k) => `${n(k)} statement${k === 1 ? "" : "s"}`;
-  const done = (a) => (a && a.statements ? ` (after ${stmts(a.statements)})` : "");
-  const whole = ctx.whole ? `the whole program's analysis was cut at its ${secs(ctx.whole.deadline_ms)} deadline${done(ctx.whole)}` : ctx.pending ? "the whole program's analysis is still running" : "the whole program's analysis took too long";
+  const unseen = "counts as code rowan cannot see";
+  const whole = ctx.whole ? `the whole program's analysis stopped at its ${secs(ctx.whole.deadline_ms)} time limit` : ctx.pending ? "the whole program's analysis is still running" : "the whole program's analysis took too long";
   if (run.fn) {
     const a = run.analysis || {};
-    const cut = a.cut ? `; this run was cut at its own ${secs(a.deadline_ms)} deadline too, so code it had not reached is taken as unknown code` : "";
-    const callees = a.callees_cut ? `; past ${stmts(a.callees_cut)}, the calls made by the functions it calls were taken as unknown code` : "";
-    return `analysed on demand: this function alone, for any call, in ${secs(a.ms || 0)} (${stmts(a.statements || 0)}), because ${whole}${callees}${cut}`;
+    const callees = a.callees_cut ? "; past its work limit, the calls made by the functions it calls count as code rowan cannot see" : "";
+    const cut = a.cut ? `; this run stopped at its own ${secs(a.deadline_ms)} time limit too: code it had not reached ${unseen}` : "";
+    return `analysed alone, for any call (in ${secs(a.ms || 0)}): ${whole}${callees}${cut}`;
   }
-  if (run.module) return `from the module's own code only (its functions are analysed when you hover them), because ${whole}`;
+  if (run.module) return `from the module's own code only (functions are analysed when you hover them): ${whole}`;
   const a = run.analysis;
-  if (a && a.cut) return `the whole program's analysis was cut at its ${secs(a.deadline_ms)} deadline${done(a)}: code it had not reached by then is taken as unknown code, so values may say less than they could`;
+  if (a && a.cut) return `the analysis stopped at its ${secs(a.deadline_ms)} time limit: code it had not reached ${unseen}, so values may say less than they could`;
   return null;
 }
 
@@ -444,6 +501,7 @@ function renderHover(name, facts, verdicts) {
     // (the unknowns of the value shown: the objects are the calls' when there are some)
     const unknown = (f.general_unknowns || objs).filter((o) => o.kind === "unknown");
     const origin = (o) => (o.origin ? `the result of \`${o.origin.text}\` on line ${o.origin.line}${o.origin.file ? ` in ${o.origin.file}` : ""}` : (o.from || []).length ? o.from.map(fromText).join(" or ") : null);
+    const said = (o) => shortCalls(origin(o));
     // (an unknown named by itself, with what is known of it: that is its value)
     const self = legend.findIndex(([sym]) => sym === name);
     let value = text;
@@ -465,7 +523,7 @@ function renderHover(name, facts, verdicts) {
       value = paramValue(value, name, f.type);
       if (/(^| )\?$/.test(value)) add(origins, ["whatever a call passes"]);
       // (where the unknowns the program's calls passed come from: `json.loads(…)` on line 9)
-      add(origins, objs.filter((o) => o.kind === "unknown" && !(o.from || []).some((t) => t.startsWith(`argument \`${name}\` of `))).map(origin).filter(Boolean).slice(0, 2));
+      add(origins, objs.filter((o) => o.kind === "unknown" && !(o.from || []).some((t) => t.startsWith(`argument \`${name}\` of `))).map(said).filter(Boolean).slice(0, 2));
     } else if (own && f.type) {
       value = typeText(f.type);
     } else if (own && !objs.length) {
@@ -474,17 +532,17 @@ function renderHover(name, facts, verdicts) {
       add(origins, [`tensor dims equal to it are written \`${name}\``]);
     } else if (own && unknown.length === 1) {
       value = "?";
-      add(origins, [origin(unknown[0])].filter(Boolean));
+      add(origins, [said(unknown[0])].filter(Boolean));
     } else if (value === "?" && !legend.length) {
-      add(origins, unknown.map(origin).filter(Boolean).slice(0, 1));
+      add(origins, unknown.map(said).filter(Boolean).slice(0, 1));
     } else {
       // the names the value mentions, with what is known about each (Notes keeps those the
       // hover shows); where an unknown printed as `?` comes from
       for (const [sym, desc] of legend) if (!symbols.some(([s0]) => s0 === sym)) symbols.push([sym, desc]);
-      add(origins, unknown.filter((o) => !o.symbol).map(origin).filter(Boolean));
+      add(origins, unknown.filter((o) => !o.symbol).map(said).filter(Boolean));
     }
     // (what unknown code may have changed of the program's objects: where their `?` and `~` come from)
-    if (!tag) add(changed, objs.filter((o) => o.kind !== "unknown").flatMap((o) => (o.changed_by || []).map(callText)));
+    if (!tag) add(changed, objs.filter((o) => o.kind !== "unknown").flatMap((o) => (o.changed_by || []).map((t) => shortCalls(callText(t)))));
     head.push(...headLines(name, value, tag));
     add(reqs, requirementLines(f));
     // (on demand there are no calls of the program: the value is for any call)
@@ -502,12 +560,22 @@ function renderHover(name, facts, verdicts) {
   const by = changed.length ? `may have been changed by ${changed.slice(0, 2).join(" or ")}${changed.length > 2 ? ` (or ${changed.length - 2} other call${changed.length > 3 ? "s" : ""})` : ""}` : null;
   const unknownUsed = UNKNOWN(all) || head.some((l) => / = \?$/.test(l));
   const why = origins.slice(0, 3).concat(by && unknownUsed ? [by] : []);
-  if (unknownUsed) notes.push(`\`?\`: unknown${why.length ? ` (${why.join("; ")})` : ""}`);
-  notes.push(...typedNotes(all));
-  for (const [test, mark, meaning] of NOTATION) if (test(all)) notes.push(`\`${mark}\`: ${meaning}${mark === '"k"~' && by && !unknownUsed ? ` (${by})` : ""}`);
-  for (const m of Object.keys(MARK_TEXT)) if (marks.has(m)) notes.push(`${m}: ${MARK_TEXT[m]}`);
+  // (what this hover's names and unknowns are: a Note each; what the notation and marks it uses
+  // mean, the same in every hover: one legend line, last)
+  const legend = [];
+  if (unknownUsed && why.length) notes.push(`\`?\`: unknown (${why.join("; ")})`);
+  else if (unknownUsed) legend.push("`?` unknown");
+  const typed = typedLegend(all);
+  if (typed) legend.push(typed);
+  for (const [test, mark, meaning] of NOTATION) {
+    if (!test(all)) continue;
+    if (mark === '"k"~' && by && !unknownUsed) notes.push(`\`${mark}\`: ${meaning} (${by})`);
+    else legend.push(`\`${mark}\` ${meaning}`);
+  }
+  for (const m of Object.keys(MARK_TEXT)) if (marks.has(m)) legend.push(`${m} ${MARK_TEXT[m]}`);
   const cut = runNote(facts[0].run);
   if (cut) notes.push(cut);
+  if (legend.length) notes.push(legend.join(" · "));
   const out = ["```python", ...head, "```"];
   const section = (title, items, max) => items.length && out.push("", `**${title}**`, ...bullets(items, max).map((x) => `- ${x}`));
   section("Requirements", reqs, 10);
@@ -1106,5 +1174,5 @@ function deactivate() {
 }
 
 module.exports = {
-  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, factsAt, diagnosticMessage, findBinary,
+  shorten, shortCalls, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, factsAt, diagnosticMessage, findBinary,
   binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers, serverEvents, followArgs, sitePackagesOf };
