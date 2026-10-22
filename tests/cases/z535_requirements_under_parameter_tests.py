@@ -25,10 +25,10 @@ def by_mode(cfg, mode):
         return cfg["speed"]
     elif mode == "safe":
         return cfg["limit"]
-    return None
+    return None  # (limit's test: `mode == "safe"` implies `mode != "fast"`, so it is said alone)
 #@schema param by_mode.cfg: sometimes={speed,limit} only={speed,limit}
 #@only param by_mode.cfg: speed if mode == "fast"
-#@only param by_mode.cfg: limit if mode != "fast" and mode == "safe"
+#@only param by_mode.cfg: limit if mode == "safe"
 
 
 def nested(cfg, a, b):

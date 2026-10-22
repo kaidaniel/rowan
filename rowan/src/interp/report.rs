@@ -645,10 +645,22 @@ pub struct Need {
     pub only_if: Option<String>,
 }
 
-/// Tests that all hold, as Python: `a and b is None`.
+/// Tests that all hold, as Python: `a and b is None`; one that another implies left out (`x !=
+/// 0 and x == 5` is `x == 5`).
 fn only_if_text(tests: &intern::IdSet<intern::StrId>) -> String {
     let par = |t: &str| if t.contains(" or ") { format!("({})", t) } else { t.to_string() };
-    tests.iter().map(|t| par(&intern::str_get(t))).collect::<Vec<_>>().join(" and ")
+    let texts: Vec<String> = tests.iter().map(|t| intern::str_get(t).to_string()).collect();
+    // (`x == 5` implies `x != 0`: two int literals, or two str literals, that differ)
+    let lit = |s: &str| {
+        let int = !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
+        let st = s.len() >= 2 && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\'')) && !s[1..s.len() - 1].contains(['"', '\'', '\\']);
+        (int || st).then(|| if int { String::new() } else { s[..1].to_string() })
+    };
+    let implied = |t: &str| {
+        let Some((x, v)) = t.split_once(" != ") else { return false };
+        texts.iter().any(|o| o.split_once(" == ").is_some_and(|(y, w)| y == x && w != v && lit(v).is_some() && lit(v) == lit(w)))
+    };
+    texts.iter().filter(|t| !implied(t)).map(|t| par(t)).collect::<Vec<_>>().join(" and ")
 }
 
 /// One step of an access path: `.name` for an attribute, `["k"]` / `[0]` / `[*]` for an item.
