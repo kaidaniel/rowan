@@ -310,7 +310,7 @@ impl Analyzer {
                 let oid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, None);
                 self.copy_into(oid, Ns::Item, a, state, true, &intern::KeySet::new());
                 self.copy_into(oid, Ns::Item, b, state, true, &intern::KeySet::new());
-                return Value::obj(oid);
+                return self.with_rest(op, a, b, Kind::Dict, Value::obj(oid), node, state);
             }
         }
         if op == ast::Operator::Add {
@@ -750,6 +750,19 @@ impl Analyzer {
         Some(self.alloc_positional(kind, node, None, Value::objs(e.pts.clone()), e.kv, state))
     }
 
+    /// `r`, what `a op b` gives where either is of `kind` (a list, a dict), and what it gives
+    /// where neither is: `"k" + "s"`, an unknown text's (`[1] if c else s`).
+    fn with_rest(&mut self, op: ast::Operator, a: &Value, b: &Value, kind: Kind, r: Value, node: &Node, state: &mut State) -> Value {
+        let rest = |an: &Analyzer, v: &Value| Value::with_kv(v.pts.filter(|o| an.heap.kind(o) != kind), v.kv.clone());
+        let (ra, rb) = (rest(self, a), rest(self, b));
+        let empty = |v: &Value| v.pts.is_empty() && v.kv.is_bot();
+        if empty(&ra) || empty(&rb) {
+            return r;
+        }
+        let other = self.binop(op, &ra, &rb, node, state);
+        r.join(&other)
+    }
+
     /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.
     fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
@@ -790,7 +803,7 @@ impl Analyzer {
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
             state.elems.insert(oid, acc.kv);
-            return Some(Value::obj(oid));
+            return Some(self.with_rest(ast::Operator::Add, a, b, Kind::List, Value::obj(oid), node, state));
         }
         // (two unknowns — sequences, texts, numbers, arrays: as sequences, the elements of
         // either; a slice or concatenation stands for its sequences)
