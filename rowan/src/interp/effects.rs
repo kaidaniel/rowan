@@ -207,6 +207,13 @@ pub struct Closure {
     pub modules: Vec<(ObjId, u64)>,
 }
 
+/// Attribute names as sorted keys.
+fn sorted_keys(names: FxHashSet<StrId>) -> Vec<KeyId> {
+    let mut ks: Vec<KeyId> = names.into_iter().map(|a| key_str_lit(&str_get(a))).collect();
+    ks.sort_unstable();
+    ks
+}
+
 /// The names a module has on a path, as a fingerprint (their number and their keys).
 pub(in crate::interp) fn module_names(state: &State, m: ObjId) -> u64 {
     let mut h: u64 = 0;
@@ -305,27 +312,28 @@ impl Analyzer {
     /// some object, and those they delete.
     pub(in crate::interp) fn attrs_set_by_methods(&mut self, cls: ObjId, state: &State) -> (Vec<KeyId>, Vec<KeyId>) {
         let (mut out, mut del): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
+        for fi in self.methods_but_init(cls, state) {
+            let u = self.code_uses(&fi);
+            out.extend(u.stored.iter().copied());
+            del.extend(u.deleted.iter().copied());
+        }
+        (sorted_keys(out), sorted_keys(del))
+    }
+
+    /// The program's functions the classes of `cls`'s MRO hold on this path, but `__init__`.
+    fn methods_but_init(&self, cls: ObjId, state: &State) -> Vec<std::rc::Rc<FuncInfo>> {
+        let mut out = Vec::new();
         for c in self.heap.mro(cls) {
             for (k, v) in state.obj_slots(c, Ns::Attr) {
-                if intern::key_as_str(k).as_deref() == Some("__init__") {
-                    continue;
-                }
-                for f in v.pts.iter() {
-                    if let Payload::Func(fi) = &self.heap.obj(f).payload {
-                        let fi = fi.clone();
-                        let u = self.code_uses(&fi);
-                        out.extend(u.stored.iter().copied());
-                        del.extend(u.deleted.iter().copied());
-                    }
+                if intern::key_as_str(k).as_deref() != Some("__init__") {
+                    out.extend(v.pts.iter().filter_map(|f| match &self.heap.obj(f).payload {
+                        Payload::Func(fi) => Some(fi.clone()),
+                        _ => None,
+                    }));
                 }
             }
         }
-        let keys = |set: FxHashSet<StrId>| {
-            let mut ks: Vec<KeyId> = set.into_iter().map(|a| key_str_lit(&str_get(a))).collect();
-            ks.sort_unstable();
-            ks
-        };
-        (keys(out), keys(del))
+        out
     }
 
     /// On demand, an instance any call may get: any of the program's functions may have run with
@@ -431,21 +439,7 @@ impl Analyzer {
     /// Does a method of `cls` or its bases (but `__init__`, static and class methods) give its
     /// receiver away?
     fn escapes_in_methods(&mut self, cls: ObjId, state: &State) -> bool {
-        for c in self.heap.mro(cls) {
-            for (k, v) in state.obj_slots(c, Ns::Attr) {
-                if intern::key_as_str(k).as_deref() == Some("__init__") {
-                    continue;
-                }
-                for f in v.pts.iter() {
-                    let Payload::Func(fi) = &self.heap.obj(f).payload else { continue };
-                    let fi = fi.clone();
-                    if !fi.is_static.get() && !fi.is_classmethod.get() && self.code_uses(&fi).recv.as_ref().is_none_or(|r| r.escapes) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        self.methods_but_init(cls, state).into_iter().any(|fi| !fi.is_static.get() && !fi.is_classmethod.get() && self.code_uses(&fi).recv.as_ref().is_none_or(|r| r.escapes))
     }
 
     /// What a call of method `foid` that does not run may do to its receiver `recv` itself, by
@@ -540,17 +534,12 @@ impl Analyzer {
                 deletes.insert(as_str(k));
             }
         }
-        let keys = |set: FxHashSet<StrId>| {
-            let mut ks: Vec<KeyId> = set.into_iter().map(|a| key_str_lit(&str_get(a))).collect();
-            ks.sort_unstable();
-            ks
-        };
         stores.retain(|n| !by_setter.contains(n));
         let mut code: Vec<ObjId> = done.into_iter().collect();
         code.sort_unstable();
         // (a deleted name stored again: as a store, the row opened for both)
         stores_like.extend(deletes_like);
-        Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code, stores_like })
+        Some(RecvEffects { stores: sorted_keys(stores), deletes: sorted_keys(deletes), used: sorted_keys(used), code, stores_like })
     }
 
     /// The attribute names method `foid`'s code stores on its receiver `recv` on every way it
@@ -682,15 +671,11 @@ impl Analyzer {
         self.effects.whole.is_none() && self.cached_closure(roots, state).is_some()
     }
 
-    /// Resume walk `w` with the code it was given since (`ClosureWalk::push`).
-    pub(in crate::interp) fn walk_more(&mut self, w: &mut ClosureWalk, state: &State) {
-        self.walk_closure(w, state);
-    }
-
     /// Walk the code `w.work` holds into `w`'s closure (resumable: code already in it is not
     /// walked again; a class already met is looked at again only for the names whose use grew
-    /// since: the closure is the same whatever order the code is met in).
-    fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
+    /// since: the closure is the same whatever order the code is met in). Resumed with the code
+    /// it was given since (`ClosureWalk::push`).
+    pub(in crate::interp) fn walk_closure(&mut self, w: &mut ClosureWalk, state: &State) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| an.holds_code(*x)));
         let ClosureWalk { out, work, attrs, reads, class_stores, classes, done, done_attrs, classes_seen, names_seen, by_name, dirty, cap, visits, cut } = w;
         loop {
@@ -1128,7 +1113,7 @@ impl Analyzer {
         for name in LIBRARY_DUNDERS {
             let Some(owner) = self.class_lookup(c, name) else { continue };
             let k = key_str_lit(name);
-            let v = state.slot_opt(owner, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned()).unwrap_or_default();
+            let v = self.class_slot(owner, k, state);
             for f in v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))).collect::<Vec<_>>() {
                 if !out.contains(&f) && !self.changes_nothing(f, c, state, 0, &mut Vec::new()) {
                     out.push(f);
@@ -1148,7 +1133,7 @@ impl Analyzer {
         for &name in names {
             let Some(owner) = self.class_lookup(c, name) else { continue };
             let k = key_str_lit(name);
-            let v = state.slot_opt(owner, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned()).unwrap_or_default();
+            let v = self.class_slot(owner, k, state);
             out.extend(v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))));
         }
         out
@@ -1180,7 +1165,7 @@ impl Analyzer {
                 return false;
             }
             for k in self.heap.mro(c) {
-                let v = state.slot_opt(k, Ns::Attr, key_str_lit(&str_get(m))).or_else(|| self.heap.cls_slots.get(&(k, Ns::Attr, key_str_lit(&str_get(m)))).cloned()).unwrap_or_default();
+                let v = self.class_slot(k, key_str_lit(&str_get(m)), state);
                 if !v.kv.is_bot() || v.pts.iter().any(|g| !matches!(self.heap.obj(g).payload, Payload::Func(_))) {
                     return false;
                 }

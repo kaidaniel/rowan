@@ -606,7 +606,7 @@ pub(super) fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         } else if let Ok((_, tree)) = crate::frontend::parse(&format!("<exec L{}>", c.line), None, code.to_string()) {
             an.exec_block(&tree.body, st);
             st.reachable = true;
-            return an.none_v.clone();
+            return Value::none();
         }
     }
     // unknown code: everything reachable from the frame's names (and the module's) may change
@@ -657,7 +657,7 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
     }
     let f = st.slot(moid, Ns::Attr, key_str_lit("matched"));
     let m = an.call_value(&f, &c.node, None, st, Some(vec![]));
-    m.join(&an.none_v.clone())
+    m.join(&Value::none())
 }
 
 pub(super) fn m_gather(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1031,7 +1031,7 @@ pub(super) fn m_memo(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.drop_obj_ns(memo, Ns::Item);
         st.set_slot(memo, Ns::Attr, key_str_lit("hits"), zero.clone(), true);
         st.set_slot(memo, Ns::Attr, key_str_lit("misses"), zero, true);
-        return an.none_v.clone();
+        return Value::none();
     }
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "CacheInfo", Payload::None, Some(Row::new()), Ns::Attr, None, Some("cacheinfo"));
     let r = st.row(memo, Ns::Item);

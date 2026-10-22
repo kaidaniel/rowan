@@ -1272,7 +1272,7 @@ fn pyd_init_privates(an: &mut Analyzer, cls: ObjId, inst: ObjId, state: &mut Sta
     if let Some(defc) = an.class_lookup(cls, "model_post_init") {
         let fv = an.heap.class_attr(defc, "model_post_init");
         for f in fv.pts.iter().filter(|f| an.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
-            an.call_user(f, Some(Value::obj(inst)), Args::pos(&[an.none_v.clone()]), state, node, false);
+            an.call_user(f, Some(Value::obj(inst)), Args::pos(&[Value::none()]), state, node, false);
         }
     }
 }
@@ -1547,7 +1547,7 @@ fn pyd_call_validator(an: &mut Analyzer, cls: ObjId, v: &Validator, val: &Value,
         state.set_row(did, Ns::Item, row);
         let info = an.alloc_at(Kind::Namespace, node, state, "ValidationInfo", Payload::None, Some(Row::new()), Ns::Attr, None, Some(&format!("vinfo{}:{}:ns", cls, field)));
         let mut irow = Row::new();
-        for (k, x) in [("data", Value::obj(did)), ("field_name", Value::lit_str(field)), ("mode", Value::lit_str("python")), ("context", an.none_v.clone())] {
+        for (k, x) in [("data", Value::obj(did)), ("field_name", Value::lit_str(field)), ("mode", Value::lit_str("python")), ("context", Value::none())] {
             let kk = key_str_lit(k);
             irow = irow.store(kk, true);
             state.set_slot(info, Ns::Attr, kk, x, true);
@@ -1611,7 +1611,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
             };
             let rest = Value::with_kv(val.pts.clone(), rest_kv);
             let conv = if rest.empty() { rest } else { pyd_convert(an, inner, &rest, state, node) };
-            conv.join(&an.none_v.clone())
+            conv.join(&Value::none())
         }
         Ann::Union(ms, disc) => {
             let models: Vec<ObjId> = ms.iter().filter_map(|m| if let Ann::Model(c) = m { Some(*c) } else { None }).collect();
@@ -2854,7 +2854,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 };
                 let pc = pyd_class(an, cls, st);
                 if pc.extra != Extra::Allow {
-                    outs.push(an.none_v.clone());
+                    outs.push(Value::none());
                     continue;
                 }
                 let fieldset: KeySet = KeySet::from_iter(pc.fields.iter().map(|f| key_str_lit(&f.name)));
@@ -2879,7 +2879,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             join_values(outs)
         }
-        "model_post_init" => an.none_v.clone(),
+        "model_post_init" => Value::none(),
         // a wrap serializer's handler: the default dump
         "dumphandler" => {
             let opts = DumpOpts { raw: true, ..Default::default() };
@@ -3090,7 +3090,7 @@ pub fn fieldinfo_attr(an: &mut Analyzer, st: &mut State, q: &str, name: &str, no
             match a {
                 Some(x) if f.alts.is_empty() || name != "validation_alias" => Value::lit_str(&x),
                 Some(_) => Value::data("AliasChoices"),
-                None => an.none_v.clone(),
+                None => Value::none(),
             }
         }
         "is_required" => an.method_value(&format!("fieldinfo.is_required.{}", f.required), &Value::new()),

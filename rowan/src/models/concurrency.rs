@@ -110,7 +110,7 @@ pub fn thread_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let o = obj(an, st, &c.node, "stdobj.thread", &format!("th{}", c.site));
     let timer = c.qual == "threading.Timer";
     let (target, args, kwargs) = if timer { (c.arg(1, Some("function")), c.arg(2, Some("args")), c.arg(3, Some("kwargs"))) } else { (c.arg(1, Some("target")), c.arg(3, Some("args")), c.arg(4, Some("kwargs"))) };
-    let target = target.unwrap_or_else(|| an.none_v.clone());
+    let target = target.unwrap_or_else(|| Value::none());
     let (args, kwargs) = (args.unwrap_or_default(), kwargs.unwrap_or_default());
     for (k, v) in [("target", target), ("args", args), ("kwargs", kwargs), ("timer", Value::lit(intern::key_bool(timer)))] {
         st.set_slot(o, Ns::Attr, slot_key(k), v, true);
@@ -187,7 +187,7 @@ fn future_of(an: &mut Analyzer, st: &mut State, node: &Node, ctx: &str, v: Value
     st.set_slot(o, Ns::Attr, slot_key("result"), v, true);
     st.set_slot(o, Ns::Attr, slot_key("raised"), Value::lit(intern::key_int(r.level as i64)), true);
     // what exception() gives: None, the raised exception, or (not known) either
-    let none = an.none_v.clone();
+    let none = Value::none();
     let exc = match r.level {
         0 => none,
         2 if !r.exc.empty() => r.exc.clone(),
@@ -211,9 +211,9 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 for o in objs {
                     thread_start(an, st, c, o);
                 }
-                return an.none_v.clone();
+                return Value::none();
             }
-            "join" => return an.none_v.clone(),
+            "join" => return Value::none(),
             "is_alive" => return Value::data("alive"),
             _ => return Value::data(name),
         }
@@ -221,7 +221,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if q.starts_with("stdobj.executor.") {
         match name {
             "__enter__" => return recv,
-            "__exit__" | "shutdown" => return an.none_v.clone(),
+            "__exit__" | "shutdown" => return Value::none(),
             "submit" => {
                 let Some(f) = c.args.first().cloned() else { return Value::data("future") };
                 let args: Vec<Value> = c.args.iter().skip(1).cloned().collect();
@@ -294,7 +294,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if let Some(f) = c.args.first().cloned() {
                     call_catching(an, &f, vec![recv.clone()], IndexMap::new(), st, &c.node);
                 }
-                return an.none_v.clone();
+                return Value::none();
             }
             _ => return Value::data(name),
         }
@@ -329,7 +329,7 @@ fn thread_sub(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.catching(|an| an.call_method_with(&recv, "run", vec![], &c.node, st));
         an.leave_try();
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {

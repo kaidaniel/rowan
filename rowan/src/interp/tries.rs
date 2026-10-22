@@ -503,7 +503,7 @@ impl Analyzer {
                     if !st.reachable {
                         break;
                     }
-                    let a = if exc { Value::data("exc") } else { self.none_v.clone() };
+                    let a = if exc { Value::data("exc") } else { Value::none() };
                     self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
                     // an ExitStack: its callbacks, last registered first; closing(x): x.close()
                     crate::models::csvio::exitstack_close(self, st, v, n, !exc);

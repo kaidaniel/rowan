@@ -396,7 +396,7 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     st.set_row(oid, Ns::Item, row);
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         _ => {
             let _ = join_values(Vec::<Value>::new());
@@ -492,19 +492,19 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     match (name.as_str(), cur) {
         ("maxlen", _) => match maxlen {
             Some(m) => Value::lit(intern::key_int(m)),
-            None => an.none_v.clone(),
+            None => Value::none(),
         },
         ("append", Some(mut items)) => {
             items.push(arg);
             let items = fit(items, false);
             set_items(an, oid, items, st);
-            an.none_v.clone()
+            Value::none()
         }
         ("appendleft", Some(mut items)) => {
             items.insert(0, arg);
             let items = fit(items, true);
             set_items(an, oid, items, st);
-            an.none_v.clone()
+            Value::none()
         }
         ("extend" | "extendleft", Some(mut items)) => {
             match an.iterate(&arg, &c.node, st).items {
@@ -522,7 +522,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 None => forget(an, oid, &arg, c, st),
             }
-            an.none_v.clone()
+            Value::none()
         }
         ("pop" | "popleft", Some(mut items)) => {
             if items.is_empty() {
@@ -542,11 +542,11 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 r.rotate_right(k as usize);
                 set_items(an, oid, r, st);
             }
-            an.none_v.clone()
+            Value::none()
         }
         ("clear", _) => {
             set_items(an, oid, Vec::new(), st);
-            an.none_v.clone()
+            Value::none()
         }
         ("copy", Some(items)) => {
             let nid = an.alloc_at(Kind::List, &c.node, st, &format!("deque@L{}", c.line), Payload::None, None, Ns::Item, None, Some("dequecopy"));
@@ -563,7 +563,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         (_, None) => {
             forget(an, oid, &arg, c, st);
-            an.none_v.clone()
+            Value::none()
         }
         _ => Value::data("deque"),
     }

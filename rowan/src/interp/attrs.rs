@@ -296,7 +296,7 @@ impl Analyzer {
         if name == "maxlen" {
             match self.m.deques[&oid] {
                 Some(m) => Value::lit(intern::key_int(m)),
-                None => self.none_v.clone(),
+                None => Value::none(),
             }
         } else {
             self.method_value(&format!("deque.{}", name), &Value::obj(oid))
@@ -563,12 +563,12 @@ impl Analyzer {
     /// it (`live_defaults`).
     fn function_defaults_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
         let fi = self.heap.func_info(oid);
-        let Some(params) = fi.node.params() else { return self.none_v.clone() };
+        let Some(params) = fi.node.params() else { return Value::none() };
         let kw = name == "__kwdefaults__";
         let ps: Vec<&ast::ParameterWithDefault> = if kw { params.kwonlyargs.iter().collect() } else { params.posonlyargs.iter().chain(params.args.iter()).collect() };
         let (names, vals): (Vec<String>, Vec<Value>) = ps.iter().filter_map(|p| fi.defaults.get(&intern::s(p.parameter.name.id.as_str())).map(|v| (p.parameter.name.id.to_string(), v.clone()))).unzip();
         let v = if vals.is_empty() {
-            self.none_v.clone()
+            Value::none()
         } else if kw {
             crate::models::stdlib::names_dict(self, state, node, &names, Some(vals), "kwdefaults")
         } else {
@@ -629,36 +629,15 @@ impl Analyzer {
         Value::obj(self.heap.alloc_raw(Kind::Method, &key, "", true, qual, Payload::Method(qual.to_string(), recv.clone())))
     }
 
-    /// Return the class oid (in MRO) that defines `name`, or None.
+    /// The class of `cls`'s MRO that defines `name`, if any.
     pub fn class_lookup(&self, cls: u32, name: &str) -> Option<u32> {
         let nk = key_str_lit(name);
-        let order = self.heap.mro(cls);
-        if !order.is_empty() {
-            return order.into_iter().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
-        }
-        let mut seen: Vec<u32> = Vec::new();
-        let mut order = vec![cls];
-        while !order.is_empty() {
-            let c = order.remove(0);
-            if seen.contains(&c) {
-                continue;
-            }
-            seen.push(c);
-            if self.heap.cls_slots.contains_key(&(c, Ns::Attr, nk)) {
-                return Some(c);
-            }
-            if let Some(ci) = self.heap.class_info_opt(c) {
-                order.extend(ci.bases.iter().copied());
-            }
-        }
-        None
+        self.heap.mro(cls).into_iter().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)))
     }
 
     /// Is the value class `c` holds as `k` plain data (no function, descriptor or property)?
     pub(in crate::interp) fn plain_class_attr(&self, c: u32, k: KeyId, state: &State) -> bool {
-        let cv = state.slot_opt(c, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(c, Ns::Attr, k)).cloned()).unwrap_or_default();
-        let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound | Kind::Instance | Kind::External | Kind::Unknown));
-        plain
+        !self.class_slot(c, k, state).pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound | Kind::Instance | Kind::External | Kind::Unknown))
     }
 
     /// The classes of `cls`'s MRO that may hold `name` on this path, up to the first that surely
@@ -667,11 +646,7 @@ impl Analyzer {
     pub fn class_lookup_on_path(&self, cls: u32, name: &str, state: &State) -> (Vec<u32>, bool) {
         let nk = key_str_lit(name);
         let mut out = Vec::new();
-        let mut order = self.heap.mro(cls);
-        if order.is_empty() {
-            order = self.class_lookup(cls, name).into_iter().collect();
-        }
-        for c in order {
+        for c in self.heap.mro(cls) {
             if !self.heap.cls_slots.contains_key(&(c, Ns::Attr, nk)) {
                 continue;
             }
@@ -749,7 +724,12 @@ impl Analyzer {
 
     /// What classes `defs` hold as `nk` (on this path, else on any).
     pub(in crate::interp) fn class_values(&self, defs: &[u32], nk: KeyId, state: &State) -> Value {
-        join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()))
+        join_values(defs.iter().map(|d| self.class_slot(*d, nk, state)))
+    }
+
+    /// What class `c` holds as `k`: on this path when the path has it, else what any path stored.
+    pub(in crate::interp) fn class_slot(&self, c: ObjId, k: KeyId, state: &State) -> Value {
+        state.slot_opt(c, Ns::Attr, k).or_else(|| self.heap.cls_slots.get(&(c, Ns::Attr, k)).cloned()).unwrap_or_default()
     }
 
     /// An attribute read's verdict, guarded or not.
@@ -1280,14 +1260,14 @@ impl Analyzer {
                 }
                 // a property without a setter: the assignment raises
                 if kind == Kind::Instance {
-                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                    let cv = self.class_slot(defc, nk, state);
                     if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
                         self.raise_here("AttributeError", state);
                         return true;
                     }
                 }
                 // a data descriptor (an object whose class has `__set__`) takes the store
-                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                let cv = self.class_slot(defc, nk, state);
                 let descs: Vec<u32> = cv.pts.iter().filter(|d| self.heap.kind(*d) == Kind::Instance && self.heap.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
                 if !descs.is_empty() {
                     for d in descs {

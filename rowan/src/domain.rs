@@ -1462,6 +1462,10 @@ impl Value {
     pub fn lit(k: KeyId) -> Value {
         Value { pts: ObjSet::new(), kv: KeyVal::Lit(k) }
     }
+    /// `None`.
+    pub fn none() -> Value {
+        Value::lit(intern::key_none())
+    }
     pub fn lit_str(s: &str) -> Value {
         Value::lit(intern::key_str_lit(s))
     }

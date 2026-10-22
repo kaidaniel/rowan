@@ -260,7 +260,7 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
             _ => Conv::Other,
         },
     };
-    let none = an.none_v.clone();
+    let none = Value::none();
     let suppress_v = |v: &Value, an: &Analyzer| v.pts.iter().any(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o).ends_with("SUPPRESS")) || matches!(&v.kv, KeyVal::Data(d, _) if intern::str_get(*d).contains("SUPPRESS")) || lit_str(v).as_deref() == Some("==SUPPRESS==");
     let (default, has_default, suppress) = match c.kw("default") {
         Some(d) => {
@@ -388,7 +388,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         "get_default" => {
             let Some(dest) = c.args.first().and_then(lit_str) else { return Value::data("default") };
@@ -396,7 +396,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if let Some((_, v)) = s.defaults.iter().find(|(n, _)| *n == dest) {
                 return v.clone();
             }
-            s.args.iter().find(|a| a.dest == dest).map(|a| a.default.clone()).unwrap_or_else(|| an.none_v.clone())
+            s.args.iter().find(|a| a.dest == dest).map(|a| a.default.clone()).unwrap_or_else(|| Value::none())
         }
         "parse_args" | "parse_known_args" | "parse_intermixed_args" | "parse_known_intermixed_args" => {
             let known = name.contains("known");
@@ -428,7 +428,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if matches!(name.as_str(), "exit" | "error") {
                 an.raise_here("SystemExit", st);
             }
-            an.none_v.clone()
+            Value::none()
         }
         "format_help" | "format_usage" => Value::data("usage"),
         _ => Value::data(&format!("L{}", c.line)),
@@ -557,7 +557,7 @@ fn parse_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, to
     }
     if let Some(sub) = &spec.sub {
         if let Some(d) = &sub.dest {
-            ns.entry(d.clone()).or_insert_with(|| an.none_v.clone());
+            ns.entry(d.clone()).or_insert_with(|| Value::none());
         }
     }
     for (k, v) in &spec.defaults {
@@ -770,7 +770,7 @@ fn parse_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, to
     }
     for (d, vs) in appends {
         // (appending to a list default copies it first: its items come first)
-        let default = opts.iter().find(|a| a.dest == d && a.has_default).map(|a| a.default.clone()).filter(|v| !(v.pts.is_empty() && v.kv == an.none_v.kv));
+        let default = opts.iter().find(|a| a.dest == d && a.has_default).map(|a| a.default.clone()).filter(|v| !(v.pts.is_empty() && v.kv == Value::none().kv));
         let (mut items, mut known) = (Vec::new(), true);
         if let Some(dv) = default {
             let it = an.iterate(&dv, &c.node, st);
@@ -936,7 +936,7 @@ fn parse_unknown(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, known_ar
             if !sub.required {
                 let mut ns = base.clone();
                 if let Some(d) = &sub.dest {
-                    ns.insert(d.clone(), an.none_v.clone());
+                    ns.insert(d.clone(), Value::none());
                 }
                 outs.push(make(an, st, &ns, &maybe, spec.opaque, "nsnone"));
             }
@@ -978,7 +978,7 @@ fn unknown_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, 
     }
     if let Some(sub) = &spec.sub {
         if let Some(d) = &sub.dest {
-            ns.entry(d.clone()).or_insert_with(|| an.none_v.clone());
+            ns.entry(d.clone()).or_insert_with(|| Value::none());
         }
     }
     for (k, v) in &spec.defaults {

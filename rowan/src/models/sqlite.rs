@@ -1231,7 +1231,7 @@ pub fn m_connect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.m.sql_dbs.insert(oid, Db { memory, tables: IndexMap::new(), line: c.line });
     let rf = key_str_lit("row_factory");
     st.set_row(oid, Ns::Attr, Row::new().store(rf, true));
-    st.set_slot(oid, Ns::Attr, rf, an.none_v.clone(), true);
+    st.set_slot(oid, Ns::Attr, rf, Value::none(), true);
     Value::obj(oid)
 }
 
@@ -1668,7 +1668,7 @@ fn cursor_obj(an: &mut Analyzer, st: &mut State, node: &Node, con: u32, rs: Rs, 
     };
     let desc = match &rs.cols {
         Some(cs) => {
-            let none = an.none_v.clone();
+            let none = Value::none();
             let items: Vec<Value> = cs.iter().enumerate().map(|(i, c)| {
                 let mut vs = vec![Value::lit_str(c)];
                 vs.extend(std::iter::repeat_n(none.clone(), 6));
@@ -1797,7 +1797,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Value::obj(o)
         }
         (true, "cursor") => cursor_obj(an, st, &c.node, con, Rs::default(), None),
-        (true, "commit" | "rollback" | "close" | "interrupt") | (false, "close") => an.none_v.clone(),
+        (true, "commit" | "rollback" | "close" | "interrupt") | (false, "close") => Value::none(),
         (false, "fetchall") => cursor_rows(an, st, &c.node, o).map(|v| {
             st.set_slot(o, Ns::Attr, key_str_lit("\u{1}pos"), Value::data("pos"), true);
             v
@@ -1813,13 +1813,13 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     if (p as usize) < n {
                         st.slot(lo.unwrap(), Ns::Pos, intern::key_int(p))
                     } else {
-                        an.none_v.clone()
+                        Value::none()
                     }
                 }
                 _ => {
                     st.set_slot(o, Ns::Attr, pk, Value::data("pos"), true);
                     let e = an.elem_of(&list, &c.node, st);
-                    e.join(&an.none_v.clone())
+                    e.join(&Value::none())
                 }
             }
         }

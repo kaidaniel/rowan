@@ -39,7 +39,7 @@ impl Analyzer {
                 ast::Number::Complex { .. } => Value::data("complex"),
             },
             ast::Expr::BooleanLiteral(b) => Value::lit(intern::key_bool(b.value)),
-            ast::Expr::NoneLiteral(_) => self.none_v.clone(),
+            ast::Expr::NoneLiteral(_) => Value::none(),
             ast::Expr::BytesLiteral(b) => Value::lit(intern::key(intern::Key::Bytes(b.value.bytes().collect()))),
             ast::Expr::EllipsisLiteral(_) => Value::lit(intern::key(intern::Key::Ellipsis)),
             ast::Expr::Name(n) => {
@@ -211,17 +211,17 @@ impl Analyzer {
     fn expr_yield(&mut self, y: &'static ast::ExprYield, state: &mut State) -> Value {
         let v = match &y.value {
             Some(v) => self.eval(v, state),
-            None => self.none_v.clone(),
+            None => Value::none(),
         };
         // (the with body runs at every yield the generator reaches: one per path)
         if self.gens.cm_hook.as_ref().map(|h| (!h.ran || (h.multi)) && self.cx.frames.len() == h.depth + 1).unwrap_or(false) {
             self.run_cm_body(v, state);
-            return self.none_v.clone();
+            return Value::none();
         }
         // (a consumer that stops early takes it here)
         if self.at_stop_hook() {
             self.stop_at_yield(v, state);
-            return self.none_v.clone();
+            return Value::none();
         }
         // (a bare `yield` yields None)
         self.yield_value(v, state, (y as *const _ as usize, 0));
@@ -229,7 +229,7 @@ impl Analyzer {
         if crate::frontend::any_send_call() {
             Value::data("yield")
         } else {
-            self.none_v.clone()
+            Value::none()
         }
     }
 

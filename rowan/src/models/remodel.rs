@@ -104,7 +104,7 @@ fn match_obj(an: &mut Analyzer, st: &mut State, node: &Node, re: &Regex, m: ReMa
             }
         }
     }
-    let none = an.none_v.clone();
+    let none = Value::none();
     set_attr(st, oid, "lastindex", last.map(|g| Value::lit(intern::key_int(g as i64))).unwrap_or_else(|| none.clone()));
     let lg = last.and_then(|g| re.names.iter().find(|(_, x)| *x == g).map(|(n, _)| Value::lit_str(n))).unwrap_or_else(|| none.clone());
     set_attr(st, oid, "lastgroup", lg);
@@ -202,7 +202,7 @@ pub fn m_re(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             let m = ReMatch { pat: t.pat.clone(), flags: t.flags, text: s, spans, pos, endpos };
                             match_obj(an, st, &c.node, &t.re, m, "m")
                         }
-                        Ok(None) => an.none_v.clone(),
+                        Ok(None) => Value::none(),
                         Err(()) => unknown_string(an, st, c, &name, &t),
                     }
                 }
@@ -230,7 +230,7 @@ pub fn m_re(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let Ok(ms) = t.re.find_all(&s, 0, s.len(), maxsplit) else { return unknown_string(an, st, c, &name, &t) };
                     let mut items: Vec<Value> = Vec::new();
                     let mut at = 0;
-                    let none = an.none_v.clone();
+                    let none = Value::none();
                     for spans in ms {
                         let (a, b) = spans[0].unwrap();
                         items.push(Value::lit_str(&s[at..a].iter().collect::<String>()));
@@ -349,7 +349,7 @@ fn unknown_string(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, t: &T
         }
         "findall" | "split" => {
             let e = if name == "findall" && t.re.ngroups > 1 { Value::data("tuple") } else { Value::data("str") };
-            let e = if name == "split" && t.re.ngroups > 0 { e.join(&an.none_v.clone()) } else { e };
+            let e = if name == "split" && t.re.ngroups > 0 { e.join(&Value::none()) } else { e };
             an.alloc_positional(Kind::List, &c.node, None, e, DATA, st)
         }
         "finditer" => {
@@ -386,7 +386,7 @@ pub fn m_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("match") };
     let Some(m) = an.m.re_matches.get(&oid).cloned() else { return Value::data("match") };
     let Some(re) = Regex::new(&m.pat, m.flags) else { return Value::data("match") };
-    let none = an.none_v.clone();
+    let none = Value::none();
     let gidx = |v: &Value| -> Option<usize> {
         if let Some(i) = lit_int(v) {
             return (i >= 0 && (i as usize) <= re.ngroups).then_some(i as usize);
@@ -467,7 +467,7 @@ pub fn match_item(an: &mut Analyzer, oid: u32, key: &Value) -> Option<Value> {
     } else {
         re.group_index(&lit_str(key)?)?
     };
-    Some(group_value(&m, g, &an.none_v.clone()))
+    Some(group_value(&m, g, &Value::none()))
 }
 
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {

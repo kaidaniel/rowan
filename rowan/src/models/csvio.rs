@@ -396,7 +396,7 @@ fn m_file(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &Value)
         }
         "writelines" | "close" | "flush" | "__exit__" => {
             an.may_raise_here("OSError", st);
-            an.none_v.clone()
+            Value::none()
         }
         "readable" | "writable" | "seekable" | "isatty" | "closed" => Value::data(&crate::domain::typed_label("bool", "")),
         _ => an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node),
@@ -510,7 +510,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     None => Text::Unknown,
                 };
                 write_into(an, st, &recv, &piece, c.line, false);
-                an.none_v.clone()
+                Value::none()
             }
             "seek" | "tell" => Value::lit(intern::key_int(0)),
             "truncate" => {
@@ -520,7 +520,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 Value::lit(intern::key_int(0))
             }
-            "close" | "flush" => an.none_v.clone(),
+            "close" | "flush" => Value::none(),
             "readlines" => {
                 let t = text_in(an, st, &recv);
                 match t {
@@ -582,7 +582,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if ws.is_empty() {
             return Value::data("csvwriter");
         }
-        return an.none_v.clone();
+        return Value::none();
     }
     Value::data(name)
 }
@@ -688,8 +688,8 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let f = c.arg(0, Some("f")).unwrap_or_default();
     let fieldnames = c.arg(1, Some("fieldnames"));
-    let restkey = c.arg(2, Some("restkey")).unwrap_or_else(|| an.none_v.clone());
-    let restval = c.arg(3, Some("restval")).unwrap_or_else(|| an.none_v.clone());
+    let restkey = c.arg(2, Some("restkey")).unwrap_or_else(|| Value::none());
+    let restval = c.arg(3, Some("restval")).unwrap_or_else(|| Value::none());
     let delim = single_char(an, c, "delimiter", ',');
     let quote = single_char(an, c, "quotechar", '"');
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar" | "fieldnames" | "restkey" | "restval"));
@@ -737,7 +737,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     if let Some(o) = lv.single() {
                         let fv = match &fields {
                             Some(fs) => csv_str_list(an, fs, &c.node, st, "csvfields"),
-                            None => an.none_v.clone(),
+                            None => Value::none(),
                         };
                         an.m.csv_readers.insert(o, fv);
                     }
@@ -830,7 +830,7 @@ pub fn closing_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let kind = if c.qual.ends_with("closing") { "stdobj.closing" } else { "stdobj.nullcontext" };
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, kind, Payload::Method(kind.into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.heap.obj_mut(oid).payload = Payload::Method(kind.into(), Value::new());
-    let target = c.arg(0, Some("enter_result")).or_else(|| c.arg(0, Some("thing"))).unwrap_or_else(|| an.none_v.clone());
+    let target = c.arg(0, Some("enter_result")).or_else(|| c.arg(0, Some("thing"))).unwrap_or_else(|| Value::none());
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
     Value::obj(oid)
 }
@@ -898,8 +898,8 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
 fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &Value) -> Value {
     match name {
         "callback" | "push" => {
-            let Some(f) = c.args.first().cloned() else { return an.none_v.clone() };
-            let args: Vec<Value> = if name == "push" { vec![an.none_v.clone(), an.none_v.clone(), an.none_v.clone()] } else { c.args.iter().skip(1).cloned().collect() };
+            let Some(f) = c.args.first().cloned() else { return Value::none() };
+            let args: Vec<Value> = if name == "push" { vec![Value::none(), Value::none(), Value::none()] } else { c.args.iter().skip(1).cloned().collect() };
             for o in recv.pts.iter() {
                 an.m.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
             }
@@ -926,7 +926,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
                     Kind::Instance => {
                         let v = an.call_method_if_defined(&Value::obj(o), "__enter__", &c.node, st).unwrap_or_else(|| Value::obj(o));
                         // its __exit__ at the stack's exit
-                        let none = an.none_v.clone();
+                        let none = Value::none();
                         let ex = an.load_attr(&Value::obj(o), "__exit__", &c.node, st, false);
                         for s in recv.pts.iter() {
                             an.m.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
@@ -940,7 +940,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
         }
         "close" => {
             exitstack_close(an, st, recv, &c.node, true);
-            an.none_v.clone()
+            Value::none()
         }
         "__enter__" => recv.clone(),
         _ => Value::data(name),

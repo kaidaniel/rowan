@@ -337,7 +337,7 @@ pub fn m_dcinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::int
             dataclass_init(an, cls, o, &args, &c.star_args, &c.kwargs, &c.star_kwargs, st, &c.node);
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// The decorators of a class the program defines that the models know: `total_ordering`, and

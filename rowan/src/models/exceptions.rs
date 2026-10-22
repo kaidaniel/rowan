@@ -146,7 +146,7 @@ pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::in
         an.store_key(o, Ns::Attr, &Value::lit(key_str_lit("args")), &t, strong, &c.node, st);
         an.m.exc_objs.insert(o, name);
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// The class names a handler for `caught` catches: those and their subclasses in the table.

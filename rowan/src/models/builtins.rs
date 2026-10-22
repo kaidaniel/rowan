@@ -121,7 +121,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict.fromkeys@L{}", c.line));
-    let val = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
+    let val = c.args.get(1).cloned().unwrap_or_else(|| Value::none());
     let Some(a) = c.args.first() else { return Value::obj(oid) };
     // known items that are literals, in order (a list, a string's characters, a generator)
     let it = an.iterate(a, &c.node, st);
@@ -754,14 +754,14 @@ pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str) -> Value {
     }
     // a slice object with known bounds
     if let Some((lo, hi, st)) = Analyzer::slice_label_bounds(&obj.kv) {
-        let lit = |b: Option<i64>, an: &Analyzer| match b {
+        let lit = |b: Option<i64>| match b {
             Some(i) => Value::lit(intern::key_int(i)),
-            None => an.none_v.clone(),
+            None => Value::none(),
         };
         match name {
-            "start" => return lit(lo, an),
-            "stop" => return lit(hi, an),
-            "step" => return lit(st, an),
+            "start" => return lit(lo),
+            "stop" => return lit(hi),
+            "step" => return lit(st),
             "indices" => return an.method_value("slice.indices", obj),
             _ => {}
         }
@@ -1319,7 +1319,7 @@ pub(super) fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `random.shuffle(xs)` of lists of known length: each position may hold any of the items
@@ -1336,7 +1336,7 @@ pub(super) fn m_shuffle(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_slot(o, Ns::Pos, intern::key_int(i as i64), all.clone(), xs.pts.len() == 1);
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `random.choice(seq)` (`secrets.choice`): one of seq's items; `random.sample(seq, k)` /
@@ -1390,7 +1390,7 @@ pub(super) fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     match &c.args[..] {
         [d, k, v] if !d.pts.is_empty() && d.kv.is_bot() && k.pts.is_empty() && d.pts.iter().all(|o| an.heap.kind(o) == Kind::Dict) => {
             an.store_item(d, Ns::Item, k, v, &c.node, st);
-            an.none_v.clone()
+            Value::none()
         }
         _ => an.unknown_call(&c.qual, None, c.arguments(), st, &c.node),
     }
@@ -1399,14 +1399,14 @@ pub(super) fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
 /// `object.__setattr__(obj, "name", v)`: the plain store (no user `__setattr__`).
 pub(super) fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.plain_setattr(|an| m_setattr(an, st, c));
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `object.__init__(self)` (`super().__init__()` in a class whose bases are the program's):
 /// nothing; given more, as CPython decides by the class (unknown code).
 pub(super) fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.args.len() == 1 && c.kwargs.is_empty() && c.star_args.is_empty() && c.star_kwargs.is_empty() {
-        return an.none_v.clone();
+        return Value::none();
     }
     an.unknown_call(&c.qual, None, c.arguments(), st, &c.node)
 }
@@ -1444,7 +1444,7 @@ pub(super) fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => an.delete_item(&c.args[0], Ns::Attr, &c.args[1], &c.node, st, true),
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `hasattr(obj, "name")` on instances of known classes: decided by the attribute rows and

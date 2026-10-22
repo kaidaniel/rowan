@@ -82,7 +82,7 @@ impl Analyzer {
         if let Some(c) = container_annotation(ann) {
             self.heap.ann.insert(o, (c, module));
         }
-        if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
+        if none { Value::obj(o).join(&Value::none()) } else { Value::obj(o) }
     }
 
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
@@ -239,7 +239,7 @@ impl Analyzer {
         // (beside None: an unknown object of the type, as a general run's field holds)
         let typed = match none {
             false => Value::data(&crate::domain::typed_label(t, scalar.as_deref().unwrap_or(""))),
-            true => self.typed_object(&format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name), t, false, 0, None, state).join(&self.none_v),
+            true => self.typed_object(&format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name), t, false, 0, None, state).join(&Value::none()),
         };
         out.join(&typed)
     }
@@ -355,7 +355,7 @@ impl Analyzer {
             }
             an.typed_object(&format!("ann:{}:{}", path, k), t, single, depth + 1, c.map(|c| (c, module)), state)
         };
-        let mut out = if none { self.none_v.clone() } else { Value::new() };
+        let mut out = if none { Value::none() } else { Value::new() };
         if members.is_empty() && !none {
             return unknown();
         }

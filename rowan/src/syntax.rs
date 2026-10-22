@@ -24,27 +24,35 @@ pub fn chain_text(node: &ast::Expr) -> Option<String> {
     Some(parts.join("."))
 }
 
+/// The statement lists directly inside a compound statement, in source order: an `if`'s
+/// branches, a loop's body and `else`, a `with`'s body, a `try`'s body, handlers, `else` and
+/// `finally`, a `match`'s cases (not a function's or class's body).
+pub fn blocks(st: &ast::Stmt) -> Vec<&[ast::Stmt]> {
+    match st {
+        ast::Stmt::If(i) => std::iter::once(&i.body[..]).chain(i.elif_else_clauses.iter().map(|c| &c.body[..])).collect(),
+        ast::Stmt::For(f) => vec![&f.body, &f.orelse],
+        ast::Stmt::While(w) => vec![&w.body, &w.orelse],
+        ast::Stmt::With(w) => vec![&w.body],
+        ast::Stmt::Try(t) => {
+            let handlers = t.handlers.iter().map(|h| {
+                let ast::ExceptHandler::ExceptHandler(h) = h;
+                &h.body[..]
+            });
+            std::iter::once(&t.body[..]).chain(handlers).chain([&t.orelse[..], &t.finalbody[..]]).collect()
+        }
+        ast::Stmt::Match(m) => m.cases.iter().map(|c| &c.body[..]).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Does a loop body `break` or `continue` this loop (not a nested loop, function or class)?
 pub fn contains_jump(body: &[ast::Stmt]) -> bool {
     fn visit(n: &ast::Stmt) -> bool {
         match n {
             ast::Stmt::Break(_) | ast::Stmt::Continue(_) => true,
-            ast::Stmt::For(f) => f.orelse.iter().any(visit),
-            ast::Stmt::While(w) => w.orelse.iter().any(visit),
-            ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => false,
-            ast::Stmt::If(i) => i.body.iter().any(visit) || i.elif_else_clauses.iter().any(|c| c.body.iter().any(visit)),
-            ast::Stmt::With(w) => w.body.iter().any(visit),
-            ast::Stmt::Try(t) => {
-                t.body.iter().any(visit)
-                    || t.handlers.iter().any(|h| {
-                        let ast::ExceptHandler::ExceptHandler(h) = h;
-                        h.body.iter().any(visit)
-                    })
-                    || t.orelse.iter().any(visit)
-                    || t.finalbody.iter().any(visit)
-            }
-            ast::Stmt::Match(m) => m.cases.iter().any(|c| c.body.iter().any(visit)),
-            _ => false,
+            // (a nested loop's jumps are its own: only its `else` may jump out of this one)
+            ast::Stmt::For(ast::StmtFor { orelse, .. }) | ast::Stmt::While(ast::StmtWhile { orelse, .. }) => orelse.iter().any(visit),
+            _ => blocks(n).iter().any(|b| b.iter().any(visit)),
         }
     }
     body.iter().any(visit)
@@ -120,60 +128,42 @@ pub fn stop_early_shape(body: &[ast::Stmt]) -> Option<bool> {
     (!v.0).then_some(v.1)
 }
 
+/// The statements of a body and of the blocks inside them (not of nested functions or classes).
+fn own_stmts(body: &[ast::Stmt]) -> Vec<&ast::Stmt> {
+    let mut out = Vec::new();
+    for st in body.iter().filter(|st| !matches!(st, ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_))) {
+        out.push(st);
+        out.extend(blocks(st).into_iter().flat_map(own_stmts));
+    }
+    out
+}
+
 /// Has a function body (not its nested functions) a `while` loop whose test is a constant that
 /// is true (`while True:`, `while 1:`): code that may run on without end?
 pub fn has_endless_loop(body: &[ast::Stmt]) -> bool {
-    struct V(bool);
-    impl<'a> SourceOrderVisitor<'a> for V {
-        fn visit_expr(&mut self, _: &'a ast::Expr) {}
-        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
-            match st {
-                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => return,
-                ast::Stmt::While(w) => {
-                    self.0 |= match &*w.test {
-                        ast::Expr::BooleanLiteral(b) => b.value,
-                        ast::Expr::NumberLiteral(n) => !matches!(&n.value, ast::Number::Int(i) if i.as_u8() == Some(0)),
-                        e => is_constant(e),
-                    };
-                }
-                _ => {}
-            }
-            source_order::walk_stmt(self, st);
-        }
-    }
-    let mut v = V(false);
-    body.iter().for_each(|st| v.visit_stmt(st));
-    v.0
+    own_stmts(body).into_iter().any(|st| match st {
+        ast::Stmt::While(w) => match &*w.test {
+            ast::Expr::BooleanLiteral(b) => b.value,
+            ast::Expr::NumberLiteral(n) => !matches!(&n.value, ast::Number::Int(i) if i.as_u8() == Some(0)),
+            e => is_constant(e),
+        },
+        _ => false,
+    })
 }
 
 /// May a function body's own `except` clauses catch GeneratorExit (a bare `except:`, one naming
 /// GeneratorExit or BaseException)?
 pub fn catches_generator_exit(body: &[ast::Stmt]) -> bool {
-    struct V(bool);
-    impl<'a> SourceOrderVisitor<'a> for V {
-        fn visit_expr(&mut self, _: &'a ast::Expr) {}
-        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
-            match st {
-                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => return,
-                ast::Stmt::Try(t) => {
-                    for h in &t.handlers {
-                        let ast::ExceptHandler::ExceptHandler(h) = h;
-                        let names: Vec<String> = match h.type_.as_deref() {
-                            None => vec!["BaseException".into()],
-                            Some(ast::Expr::Tuple(tp)) => tp.elts.iter().map(dotted_last).collect(),
-                            Some(e) => vec![dotted_last(e)],
-                        };
-                        self.0 |= names.iter().any(|n| n == "GeneratorExit" || n == "BaseException");
-                    }
-                }
-                _ => {}
-            }
-            source_order::walk_stmt(self, st);
-        }
-    }
-    let mut v = V(false);
-    body.iter().for_each(|st| v.visit_stmt(st));
-    v.0
+    let catches = |h: &ast::ExceptHandler| {
+        let ast::ExceptHandler::ExceptHandler(h) = h;
+        let names: Vec<String> = match h.type_.as_deref() {
+            None => vec!["BaseException".into()],
+            Some(ast::Expr::Tuple(tp)) => tp.elts.iter().map(dotted_last).collect(),
+            Some(e) => vec![dotted_last(e)],
+        };
+        names.iter().any(|n| n == "GeneratorExit" || n == "BaseException")
+    };
+    own_stmts(body).into_iter().any(|st| matches!(st, ast::Stmt::Try(t) if t.handlers.iter().any(catches)))
 }
 
 /// The last part of a callee as written: `json.loads` → `loads`, `f(x)(y)` → `f`; another
@@ -344,24 +334,7 @@ pub fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
 
 /// A `return` somewhere in these statements (not inside nested functions or classes).
 pub fn contains_return(body: &[ast::Stmt]) -> bool {
-    body.iter().any(|s| match s {
-        ast::Stmt::Return(_) => true,
-        ast::Stmt::If(i) => contains_return(&i.body) || i.elif_else_clauses.iter().any(|c| contains_return(&c.body)),
-        ast::Stmt::For(f) => contains_return(&f.body) || contains_return(&f.orelse),
-        ast::Stmt::While(w) => contains_return(&w.body) || contains_return(&w.orelse),
-        ast::Stmt::With(w) => contains_return(&w.body),
-        ast::Stmt::Try(t) => {
-            contains_return(&t.body)
-                || contains_return(&t.orelse)
-                || contains_return(&t.finalbody)
-                || t.handlers.iter().any(|h| {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    contains_return(&h.body)
-                })
-        }
-        ast::Stmt::Match(m) => m.cases.iter().any(|c| contains_return(&c.body)),
-        _ => false,
-    })
+    body.iter().any(|s| matches!(s, ast::Stmt::Return(_)) || blocks(s).iter().any(|b| contains_return(b)))
 }
 
 /// Plain names a statement (and the blocks inside it) assigns.
@@ -458,38 +431,18 @@ pub fn assignments_to(body: &'static [ast::Stmt], name: &str) -> Vec<&'static as
 /// Every statement in a body, nested ones too (in functions, classes and blocks), each
 /// before the statements inside it.
 pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
-    let mut out: Vec<&'static ast::Stmt> = Vec::new();
     fn go(s: &'static ast::Stmt, out: &mut Vec<&'static ast::Stmt>) {
         out.push(s);
-        match s {
-            ast::Stmt::FunctionDef(f) => f.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::ClassDef(c) => c.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::For(f) => {
-                f.body.iter().for_each(|x| go(x, out));
-                f.orelse.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::While(w) => {
-                w.body.iter().for_each(|x| go(x, out));
-                w.orelse.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::If(i) => {
-                i.body.iter().for_each(|x| go(x, out));
-                i.elif_else_clauses.iter().for_each(|c| c.body.iter().for_each(|x| go(x, out)));
-            }
-            ast::Stmt::With(w) => w.body.iter().for_each(|x| go(x, out)),
-            ast::Stmt::Try(t) => {
-                t.body.iter().for_each(|x| go(x, out));
-                for h in &t.handlers {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    h.body.iter().for_each(|x| go(x, out));
-                }
-                t.orelse.iter().for_each(|x| go(x, out));
-                t.finalbody.iter().for_each(|x| go(x, out));
-            }
-            ast::Stmt::Match(m) => m.cases.iter().for_each(|c| c.body.iter().for_each(|x| go(x, out))),
-            _ => {}
+        let own: &'static [ast::Stmt] = match s {
+            ast::Stmt::FunctionDef(f) => &f.body,
+            ast::Stmt::ClassDef(c) => &c.body,
+            _ => &[],
+        };
+        for b in std::iter::once(own).chain(blocks(s)) {
+            b.iter().for_each(|x| go(x, out));
         }
     }
+    let mut out: Vec<&'static ast::Stmt> = Vec::new();
     body.iter().for_each(|x| go(x, &mut out));
     out
 }
