@@ -173,9 +173,9 @@ function prettyValue(text, width = VALUE_WIDTH) {
       // container with one long item breaks)
       const container = p.open !== "(" && !/[\w)\]"'.]$/.test(cur);
       const fits = cur.length + flat.length <= width;
-      // (a container in typing notation with one long item, `list[{…}]`: around the item, which
-      // breaks, `list[{` … `}]`)
-      if (!fits && p.open === "[" && p.items.length === 1 && /(^|[^\w.])(list|set|frozenset)$/.test(cur)) {
+      // (a container in typing notation with one long item, not several values, `list[{…}]`:
+      // around the item, which breaks, `list[{` … `}]`)
+      if (!fits && p.open === "[" && p.items.length === 1 && alternatives(flatParts(p.items[0])).length === 1 && /(^|[^\w.])(list|set|frozenset)$/.test(cur)) {
         cur = emit(p.items[0], indent, cur + p.open) + p.close;
         continue;
       }

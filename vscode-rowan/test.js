@@ -392,6 +392,8 @@ assert.deepStrictEqual(prettyValue('Spinner(frames=list["-" | "/"] | list["a" | 
   "  interval=?",
   ")",
 ]);
+// (one value of a list's items that holds several, `list["a" | f(x, y) | ?]`, stays as written)
+assert.deepStrictEqual(prettyValue('list["<dl>" | self.document(value, key, name, fdict, cdict) | ?]', 40), ['list["<dl>" | self.document(value, key, name, fdict, cdict) | ?]']);
 // (items that say no more than a name, `Emax~=?`: as many to a line as fit, in their order;
 // one that says more, on its own line)
 assert.deepStrictEqual(prettyValue("Context(Emax~=?, Emin~=?, _ignored_flags~=?, capitals~=?, clamp~=?, flags~=?, prec~=3, rounding~=?, **?)"), [
