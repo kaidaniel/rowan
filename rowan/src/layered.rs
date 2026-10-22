@@ -222,7 +222,7 @@ fn map_side<K: Clone, V: Clone + PartialEq>(t: &Tree<K, V>, left: bool, g: &mut 
         Node::Branch { p, m, l, r } => {
             let nl = map_side(l, left, g);
             let nr = map_side(r, left, g);
-            branch(*p, *m, nl, nr, None)
+            branch(*p, *m, nl, nr, Some(t))
         }
     }
 }
@@ -505,6 +505,16 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
         let mut keep = |_: &K, v: &V| Some(v.clone());
         let mut keep2 = |_: &K, v: &V| Some(v.clone());
         let mut g = Merge { both: &mut both, left: &mut keep, right: &mut keep2, one_side_identity: true, equal_identity: true };
+        self.merge_with(o, &mut g)
+    }
+
+    /// `join`, but a key on one side only takes `side`'s value (None: dropped).
+    pub fn join_sides(&self, o: &LayerMap<K, V>, f: &mut dyn FnMut(&V, &V) -> V, side: &mut dyn FnMut(&K, &V) -> Option<V>) -> LayerMap<K, V> {
+        let side = std::cell::RefCell::new(side);
+        let mut both = |_: &K, a: &V, b: &V| Some(f(a, b));
+        let mut left = |k: &K, v: &V| (side.borrow_mut())(k, v);
+        let mut right = |k: &K, v: &V| (side.borrow_mut())(k, v);
+        let mut g = Merge { both: &mut both, left: &mut left, right: &mut right, one_side_identity: false, equal_identity: true };
         self.merge_with(o, &mut g)
     }
 

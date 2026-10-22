@@ -140,7 +140,22 @@ impl Analyzer {
             if let Some(o) = self.made_instance(cls, &ctx, state).filter(|_| param.is_none()) {
                 return Some(Value::obj(o));
             }
-            return self.fresh_instance(cls, state, &ctx).map(Value::obj);
+            // (made where a path first reads the part: what it made starts so on every path)
+            let pre = state.copy();
+            let inst = self.fresh_instance(cls, state, &ctx);
+            for (o, ns) in state.rows.diff_keys(&pre.rows) {
+                if pre.has_facts(o) {
+                    continue;
+                }
+                let Some(r) = state.rows.get(&(o, ns)) else { continue };
+                crate::state::mark_found(o, ns, &r);
+            }
+            for (o, sk) in state.slots.diff_keys(&pre.slots) {
+                if let (false, Some(v)) = (pre.has_facts(o), state.slots.get(&o, &sk)) {
+                    crate::state::mark_found_slot(o, sk, &v);
+                }
+            }
+            return inst.map(Value::obj);
         };
         let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
         let mut names: KeySet = KeySet::from_iter(fields.iter().map(|(f, _)| key_str_lit(f)));
@@ -168,6 +183,7 @@ impl Analyzer {
                     return Some(Value::obj(o));
                 }
                 self.heap.obj_mut(o).depth = depth;
+                crate::state::mark_found(o, ns, &declared);
                 state.set_row(o, ns, declared);
                 o
             }
@@ -179,6 +195,9 @@ impl Analyzer {
                 Some((a, module)) => self.field_value(a, module, validated, &format!("{}.{}", path, name), single, depth, state),
                 None => Value::data(&format!("field {}", name)),
             };
+            if param.is_none() {
+                crate::state::mark_found_slot(inst, (ns, f), &v);
+            }
             state.set_slot(inst, ns, f, v, true);
         }
         if let (true, Some((fi, pname))) = (ci.lib.typed_dict, param) {
@@ -229,6 +248,8 @@ impl Analyzer {
     /// container whose parts follow annotation `ann`).
     fn typed_object(&mut self, site: &str, t: &'static str, single: bool, depth: u32, ann: Option<(&'static ast::Expr, ObjId)>, state: &mut State) -> Value {
         let o = self.heap.alloc_raw(Kind::Unknown, site, "", single, "?", Payload::None);
+        crate::state::mark_found(o, Ns::Item, &Row::top());
+        crate::state::mark_found(o, Ns::Attr, &Row::top());
         self.heap.obj_mut(o).ty = Some(t);
         self.heap.obj_mut(o).depth = depth;
         if let Some(a) = ann {

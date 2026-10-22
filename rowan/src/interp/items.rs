@@ -328,6 +328,8 @@ impl Analyzer {
         let kind = if bounds.is_empty() { "concat" } else { "slice" };
         let sid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind, ids.join(",")), "", false, &label, Payload::View(ViewKind::Elems, Value::objs(bases.clone())));
         // (its own content is not known: what a copy of it holds, say)
+        crate::state::mark_found(sid, Ns::Item, &Row::top());
+        crate::state::mark_found(sid, Ns::Attr, &Row::top());
         if !state.has_row(sid, Ns::Item) {
             state.set_row(sid, Ns::Item, Row::top());
             state.set_row(sid, Ns::Attr, Row::top());
@@ -776,6 +778,8 @@ impl Analyzer {
             let pid = group[0].0;
             let old = state.has_row(pid, Ns::Item).then(|| state.row(pid, Ns::Item));
             let r = join_rows(old.into_iter().chain(group.iter().map(|(_, r)| r.clone())));
+            crate::state::mark_found(pid, Ns::Item, &r);
+            crate::state::mark_found(pid, Ns::Attr, &r);
             state.set_row_narrowed(pid, Ns::Item, r.clone());
             state.set_row_narrowed(pid, Ns::Attr, r);
         }
@@ -879,6 +883,8 @@ impl Analyzer {
             self.mode.wide_rows.push((pid, r));
             return;
         }
+        crate::state::mark_found(pid, Ns::Item, &r);
+        crate::state::mark_found(pid, Ns::Attr, &r);
         state.set_row_narrowed(pid, Ns::Item, r.clone());
         state.set_row_narrowed(pid, Ns::Attr, r);
     }

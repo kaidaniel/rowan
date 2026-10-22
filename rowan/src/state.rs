@@ -341,7 +341,7 @@ impl State {
             match self.rows.get(&k) {
                 Some(cur) if cur == v => {}
                 Some(cur) => self.rows.insert(k, cur.join(&v)),
-                None if new_ok(self, k.0) => self.rows.insert(k, v),
+                None if new_ok(self, k.0) => self.rows.insert(k, one_side_row(&k, &v)),
                 None => {}
             }
         }
@@ -350,21 +350,21 @@ impl State {
             match self.slots.get(&oid, &sk) {
                 Some(cur) if cur == v => {}
                 Some(cur) => self.slots.set(&oid, sk, cur.join(&v)),
-                None if new_ok(self, oid) => self.slots.set(&oid, sk, v),
+                None if new_ok(self, oid) => self.slots.set(&oid, sk, one_side_slot(oid, &sk, &v)),
                 None => {}
             }
         }
         for k in o.elems.diff_keys(&prev.elems) {
             match (o.elems.get(&k), self.elems.get(&k)) {
                 (Some(v), Some(cur)) => self.elems.insert(k, kv_join(&cur, &v)),
-                (Some(v), None) if !known => self.elems.insert(k, v),
+                (Some(v), None) if !known && !is_found(k) => self.elems.insert(k, v),
                 _ => {}
             }
         }
         for k in o.lens.diff_keys(&prev.lens) {
             match (o.lens.get(&k), self.lens.get(&k)) {
                 (Some(v), Some(cur)) => self.lens.insert(k, join_len(&cur, &v)),
-                (Some(v), None) if !known => self.lens.insert(k, v),
+                (Some(v), None) if !known && !is_found(k) => self.lens.insert(k, v),
                 _ => {}
             }
         }
@@ -491,10 +491,23 @@ impl State {
         if !self.narrowed.is_empty() && !o.narrowed.is_empty() {
             s.narrowed = self.narrowed.iter().filter(|(k, v)| o.narrowed.get(*k) == Some(*v)).map(|(k, v)| (*k, v.clone())).collect();
         }
-        s.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
+        // (an object one side has no facts of was not made there, unless a path makes it when
+        // it first reads it, `mark_found`: the other side holds it as it starts)
+        let mut one_sided: Vec<ObjId> = Vec::new();
+        s.rows = if any_found() {
+            self.rows.join_sides(&o.rows, &mut |a, b| a.join(b), &mut |k, r| {
+                if is_found(k.0) && one_sided.last() != Some(&k.0) {
+                    one_sided.push(k.0);
+                }
+                Some(one_side_row(k, r))
+            })
+        } else {
+            self.rows.join(&o.rows, &mut |a, b| a.join(b))
+        };
         s.slots = self.slots.join(&o.slots, &mut |a, b| a.join(b));
         s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
         s.lens = self.lens.join(&o.lens, &mut join_len);
+        s.found_one_sided(&one_sided);
         s.reqs = self.reqs.join_with_keep(&o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
         s.ret = ret;
         s.exits = exits;
@@ -596,7 +609,7 @@ impl State {
         for k in &rows {
             let Some(v) = o.rows.get(k) else { continue };
             match self.rows.get(k) {
-                None => self.rows.insert(*k, v),
+                None => self.rows.insert(*k, one_side_row(k, &v)),
                 Some(cur) => {
                     if cur != v {
                         self.rows.insert(*k, cur.join(&v));
@@ -615,7 +628,7 @@ impl State {
         for (oid, sk) in &slots {
             let Some(v) = o.slots.get(oid, sk) else { continue };
             match self.slots.get(oid, sk) {
-                None => self.slots.set(oid, *sk, v),
+                None => self.slots.set(oid, *sk, one_side_slot(*oid, sk, &v)),
                 Some(cur) => {
                     if cur != v {
                         self.slots.set(oid, *sk, cur.join(&v));
@@ -634,6 +647,7 @@ impl State {
         for k in touched {
             if let Some(v) = o.lens.get(&k) {
                 match self.lens.get(&k) {
+                    None if is_found(k) => {}
                     None => self.set_lens(k, v),
                     Some(cur) => {
                         if cur != v {
@@ -646,6 +660,7 @@ impl State {
         for k in &elems {
             let Some(v) = o.elems.get(k) else { continue };
             match self.elems.get(k) {
+                None if is_found(*k) => {}
                 None => self.elems.insert(*k, v),
                 Some(cur) => {
                     if cur != v {
@@ -1059,6 +1074,109 @@ pub fn is_merged(oid: ObjId) -> bool {
     MERGED.with(|m| m.borrow().contains(&oid))
 }
 
+/// What objects a path makes when it first reads them (an input's part, an annotated part)
+/// start with, joined over the paths that made them: a path that has not read one holds it all
+/// the same, as it starts.
+#[derive(Default)]
+pub struct Found {
+    /// which objects are found ones (a bit per object id)
+    bits: Vec<u64>,
+    rows: FxHashMap<(ObjId, Ns), Row>,
+    slots: FxHashMap<ObjId, Vec<(SlotKey, Value)>>,
+}
+
+thread_local! {
+    static FOUND: std::cell::RefCell<Found> = std::cell::RefCell::new(Found::default());
+}
+
+fn set_found_bit(f: &mut Found, oid: ObjId) {
+    let w = oid as usize / 64;
+    if f.bits.len() <= w {
+        f.bits.resize(w + 1, 0);
+    }
+    f.bits[w] |= 1 << (oid % 64);
+}
+
+/// `oid` is made where a path first reads it, its row in `ns` starting as `init`
+/// (`one_side_row`).
+pub fn mark_found(oid: ObjId, ns: Ns, init: &Row) {
+    FOUND.with(|m| {
+        let f = &mut *m.borrow_mut();
+        set_found_bit(f, oid);
+        let r = match f.rows.get(&(oid, ns)) {
+            Some(cur) if cur == init => return,
+            Some(cur) => cur.join(init),
+            None => init.clone(),
+        };
+        f.rows.insert((oid, ns), r);
+    });
+}
+
+/// A found object's (`mark_found`) slot `sk` starts as `v`.
+pub fn mark_found_slot(oid: ObjId, sk: SlotKey, v: &Value) {
+    FOUND.with(|m| {
+        let f = &mut *m.borrow_mut();
+        set_found_bit(f, oid);
+        let slots = f.slots.entry(oid).or_default();
+        match slots.iter_mut().find(|(k, _)| *k == sk) {
+            Some((_, cur)) => *cur = cur.join(v),
+            None => slots.push((sk, v.clone())),
+        }
+    });
+}
+
+/// Is `oid` an object a path makes when it first reads it (`mark_found`)?
+fn is_found(oid: ObjId) -> bool {
+    FOUND.with(|m| m.borrow().bits.get(oid as usize / 64).is_some_and(|w| w & (1 << (oid % 64)) != 0))
+}
+
+fn any_found() -> bool {
+    FOUND.with(|m| !m.borrow().bits.is_empty())
+}
+
+/// `r`, an object's row in `ns` on one of two paths joined, the other without it: a found
+/// object (`mark_found`) is there as it starts; any other was not made there.
+fn one_side_row(k: &(ObjId, Ns), r: &Row) -> Row {
+    if !is_found(k.0) {
+        return r.clone();
+    }
+    match FOUND.with(|m| m.borrow().rows.get(k).cloned()) {
+        Some(init) if init != *r => r.join(&init),
+        _ => r.clone(),
+    }
+}
+
+/// A slot on one side of a join only: a found object's as it starts there too (none: a key
+/// its row did not have, which the joined row says).
+fn one_side_slot(oid: ObjId, sk: &SlotKey, v: &Value) -> Value {
+    if !is_found(oid) {
+        return v.clone();
+    }
+    match FOUND.with(|m| m.borrow().slots.get(&oid).and_then(|l| l.iter().find(|(k, _)| k == sk).map(|(_, v)| v.clone()))) {
+        Some(init) if init != *v => v.join(&init),
+        _ => v.clone(),
+    }
+}
+
+impl State {
+    /// After a join that found objects `oids` had facts on one side of only: their slots join
+    /// what they start with, their elements and lengths are not known.
+    fn found_one_sided(&mut self, oids: &[ObjId]) {
+        for &oid in oids {
+            let init = FOUND.with(|m| m.borrow().slots.get(&oid).cloned()).unwrap_or_default();
+            for (sk, v) in init {
+                if let Some(cur) = self.slots.get(&oid, &sk) {
+                    if cur != v {
+                        self.slots.set(&oid, sk, cur.join(&v));
+                    }
+                }
+            }
+            self.elems.remove(&oid);
+            self.lens.remove(&oid);
+        }
+    }
+}
+
 thread_local! {
     /// the shared unknown object (`interp::any_object`): no store changes it
     static ANY: std::cell::Cell<ObjId> = const { std::cell::Cell::new(ObjId::MAX) };
@@ -1138,6 +1256,7 @@ pub fn view_hits() -> u64 {
 /// exchanged for the thread's around each of its runs (`swap`).
 pub struct ThreadState {
     merged: rustc_hash::FxHashSet<ObjId>,
+    found: Found,
     any: ObjId,
     views: rustc_hash::FxHashMap<ObjId, ObjId>,
     viewed: rustc_hash::FxHashMap<ObjId, Vec<ObjId>>,
@@ -1151,7 +1270,7 @@ pub struct ThreadState {
 
 impl Default for ThreadState {
     fn default() -> Self {
-        ThreadState { merged: Default::default(), any: ObjId::MAX, views: Default::default(), viewed: Default::default(), drops: 0, fp_visits: 0, view_hits: 0, row_joins: 0, opaque: false, shapes: Default::default() }
+        ThreadState { merged: Default::default(), found: Default::default(), any: ObjId::MAX, views: Default::default(), viewed: Default::default(), drops: 0, fp_visits: 0, view_hits: 0, row_joins: 0, opaque: false, shapes: Default::default() }
     }
 }
 
@@ -1159,6 +1278,7 @@ impl ThreadState {
     /// Exchanges the thread's marks with these.
     pub fn swap(&mut self) {
         MERGED.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut self.merged));
+        FOUND.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut self.found));
         ANY.with(|a| self.any = a.replace(self.any));
         VIEWS.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.views));
         VIEWED.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.viewed));
@@ -1173,6 +1293,7 @@ impl ThreadState {
 
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
+    FOUND.with(|m| *m.borrow_mut() = Found::default());
     VIEWS.with(|v| v.borrow_mut().clear());
     VIEWED.with(|v| v.borrow_mut().clear());
     ANY.with(|a| a.set(ObjId::MAX));

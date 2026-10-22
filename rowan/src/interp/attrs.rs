@@ -1052,6 +1052,8 @@ impl Analyzer {
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable.
     pub(in crate::interp) fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
+        crate::state::mark_found(oid, Ns::Item, &Row::top());
+        crate::state::mark_found(oid, Ns::Attr, &Row::top());
         if !state.has_row(oid, Ns::Item) {
             state.set_row(oid, Ns::Item, Row::top());
             state.set_row(oid, Ns::Attr, Row::top());
