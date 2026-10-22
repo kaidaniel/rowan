@@ -144,13 +144,13 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 cd rowan && cargo build --release && cargo test --release --lib && cd ..
 uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths select cases; -v; --pending [--prune]: cases in tests/*/PENDING
 uv run --no-project python tests/run_snapshots.py   # --update only after reviewing the diff
-uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
-uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
+uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min; torch: `--with torch --with numpy python tests/torch_oracle.py [case…]`
 uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0; -n 50: ~5 s
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py [-j N]: vs whole runs; bench/first_hover.py (same arguments, rich): rowan serve's first hover in a file
 uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed (`--follow`): cost and hover precision per scenario, ~10 s (venvs cached in bench/work/); --uncapped: also no allowance (fanout), no bounds
+uv run --no-project python bench/scoreboard.py run [--since vX] [--ref REF]; … report [--md F]  # every release tag built and measured with one pinned test set (fuzz at fresh seeds, golden, budget=0, the eight benchmarks' verdicts, hover facts, time, memory; site-packages; lines) into bench/scoreboard.json, new tags only (~5 min each); bench/site/index.html: the Pages overview of it and the CI history
 ```
 
 Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`, every push and PR): build, `cargo test`, golden (`--pending` informational), snapshots,
@@ -170,7 +170,7 @@ Run the oracle on the cases you touched, in full before a commit that changes mo
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits (reachability and closure walks) / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower), each library entry's work, the functions doing most (runs, own statements, units and ms of outermost runs). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000,fanout=4`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`. Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
-## Layout (`rowan/src/`, ~72k lines: the engine ~29k, the models ~43k)
+## Layout (`rowan/src/`, ~82k lines: the engine ~38k, the models ~45k)
 
 Maps of the code, file by file, with where to start reading: `rowan/README.md` (the crate, the binary, `py/`), `rowan/src/README.md`
 (syntax, domains, `main.rs` / `serve.rs`), `rowan/src/interp/README.md` (the `Analyzer`'s components, how a program runs),
@@ -191,7 +191,7 @@ Maps of the code, file by file, with where to start reading: `rowan/README.md` (
 | --- | --- |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.7 / ~2.2 / ~5.5 / ~5.7 s; 0.14 / 0.07 / 0.12 / 0.12 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~11.1 / ~0.65 / ~3.2 / ~4.9 s; 0.33 / 0.22 / 0.21 / 0.31 GB |
-| installed packages (`bench/sitepackages.py`, s1–s9), `--follow '*'` | 0.37 / 0.20 / 0.53 / 0.19 / 2.9 / 2.0 / 1.2 / 0.44 / 0.26 s; 30 / 29 / 62 / 73 / 401 / 406 / 169 / 79 / 87 MB; facts gained 6 / 32 / 13 / 13 / 6 / 8 / 14 / 6 / 10, lost 0 (none: < 0.01 s, 10 MB); `rowan serve`: first answer as without (13–23 ms), followed document at 0.18–2.2 s |
+| installed packages (`bench/sitepackages.py`, s1–s9), `--follow '*'` | 0.37 / 0.20 / 0.53 / 0.19 / 2.9 / 2.0 / 1.2 / 0.44 / 0.26 s; 30 / 29 / 62 / 73 / 401 / 406 / 169 / 79 / 87 MB; facts gained 6 / 33 / 13 / 13 / 6 / 2 / 14 / 6 / 10, lost 0 (none: < 0.01 s, 10 MB); `rowan serve`: first answer as without (13–23 ms), followed document at 0.18–2.2 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12-0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
 
 ## Known problems and next steps

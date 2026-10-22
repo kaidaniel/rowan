@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rowan progress</title>
+<!--
+  The benchmark site (GitHub Pages, dev/bench/). Two sources, both next to this file:
+  scoreboard.json  bench/scoreboard.py's results: every release measured with one fixed
+                   measurement set (soundness, precision, speed, size); the overview
+  data.js          github-action-benchmark's history of every commit on main (bench.yml);
+                   aggregated per metric, each program's chart in a collapsed drill-down
+  No libraries: the charts are inline SVG drawn below.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --border: #e3e2de;
+  --grid: #ebeae6;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7974;
+  --series-1: #2a78d6;
+  --series-1-wash: rgba(42, 120, 214, 0.10);
+  --good: #008300;
+  --bad: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --border: #2e2e2c;
+    --grid: #262624;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e88;
+    --series-1: #3987e5;
+    --series-1-wash: rgba(57, 135, 229, 0.14);
+    --good: #3fb950;
+    --bad: #f0706a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #121211;
+  --surface-1: #1a1a19;
+  --border: #2e2e2c;
+  --grid: #262624;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e88;
+  --series-1: #3987e5;
+  --series-1-wash: rgba(57, 135, 229, 0.14);
+  --good: #3fb950;
+  --bad: #f0706a;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 32px 0 8px; }
+h3 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+p.lead, .note { color: var(--text-secondary); margin: 0 0 12px; max-width: 80ch; }
+.note { font-size: 12.5px; }
+a { color: var(--series-1); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; margin: 16px 0; }
+.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.kpi .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi .k { color: var(--text-secondary); font-size: 12px; }
+.kpi .d { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.family { margin-top: 20px; }
+.family > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin-bottom: 6px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px 6px; min-width: 0; }
+.card .sub { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
+.card svg { display: block; width: 100%; height: auto; overflow: visible; }
+details { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; }
+details > summary { cursor: pointer; padding: 10px 12px; font-weight: 600; }
+details > summary .sub { font-weight: 400; color: var(--text-muted); font-size: 12.5px; }
+details > .body { padding: 0 12px 12px; }
+details details { background: var(--surface-0); }
+.tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); max-height: 560px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface-1); color: var(--text-secondary); font-weight: 600; z-index: 1; }
+th.l, td.l { text-align: left; }
+td.title { white-space: normal; min-width: 260px; max-width: 420px; color: var(--text-secondary); text-align: left; }
+tr.fam th { top: 0; }
+.up { color: var(--good); } .down { color: var(--bad); } .flat { color: var(--text-muted); }
+.delta { font-size: 11px; margin-left: 4px; }
+.tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 340px;
+  background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+.tip b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.tip .m { color: var(--text-secondary); }
+svg text { fill: var(--text-muted); font-size: 10px; }
+.empty { color: var(--text-muted); font-size: 12px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>rowan: progress across releases</h1>
+  <p class="lead" id="lead">Every release measured with one fixed measurement set (today's tests, fuzzer and benchmarks), so newer tests find older bugs. Loading…</p>
+  <div class="kpis" id="kpis"></div>
+
+  <h2>Overview: one curve per metric, by release</h2>
+  <p class="note">x: releases in order (v0.1.N, about one per merged pull request). Hover a chart for the release, its pull requests and the value. The table below holds every number.</p>
+  <div id="overview"></div>
+
+  <h2>Releases × metric families</h2>
+  <p class="note">Newest first. Deltas against the release before; green: better, red: worse, grey: within noise (wall time and memory: the measured spread of repeated runs; counts: any change).</p>
+  <div class="tablewrap"><table id="table"></table></div>
+
+  <h2>Stop criterion</h2>
+  <p class="note" id="stopnote"></p>
+  <div class="tablewrap"><table id="stop"></table></div>
+
+  <h2>Drill-down</h2>
+  <div id="drill"></div>
+
+  <h2>Every commit on main (CI history)</h2>
+  <p class="note" id="cinote">The Bench workflow's numbers on GitHub's runners (wall time and memory vary 10–20% between runners; work counters are deterministic). Each metric is aggregated as the geometric mean over the programs, as a ratio to its first commit with all of them; every program's own chart is inside. <a href="charts.html">The previous page</a> (every series, uncollapsed) is kept.</p>
+  <div id="ci"></div>
+</main>
+<div class="tip" id="tip"></div>
+<script src="data.js"></script>
+<script>
+"use strict";
+const PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"];
+const tip = document.getElementById("tip");
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) (k === "class" ? e.className = v : e.setAttribute(k, v));
+  for (const c of kids) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+};
+const svgEl = (tag, attrs = {}) => {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+};
+const fmtNum = (v, d) => v == null || Number.isNaN(v) ? "–" :
+  Math.abs(v) >= 10000 ? (v / 1000).toFixed(v >= 1e5 ? 0 : 1) + "K" : v.toFixed(d ?? (Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2));
+const niceTicks = (lo, hi, n = 4) => {
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const step0 = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0);
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+};
+
+// A line chart of one series. points: [{x: index, y, label, lines: [text…]}]; opts: {unit, lower}
+function lineChart(points, opts = {}) {
+  const W = 300, H = 120, L = 34, R = 8, T = 8, B = 18;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+  const pts = points.filter(p => p.y != null && isFinite(p.y));
+  if (!pts.length) { const d = el("div", { class: "empty" }, "not measured"); return d; }
+  const xs = points.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(...pts.map(p => p.y)), y1 = Math.max(...pts.map(p => p.y));
+  if (opts.zero && y0 > 0) y0 = 0;
+  const pad = (y1 - y0) * 0.08 || Math.abs(y1) * 0.05 || 1; y0 -= opts.zero && y0 === 0 ? 0 : pad; y1 += pad;
+  const sx = x => L + (x1 === x0 ? 0.5 : (x - x0) / (x1 - x0)) * (W - L - R);
+  const sy = y => T + (1 - (y - y0) / (y1 - y0)) * (H - T - B);
+  const ticks = niceTicks(y0, y1), step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
+  const tdig = step >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(step) - 1e-9));
+  for (const t of ticks) {
+    svg.append(svgEl("line", { x1: L, x2: W - R, y1: sy(t), y2: sy(t), stroke: "var(--grid)", "stroke-width": 1 }));
+    const tx = svgEl("text", { x: L - 4, y: sy(t) + 3, "text-anchor": "end" }); tx.textContent = Math.abs(t) >= 10000 ? fmtNum(t) : t.toFixed(tdig); svg.append(tx);
+  }
+  // x labels: first, last and a few between
+  const every = Math.max(1, Math.ceil(points.length / 5));
+  points.forEach((p, i) => {
+    if (i % every && i !== points.length - 1) return;
+    if (i !== points.length - 1 && points.length - 1 - i < every * 0.6) return;
+    const tx = svgEl("text", { x: sx(p.x), y: H - 4, "text-anchor": i === 0 ? "start" : i === points.length - 1 ? "end" : "middle" });
+    tx.textContent = p.short ?? p.label; svg.append(tx);
+  });
+  // the line, broken where a value is missing; a wash under it
+  let d = "", open = false;
+  for (const p of points) {
+    if (p.y == null || !isFinite(p.y)) { open = false; continue; }
+    d += `${open ? "L" : "M"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`; open = true;
+  }
+  svg.append(svgEl("path", { d, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  // cut runs (a lower bound) as hollow markers
+  for (const p of pts) if (p.cut) svg.append(svgEl("circle", { cx: sx(p.x), cy: sy(p.y), r: 3, fill: "var(--surface-1)", stroke: "var(--series-1)", "stroke-width": 1.5 }));
+  const last = pts[pts.length - 1];
+  svg.append(svgEl("circle", { cx: sx(last.x), cy: sy(last.y), r: 4, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 }));
+  // hover: a crosshair snapped to the nearest release
+  const cross = svgEl("line", { y1: T, y2: H - B, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" });
+  const dot = svgEl("circle", { r: 4, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
+  svg.append(cross, dot);
+  const hit = svgEl("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" });
+  svg.append(hit);
+  const show = ev => {
+    const r = svg.getBoundingClientRect(), vx = (ev.clientX - r.left) / r.width * W;
+    let best = points[0];
+    for (const p of points) if (Math.abs(sx(p.x) - vx) < Math.abs(sx(best.x) - vx)) best = p;
+    cross.setAttribute("x1", sx(best.x)); cross.setAttribute("x2", sx(best.x)); cross.setAttribute("visibility", "visible");
+    if (best.y != null && isFinite(best.y)) { dot.setAttribute("cx", sx(best.x)); dot.setAttribute("cy", sy(best.y)); dot.setAttribute("visibility", "visible"); }
+    else dot.setAttribute("visibility", "hidden");
+    tip.replaceChildren(el("b", {}, best.y == null ? "not measured" : fmtNum(best.y, opts.digits) + (opts.unit ? " " + opts.unit : "") + (best.cut ? " (cut: at least)" : "")),
+      el("div", {}, best.label), ...(best.lines || []).map(t => el("div", { class: "m" }, t)));
+    tip.style.display = "block";
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = Math.min(ev.clientX + 12, innerWidth - tw - 8) + "px";
+    tip.style.top = Math.max(8, ev.clientY - th - 12) + "px";
+  };
+  hit.addEventListener("pointermove", show);
+  hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); });
+  return svg;
+}
+const card = (title, sub, chart) => el("div", { class: "card" }, el("h3", {}, title), el("div", { class: "sub" }, sub), chart);
+// a collapsed section whose contents are built the first time it opens
+function lazyDetails(summary, sub, build) {
+  const body = el("div", { class: "body" });
+  const d = el("details", {}, el("summary", {}, summary, " ", el("span", { class: "sub" }, sub)), body);
+  d.addEventListener("toggle", () => { if (d.open && !body.childElementCount) build(body); });
+  return d;
+}
+
+// ---------------------------------------------------------------- the scoreboard
+const METRICS = [
+  // family, key in index, title, unit, higher is better, digits, what
+  ["Soundness", "soundness.golden_pct", "Golden suites passing", "%", true, 1, "today's ~1,470 golden cases, PENDING left out"],
+  ["Soundness", "soundness.unsound_per_10k", "Fuzzing: unsound per 10k checks", "", false, 1, "today's fuzzer, 3 seeds CI never runs, ~10k checks"],
+  ["Precision", "precision.budget0_pct", "Golden passing with budget=0", "%", true, 1, "every call past its budget: what large programs fall back to"],
+  ["Precision", "precision.proven_pct", "Proven verdicts", "%", true, 1, "share of the 8 benchmarks' reads proven to succeed"],
+  ["Precision", "precision.known_facts_pct", "Hover facts known or typed", "%", true, 1, "share of the benchmarks' main-file hover values not `?`"],
+  ["Speed", "speed.wall_geomean_s", "Wall time, geometric mean", "s", false, 2, "8 benchmarks, no deadline, --facts; a cut run counts as 180 s"],
+  ["Speed", "speed.rss_geomean_mb", "Peak memory, geometric mean", "MB", false, 0, "8 benchmarks, runs that finished"],
+  ["Size", "size.engine_lines", "Engine lines", "", false, 0, "rowan/src outside models/ (objective: towards 10k)"],
+  ["Size", "size.model_lines", "Model lines", "", null, 0, "rowan/src/models/ (not an objective)"],
+];
+const get = (o, path) => path.split(".").reduce((a, k) => a == null ? a : a[k], o);
+const shortTag = t => t.startsWith("v0.1.") ? t.slice(5) : t.slice(0, 4);
+const prsText = r => (r.prs || []).map(p => `#${p.n} ${p.title}`);
+
+function scoreboard(sb) {
+  // (the releases before the first pull request, v0.1.0-v0.1.6, are in the table only: every
+  // benchmark ran past the timeout then, which would flatten every curve)
+  const all = sb.releases, start = Math.max(0, all.findIndex(r => (r.prs || []).length));
+  const rels = all.slice(start);
+  const spread = noise(all);
+  document.getElementById("lead").textContent =
+    `Every release (${all.length}, ${all[0].tag} to ${all[all.length - 1].tag}; the charts from ${rels[0].tag}, the first with merged pull requests) measured with one fixed measurement set: the tests, fuzzer, benchmark programs and site-packages scenarios of ${sb.measure_ref.slice(0, 7)}, on ${sb.machine}. Newer tests find older bugs, so this is how sound and precise each release really was, not how it did on the tests of its day.`;
+  // headline: the first loop release with numbers vs the latest
+  const first = rels[0], last = rels[rels.length - 1];
+  const kpis = document.getElementById("kpis");
+  for (const [fam, key, title, unit, hib, dg] of METRICS) {
+    if (hib == null) continue;
+    const a = get(first.index, key), b = get(last.index, key);
+    kpis.append(el("div", { class: "kpi" }, el("div", { class: "k" }, title), el("div", { class: "v" }, fmtNum(b, dg) + (unit ? " " + unit : "")),
+      el("div", { class: "d" }, `${fmtNum(a, dg)} at ${first.tag}`)));
+  }
+  // overview: small multiples by family
+  const ov = document.getElementById("overview");
+  const fams = [...new Set(METRICS.map(m => m[0]))];
+  const pointsFor = (key, extra) => rels.map((r, i) => ({ x: i, y: get(r.index, key), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
+  for (const fam of fams) {
+    const g = el("div", { class: "grid" });
+    for (const [f, key, title, unit, hib, dg, what] of METRICS.filter(m => m[0] === fam))
+      g.append(card(title, `${what}; ${hib == null ? "" : hib ? "higher is better" : "lower is better"}`, lineChart(pointsFor(key, key.startsWith("speed.wall") ? r => ({ cut: r.index.speed.finished != null && r.index.speed.finished < 8 }) : null), { unit, digits: dg })));
+    ov.append(el("div", { class: "family" }, el("h3", {}, fam), g));
+  }
+  // the table
+  const t = document.getElementById("table");
+  const fh = el("tr", { class: "fam" }, el("th", { class: "l" }, "release"), el("th", { class: "l" }, "date"));
+  for (const m of METRICS) fh.append(el("th", { title: m[6] }, m[2] + (m[3] ? ` (${m[3]})` : "")));
+  fh.append(el("th", { class: "l" }, "pull requests"));
+  t.append(el("thead", {}, fh));
+  const tb = el("tbody");
+  [...all].reverse().forEach((r, ri) => {
+    const prev = all[all.length - 2 - ri];
+    const tr = el("tr", {}, el("td", { class: "l" }, r.tag), el("td", { class: "l" }, r.date.slice(0, 10)));
+    for (const [fam, key, title, unit, hib, dg] of METRICS) {
+      const v = get(r.index, key), p = prev ? get(prev.index, key) : null;
+      const td = el("td", {}, fmtNum(v, dg));
+      if (v != null && p != null && Number(fmtNum(Math.abs(v - p), dg)) !== 0) {
+        const tol = key.startsWith("speed.wall") ? spread.wall : key.startsWith("speed.rss") ? spread.rss : 0;
+        const rel = p ? Math.abs(v - p) / Math.abs(p) : 1;
+        const cls = hib == null || rel <= tol ? "flat" : (v > p) === hib ? "up" : "down";
+        td.append(el("span", { class: "delta " + cls }, (v > p ? "+" : "") + fmtNum(v - p, dg)));
+      }
+      tr.append(td);
+    }
+    const prs = el("td", { class: "title" });
+    (r.prs || []).forEach((p, i) => { if (i) prs.append("; "); prs.append(el("a", { href: `https://github.com/kaidaniel/rowan/pull/${p.n}` }, `#${p.n}`), " " + p.title); });
+    tr.append(prs);
+    tb.append(tr);
+  });
+  t.append(tb);
+  drill(rels, pointsFor);
+  stopTable(sb.stop);
+}
+
+// the stop criterion over the last releases: which held-out metric moved (* beyond noise)
+function stopTable(stop) {
+  if (!stop) return;
+  const last = stop.rows.slice(-12), cols = Object.keys(last[0].cells);
+  const cur = stop.rows[stop.rows.length - 1];
+  document.getElementById("stopnote").textContent =
+    `Stop the loop after ${stop.criterion}. Now: ${cur.quiet ? cur.in_a_row + " quiet release(s) in a row" : "the latest release still moved a held-out metric"}. Fuzz: unsound checks at the fresh seeds; the others: change against the release before (* beyond noise).`;
+  const t = document.getElementById("stop");
+  const h = el("tr", {}, el("th", { class: "l" }, "release"));
+  for (const c of cols) h.append(el("th", {}, c));
+  h.append(el("th", { class: "l" }, "quiet?"));
+  t.append(el("thead", {}, h));
+  const tb = el("tbody");
+  for (const r of [...last].reverse()) {
+    const tr = el("tr", {}, el("td", { class: "l" }, r.tag));
+    for (const c of cols) tr.append(el("td", {}, r.cells[c]));
+    tr.append(el("td", { class: "l" }, r.quiet ? `yes (${r.in_a_row} in a row)` : "no"));
+    tb.append(tr);
+  }
+  t.append(tb);
+}
+
+// timing noise: the largest relative spread of a geometric mean over repeated runs of one release
+function noise(rels) {
+  let wall = 0.05, rss = 0.03;
+  for (const r of rels) {
+    const reps = (r.bench_repeats || []).concat(r.bench ? [r.bench] : []);
+    if (reps.length < 2) continue;
+    const gm = k => reps.map(b => Math.exp(PROGRAMS.reduce((s, p) => s + Math.log((b[p] || {})[k] || 1), 0) / PROGRAMS.length));
+    const w = gm("wall_s"), m = gm("rss_mb");
+    wall = Math.max(wall, Math.max(...w) / Math.min(...w) - 1);
+    rss = Math.max(rss, Math.max(...m) / Math.min(...m) - 1);
+  }
+  return { wall, rss };
+}
+
+function drill(rels, pointsFor) {
+  const root = document.getElementById("drill");
+  const perProgram = (body, title, f, unit, dg, cutAware) => {
+    const g = el("div", { class: "grid" });
+    for (const p of PROGRAMS)
+      g.append(card(p, title, lineChart(rels.map((r, i) => { const b = (r.bench || {})[p] || {}; return { x: i, y: f(b), label: r.tag, short: shortTag(r.tag), lines: prsText(r), cut: cutAware && b.finished === false }; }), { unit, digits: dg })));
+    body.append(g);
+  };
+  const share = (b, k) => { const t = b.tiers; if (!t || !b.finished) return null; const n = Object.values(t).reduce((a, x) => a + x, 0); return n ? 100 * (t[k] || 0) / n : null; };
+  const known = b => { const f = b.facts; if (!f || !b.finished) return null; const n = (f.unknown || 0) + (f.partial || 0) + (f.exact || 0); return n ? 100 * ((f.partial || 0) + (f.exact || 0)) / n : null; };
+  root.append(
+    lazyDetails("Soundness", "fuzzing per area and seed, golden crashes", body => {
+      const kinds = [...new Set(rels.flatMap(r => Object.keys((r.fuzz || {}).kinds || {})))].sort();
+      const g = el("div", { class: "grid" });
+      g.append(card("Fuzzing: unsound checks", "all areas, 3 seeds", lineChart(rels.map((r, i) => ({ x: i, y: (r.fuzz || {}).unsound, label: r.tag, lines: prsText(r) })), { digits: 0 })));
+      g.append(card("Fuzzing: rowan crashed", "no answer for a program", lineChart(rels.map((r, i) => ({ x: i, y: (r.fuzz || {}).crashed, label: r.tag, lines: prsText(r) })), { digits: 0 })));
+      g.append(card("Golden: cases passing", "count", lineChart(rels.map((r, i) => ({ x: i, y: (r.golden || {}).passed, label: r.tag, lines: prsText(r) })), { digits: 0 })));
+      for (const k of kinds) g.append(card(`Fuzzing: ${k}`, "unsound checks in this area", lineChart(rels.map((r, i) => ({ x: i, y: r.fuzz ? ((r.fuzz.kinds || {})[k] || 0) : null, label: r.tag, lines: prsText(r) })), { digits: 0 })));
+      body.append(g);
+    }),
+    lazyDetails("Precision", "per benchmark: proven, possibly, known hover facts, verdicts reached", body => {
+      for (const [t, f, u, dg] of [["proven verdicts (%)", b => share(b, "proven"), "%", 1], ["possibly verdicts (%)", b => share(b, "possibly"), "%", 1],
+                                   ["hover facts known or typed (%)", known, "%", 1], ["verdicts (reads reached)", b => b.finished && b.tiers ? Object.values(b.tiers).reduce((a, x) => a + x, 0) : null, "", 0]])
+        body.append(lazyDetails(t, "", b2 => perProgram(b2, t, f, u, dg)));
+    }),
+    lazyDetails("Speed and memory", "per benchmark: wall time, peak memory, work", body => {
+      body.append(lazyDetails("wall time (s)", "hollow: cut at the timeout", b2 => perProgram(b2, "wall time, s", b => b.wall_s, "s", 1, true)));
+      body.append(lazyDetails("peak memory (MB)", "", b2 => perProgram(b2, "peak memory, MB", b => b.finished ? b.rss_mb : null, "MB", 0)));
+      body.append(lazyDetails("work (statements)", "deterministic", b2 => perProgram(b2, "statements run", b => b.finished ? b.work : null, "", 0)));
+    }),
+    lazyDetails("Installed packages", "bench/sitepackages.py, from v0.1.40", body => {
+      const scen = [...new Set(rels.flatMap(r => Object.keys(r.sitepackages || {}).filter(k => k !== "error")))].sort();
+      const g = el("div", { class: "grid" });
+      g.append(card("facts gained by following", "all scenarios, --follow '*' against none", lineChart(pointsFor("sitepackages.gained"), { digits: 0 })));
+      g.append(card("facts lost by following", "should stay 0", lineChart(pointsFor("sitepackages.lost"), { digits: 0 })));
+      for (const s of scen) g.append(card(s, "--follow '*': wall time (s)", lineChart(rels.map((r, i) => ({ x: i, y: (((r.sitepackages || {})[s] || {}).follow || {}).wall_s, label: r.tag, lines: prsText(r) })), { unit: "s" })));
+      body.append(g);
+    }),
+  );
+}
+
+// ---------------------------------------------------------------- the CI history (data.js)
+// a CI series' group and its member: "rich: wall time" -> wall time / rich; "pip hovers: p50" ->
+// hovers: p50 / pip; "site-packages s2_internal follow: work" -> site-packages: work / s2_internal follow
+function ciGroup(name) {
+  const m = name.match(/^(.+?): (.+)$/);
+  if (!m) return [name, name];
+  const [, prefix, metric] = m;
+  if (PROGRAMS.includes(prefix)) return [metric, prefix];
+  if (prefix.startsWith("site-packages ")) return [`site-packages: ${metric}`, prefix.slice(14)];
+  const h = prefix.match(/^(\S+) (hovers|first hover)$/);
+  if (h) return [`${h[2]}: ${metric}`, h[1]];
+  return [name, name];
+}
+
+function ciHistory() {
+  const root = document.getElementById("ci");
+  const runs = ((window.BENCHMARK_DATA || {}).entries || {}).rowan || [];
+  if (!runs.length) { root.append(el("p", { class: "note" }, "No history (data.js) next to this page.")); return; }
+  // series name "rich: wall time" -> group "wall time", member "rich"
+  const groups = new Map();
+  runs.forEach((run, i) => {
+    for (const b of run.benches) {
+      const [grp, member] = ciGroup(b.name);
+      if (!groups.has(grp)) groups.set(grp, { unit: b.unit, members: new Map() });
+      const g = groups.get(grp);
+      if (!g.members.has(member)) g.members.set(member, new Array(runs.length).fill(null));
+      g.members.get(member)[i] = { v: b.value, extra: b.extra };
+    }
+  });
+  const info = i => { const c = runs[i].commit; return { label: `${c.id.slice(0, 7)} · ${c.timestamp.slice(0, 10)}`, short: c.timestamp.slice(5, 10), lines: [c.message.split("\n")[0].slice(0, 120)] }; };
+  const order = ["wall time", "peak memory", "work", "work units", "tabulations", "objects"];
+  const names = [...groups.keys()].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99) || a.localeCompare(b));
+  const overview = el("div", { class: "grid" });
+  root.append(overview);
+  for (const name of names) {
+    const g = groups.get(name), members = [...g.members.keys()];
+    if (members.length > 1) {
+      // the geometric mean of each program's ratio to its value at the first run that has all of them
+      const base = runs.findIndex((_, i) => members.every(m => g.members.get(m)[i]));
+      const pts = runs.map((_, i) => {
+        const vals = members.map(m => g.members.get(m)[i]);
+        const ok = i >= base && base >= 0 && vals.every(v => v && v.v > 0 && !/cut/.test(v.extra || ""));
+        const y = ok ? Math.exp(members.reduce((s, m) => s + Math.log(g.members.get(m)[i].v / g.members.get(m)[base].v), 0) / members.length) : null;
+        return { x: i, y, ...info(i) };
+      });
+      overview.append(card(`${name}`, `geometric mean over ${members.length} ${members.every(m => PROGRAMS.includes(m)) ? "programs" : "series"}, ratio to ${info(Math.max(base, 0)).label}`, lineChart(pts, { digits: 2, unit: "×" })));
+    }
+    root.append(lazyDetails(name, `${members.length} series, ${g.unit}`, body => {
+      const grid = el("div", { class: "grid" });
+      for (const m of members)
+        grid.append(card(m, g.unit, lineChart(runs.map((_, i) => { const v = g.members.get(m)[i]; return { x: i, y: v ? v.v : null, cut: v && /cut/.test(v.extra || ""), ...info(i), lines: [...info(i).lines, v && v.extra ? v.extra : ""] }; }), { unit: g.unit })));
+      body.append(grid);
+    }));
+  }
+}
+
+try { ciHistory(); } catch (e) {
+  document.getElementById("ci").append(el("p", { class: "note" }, "The CI history could not be drawn: " + e));
+}
+fetch("scoreboard.json").then(r => r.json()).then(scoreboard).catch(e => {
+  document.getElementById("lead").textContent = "The scoreboard (scoreboard.json) could not be loaded: " + e;
+});
+</script>
+</body>
+</html>
