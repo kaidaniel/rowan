@@ -1048,9 +1048,10 @@ impl Analyzer {
 
     /// What a skipped call of `foid` on its one receiver among `recvs` stores on it on every way
     /// it completes (`must_stores`), but what its code deletes or a setter takes; where the
-    /// receiver escapes (no `effs`), unknown code may remove them after.
+    /// receiver escapes (no `effs`, also a class's `__setattr__` / `__delattr__` its stores and
+    /// deletes go to: decimal's `Context`), unknown code may remove them after.
     fn must_after(&mut self, foid: ObjId, recvs: &[ObjId], effs: &[(ObjId, RecvEffects)]) -> Vec<KeyId> {
-        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| ["__setattr__", "__delattr__", "__getattribute__"].iter().any(|h| an.class_lookup(c, h).is_some()));
+        let hooked = |an: &Analyzer, o: ObjId| an.heap.instance_class(o).is_none_or(|c| an.class_lookup(c, "__getattribute__").is_some());
         let [o] = recvs else { return Vec::new() };
         if !fi_is_method(self, foid) || hooked(self, *o) {
             return Vec::new();
