@@ -14,7 +14,7 @@ e.g. no such feature yet):
                        FUZZ_N programs per kind and seed: checks, `unsound` (a claim CPython
                        contradicts: a value left out, a line taken for unreachable, a key set or
                        verdict claim), `crashed` (rowan failed: no answer), `timeouts` (over
-                       CASE_TIMEOUT_S), `unreadable` (output today's harness cannot read)
+                       CASE_TIMEOUT_S or CASE_MEMORY_MB), `unreadable` (output today's harness cannot read)
              golden    today's golden suites (tests/run_golden.py, PENDING cases left out):
                        passed / total, crashed, timeouts, unreadable, the failing cases
   precision  budget0   the golden suites with ROWAN_LIMITS=budget=0 (every call past its budget)
