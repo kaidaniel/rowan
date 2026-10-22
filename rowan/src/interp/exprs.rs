@@ -290,10 +290,8 @@ impl Analyzer {
         }
         // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
         if let ast::Expr::Attribute(a) = &*c.func {
-            if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
-                if let ast::Expr::StringLiteral(sl) = first {
-                    state.add_name_key(s(nm.id.as_str()), key_str_lit(sl.value.to_str()));
-                }
+            if let (ast::Expr::Name(nm), "setdefault", Some(ast::Expr::StringLiteral(sl))) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
+                state.add_name_key(s(nm.id.as_str()), key_str_lit(sl.value.to_str()));
             }
         }
         r

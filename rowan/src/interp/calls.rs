@@ -459,15 +459,8 @@ impl Analyzer {
                 crate::models::stdlib::partial_call(self, state, &call)
             }
             Kind::Instance => {
-                if let Some(cls) = self.heap.instance_class(oid) {
-                    if let Some(m) = self.class_lookup(cls, "__call__") {
-                        let f = self.heap.class_attr(m, "__call__");
-                        if f.pts.is_empty() {
-                            return Value::new();
-                        }
-                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
-                        return self.call_alternatives(&fns, oid, a, state, node);
-                    }
+                if let Some(fns) = self.own_methods(oid, "__call__") {
+                    return self.call_alternatives(&fns, oid, a, state, node);
                 }
                 let q = format!("call of {}", self.heap.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), a, state, node)

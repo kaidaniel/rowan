@@ -198,18 +198,6 @@ impl Analyzer {
                 Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
                 Kind::Locidx if matches!(&self.heap.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => self.accessor_attr(oid, name, node, state),
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded, raises),
-                // an lru_cache'd function's cache_info / cache_clear
-                Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.heap.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
-                // a function's names (a `@wraps(fn)` wrapper: fn's)
-                Kind::Function if name == "__annotations__" && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
-                    let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
-                    crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation")
-                }
-                Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
-                // (its defaults: made at the first read, kept on it: what changes them reaches its calls)
-                Kind::Function if matches!(name, "__defaults__" | "__kwdefaults__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_defaults_attr(oid, name, node, state),
-                // a singledispatch function's register
-                Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => self.function_attr(oid, name, nk, single, node, state),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => match self.view_attr(oid, name, node, state, report) {
@@ -499,11 +487,28 @@ impl Analyzer {
         })
     }
 
-    /// Attribute `name` of the program's function `oid` (`single`: the read's only object): what
+    /// Attribute `name` of the program's function `oid` (`single`: the read's only object): an
+    /// `lru_cache`'s and singledispatch's methods, its names and defaults unless stored, else what
     /// the program stored on it; on paths it did not, an AttributeError — surely where it surely
     /// lacks it (a call that did not run gives back the functions its code may,
     /// `returned_aliases`).
     fn function_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, single: bool, node: &Node, state: &mut State) -> Value {
+        let unset = state.slot_opt(oid, Ns::Attr, nk).is_none();
+        match name {
+            // an lru_cache'd function's cache_info / cache_clear
+            "cache_info" | "cache_clear" if self.heap.func_info(oid).is_memo.get() => return self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
+            // a function's names (a `@wraps(fn)` wrapper: fn's)
+            "__annotations__" if unset => {
+                let names = crate::models::stdlib::annotated_names(self, oid, false).unwrap_or_default();
+                return crate::models::stdlib::names_dict(self, state, node, &names, None, "annotation");
+            }
+            "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__" if unset => return self.function_name_attr(oid, name, node, state),
+            // (its defaults: made at the first read, kept on it: what changes them reaches its calls)
+            "__defaults__" | "__kwdefaults__" if unset => return self.function_defaults_attr(oid, name, node, state),
+            // a singledispatch function's register
+            "register" if self.m.sdispatch.contains_key(&oid) => return self.method_value("sdispatch.register", &Value::obj(oid)),
+            _ => {}
+        }
         let row = state.row(oid, Ns::Attr);
         match state.slot_opt(oid, Ns::Attr, nk) {
             // (a wrapper of an unknown, stored on some paths only: on the others what the
@@ -537,7 +542,7 @@ impl Analyzer {
 
     /// A function's `__name__` / `__qualname__` / `__module__` / `__wrapped__` / `__doc__` (a
     /// `@wraps(fn)` wrapper: fn's).
-    fn function_name_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+    fn function_name_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
         match self.m.wrapped.get(&oid).cloned() {
             Some(w) if name == "__wrapped__" => w,
             Some(w) => self.load_attr(&w, name, node, state, false),
@@ -548,10 +553,7 @@ impl Analyzer {
                     "__qualname__" => Value::lit_str(&fi.py_qualname()),
                     "__module__" => Value::lit_str(&self.heap.module_info(fi.module).name),
                     "__doc__" => Value::data("doc"),
-                    _ => {
-                        let _ = report;
-                        Value::data(name)
-                    }
+                    _ => Value::data(name),
                 }
             }
         }

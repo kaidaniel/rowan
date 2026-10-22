@@ -467,10 +467,7 @@ impl Analyzer {
             if self.heap.kind(oid) != Kind::Instance {
                 continue;
             }
-            let Some(cls) = self.heap.instance_class(oid) else { continue };
-            let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
-            let fv = self.heap.class_attr(m, "__exit__");
-            if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
+            if self.own_methods(oid, "__exit__").unwrap_or_default().into_iter().any(|f| crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
         }

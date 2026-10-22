@@ -81,9 +81,8 @@ impl Analyzer {
     pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
         // (the slot table in place: a walk visits the whole reachable heap)
         state.slots.each(&o, &mut |_, v| v.push_objs(work));
-        match state.elems.get_ref(&o) {
-            Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
-            _ => {}
+        if let Some(KeyVal::KeysOf(ko)) = state.elems.get_ref(&o) {
+            work.extend(ko.objs.iter());
         }
         for (lo, v) in state.lasts.iter() {
             if *lo == o {

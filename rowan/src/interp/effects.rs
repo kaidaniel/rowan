@@ -1379,26 +1379,7 @@ impl Analyzer {
                 out.rebound.extend(cs.into_iter().map(|c| (c, Ns::Attr, k)));
             }
         }
-        // (a default is the function's own state: it changes where its parameter does)
-        for (p, v) in fi.defaults.iter() {
-            code(self, v, work);
-            if let Some(f) = uses.params.get(p) {
-                let (own, held) = self.flag_effect(f, v, state);
-                if own {
-                    out.values.push(v.clone());
-                } else if held || f.held2 {
-                    out.held_values.push(v.clone());
-                }
-                match self.edited(f, v, state) {
-                    (true, _) => {
-                        out.edited_values.push(v.clone());
-                        out.removed_values.extend(f.removes.any().then(|| (v.clone(), f.removes)));
-                    }
-                    (false, true) => out.iterated_values.push(v.clone()),
-                    _ => {}
-                }
-            }
-        }
+        self.defaults_closure(fi, &uses, state, out, work);
         // (what the program's functions it calls by name do with the names' values it gives them,
         // and its callers with what it returns)
         let mut more: FxHashMap<Callee, Flags> = FxHashMap::default();
@@ -1455,6 +1436,29 @@ impl Analyzer {
                 // (a builtin's name not bound in the module: the builtin, taken as fixed)
                 None if !intern::key_as_str(loc.2).is_some_and(|n| crate::models::tables::is_builtin_name(&n)) => out.unbound.push(loc),
                 None => {}
+            }
+        }
+    }
+
+    /// What a function's code adds to a closure through its defaults: a default is the
+    /// function's own state, it changes where its parameter does; the code it holds.
+    fn defaults_closure(&mut self, fi: &FuncInfo, uses: &CodeUses, state: &State, out: &mut Closure, work: &mut Vec<ObjId>) {
+        for (p, v) in fi.defaults.iter() {
+            work.extend(v.pts.iter().filter(|x| self.holds_code(*x)));
+            let Some(f) = uses.params.get(p) else { continue };
+            let (own, held) = self.flag_effect(f, v, state);
+            if own {
+                out.values.push(v.clone());
+            } else if held || f.held2 {
+                out.held_values.push(v.clone());
+            }
+            match self.edited(f, v, state) {
+                (true, _) => {
+                    out.edited_values.push(v.clone());
+                    out.removed_values.extend(f.removes.any().then(|| (v.clone(), f.removes)));
+                }
+                (false, true) => out.iterated_values.push(v.clone()),
+                _ => {}
             }
         }
     }
@@ -1760,7 +1764,7 @@ impl Analyzer {
     /// Whether value `v` (own) or what it holds (held) may change by `f`: iterating a plain
     /// container uses what it holds (an iterator advances); calling code runs it (the closure
     /// follows it), calling a library method that keeps nothing changes nothing.
-    fn flag_effect(&self, f: &Flags, v: &Value, _state: &State) -> (bool, bool) {
+    fn flag_effect(&self, f: &Flags, v: &Value, state: &State) -> (bool, bool) {
         let plain = |o: ObjId| match self.heap.kind(o) {
             Kind::Dict | Kind::Set | Kind::Tuple => true,
             Kind::List => self.heap.obj(o).label.starts_with("list@"),
@@ -1772,7 +1776,7 @@ impl Analyzer {
             _ => false,
         };
         // (a library layer called runs its model)
-        let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, _state);
+        let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, state);
         let plain = v.pts.iter().all(plain);
         let own = f.changes || f.kept || f.methods || ((f.iterated || f.edits) && !plain) || (f.called && !v.pts.iter().all(code_only));
         (own, f.held || f.iterated && !plain)
