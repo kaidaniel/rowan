@@ -1263,19 +1263,28 @@ impl Analyzer {
     /// `**kw` supplies is read from it (a requirement on an input).
     fn unbound_param_value(&mut self, defaults: &IndexMap<StrId, Value>, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
         let nk = intern::key_of_str(name);
-        let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
+        // (a mapping whose keys are not all known — open, of no facts here, not an object — may
+        // hold the key)
+        let kw_present = star_kwargs.iter().any(|sk| {
+            (!sk.kv.is_bot() && !sk.kv.is_literal()) || sk.pts.iter().any(|x| {
+                let r = self.read_row(x, Ns::Item, state);
+                r.present.contains(nk) || r.open()
+            })
+        });
         let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
         if let (Some(d), false) = (defaults.get(&name), kw_present) {
             d.clone()
         } else if !star_kwargs.is_empty() {
             let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
-            if defaults.get(&name).is_none() && !kw_definite {
-                // a required parameter only `**kw` can supply: read from it (a requirement on
-                // an input; a missing key is a TypeError at the call)
+            if !kw_definite {
+                // what an open mapping may hold under the name: a required parameter only `**kw`
+                // can supply is read from it (a requirement on an input; a missing key is a
+                // TypeError at the call), one with a default only looked at
+                let required = defaults.get(&name).is_none();
                 for sk in star_kwargs {
-                    let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
+                    let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| self.read_row(*o, Ns::Item, state).open()).collect();
                     if !recs.is_empty() {
-                        let v = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(nk), node, state, true);
+                        let v = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(nk), node, state, required);
                         vals.push(v);
                     }
                 }
