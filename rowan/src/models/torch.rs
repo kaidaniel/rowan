@@ -3210,7 +3210,7 @@ pub fn t_forward_hooks(an: &mut Analyzer, o: ObjId, args: &[Value], out: Value, 
     let r = an.call_value(&hooks, node, None, st, Some(vec![Value::obj(o), tup, out.clone()]));
     let j = st.join(&mut not_run);
     st.replace_with(j);
-    let none = an.none_v.clone();
+    let none = Value::none();
     let kv = crate::domain::kv_exclude(&r.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT);
     let other = Value::with_kv(r.pts.iter().filter(|x| !none.pts.contains(*x)).collect(), kv);
     if other.empty() {
@@ -3377,7 +3377,7 @@ pub fn t_layer_new(an: &mut Analyzer, ty: &str, c: &Call, st: &mut State) -> Val
             let (i, out) = (g(an, st, "in_features"), g(an, st, "out_features"));
             set(an, st, "weight", tensor_value(Shape::known(vec![out, i])));
             let has_bias = t_cfg(an, o, "bias", st);
-            let b = if t_bool(an, &has_bias) == Some(false) { an.none_v.clone() } else { tensor_value(Shape::known(vec![out])) };
+            let b = if t_bool(an, &has_bias) == Some(false) { Value::none() } else { tensor_value(Shape::known(vec![out])) };
             set(an, st, "bias", b);
         }
         "Bilinear" => {
@@ -3944,7 +3944,7 @@ fn t_mha(an: &mut Analyzer, o: u32, args: &[Value], kwargs: &IndexMap<StrId, Val
     let kn = sh::norm_shape(&k, &st.tf);
     let out = tensor_value(qn.clone());
     let weights = if !need {
-        an.none_v.clone()
+        Value::none()
     } else {
         let mk = |batched: bool| -> Shape {
             let qd = |i: i64| sh::dim_at(&qn, i).unwrap_or_else(sh::unknown);
@@ -4285,11 +4285,11 @@ pub fn m_nnmodule(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     match name {
         "register_buffer" | "register_parameter" | "add_module" | "register_module" => {
             let (Some(n), Some(v)) = (c.arg(0, Some("name")).and_then(|v| t_str(an, &v)), c.arg(1, None).or_else(|| kw(c, "tensor").cloned()).or_else(|| kw(c, "param").cloned()).or_else(|| kw(c, "module").cloned())) else {
-                return an.none_v.clone();
+                return Value::none();
             };
             let node = c.node;
             an.store_attr(&recv, &n, &v, &node, st);
-            an.none_v.clone()
+            Value::none()
         }
         // `m.apply(fn)`: fn on every submodule, then on m
         "apply" => {

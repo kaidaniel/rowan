@@ -389,18 +389,7 @@ impl Analyzer {
             }
         }
         work.extend(self.gens.fresh_loops.iter().map(|l| l.2));
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        while let Some(o) = work.pop() {
-            if seen.len() > MUST_WALK || !seen.insert(o) {
-                continue;
-            }
-            if targets.binary_search(&o).is_ok() {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    break;
-                }
-            }
+        let mut sure = |o: ObjId, work: &mut Vec<ObjId>| {
             let len = self.heap.llen(o, state);
             for ((ns, k), v) in state.slots_of(o) {
                 let sure = match ns {
@@ -410,11 +399,11 @@ impl Analyzer {
                     _ => false,
                 };
                 if sure {
-                    one(&v, &mut work);
+                    one(&v, work);
                 }
             }
-        }
-        found
+        };
+        self.find_among(work, targets, MUST_WALK + 1, false, &mut sure).unwrap_or_else(|found| found)
     }
 
     /// Which of `targets` anything may still hold (a walk from every root the collector has,
@@ -434,25 +423,10 @@ impl Analyzer {
             work.extend(it.iter());
         }
         work.extend(self.gens.fresh_loops.iter().map(|l| l.2));
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        while let Some(o) = work.pop() {
-            if !seen.insert(o) {
-                continue;
-            }
-            if seen.len() > MAY_WALK {
-                return (found, true);
-            }
-            self.budget.walk_visit();
-            if targets.binary_search(&o).is_ok() {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    break;
-                }
-            }
-            self.obj_edges(o, state, &mut work);
+        match self.find_among(work, targets, MAY_WALK, true, &mut |o, work| self.obj_edges(o, state, work)) {
+            Ok(found) => (found, false),
+            Err(found) => (found, true),
         }
-        (found, false)
     }
 
     /// `body` runs a loop over generator `o` made for it alone (a `for`, a comprehension's

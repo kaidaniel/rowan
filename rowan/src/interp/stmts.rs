@@ -323,7 +323,7 @@ impl Analyzer {
     fn stmt_return(&mut self, r: &'static ast::StmtReturn, state: &mut State) {
         let v = match &r.value {
             Some(e) => self.eval(e, state),
-            None => self.none_v.clone(),
+            None => Value::none(),
         };
         if !state.reachable {
             // the value's evaluation raised on every path (a guarded access that is
@@ -1011,35 +1011,15 @@ fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMa
         match st {
             ast::Stmt::If(i) => {
                 add(&i.test, out);
-                count_tests(&i.body, in_loop, out);
-                for c in &i.elif_else_clauses {
-                    if let Some(t) = &c.test {
-                        add(t, out);
-                    }
-                    count_tests(&c.body, in_loop, out);
-                }
+                i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()).for_each(|t| add(t, out));
             }
-            ast::Stmt::While(w) => {
-                add(&w.test, out);
-                count_tests(&w.body, true, out);
-                count_tests(&w.orelse, in_loop, out);
-            }
-            ast::Stmt::For(f) => {
-                count_tests(&f.body, true, out);
-                count_tests(&f.orelse, in_loop, out);
-            }
-            ast::Stmt::With(w) => count_tests(&w.body, in_loop, out),
-            ast::Stmt::Try(t) => {
-                count_tests(&t.body, in_loop, out);
-                for h in &t.handlers {
-                    let ast::ExceptHandler::ExceptHandler(h) = h;
-                    count_tests(&h.body, in_loop, out);
-                }
-                count_tests(&t.orelse, in_loop, out);
-                count_tests(&t.finalbody, in_loop, out);
-            }
-            ast::Stmt::Match(m) => m.cases.iter().for_each(|c| count_tests(&c.body, in_loop, out)),
+            ast::Stmt::While(w) => add(&w.test, out),
             _ => {}
+        }
+        // (a loop's body runs again: its tests count twice)
+        let looped = matches!(st, ast::Stmt::For(_) | ast::Stmt::While(_));
+        for (i, b) in crate::syntax::blocks(st).into_iter().enumerate() {
+            count_tests(b, in_loop || (looped && i == 0), out);
         }
     }
 }

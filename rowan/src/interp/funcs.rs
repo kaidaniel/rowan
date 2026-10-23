@@ -265,6 +265,13 @@ impl Analyzer {
         Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), Args::pos(&args), st, node, false)))
     }
 
+    /// The program's functions instance `oid`'s class holds as method `name` (None: its class
+    /// has no such attribute).
+    pub(in crate::interp) fn own_methods(&self, oid: ObjId, name: &str) -> Option<Vec<ObjId>> {
+        let m = self.class_lookup(self.heap.instance_class(oid)?, name)?;
+        Some(self.heap.class_attr(m, name).pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect())
+    }
+
     /// The (receiver, function) pairs of the instances among `v` whose class defines one of
     /// `names` (the first defined, in order), and the rest of `v`.
     pub(in crate::interp) fn method_calls(&self, v: &Value, names: &[&str]) -> (Vec<(ObjId, ObjId)>, Value) {

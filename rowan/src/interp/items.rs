@@ -188,7 +188,6 @@ impl Analyzer {
             Kind::Locidx => {
                 let v = crate::models::pandas::loc_get(self, oid, key, node, state);
                 parts.push(v);
-                return;
             }
             Kind::Groupby => {
                 // (several groupby objects: each selection is an object of its own)
@@ -197,12 +196,9 @@ impl Analyzer {
                 let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
                 self.cx.alloc_extra = saved;
                 parts.push(v);
-                return;
             }
-            Kind::Instance if ns == Ns::Item => { if self.item_of_instance(oid, key, node, state, single_target, line_data, parts) { return; } }
-            _ => {}
-        }
-        match kind {
+            // (its class's `__getitem__`, `__missing__`, a NamedTuple's positions; else a record's key)
+            Kind::Instance if ns == Ns::Item && self.item_of_instance(oid, key, node, state, single_target, line_data, parts) => {}
             Kind::Pair => {
                 // a (key, value) pair indexed by 0 / 1 (or -2 / -1)
                 let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
@@ -444,13 +440,10 @@ impl Analyzer {
     fn item_of_instance(&mut self, oid: ObjId, key: &Value, node: &Node, state: &mut State, single_target: bool, line_data: &Value, parts: &mut Vec<Value>) -> bool {
         let cls = self.heap.instance_class(oid);
         if let Some(cls) = cls {
-            if let Some(m) = self.class_lookup(cls, "__getitem__") {
-                let fv = self.heap.class_attr(m, "__getitem__");
-                for f in fv.pts.iter() {
-                    if self.heap.kind(f) == Kind::Function {
-                        let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
-                        parts.push(r);
-                    }
+            if let Some(fs) = self.own_methods(oid, "__getitem__") {
+                for f in fs {
+                    let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
+                    parts.push(r);
                 }
                 return true;
             }
@@ -578,10 +571,8 @@ impl Analyzer {
         // (a model's own read — pydantic collecting its field errors — raises nothing here:
         // the model raises its ValidationError, with every error, afterwards)
         let model_read = ns == Ns::Item && self.unwind.item_exc == Some("ValidationError");
-        if model_read {
-            if self.unwind.caught_load && cls.tier == Tier::Input {
-                self.require_providers_k(cls, row, true, state, Some(k), ns);
-            }
+        if model_read && self.unwind.caught_load && cls.tier == Tier::Input {
+            self.require_providers_k(cls, row, true, state, Some(k), ns);
         }
         // the handler sees the state as it is here (and a KeyError / AttributeError
         // carrying the key)
@@ -978,16 +969,11 @@ impl Analyzer {
                     self.store_key(inst, Ns::Attr, &key, v, s1, node, state);
                 }
                 Kind::Instance if ns == Ns::Item => {
-                    if let Some(cls) = self.heap.instance_class(oid) {
-                        if let Some(m) = self.class_lookup(cls, "__setitem__") {
-                            let fv = self.heap.class_attr(m, "__setitem__");
-                            for f in fv.pts.iter() {
-                                if self.heap.kind(f) == Kind::Function {
-                                    self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone(), v.clone()]), state, node, false);
-                                }
-                            }
-                            continue;
+                    if let Some(fs) = self.own_methods(oid, "__setitem__") {
+                        for f in fs {
+                            self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone(), v.clone()]), state, node, false);
                         }
+                        continue;
                     }
                 }
                 _ => {}
@@ -1219,80 +1205,82 @@ impl Analyzer {
                 self.refresh_chainmap(oid, state);
                 continue;
             }
-            if kind == Kind::Instance && ns == Ns::Item {
-                if let Some(cls) = self.heap.instance_class(oid) {
-                    if let Some(m) = self.class_lookup(cls, "__delitem__") {
-                        let fv = self.heap.class_attr(m, "__delitem__");
-                        for f in fv.pts.iter() {
-                            if self.heap.kind(f) == Kind::Function {
-                                self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
-                            }
-                        }
-                        continue;
-                    }
+            if let Some(fs) = self.own_methods(oid, "__delitem__").filter(|_| kind == Kind::Instance && ns == Ns::Item) {
+                for f in fs {
+                    self.call_user(f, Some(Value::obj(oid)), Args::pos(&[key.clone()]), state, node, false);
                 }
+                continue;
             }
-            // (a key that may be an object: a key not known, no literal of it surely removed)
-            let okey = self.opaque_key(key, state);
-            let ckey = Value::with_kv(okey.pts.clone(), self.canon_kv(oid, ns, &okey.kv, state));
-            let key = &ckey;
-            let mut row = state.row(oid, ns);
-            let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
-            let mut raise: Option<(bool, Value)> = None;
-            for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
-                let cls = classify(&row, k);
-                if report && !self.is_guarded(ns) {
-                    self.verdict(node, k, &cls, oid, ns, None, None);
-                    if cls.tier == Tier::Input {
-                        self.require_providers_k(&cls, &row, false, state, Some(k), ns);
-                    }
-                }
-                // (a `del` of a key that is not there raises KeyError; one of a mapping built from
-                // data may not be there)
-                if cls.tier != Tier::Proven {
-                    let surely = cls.tier == Tier::Missing && is_lit && strong;
-                    raise = Some((surely || raise.as_ref().is_some_and(|r| r.0), Value::lit(k)));
-                }
-                row = row.delete(k, strong && is_lit);
-                // (one of several objects, or one of several keys: the value may still be there)
-                if strong && is_lit {
-                    state.pop_slot(oid, ns, k);
-                }
-            }
-            // (an instance attribute's `del` raises AttributeError the same way, a class attribute
-            // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
-            let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
-            let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
-            // (a key not known: it may be none of the record's keys; an empty dict has none)
-            let empty = strong && kind == Kind::Dict && ns == Ns::Item && { let r0 = state.row(oid, ns); r0.closed() && r0.present.is_empty() };
-            if !key.kv.is_literal() || (empty && !key.pts.is_empty()) {
-                raise = Some((empty, key.clone()));
-            }
-            let raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
-            // (not reported: a model's removal, `pop` with a default, raises on its own terms)
-            if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
-                state.set_row(oid, ns, row.clone());
-                let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
-                if !self.unwind.tries.is_empty() {
-                    let e = crate::models::exceptions::exception_object(self, exc, vec![kv], node, state);
-                    self.unwind.cur_exc = Some(e);
-                }
-                if surely {
-                    self.raise_here(exc, state);
-                } else {
-                    self.may_raise_here(exc, state);
-                }
-                self.unwind.cur_exc = None;
-                if surely {
-                    continue;
-                }
-            }
-            // an unknown key: any key may be the one deleted
-            if !key.kv.is_literal() {
-                row = row.mutate(s(&format!("del@L{}", node.line)));
-            }
-            state.set_row(oid, ns, row);
+            self.delete_key(oid, ns, key, strong, node, state, report);
         }
+    }
+
+    /// Removes `key` from record `oid` (strongly from a single object): its verdict, the
+    /// KeyError / AttributeError it may raise (none where `report` is false: a model's
+    /// removal).
+    #[allow(clippy::too_many_arguments)]
+    fn delete_key(&mut self, oid: ObjId, ns: Ns, key: &Value, strong: bool, node: &Node, state: &mut State, report: bool) {
+        let kind = self.heap.kind(oid);
+        // (a key that may be an object: a key not known, no literal of it surely removed)
+        let okey = self.opaque_key(key, state);
+        let ckey = Value::with_kv(okey.pts.clone(), self.canon_kv(oid, ns, &okey.kv, state));
+        let key = &ckey;
+        let mut row = state.row(oid, ns);
+        let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
+        let mut raise: Option<(bool, Value)> = None;
+        for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
+            let cls = classify(&row, k);
+            if report && !self.is_guarded(ns) {
+                self.verdict(node, k, &cls, oid, ns, None, None);
+                if cls.tier == Tier::Input {
+                    self.require_providers_k(&cls, &row, false, state, Some(k), ns);
+                }
+            }
+            // (a `del` of a key that is not there raises KeyError; one of a mapping built from
+            // data may not be there)
+            if cls.tier != Tier::Proven {
+                let surely = cls.tier == Tier::Missing && is_lit && strong;
+                raise = Some((surely || raise.as_ref().is_some_and(|r| r.0), Value::lit(k)));
+            }
+            row = row.delete(k, strong && is_lit);
+            // (one of several objects, or one of several keys: the value may still be there)
+            if strong && is_lit {
+                state.pop_slot(oid, ns, k);
+            }
+        }
+        // (an instance attribute's `del` raises AttributeError the same way, a class attribute
+        // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
+        let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
+        let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
+        // (a key not known: it may be none of the record's keys; an empty dict has none)
+        let empty = strong && kind == Kind::Dict && ns == Ns::Item && { let r0 = state.row(oid, ns); r0.closed() && r0.present.is_empty() };
+        if !key.kv.is_literal() || (empty && !key.pts.is_empty()) {
+            raise = Some((empty, key.clone()));
+        }
+        let raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
+        // (not reported: a model's removal, `pop` with a default, raises on its own terms)
+        if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
+            state.set_row(oid, ns, row.clone());
+            let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
+            if !self.unwind.tries.is_empty() {
+                let e = crate::models::exceptions::exception_object(self, exc, vec![kv], node, state);
+                self.unwind.cur_exc = Some(e);
+            }
+            if surely {
+                self.raise_here(exc, state);
+            } else {
+                self.may_raise_here(exc, state);
+            }
+            self.unwind.cur_exc = None;
+            if surely {
+                return;
+            }
+        }
+        // an unknown key: any key may be the one deleted
+        if !key.kv.is_literal() {
+            row = row.mutate(s(&format!("del@L{}", node.line)));
+        }
+        state.set_row(oid, ns, row);
     }
 
     /// The join of every value in one namespace of the object.

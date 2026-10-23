@@ -18,7 +18,7 @@ pub(super) fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serd
 pub(super) fn json_literal_h(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Value, path: &str, hook: Option<&Value>) -> Value {
     let site = format!("{}#json{}", crate::interp::site_string(&c.node), path);
     match j {
-        serde_json::Value::Null => an.none_v.clone(),
+        serde_json::Value::Null => Value::none(),
         serde_json::Value::Bool(b) => Value::lit(intern::key_bool(*b)),
         serde_json::Value::Number(n) => match n.as_i64() {
             Some(i) => Value::lit(intern::key_int(i)),

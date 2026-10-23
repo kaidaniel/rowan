@@ -1423,7 +1423,7 @@ def main() -> int:
     out = a.out or tempfile.mkdtemp(prefix="rowan-fuzz-")
     os.makedirs(out, exist_ok=True)
     limits = [x.strip() for x in a.limits.split(";")]
-    cases, made = [], {}
+    cases, made, used_mods = [], {}, set()
     for kind in a.kinds:
         for k in range(a.n):
             seed = a.seed + k
@@ -1432,6 +1432,14 @@ def main() -> int:
                 print(f"making {kind} {seed}", file=sys.stderr, flush=True)
             head, body, probes, *mods = KINDS[kind]()
             mods = mods[0] if mods else {}
+            # A module name drawn twice (seeds decorators 1414000110 and …170 both draw
+            # fzm72102201) would let the later program's module overwrite the earlier one's
+            # before rowan checks it: rename it after its seed (the draws stay as they were).
+            for name in [nm for nm in mods if nm in used_mods]:
+                new = f"{name}_{seed}"
+                head, body = ([re.sub(rf"\b{name}\b", new, l) for l in ls] for ls in (head, body))
+                mods[new] = mods.pop(name)
+            used_mods.update(mods)
             made.setdefault(kind, [0, 0])[0] += 1
             for lim in limits + KIND_LIMITS.get(kind, []):
                 text = annotate(head, body, probes, lim, mods, out)

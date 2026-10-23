@@ -355,7 +355,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if name == "read" {
                 return Value::data("files");
             }
-            an.none_v.clone()
+            Value::none()
         }
         "sections" => {
             if !spec.known {
@@ -419,7 +419,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
-            an.none_v.clone()
+            Value::none()
         }
         "add_section" => {
             match arg(0, "section").as_ref().and_then(lit_str) {
@@ -434,7 +434,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
-            an.none_v.clone()
+            Value::none()
         }
         "remove_section" | "remove_option" => {
             let s = arg(0, "section").as_ref().and_then(lit_str);
@@ -498,7 +498,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "write" => {
             crate::models::noeffect(an, st, c);
-            an.none_v.clone()
+            Value::none()
         }
         _ => Value::data("configparser"),
     }
@@ -526,7 +526,7 @@ pub fn m_section(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some((spec, sec)) = an.m.cfg_sections.get(&sid).cloned() else { return Value::data("section") };
     let opt = c.arg(0, Some("option")).as_ref().and_then(lit_str);
     // (a section's `get` falls back to None)
-    let fallback = c.arg(1, Some("fallback")).or_else(|| if name == "get" { Some(an.none_v.clone()) } else { None });
+    let fallback = c.arg(1, Some("fallback")).or_else(|| if name == "get" { Some(Value::none()) } else { None });
     let _ = DATA;
     get_value(an, st, &spec, &name, Some(sec), opt, fallback)
 }

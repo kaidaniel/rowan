@@ -17,7 +17,7 @@ pub(super) fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (a key that may be an object: an unknown key)
     let okey = an.opaque_key(key, st);
     let key = &okey;
-    let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
+    let default = c.args.get(1).cloned().unwrap_or_else(|| Value::none());
     let recv = c.recv.clone().unwrap_or_default();
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
@@ -44,7 +44,7 @@ pub(super) fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     an.check_hashable(key, st);
     let okey = an.opaque_key(key, st);
     let key = &okey;
-    let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
+    let default = c.args.get(1).cloned().unwrap_or_else(|| Value::none());
     let recv = c.recv.clone().unwrap_or_default();
     let recs = an.record_objects(&recv);
     if let Some(k) = key.kv.as_lit() {
@@ -142,7 +142,7 @@ pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.copy_into(oid, Ns::Item, sk, st, strong, &KeySet::new());
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `xs.pop()` / `xs.pop(i)` on one list: positional when the list's positions are known.
@@ -269,7 +269,7 @@ pub(super) fn m_move_to_end(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
                 ks.push(k);
             }
             st.set_row(*oid, Ns::Item, row.with_order(ks));
-            return an.none_v.clone();
+            return Value::none();
         }
         if row.closed() && !row.present.contains(k) {
             an.raise_here("KeyError", st);
@@ -281,7 +281,7 @@ pub(super) fn m_move_to_end(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
         let row = st.row(o, Ns::Item);
         st.set_row(o, Ns::Item, row.with_order(Vec::new()));
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 pub(super) fn m_clear(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -297,7 +297,7 @@ pub(super) fn m_clear(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_row(oid, Ns::Item, Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() }));
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 pub(super) fn m_views(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
@@ -454,7 +454,7 @@ pub(super) fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Val
             }
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `slice(stop)` / `slice(start, stop[, step])`: the label a `a:b:c` subscript makes (known
@@ -602,7 +602,7 @@ pub(super) fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         _ => Value::data("set"),
     }
@@ -698,7 +698,7 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                     st.drop_obj_ns(oid, Ns::Pos);
                     an.set_positions(oid, Vec::new(), st);
                     st.clear_last(oid);
-                    return an.none_v.clone();
+                    return Value::none();
                 }
             }
             // one list with known positions: updated in place
@@ -733,7 +733,7 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                     };
                     if done {
                         an.set_positions(oid, ps, st);
-                        return an.none_v.clone();
+                        return Value::none();
                     }
                 }
             }
@@ -746,16 +746,16 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                     }
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         // (the statements' dunders called by name: as the statements)
         "__setitem__" if c.args.len() == 2 => {
             an.store_item(&recv, Ns::Item, &c.args[0], &c.args[1], &c.node, st);
-            an.none_v.clone()
+            Value::none()
         }
         "__delitem__" if c.args.len() == 1 => {
             an.delete_subscript(&recv, &c.args[0], &c.node, st);
-            an.none_v.clone()
+            Value::none()
         }
         "__iadd__" | "__ior__" | "__iand__" | "__isub__" | "__ixor__" if c.args.len() == 1 && recv.kv.is_bot() => {
             let kind = |k: Kind| !recv.pts.is_empty() && recv.pts.iter().all(|o| an.heap.kind(o) == k);
@@ -800,7 +800,7 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if !attrs_of.is_empty() {
         if name == "get" && !c.args.is_empty() {
             // `obj.__dict__.get(name, default)`: the attribute, or the default when it is not set
-            let dflt = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
+            let dflt = c.args.get(1).cloned().unwrap_or_else(|| Value::none());
             let Some(k) = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()) else { return an.all_values(attrs_of[0], Ns::Attr, st).join(&dflt) };
             let mut out = Value::new();
             for o in attrs_of {
@@ -834,7 +834,7 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.copy_into(oid, Ns::Attr, sk, st, strong, &KeySet::new());
             }
         }
-        return an.none_v.clone();
+        return Value::none();
     }
     if matches!(name, "tolist" | "to_list" | "copy") {
         if let Some(recv) = &c.recv {

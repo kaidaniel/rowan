@@ -182,7 +182,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         "heappop" | "heapreplace" | "heappushpop" => {
             let x = c.args.get(1).cloned();
@@ -253,13 +253,13 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 if ok {
                     set_items(an, st, o, its);
-                    return an.none_v.clone();
+                    return Value::none();
                 }
             }
             for o in heap.pts.iter() {
                 blur(an, st, o, None);
             }
-            an.none_v.clone()
+            Value::none()
         }
         "nlargest" | "nsmallest" => {
             // `sorted(iterable, key=key, reverse=nlargest)[:n]`
@@ -385,7 +385,7 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if let Some(o) = o {
                     set_items(an, st, o, its);
                 }
-                return an.none_v.clone();
+                return Value::none();
             }
             return Value::lit(intern::key_int(l as i64));
         }
@@ -394,7 +394,7 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for o in a.pts.iter() {
             blur(an, st, o, Some(&x));
         }
-        return an.none_v.clone();
+        return Value::none();
     }
     Value::data("bisect index")
 }

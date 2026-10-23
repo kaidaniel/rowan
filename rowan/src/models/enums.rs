@@ -101,7 +101,7 @@ pub fn flag_member(an: &mut Analyzer, cls: u32, r: i64, node: &Node, state: &mut
         }
     }
     parts.sort_by(|p, q| p.0.cmp(&q.0));
-    let name = if r != 0 && covered == r { Value::lit_str(&parts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join("|")) } else { an.none_v.clone() };
+    let name = if r != 0 && covered == r { Value::lit_str(&parts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join("|")) } else { Value::none() };
     let cname = an.heap.class_info(cls).name.clone();
     let qual = format!("{}({})", cname, r);
     let mid = an.heap.alloc_raw(Kind::Instance, &format!("flag:{}:{}", cls, r), "", true, &qual, Payload::Cls(cls));

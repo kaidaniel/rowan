@@ -1331,7 +1331,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.delete_item(&recv, Ns::Item, k, &c.node, st, false);
             }
         }
-        return an.none_v.clone();
+        return Value::none();
     }
     // a middleware's call_next(request): the route's response
     if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
@@ -1386,7 +1386,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "HTTPException" => {
             let code = c.arg(0, Some("status_code")).unwrap_or_default();
             let detail = c.arg(1, Some("detail")).unwrap_or_else(|| Value::data("detail"));
-            let headers = c.arg(2, Some("headers")).unwrap_or_else(|| an.none_v.clone());
+            let headers = c.arg(2, Some("headers")).unwrap_or_else(|| Value::none());
             let v = fa_obj(an, st, &c.node, "fastapi.httpexc", detail.clone(), &format!("hx{}", c.site));
             if let Some(o) = v.single() {
                 let mut row = Row::new();
@@ -1400,7 +1400,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             v
         }
         "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => {
-            let content = c.arg(0, Some("content")).unwrap_or_else(|| an.none_v.clone());
+            let content = c.arg(0, Some("content")).unwrap_or_else(|| Value::none());
             let code = c.arg(1, Some("status_code")).unwrap_or_else(|| Value::lit(intern::key_int(200)));
             let v = fa_obj(an, st, &c.node, "fastapi.jsonresponse", content, &format!("jr{}", c.site));
             if let Some(o) = v.single() {
@@ -1455,7 +1455,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                     }
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         ("fastapi.app", "add_api_route") => {
             let path = c.arg(0, Some("path")).and_then(|v| str_of(&v));
@@ -1472,7 +1472,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                 an.m.fa_routes.push(FaRoute { app: o, methods: methods.clone(), path: path.clone(), func: Some(fo), call: c.call_ast, module });
                 an.m.fa_handlers.insert(fo);
             }
-            an.none_v.clone()
+            Value::none()
         }
         // decorators that register a function the framework calls (identity)
         ("fastapi.app", "exception_handler" | "middleware") => {
@@ -1483,7 +1483,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
         }
         ("fastapi.app", "on_event") => fa_obj(an, st, &c.node, "fastapi.hookx", Value::new(), &format!("hook{}", c.site)),
         ("fastapi.app", "dependency_overrides") => Value::data("overrides"),
-        ("fastapi.app", _) => an.none_v.clone(),
+        ("fastapi.app", _) => Value::none(),
         // (the raw body of a known json= payload: its bytes as httpx sends them)
         ("fastapi.request", "body") => match crate::models::json_body_text(an, st, &pv) {
             Some(t) => Value::lit(intern::key(intern::Key::Bytes(t.into_bytes()))),
@@ -1507,7 +1507,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                     an.call_value(&Value::obj(fo), &c.node, None, st, Some(args.clone()));
                 }
             }
-            an.none_v.clone()
+            Value::none()
         }
         ("fastapi.client", m) if HTTP_METHODS.contains(&m) || m == "request" => {
             let (method, c2) = if m == "request" {
@@ -1529,7 +1529,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             st.set_row(oid, Ns::Item, Row::with_source(Source::new(&format!("response.headers@L{}", c.line), SourceKind::External)));
             Value::obj(oid)
         }
-        ("fastapi.response", "raise_for_status") => an.none_v.clone(),
+        ("fastapi.response", "raise_for_status") => Value::none(),
         _ => Value::data(&format!("{}.{}", kind, name)),
     }
 }

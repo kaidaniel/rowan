@@ -277,7 +277,7 @@ impl Analyzer {
             }
             ret = st.ret.clone().unwrap_or_default();
             if st.reachable {
-                ret = ret.join(&self.none_v);
+                ret = ret.join(&Value::none());
             }
             // no normal completion (every path raises): the caller is unreachable after the call
             let completed = st.reachable || st.exits.is_some();

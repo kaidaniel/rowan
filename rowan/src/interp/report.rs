@@ -26,96 +26,9 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
     for v in verdicts {
         groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.chain_files.clone(), v.ns, v.text.clone(), v.guarded)).or_default().push(v);
     }
-    let mut out: Vec<Verdict> = Vec::new();
-    for (_, vs) in groups {
-        let mut by_obj: IndexMap<u32, &Verdict> = IndexMap::new();
-        for v in &vs {
-            match by_obj.get(&v.oid) {
-                Some(cur) if v.tier.rank() <= cur.tier.rank() => {}
-                _ => {
-                    by_obj.insert(v.oid, v);
-                }
-            }
-        }
-        // (an object the access fails on in some runs of the line — an iteration, a call — and
-        // finds the key in others: it may fail)
-        let mut mixed: Vec<Verdict> = Vec::new();
-        for (o, v) in by_obj.iter() {
-            if matches!(v.tier, Tier::Missing | Tier::LikelyMissing) && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
-                mixed.push(Verdict { tier: Tier::Possibly, note: "is missing on some of the times this line runs".into(), ..(*v).clone() });
-            }
-        }
-        for m in mixed.iter() {
-            by_obj.insert(m.oid, m);
-        }
-        let names: IndexMap<u32, String> = by_obj.iter().map(|(o, v)| (*o, v.obj.clone())).collect();
-        let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
-        tiers.sort();
-        tiers.dedup();
-        // (a key of a mapping built from data, on every object: not decided, not reported; beside
-        // an object that lacks it, it may be missing)
-        if tiers == [Tier::Map] {
-            continue;
-        }
-        // (with an object rowan knows nothing of, the group says nothing — but where the
-        // access fails on another object: it may fail)
-        if tiers.contains(&Tier::Unknown) && !tiers.contains(&Tier::Missing) {
-            continue;
-        }
-        let first = vs[0];
-        if tiers.len() == 1 {
-            let v = by_obj.values().next().unwrap();
-            out.push(Verdict { obj: object_list(names.values()), ..(*v).clone() });
-            continue;
-        }
-        // (per tier, the objects it holds for)
-        let mut by_tier: IndexMap<Tier, Vec<String>> = IndexMap::new();
-        for (o, v) in by_obj.iter() {
-            by_tier.entry(v.tier).or_default().push(object_text(an, &names[o]));
-        }
-        by_tier.sort_keys();
-        // (where it fails: the objects that lack the key, then those that may)
-        let word = |t: &Tier| match t {
-            Tier::Proven | Tier::Likely | Tier::Input | Tier::Map | Tier::Unknown => None,
-            Tier::Possibly | Tier::DataKey => Some("maybe missing on"),
-            _ => Some("missing on"),
-        };
-        let breakdown: Vec<String> = by_tier.iter().rev().filter_map(|(t, ns)| word(t).map(|w| format!("{} {}", w, object_list(ns.iter())))).collect();
-        let tier = if tiers.iter().all(|t| matches!(t, Tier::Proven | Tier::Likely)) {
-            Tier::Likely
-        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
-            Tier::Input
-        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
-            // (missing on some objects only unless code rowan cannot see set it: as hedged)
-            Tier::LikelyMissing
-        } else {
-            Tier::Possibly
-        };
-        let mut provs: Vec<SourceId> = by_obj.values().flat_map(|v| v.providers.clone()).collect();
-        provs.sort();
-        provs.dedup();
-        out.push(Verdict {
-            line: first.line,
-            col: first.col,
-            key: first.key,
-            tier,
-            obj: object_list(names.values()),
-            chain: first.chain.clone(),
-            chain_files: first.chain_files.clone(),
-            // (no object lacks it: the note of the least sure one — unknown code ran, an input)
-            note: if breakdown.is_empty() { by_obj.values().max_by_key(|v| v.tier.rank()).map(|v| v.note.clone()).unwrap_or_default() } else { format!("is not on every object this may be ({})", breakdown.join("; ")) },
-            providers: provs,
-            mutators: first.mutators.clone(),
-            ns: first.ns,
-            text: first.text.clone(),
-            oid: first.oid,
-            file: first.file.clone(),
-            guarded: first.guarded,
-        });
-    }
     // the same finding reached through many call chains: keep the shortest few chains
     let mut by_finding: IndexMap<(String, u32, u32, String, Ns, String, Tier, String, String, bool), Vec<Verdict>> = IndexMap::new();
-    for v in out {
+    for v in groups.into_values().filter_map(|vs| combine(an, &vs)) {
         by_finding.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.ns, v.text.clone(), v.tier, v.obj.clone(), v.note.clone(), v.guarded)).or_default().push(v);
     }
     let mut out: Vec<Verdict> = Vec::new();
@@ -126,6 +39,78 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
     }
     out.sort_by(|a, b| (&a.file, a.line, a.col, key_repr(a.key), &a.chain).cmp(&(&b.file, b.line, b.col, key_repr(b.key), &b.chain)));
     out
+}
+
+/// The verdicts of one access site, key and call chain on the objects it may be on, combined
+/// (`dedupe`); None where the group says nothing.
+fn combine(an: &Analyzer, vs: &[&Verdict]) -> Option<Verdict> {
+    let mut by_obj: IndexMap<u32, &Verdict> = IndexMap::new();
+    for v in vs {
+        match by_obj.get(&v.oid) {
+            Some(cur) if v.tier.rank() <= cur.tier.rank() => {}
+            _ => {
+                by_obj.insert(v.oid, v);
+            }
+        }
+    }
+    // (an object the access fails on in some runs of the line — an iteration, a call — and
+    // finds the key in others: it may fail)
+    let mut mixed: Vec<Verdict> = Vec::new();
+    for (o, v) in by_obj.iter() {
+        if matches!(v.tier, Tier::Missing | Tier::LikelyMissing) && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
+            mixed.push(Verdict { tier: Tier::Possibly, note: "is missing on some of the times this line runs".into(), ..(*v).clone() });
+        }
+    }
+    for m in mixed.iter() {
+        by_obj.insert(m.oid, m);
+    }
+    let names: IndexMap<u32, String> = by_obj.iter().map(|(o, v)| (*o, v.obj.clone())).collect();
+    let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
+    tiers.sort();
+    tiers.dedup();
+    // (a key of a mapping built from data, on every object: not decided, not reported; beside
+    // an object that lacks it, it may be missing)
+    if tiers == [Tier::Map] {
+        return None;
+    }
+    // (with an object rowan knows nothing of, the group says nothing — but where the
+    // access fails on another object: it may fail)
+    if tiers.contains(&Tier::Unknown) && !tiers.contains(&Tier::Missing) {
+        return None;
+    }
+    if tiers.len() == 1 {
+        let v = by_obj.values().next().unwrap();
+        return Some(Verdict { obj: object_list(names.values()), ..(*v).clone() });
+    }
+    // (per tier, the objects it holds for)
+    let mut by_tier: IndexMap<Tier, Vec<String>> = IndexMap::new();
+    for (o, v) in by_obj.iter() {
+        by_tier.entry(v.tier).or_default().push(object_text(an, &names[o]));
+    }
+    by_tier.sort_keys();
+    // (where it fails: the objects that lack the key, then those that may)
+    let word = |t: &Tier| match t {
+        Tier::Proven | Tier::Likely | Tier::Input | Tier::Map | Tier::Unknown => None,
+        Tier::Possibly | Tier::DataKey => Some("maybe missing on"),
+        _ => Some("missing on"),
+    };
+    let breakdown: Vec<String> = by_tier.iter().rev().filter_map(|(t, ns)| word(t).map(|w| format!("{} {}", w, object_list(ns.iter())))).collect();
+    let tier = if tiers.iter().all(|t| matches!(t, Tier::Proven | Tier::Likely)) {
+        Tier::Likely
+    } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
+        Tier::Input
+    } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
+        // (missing on some objects only unless code rowan cannot see set it: as hedged)
+        Tier::LikelyMissing
+    } else {
+        Tier::Possibly
+    };
+    let mut providers: Vec<SourceId> = by_obj.values().flat_map(|v| v.providers.clone()).collect();
+    providers.sort();
+    providers.dedup();
+    // (no object lacks it: the note of the least sure one — unknown code ran, an input)
+    let note = if breakdown.is_empty() { by_obj.values().max_by_key(|v| v.tier.rank()).map(|v| v.note.clone()).unwrap_or_default() } else { format!("is not on every object this may be ({})", breakdown.join("; ")) };
+    Some(Verdict { tier, obj: object_list(names.values()), note, providers, ..vs[0].clone() })
 }
 
 /// An object for people: `dict@L4` as it is, an unknown call's result by the call.

@@ -352,12 +352,11 @@ impl Analyzer {
         }
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
+        // (what it is given, the receiver apart)
+        let mut vals: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
         // unknown code may change what an earlier test read: facts about it no longer hold
         if !state.facts.is_empty() {
-            let mut objs: Vec<u32> = recv.map(|r| r.pts.to_vec()).unwrap_or_default();
-            for v in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()) {
-                objs.extend(v.pts.iter());
-            }
+            let objs: Vec<u32> = recv.into_iter().chain(vals.iter()).flat_map(|v| v.pts.iter()).collect();
             self.kill_facts_on(&objs, state);
         }
         // (the method's name: the qualified name's last part, or for a method of an unknown
@@ -368,7 +367,6 @@ impl Analyzer {
         // of the program's objects — changes nothing it is given)
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
             // (`log.info("%s", obj)`: it may run the dunders of the instances it is given)
-            let vals: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
             self.library_dunders(&vals, state, node);
             self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
@@ -376,13 +374,7 @@ impl Analyzer {
         if !state.narrowed.is_empty() {
             state.narrowed.clear();
         }
-        let mut vals: Vec<Value> = args.to_vec();
-        vals.extend(kwargs.values().cloned());
-        vals.extend(star_args.iter().cloned());
-        vals.extend(star_kwargs.iter().cloned());
-        if let Some(r) = recv {
-            vals.push(r.clone());
-        }
+        vals.extend(recv.cloned());
         let touched = self.reachable_records(&vals, state, 0);
         let site_id = s(&site);
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
@@ -403,21 +395,13 @@ impl Analyzer {
             self.follow_code(callables, rid, site_id, state);
         }
         // (the dunders of the instances it met may run: what they change, their receivers
-        // changed already; followed apart, as the same dunders recur)
-        let mut dunders: Vec<ObjId> = Vec::new();
-        // (`xs.append(o)` / `setattr` store it, running none of its code)
-        let stores = matches!(name, "append" | "insert" | "__setattr__" | "setattr");
-        let classes: Vec<ObjId> = found.iter().copied().filter(|o| !classes_followed && !stores && self.heap.kind(*o) == Kind::Class).collect();
-        for c in classes {
-            dunders.extend(self.changing_dunders(c, state).iter().copied());
-            // (it may call the class it met, or an instance of it: what their code reaches
-            // besides the instance may change, `Box.made += 1` in `__init__`)
-            dunders.extend(self.construct_dunders(c, met.contains(&c), state));
-        }
-        if !dunders.is_empty() {
-            dunders.sort_unstable();
-            dunders.dedup();
-            self.follow_code(dunders, rid, site_id, state);
+        // changed already; followed apart, as the same dunders recur; `xs.append(o)` /
+        // `setattr` store it, running none of its code)
+        if !classes_followed && !matches!(name, "append" | "insert" | "__setattr__" | "setattr") {
+            let dunders = self.met_dunders(&found, &met, state);
+            if !dunders.is_empty() {
+                self.follow_code(dunders, rid, site_id, state);
+            }
         }
         self.havoc.code = found;
         self.name_unknown_result(rid, site_id, &arg_recs, node);
@@ -433,6 +417,22 @@ impl Analyzer {
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// The program's dunders of the classes among `found` that unknown code may run (`met`: the
+    /// objects it met; a class met itself may be called).
+    fn met_dunders(&mut self, found: &[ObjId], met: &FxHashSet<ObjId>, state: &State) -> Vec<ObjId> {
+        let mut dunders: Vec<ObjId> = Vec::new();
+        let classes: Vec<ObjId> = found.iter().copied().filter(|o| self.heap.kind(*o) == Kind::Class).collect();
+        for c in classes {
+            dunders.extend(self.changing_dunders(c, state).iter().copied());
+            // (it may call the class it met, or an instance of it: what their code reaches
+            // besides the instance may change, `Box.made += 1` in `__init__`)
+            dunders.extend(self.construct_dunders(c, met.contains(&c), state));
+        }
+        dunders.sort_unstable();
+        dunders.dedup();
+        dunders
     }
 
     /// Unknown code ran on `vals` (`havoc_reachable`), and the generators it met may run on

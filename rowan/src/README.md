@@ -18,7 +18,7 @@ the ones above it:
 | **syntax** | |
 | `frontend.rs` | parsing with ruff, private-name mangling, leaked trees, node positions and text (a node's address is its identity) |
 | `scopes.rs` | which names of each function, lambda, generator expression and class body are locals, cells, free or globals |
-| `syntax.rs` | questions the tree alone answers: attribute chains, names used, whether a body yields, returns, jumps, assigns |
+| `syntax.rs` | questions the tree alone answers: attribute chains, names used, whether a body yields, returns, jumps, assigns; the blocks of a compound statement (`blocks`), which its walks share |
 | **domains** | |
 | `intern.rs` | interned keys (Python literals usable as dict keys), strings, sources and lenses; `IdSet`, the sorted id set every set is |
 | `domain.rs` | `Value` (objects + a scalar `KeyVal`), `Row` (an object's keys on a path) and its transfers, `classify` (a read's verdict), `ReqInfo` (a requirement) |

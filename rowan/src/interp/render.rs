@@ -13,6 +13,16 @@ use crate::state::{Kind, State};
 /// (`--value-depth N`; default 3).
 pub static VALUE_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
 
+/// `VALUE_DEPTH` now.
+fn max_depth() -> u32 {
+    VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The values at positions `from..to` of sequence `o` (`?` where not known).
+fn position_texts(an: &Analyzer, state: &State, o: ObjId, from: usize, to: usize, depth: u32, seen: &mut Vec<ObjId>) -> Vec<String> {
+    (from..to).map(|i| render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), depth, seen)).collect()
+}
+
 /// Values rendered at several runs of a line as one: their alternatives (split at the top
 /// level, outside brackets and strings), each once, the unknown `?` last.
 pub fn join_alternatives(texts: &[String]) -> String {
@@ -122,7 +132,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
 
 /// One object as Python text (`render_value`'s parts).
 fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut Vec<ObjId>) -> String {
-    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let max_depth = max_depth();
     if !an.heap.has_obj(o) {
         return "?".into();
     }
@@ -220,7 +230,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
 /// A list, tuple or set: its known positions in order (a set's known literal members sorted),
 /// else what any element may be in typing notation (`list[int]`); a deque wrapped.
 fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32, seen: &mut Vec<ObjId>) -> String {
-    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let max_depth = max_depth();
     const MAX_ITEMS: usize = 8;
     let deeper = depth + 1;
     let (open, close, ty) = match kind {
@@ -242,10 +252,7 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
                 seen.pop();
                 return if n == 0 { format!("{}{}", open, close) } else { format!("{}…{}", open, close) };
             }
-            let mut items: Vec<String> = (0..n.min(MAX_ITEMS)).map(|i| match state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)) {
-                Some(sv) => render_value(an, state, &sv, deeper, seen),
-                None => "?".into(),
-            }).collect();
+            let mut items = position_texts(an, state, o, 0, n.min(MAX_ITEMS), deeper, seen);
             if n > MAX_ITEMS {
                 items.push("…".into());
             }
@@ -267,7 +274,7 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
         // one of a few lengths (an append on some paths): each list (`["a"] | ["a", "b"]`)
         None if kind != Kind::Set && depth < max_depth && alt_lists(an, state, o).is_some() => {
             let alts = alt_lists(an, state, o).unwrap();
-            let items: Vec<String> = (0..*alts.last().unwrap()).map(|i| render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), deeper, seen)).collect();
+            let items = position_texts(an, state, o, 0, *alts.last().unwrap(), deeper, seen);
             alts.iter().map(|n| if kind == Kind::Tuple && *n == 1 { format!("({},)", items[0]) } else { format!("{}{}{}", open, items[..*n].join(", "), close) }).collect::<Vec<_>>().join(" | ")
         }
         // unknown length: what any element may be, in typing notation
@@ -311,11 +318,11 @@ fn render_iterator(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mu
         b if b.contains('#') || b.contains(':') => "iterator".to_string(),
         b => b.to_string(),
     };
-    if depth >= VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed) {
+    if depth >= max_depth() {
         return format!("<{}>", name);
     }
     seen.push(o);
-    let items = |from: usize, n: usize, seen: &mut Vec<ObjId>| (from..n).take(8).map(|i| state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)).map_or("?".into(), |sv| render_value(an, state, &sv, depth + 1, seen))).collect::<Vec<String>>();
+    let items = |from: usize, n: usize, seen: &mut Vec<ObjId>| position_texts(an, state, o, from, n.min(from + 8), depth + 1, seen);
     let n = an.heap.llen(o, state);
     let more = |n: usize, from: usize| if n - from > 8 { ", …" } else { "" };
     let out = match (an.positions_left(o, state), n) {
@@ -342,7 +349,7 @@ fn alt_lists(an: &Analyzer, state: &State, o: ObjId) -> Option<Vec<usize>> {
 /// A dict or frame: its keys and values (a frame by its columns; a Series / Counter /
 /// defaultdict / OrderedDict wrapped as Python prints them).
 fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32, seen: &mut Vec<ObjId>) -> String {
-    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let max_depth = max_depth();
     let row = state.row(o, Ns::Item);
     // (a frame by its columns, a Series / Counter / defaultdict by their keys, as
     // Python prints them)
@@ -367,8 +374,7 @@ fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32
     };
     match wrap {
         // (nothing known about its keys: the type alone)
-        Some(w) if body == "{**?}" => format!("<{}>", if w == "series" { "Series" } else { w }),
-        Some("series") => format!("Series({})", body),
+        Some(w) if body == "{**?}" => format!("<{}>", w),
         Some(w) => format!("{}({})", w, body),
         None => body,
     }
@@ -503,7 +509,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
         } else {
             // (an object used as a key: the object, by name)
             let key = match an.heap.keys.identity_objs.borrow().get(k).copied() {
-                Some(ko) => render_object(an, state, ko, VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed), seen),
+                Some(ko) => render_object(an, state, ko, max_depth(), seen),
                 None => key_display(*k),
             };
             items.push(format!("{}{}: {}", key, row.mark(*k), val));
@@ -537,12 +543,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
 fn args_items(an: &Analyzer, state: &State, args: &Value, depth: u32, seen: &mut Vec<ObjId>) -> Vec<String> {
     let tuple = args.single().filter(|t| args.kv.is_bot() && an.heap.kind(*t) == Kind::Tuple);
     match tuple.and_then(|t| Some((t, an.heap.llen(t, state)?))) {
-        Some((t, n)) if n <= 8 => (0..n)
-            .map(|i| match state.slot_opt(t, Ns::Pos, intern::key_int(i as i64)) {
-                Some(sv) => render_value(an, state, &sv, depth + 1, seen),
-                None => "?".into(),
-            })
-            .collect(),
+        Some((t, n)) if n <= 8 => position_texts(an, state, t, 0, n, depth + 1, seen),
         _ => vec![format!("*{}", render_value(an, state, args, depth + 1, seen))],
     }
 }
@@ -565,7 +566,7 @@ fn exception_args(an: &Analyzer, state: &State, o: ObjId, ns: Ns, row: &crate::d
 /// each: the keys / attributes seen on it, what an unknown call may return, else `?`.
 pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, String)> {
     fn walk(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>, out: &mut Vec<(String, String)>) {
-        if depth > VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed) || out.len() >= 8 {
+        if depth > max_depth() || out.len() >= 8 {
             return;
         }
         for o in v.pts.iter() {

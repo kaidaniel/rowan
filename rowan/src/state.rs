@@ -369,9 +369,7 @@ impl State {
             }
         }
         self.lasts = join_lasts(&self.lasts, &o.lasts);
-        if !Arc::ptr_eq(&self.sym_lens, &o.sym_lens) {
-            self.sym_lens = Arc::new(self.sym_lens.iter().filter(|x| o.sym_lens.contains(x)).copied().collect());
-        }
+        self.sym_lens = common(&self.sym_lens, &o.sym_lens);
         if !(Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf) {
             self.tf = Arc::new(self.tf.join(&o.tf));
         }
@@ -404,10 +402,15 @@ impl State {
                 self.lens.insert(oid, (None, p, 0));
             }
         }
+        self.drop_last(oid);
+        self.drop_sym_len(oid);
+    }
+
+    /// The list's last element is not known any more.
+    fn drop_last(&mut self, oid: ObjId) {
         if self.lasts.iter().any(|(o, _)| *o == oid) {
             self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
         }
-        self.drop_sym_len(oid);
     }
 
     /// `v` was appended to the list: its last element (`lst[-1]`).
@@ -422,9 +425,7 @@ impl State {
         self.lens.insert(oid, v);
         self.drop_sym_len(oid);
         // (a new length: the last element known is no longer known, an append sets it after)
-        if self.lasts.iter().any(|(o, _)| *o == oid) {
-            self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
-        }
+        self.drop_last(oid);
     }
 
     /// The list's length is not known any more.
@@ -514,11 +515,11 @@ impl State {
         s.reachable = true;
         s.facts = Arc::new(facts);
         s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
-        s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
+        s.name_keys = common(&self.name_keys, &o.name_keys);
         s.lasts = join_lasts(&self.lasts, &o.lasts);
         s.unbound = join_unbound(self, o);
-        s.sym_lens = if Arc::ptr_eq(&self.sym_lens, &o.sym_lens) { self.sym_lens.clone() } else { Arc::new(self.sym_lens.iter().filter(|x| o.sym_lens.contains(x)).copied().collect()) };
-        s.path = if Arc::ptr_eq(&self.path, &o.path) { self.path.clone() } else { Arc::new(self.path.iter().filter(|t| o.path.contains(t)).copied().collect()) };
+        s.sym_lens = common(&self.sym_lens, &o.sym_lens);
+        s.path = common(&self.path, &o.path);
         s
     }
 
@@ -610,11 +611,8 @@ impl State {
             let Some(v) = o.rows.get(k) else { continue };
             match self.rows.get(k) {
                 None => self.rows.insert(*k, one_side_row(k, &v)),
-                Some(cur) => {
-                    if cur != v {
-                        self.rows.insert(*k, cur.join(&v));
-                    }
-                }
+                Some(cur) if cur != v => self.rows.insert(*k, cur.join(&v)),
+                Some(_) => {}
             }
         }
         // (the callee changed these lists' elements: their last element is not known here)
@@ -629,11 +627,8 @@ impl State {
             let Some(v) = o.slots.get(oid, sk) else { continue };
             match self.slots.get(oid, sk) {
                 None => self.slots.set(oid, *sk, one_side_slot(*oid, sk, &v)),
-                Some(cur) => {
-                    if cur != v {
-                        self.slots.set(oid, *sk, cur.join(&v));
-                    }
-                }
+                Some(cur) if cur != v => self.slots.set(oid, *sk, cur.join(&v)),
+                Some(_) => {}
             }
         }
         // the lengths of the objects the callee touched
@@ -649,11 +644,8 @@ impl State {
                 match self.lens.get(&k) {
                     None if is_found(k) => {}
                     None => self.set_lens(k, v),
-                    Some(cur) => {
-                        if cur != v {
-                            self.set_lens(k, join_len(&cur, &v));
-                        }
-                    }
+                    Some(cur) if cur != v => self.set_lens(k, join_len(&cur, &v)),
+                    Some(_) => {}
                 }
             }
         }
@@ -662,11 +654,8 @@ impl State {
             match self.elems.get(k) {
                 None if is_found(*k) => {}
                 None => self.elems.insert(*k, v),
-                Some(cur) => {
-                    if cur != v {
-                        self.elems.insert(*k, kv_join(&cur, &v));
-                    }
-                }
+                Some(cur) if cur != v => self.elems.insert(*k, kv_join(&cur, &v)),
+                Some(_) => {}
             }
         }
         for (src, k) in o.reqs.diff_keys(&self.reqs) {
@@ -1003,18 +992,23 @@ pub fn join_env(a: &IndexMap<StrId, Value>, b: &IndexMap<StrId, Value>) -> Index
     let mut out = a.clone();
     for (k, v) in b.iter() {
         match out.get(k) {
-            None => {
-                out.insert(*k, v.clone());
+            None => drop(out.insert(*k, v.clone())),
+            Some(cur) if cur != v => {
+                let nv = cur.join(v);
+                out.insert(*k, nv);
             }
-            Some(cur) => {
-                if cur != v {
-                    let nv = cur.join(v);
-                    out.insert(*k, nv);
-                }
-            }
+            Some(_) => {}
         }
     }
     out
+}
+
+/// What both lists hold (in `a`'s order).
+fn common<T: PartialEq + Copy>(a: &Arc<Vec<T>>, b: &Arc<Vec<T>>) -> Arc<Vec<T>> {
+    if Arc::ptr_eq(a, b) {
+        return a.clone();
+    }
+    Arc::new(a.iter().filter(|x| b.contains(x)).copied().collect())
 }
 
 /// Lists whose last element is known on both paths (the join of the two values).

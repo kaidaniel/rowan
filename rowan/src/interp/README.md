@@ -75,7 +75,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `ops.rs` | operators, f-strings, `%` formatting |
 | `compare.rs` | comparisons and truth |
 | `comps.rs` | comprehensions; a generator expression's run (`genexp_body`) |
-| `funcs.rs` | function objects and decorators, names, assignment targets and unpacking |
+| `funcs.rs` | function objects and decorators, names, assignment targets and unpacking; the program's methods an instance's class holds (`own_methods`, `method_calls`) |
 | `iter.rs` | iteration: the items and element of anything iterated |
 | `stopearly.rs` | `any` / `all` / `next` / `in` of a generator made for them: run until answered, closed where it stops |
 | `genraise.rs` | a generator's raises where its consumer asks for the item it fails to give: kept by how many items it gave, raised from the consumer's state then |
@@ -88,14 +88,14 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `items.rs` | item access: reads, stores, deletes, copies of keys, positions, elements |
 | `attrs.rs` | attribute access through classes, instances, unknowns |
 | `keys.rs` | the key a value stands for (numbers, Enum members, identity-hashed objects), literal key views |
-| `alloc.rs`, `gc.rs` | allocation policy; liveness and collection |
+| `alloc.rs`, `gc.rs` | allocation policy; liveness and collection (`find_among`: the one search for which objects a walk reaches, also generators' and closing's) |
 | `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
 | `summary.rs` | result summaries: the shape of what a function returns for any call (from a pre-pass's runs), made anew where a call of it does not run |
 | `libclosure.rs` | the closure followed libraries' calls that do not run share once theirs is large (`LibClosure`): walked once, applied again where it gained or the state changed |
 | `inert.rs` | which function bodies are inert (a bounded handful of steps: `functools.wraps` decorators) |
 | `deferred.rs` | deferred definitions: a module's `@dec def f` with plain inert decorators, run when `f` is first read |
 | **output** | |
-| `report.rs` | verdicts combined, access paths of what code reads, the text report, JSON, the golden document |
+| `report.rs` | verdicts combined (`dedupe`, `combine`), access paths of what code reads, the text report, JSON, the golden document |
 | `render.rs` | values as Python text, value legends |
 | `facts.rs` | the `--facts` document for the editor |
 

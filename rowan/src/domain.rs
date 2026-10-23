@@ -710,9 +710,9 @@ pub fn chain_extend(chain: &[u32], files: &[u32], module: u32, line: u32) -> (Ch
 // verdict classification
 // ---------------------------------------------------------------------------
 
-/// The verdict of a read, `del` or `pop` of a key on one object. `Proven`, `Possibly`,
-/// `Missing` and `Input` hold for every run; `Likely` / `LikelyMissing` assume unknown code
-/// removed (added) nothing.
+/// The verdict of a read, `del` or `pop` of a key on one object, in order of severity
+/// (`rank`). `Proven`, `Possibly`, `Missing` and `Input` hold for every run; `Likely` /
+/// `LikelyMissing` assume unknown code removed (added) nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Tier {
     /// there on every path (✓)
@@ -736,19 +736,10 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The order of severity (the worst of several objects' tiers is the access's).
+    /// The order of severity, the declaration order (the worst of several objects' tiers is
+    /// the access's).
     pub fn rank(self) -> u8 {
-        match self {
-            Tier::Proven => 0,
-            Tier::Likely => 1,
-            Tier::Map => 2,
-            Tier::Input => 3,
-            Tier::Possibly => 4,
-            Tier::DataKey => 5,
-            Tier::LikelyMissing => 6,
-            Tier::Missing => 7,
-            Tier::Unknown => 8,
-        }
+        self as u8
     }
     /// The tier's name in the JSON and the golden directives.
     pub fn name(self) -> &'static str {
@@ -1461,6 +1452,10 @@ impl Value {
     }
     pub fn lit(k: KeyId) -> Value {
         Value { pts: ObjSet::new(), kv: KeyVal::Lit(k) }
+    }
+    /// `None`.
+    pub fn none() -> Value {
+        Value::lit(intern::key_none())
     }
     pub fn lit_str(s: &str) -> Value {
         Value::lit(intern::key_str_lit(s))

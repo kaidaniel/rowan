@@ -952,9 +952,7 @@ impl<'a> Flow<'a> {
                 c.comparators.iter().for_each(|x| self.expr(x, Pos::Read));
             }
             Expr::UnaryOp(u) => self.expr(&u.operand, Pos::Read),
-            Expr::List(x) => x.elts.iter().for_each(|v| self.expr(v, part)),
-            Expr::Tuple(x) => x.elts.iter().for_each(|v| self.expr(v, part)),
-            Expr::Set(x) => x.elts.iter().for_each(|v| self.expr(v, part)),
+            Expr::List(ast::ExprList { elts, .. }) | Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::Set(ast::ExprSet { elts, .. }) => elts.iter().for_each(|v| self.expr(v, part)),
             Expr::Dict(d) => {
                 for it in &d.items {
                     match &it.key {
@@ -968,7 +966,7 @@ impl<'a> Flow<'a> {
                 }
             }
             // (`[*xs]`, `f(*xs)`: xs's items are kept or given, not xs)
-            Expr::Starred(x) => self.unpacked(&x.value, if pos == Pos::Read { Pos::Read } else { Pos::Change }),
+            Expr::Starred(x) => self.unpacked(&x.value, part),
             Expr::ListComp(ast::ExprListComp { elt, generators, .. }) | Expr::SetComp(ast::ExprSetComp { elt, generators, .. }) | Expr::Generator(ast::ExprGenerator { elt, generators, .. }) => {
                 self.comprehension(generators);
                 self.expr(elt, part);
@@ -979,11 +977,7 @@ impl<'a> Flow<'a> {
                 self.expr(&d.value, part);
             }
             // (given to the code that consumes, awaits or later calls it)
-            Expr::Yield(y) => {
-                if let Some(v) = &y.value {
-                    self.expr(v, Pos::Change);
-                }
-            }
+            Expr::Yield(y) => y.value.iter().for_each(|v| self.expr(v, Pos::Change)),
             Expr::YieldFrom(y) => self.expr(&y.value, Pos::Change),
             Expr::Await(a) => self.expr(&a.value, Pos::Change),
             Expr::Lambda(l) => {

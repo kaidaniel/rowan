@@ -292,7 +292,7 @@ impl Analyzer {
         self.havoc.code.clear();
         loop {
             lc.walk.push(code.drain(..));
-            self.walk_more(&mut lc.walk, state);
+            self.walk_closure(&mut lc.walk, state);
             let g = lc.walk.gained(&mut lc.taken);
             lc.take_gained(g, state, &mut p);
             self.apply_piece(&mut lc, std::mem::take(&mut p), &ch, rid, site, state, walk);

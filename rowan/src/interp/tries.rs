@@ -467,10 +467,7 @@ impl Analyzer {
             if self.heap.kind(oid) != Kind::Instance {
                 continue;
             }
-            let Some(cls) = self.heap.instance_class(oid) else { continue };
-            let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
-            let fv = self.heap.class_attr(m, "__exit__");
-            if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
+            if self.own_methods(oid, "__exit__").unwrap_or_default().into_iter().any(|f| crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
         }
@@ -503,7 +500,7 @@ impl Analyzer {
                     if !st.reachable {
                         break;
                     }
-                    let a = if exc { Value::data("exc") } else { self.none_v.clone() };
+                    let a = if exc { Value::data("exc") } else { Value::none() };
                     self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
                     // an ExitStack: its callbacks, last registered first; closing(x): x.close()
                     crate::models::csvio::exitstack_close(self, st, v, n, !exc);

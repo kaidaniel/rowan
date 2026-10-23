@@ -195,7 +195,7 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 fn last(q: &str) -> &str {
@@ -252,7 +252,7 @@ fn new_series_of(an: &mut Analyzer, st: &mut State, node: &Node, idx: Row, name:
     for k in idx.present.iter() {
         st.set_slot(sid, Ns::Item, k, cell(k).unwrap_or_else(|| unknown_cell(k)), false);
     }
-    st.set_slot(sid, Ns::Meta, mk("name"), name.unwrap_or_else(|| an.none_v.clone()), true);
+    st.set_slot(sid, Ns::Meta, mk("name"), name.unwrap_or_else(|| Value::none()), true);
     sid
 }
 
@@ -264,12 +264,12 @@ fn series_name(an: &Analyzer, st: &State, sid: u32) -> Value {
 }
 
 /// The column a Series becomes in a frame: its name (unnamed: 0); None when unknown.
-fn name_column(an: &Analyzer, v: &Value) -> Option<KeyId> {
+fn name_column(v: &Value) -> Option<KeyId> {
     if !v.pts.is_empty() {
         return None;
     }
     let k = v.kv.as_lit()?;
-    if v.kv == an.none_v.kv {
+    if v.kv == Value::none().kv {
         return Some(intern::key_int(0));
     }
     Some(k)
@@ -505,7 +505,7 @@ fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<K
 fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let data = c.arg(0, Some("data"));
     let index = c.kw("index").or_else(|| c.arg(1, None));
-    let name = c.kw("name").or_else(|| c.arg(3, None)).unwrap_or_else(|| an.none_v.clone());
+    let name = c.kw("name").or_else(|| c.arg(3, None)).unwrap_or_else(|| Value::none());
     let idx_kw = index.as_ref().and_then(|v| an.lit_keys(v, st));
     let (idx, vk): (Option<Row>, Option<Known>) = match data.as_ref().and_then(|d| d.single()) {
         Some(d) if an.heap.kind(d) == Kind::Dict && !is_series_obj(an, d) => {
@@ -558,7 +558,7 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.set_slot(*s0, Ns::Item, k, unknown_cell(k), false);
             }
         }
-        return an.none_v.clone();
+        return Value::none();
     }
     let res = series_op(an, st, c);
     if !key_is_bool(&c.kw("inplace"), true) {
@@ -589,7 +589,7 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 fn series_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -599,7 +599,7 @@ fn series_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // the generic Series: what can be said without its index
         return match name.as_str() {
             "to_frame" => {
-                let col = c.arg(0, Some("name")).and_then(|v| name_column(an, &v));
+                let col = c.arg(0, Some("name")).and_then(|v| name_column(&v));
                 match col {
                     Some(k) => new_frame(an, st, c, Row::closed_with(KeySet::one(k)), None, None),
                     None => new_frame(an, st, c, Row::with_source(Source::new(&format!("to_frame@L{}", c.line), SourceKind::Call)), None, None),
@@ -607,7 +607,7 @@ fn series_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             "reset_index" if !key_is_bool(&c.kw("drop"), true) => {
                 let mut row = Row::with_source(Source::new(&format!("reset_index@L{}", c.line), SourceKind::Call));
-                if let Some(k) = c.kw("name").and_then(|v| name_column(an, &v)) {
+                if let Some(k) = c.kw("name").and_then(|v| name_column(&v)) {
                     row = row.store(k, true);
                 }
                 new_frame(an, st, c, row, None, None)
@@ -638,8 +638,8 @@ fn series_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "to_frame" => {
             let col = match c.arg(0, Some("name")) {
-                Some(v) => name_column(an, &v),
-                None => name_column(an, &join_values(ss.iter().map(|x| series_name(an, st, *x)))),
+                Some(v) => name_column(&v),
+                None => name_column(&join_values(ss.iter().map(|x| series_name(an, st, *x)))),
             };
             let row = match col {
                 Some(k) => Row::closed_with(KeySet::one(k)),
@@ -677,8 +677,8 @@ fn series_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             let col = match c.kw("name") {
-                Some(v) => name_column(an, &v),
-                None => name_column(an, &join_values(ss.iter().map(|x| series_name(an, st, *x)))),
+                Some(v) => name_column(&v),
+                None => name_column(&join_values(ss.iter().map(|x| series_name(an, st, *x)))),
             };
             match col {
                 Some(k) => row = row.store(k, true),
@@ -1578,8 +1578,8 @@ fn string_io(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 fn to_json(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fs = frames(an, c.recv.as_ref());
     let path = c.arg(0, Some("path_or_buf"));
-    if path.map(|p| p.kv != an.none_v.kv || !p.pts.is_empty()).unwrap_or(false) {
-        return an.none_v.clone();
+    if path.map(|p| p.kv != Value::none().kv || !p.pts.is_empty()).unwrap_or(false) {
+        return Value::none();
     }
     let orient = lit_key(&c.kw("orient")).and_then(intern::key_as_str).map(|s0| s0.to_string()).unwrap_or_else(|| "columns".into());
     let mut out = Value::new();
@@ -1702,7 +1702,7 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 index = Some(ks);
             }
             _ => {
-                if !key_is_bool(&Some(ic.clone()), false) && ic.kv != an.none_v.kv {
+                if !key_is_bool(&Some(ic.clone()), false) && ic.kv != Value::none().kv {
                     // a column by position leaves: which one is not known
                     let mut d = row.data();
                     d.definite = KeySet::new();
@@ -1713,7 +1713,7 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let v = new_frame(an, st, c, row, Some(&format!("{}@L{}", tag, c.line)), None);
-    if c.kw("index_col").map(|ic| ic.kv == an.none_v.kv || key_is_bool(&Some(ic), false)).unwrap_or(true) {
+    if c.kw("index_col").map(|ic| ic.kv == Value::none().kv || key_is_bool(&Some(ic), false)).unwrap_or(true) {
         fresh_index(st, &v);
     }
     if let (Some(ks), Some(nid)) = (index, v.pts.first()) {
@@ -1850,7 +1850,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let Some(data) = data else { return finish(an, st, Row::new()) };
     if data.pts.is_empty() {
-        return if data.kv == an.none_v.kv { finish(an, st, Row::new()) } else { open(an, st) };
+        return if data.kv == Value::none().kv { finish(an, st, Row::new()) } else { open(an, st) };
     }
     let mut row: Option<Row> = None;
     let add = |row: &mut Option<Row>, r: Row| {
@@ -2117,7 +2117,7 @@ fn piece_row_at(an: &Analyzer, st: &State, v: &Value, axis1: bool, pos: Option<K
             if axis1 {
                 let nm = series_name(an, st, o);
                 let named = nm.pts.is_empty() && nm.kv.as_lit().map(|k| k != none_key()).unwrap_or(false);
-                rows.push(match (pos, named, name_column(an, &nm)) {
+                rows.push(match (pos, named, name_column(&nm)) {
                     (Some(p0), _, _) => Row::closed_with(KeySet::one(p0)),
                     (None, true, Some(k)) => Row::closed_with(KeySet::one(k)),
                     _ => return None,
@@ -2125,7 +2125,7 @@ fn piece_row_at(an: &Analyzer, st: &State, v: &Value, axis1: bool, pos: Option<K
             } else {
                 // Series stacked as rows of a frame: one column named after the Series
                 let nm = series_name(an, st, o);
-                rows.push(match name_column(an, &nm) {
+                rows.push(match name_column(&nm) {
                     Some(k) => Row::closed_with(KeySet::one(k)),
                     None => return None,
                 });
@@ -2178,7 +2178,7 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let is_ser = !p0.pts.is_empty() && p0.pts.iter().all(|o| is_series_obj(an, o));
         if axis1 && !all_series && is_ser {
             let nm = join_values(p0.pts.iter().map(|o| series_name(an, st, o)));
-            if nm.pts.is_empty() && nm.kv == an.none_v.kv {
+            if nm.pts.is_empty() && nm.kv == Value::none().kv {
                 rows.push(Row::closed_with(KeySet::one(intern::key_int(unnamed))));
                 unnamed += 1;
                 continue;
@@ -2190,7 +2190,7 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Some(ks) => ks.get(i).copied(),
                 None => {
                     let nm = join_values(p0.pts.iter().map(|o| series_name(an, st, o)));
-                    let unnamed = nm.pts.is_empty() && nm.kv == an.none_v.kv;
+                    let unnamed = nm.pts.is_empty() && nm.kv == Value::none().kv;
                     unnamed.then(|| intern::key_int(i as i64))
                 }
             }
@@ -2598,7 +2598,7 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 rrows.push(st.row(o, Ns::Item));
             } else if is_series_obj(an, o) {
                 let nm = series_name(an, st, o);
-                rrows.push(match name_column(an, &nm) {
+                rrows.push(match name_column(&nm) {
                     Some(k) => Row::closed_with(KeySet::one(k)),
                     None => Row::with_source(Source::new(&format!("join@L{}", c.line), SourceKind::Call)),
                 });
@@ -3459,7 +3459,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
         let name_v = match nm {
             Some(k) => Value::lit(k),
-            None => an.none_v.clone(),
+            None => Value::none(),
         };
         let sid = new_series(an, st, &c.node, idx, Some(name_v), "g");
         if same_rows {
@@ -4034,7 +4034,7 @@ fn is_identifier(s0: &str) -> bool {
 fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fs = frames(an, c.recv.as_ref());
     let with_index = !key_is_bool(&c.kw("index").or_else(|| c.arg(0, None)), false);
-    let plain = c.kw("name").map(|v| v.kv == an.none_v.kv && v.pts.is_empty()).unwrap_or(false);
+    let plain = c.kw("name").map(|v| v.kv == Value::none().kv && v.pts.is_empty()).unwrap_or(false);
     let mut rows_v = Value::new();
     for (j, f) in fs.iter().enumerate() {
         let base = st.row(*f, Ns::Item);
@@ -4321,7 +4321,7 @@ fn df_insert(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             frame_setitem(an, f, col, &val, &c.node, st, single);
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 fn df_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -4360,7 +4360,7 @@ fn melt(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let idv = c.kw("id_vars").or_else(|| c.arg(off, None));
     let vv = c.kw("value_vars").or_else(|| c.arg(off + 1, None));
     let ids = match &idv {
-        Some(v) if v.kv != an.none_v.kv || !v.pts.is_empty() => keys_arg(an, st, &idv),
+        Some(v) if v.kv != Value::none().kv || !v.pts.is_empty() => keys_arg(an, st, &idv),
         _ => Some(Vec::new()),
     };
     let Some(ids) = ids else { return open_frame_call(an, st, c) };
@@ -5115,7 +5115,7 @@ fn df_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             cells_may_hold(an, st, f, k, &Value::data("cell"));
         }
     }
-    an.none_v.clone()
+    Value::none()
 }
 
 /// `combine_first(other)` / `combine(other, f)`: the union of both frames' columns.
@@ -5299,7 +5299,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
     }
     if name == "get" {
-        let default = c.arg(1, Some("default")).unwrap_or_else(|| an.none_v.clone());
+        let default = c.arg(1, Some("default")).unwrap_or_else(|| Value::none());
         if let Some(a) = c.args.first().or(c.kwargs.get(&intern::s("key"))) {
             if let (Some(k), true) = (a.kv.as_lit(), a.pts.is_empty()) {
                 // the column when there, else the default (never raises)

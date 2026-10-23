@@ -4,9 +4,7 @@
 //! `impl Analyzer` across the sibling files, one concern per file. `README.md` in this folder
 //! is the map of the files and where to start reading.
 
-use crate::domain::Value;
 use crate::frontend::{self, Node};
-use crate::intern;
 use crate::state::{reset_thread_state, Kind, State};
 
 // The components: each owns one field of `Analyzer`.
@@ -196,8 +194,6 @@ pub struct Analyzer {
     pub(in crate::interp) mode: Modes,
     /// result summaries: what calls that do not run give back (`interp/summary.rs`)
     pub(in crate::interp) summaries: summary::Summaries,
-    /// `None`
-    pub none_v: Value,
 }
 
 impl Analyzer {
@@ -210,11 +206,9 @@ impl Analyzer {
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);
         let program = Program::new(filename, idx, if follow_imports { search_paths } else { Vec::new() }, analyse_entry_points);
-        let mut an = Analyzer {
-            program,
-            none_v: Value::lit(intern::key_none()),
-            ..Default::default()
-        };
+        // (keys are numbered as interned, and literals listed by number: `None` comes first)
+        crate::intern::key_none();
+        let mut an = Analyzer { program, ..Default::default() };
         an.program.main_module = an.make_module("__main__", Some(filename), idx, tree);
         an.m.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
         Ok(an)

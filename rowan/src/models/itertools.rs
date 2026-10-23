@@ -406,7 +406,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         "zip_longest" => {
-            let fill = c.kw("fillvalue").unwrap_or_else(|| an.none_v.clone());
+            let fill = c.kw("fillvalue").unwrap_or_else(|| Value::none());
             let mut cols: Option<Vec<Vec<Value>>> = Some(Vec::new());
             let mut elems: Vec<Value> = Vec::new();
             for s in &c.args {
