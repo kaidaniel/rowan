@@ -216,17 +216,16 @@ pub fn contains_call(e: &ast::Expr) -> bool {
     found
 }
 
-/// Functions that take an iterable's items at once, by the name they are called by.
-const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "bytes", "bytearray", "join", "extend", "update", "Counter", "deque", "OrderedDict", "cat", "concat", "concatenate", "stack"];
+/// Names of functions that take an iterable's items at once (`sorted(xs)`): a candidate for
+/// `consumed_next_genexps`, decided where it runs by what the name is bound to there.
+const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "bytes", "bytearray", "Counter", "deque", "OrderedDict"];
 
 /// The generator expressions whose items are all taken before any other code runs, which
 /// therefore run where they are written, as list comprehensions (their names the enclosing
-/// code's), among a call's or a display's parts: one unpacked (`f(*g)`, `[*g, x]`, taken as it
-/// is reached), and the sole argument of a builtin or method that takes an iterable's items at
-/// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`) with nothing evaluated after it. Taken by
-/// name: a name bound to something else (a shadowed `sum`) runs one so too, which is right only
-/// if that callee also takes the items at once; otherwise the items' effects come too early (a
-/// known gap).
+/// code's): those unpacked among a call's or a display's parts (`f(*g)`, `[*g, x]`, taken as
+/// it is reached). One given alone to a function taking every item at once (`sum(…)`,
+/// `", ".join(…)`) is decided at the call by what the callee is (`bulk_genexp`): a program's
+/// own `sum`, or method named `update`, may take none.
 pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
     let parts: &[ast::Expr] = match e {
         ast::Expr::Call(c) => &c.arguments.args,
@@ -235,21 +234,18 @@ pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
         ast::Expr::Set(s) => &s.elts,
         _ => return Vec::new(),
     };
-    let mut out: Vec<&ast::Expr> = parts.iter().filter_map(|p| match p {
+    parts.iter().filter_map(|p| match p {
         ast::Expr::Starred(st) if matches!(&*st.value, ast::Expr::Generator(_)) => Some(&*st.value),
         _ => None,
-    }).collect();
-    if let Some(g) = e.as_call_expr().and_then(|c| sole_genexp(c).filter(|_| TAKE_ALL.contains(&callee_name(c)))) {
-        out.push(g);
-    }
-    out
+    }).collect()
 }
 
 /// Generator expressions a body assigns to a name that its next statement first of all gives
 /// whole to a function taking every item at once (`entries = (…)` then `for e in
 /// sorted(entries):`, `return dict(items)`): nothing runs between, so they may run where
-/// written (a raise in them then leaves the name unbound: not for bodies in a `try`).
-pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<&ast::Expr> {
+/// written (a raise in them then leaves the name unbound: not for bodies in a `try`), if that
+/// name is then bound to such a function (not the program's own `sorted`), with the name.
+pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<(&ast::Expr, &str)> {
     let mut out = Vec::new();
     for w in body.windows(2) {
         let ast::Stmt::Assign(a) = &w[0] else { continue };
@@ -268,7 +264,7 @@ pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<&ast::Expr> {
         let Some(ast::Expr::Call(c)) = first else { continue };
         let sole = matches!(&c.arguments.args[..], [ast::Expr::Name(x)] if x.id == n.id) && c.arguments.keywords.iter().all(|k| k.arg.is_some() && runs_no_code(&k.value));
         if sole && TAKE_ALL.contains(&callee_name(c)) && matches!(&*c.func, ast::Expr::Name(_)) {
-            out.push(g);
+            out.push((g, callee_name(c)));
         }
     }
     out

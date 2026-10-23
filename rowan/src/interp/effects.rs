@@ -297,11 +297,12 @@ impl Analyzer {
         let mi = self.heap.module_info(fi.module);
         let scope = mi.scopes.get(fi.scope);
         let locals = |n: &str| scope.is_local(n);
+        let shadows = |n: &str| scope.free.contains(n) || mi.scopes.get(mi.scopes.module()).locals.contains(n);
         let first = fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next()).map(|p| p.parameter.name.id.as_str());
         // (a method run with its instance: stores on it are not on its class)
         let me = first.filter(|_| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get());
         let params: Vec<StrId> = fi.node.params().map(|p| p.iter().map(|x| s(x.name().id.as_str())).collect()).unwrap_or_default();
-        let flow = super::flows::Flow::new(&locals, me, mi.pkg.clone());
+        let flow = super::flows::Flow::new(&locals, &shadows, me, mi.pkg.clone());
         let out = match fi.node {
             super::FuncNode::Def(f) => flow.scan(&params, me.map(s), &f.body, None),
             super::FuncNode::Lambda(l) => flow.scan(&params, None, &[], Some(&l.body)),

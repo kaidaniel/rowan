@@ -228,12 +228,16 @@ impl Analyzer {
             ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
             _ => None,
         };
+        // (by what the callee was, not its name: a program's own `isinstance` tells nothing)
+        // (methods: `issubset` of literal keys, `get` of a dict-like receiver only)
+        let callee = self.traced(&call.func).filter(|v| v.kv.is_bot() && !v.pts.is_empty());
+        let builtin = |f: &str| callee.as_ref().is_some_and(|v| v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && matches!(q.as_str(), "builtins.isinstance" | "builtins.hasattr" | "builtins.all" | "inspect.isclass"))));
+        let fname = fname.filter(|f| builtin(f) || (matches!(&*call.func, ast::Expr::Attribute(_)) && *f != "isclass"));
         if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
             self.narrow_isclass(s(n.id.as_str()), truth, state);
             return;
         }
-        if let ast::Expr::Name(fnm) = &*call.func {
-            let fname = fnm.id.as_str();
+        if let (ast::Expr::Name(_), Some(fname)) = (&*call.func, fname) {
             if fname == "isinstance" && args.len() == 2 {
                 match &args[0] {
                     ast::Expr::Name(n) => self.narrow_isinstance(NarrowTarget::Name(n.id.to_string()), &args[1], truth, state),

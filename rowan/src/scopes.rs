@@ -61,6 +61,10 @@ pub struct Scopes {
     /// generator expressions that run where they are written (`syntax::eager_genexps`), by
     /// address
     pub eager_genexps: FxHashSet<usize>,
+    /// generator expressions a name is bound to that the next statement gives whole to the
+    /// function called by this name (`syntax::consumed_next_genexps`): they run where written
+    /// if it takes every item at once there
+    pub consumed_next: FxHashMap<usize, String>,
     /// module names bound more than once (twice in the text, in a loop, or by a function
     /// through `global`): their value at a call depends on when the call happens
     pub rebound: FxHashSet<String>,
@@ -245,8 +249,8 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     fn visit_body(&mut self, body: &'b [ast::Stmt]) {
         // (in a function, out of any try: `syntax::consumed_next_genexps`)
         if self.try_depth == 0 && self.scopes.scopes[self.scope].kind == ScopeKind::Function && !self.scopes.scopes[self.scope].genexp {
-            for g in crate::syntax::consumed_next_genexps(body) {
-                self.scopes.eager_genexps.insert(node_addr(g));
+            for (g, callee) in crate::syntax::consumed_next_genexps(body) {
+                self.scopes.consumed_next.insert(node_addr(g), callee.to_string());
             }
         }
         source_order::walk_body(self, body);
