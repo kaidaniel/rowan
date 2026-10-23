@@ -8,7 +8,7 @@ name: Held-out soundness
 
 on:
   push:
-    branches: [main, iter/formal-85]  # TEMPORARY: to check it on the branch before merge
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
