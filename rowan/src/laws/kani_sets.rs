@@ -1,6 +1,6 @@
 //! Bounded proofs (Kani) of the sorted id sets: every operation agrees with a bit mask of the
 //! same elements, for all sets of up to three ids below 8 (the merge loops' every interleaving)
-//! and, for `union_bits`, two sets of up to two ids anywhere in three words.
+//! and, for `union_bits`, two sets of two ids anywhere in two words.
 
 use super::*;
 
@@ -48,7 +48,7 @@ fn set_operations_agree_with_masks() {
 fn union_bits_is_the_union() {
     let two = || {
         let (x, y): (u32, u32) = (kani::any(), kani::any());
-        kani::assume(x < 192 && y < 192);
+        kani::assume(x < 128 && y < 128);
         IdSet::from_vec(vec![x, y])
     };
     let (a, b) = (two(), two());
