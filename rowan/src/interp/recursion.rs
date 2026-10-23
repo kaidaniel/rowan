@@ -19,7 +19,7 @@ use crate::intern::{self, s, StrId};
 use crate::state::{Footprint, State};
 
 /// Running activations of one function past which a call with other literal arguments joins
-/// one of them (`activation_for`).
+/// one of them (`activation_key`).
 pub const MAX_ACTIVE: usize = 4;
 /// Running activations of one function past which a call whose arguments are those of the
 /// innermost one or input joins it (`activation_key`).

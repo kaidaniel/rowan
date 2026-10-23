@@ -41,8 +41,16 @@ pub fn is_any_exc(c: &Option<ExcNames>) -> bool {
 }
 
 /// A running try context. Every point of its body (and of the calls it makes) that may raise
-/// records the state there: a handler starts from the join of the states whose exceptions it
-/// may catch, a finally on an exceptional way out from those it does not.
+/// records the state there, with the try's frame's names and the names possibly unbound: a
+/// handler starts from the join of the states whose exceptions it may catch (its `as` name
+/// bound to those of its classes), a finally on an exceptional way out from those it does not.
+///
+/// What may raise: a `raise`; a read that may fail (also where no handler catches it and only a
+/// `finally` or `__exit__` that runs code sees it, `finally_sees`); an operator (types that may
+/// not fit, a divisor that may be 0, a tensor dim's too: `scalar_binop_raises`; an ordering,
+/// `ordering_raises`; `%` formatting, `percent_raises`; an unknown object's operator is unknown
+/// code); an attribute a literal's type lacks (`literals_lack_attr`), a str's or dict's method
+/// of an unknown; a model's raise; any unknown call (class `any_exc`).
 pub struct TryCtx {
     /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
     /// handler ends by re-raising)

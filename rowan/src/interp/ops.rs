@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, key_type, kv_exclude, kv_join, kv_literals, BOT, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjSet, TYPE_NAMES, Value};
+use crate::domain::{join_values, key_type, kv_exclude, kv_join, kv_literals, BOT, label_name, label_type, typed_label, DATA, KeyVal, Ns, ObjId, ObjSet, TYPE_NAMES, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, KeyId, STAR};
 use crate::source::{FnKind, RenameFn};
@@ -273,6 +273,90 @@ impl Analyzer {
     /// operator may run)?
     pub(in crate::interp) fn builtin_operand(&self, v: &Value) -> bool {
         !matches!(v.kv, KeyVal::Data(_, _) | KeyVal::KeysOf(_)) && !crate::models::pandas::is_seriesish(self, v) && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Dict | Kind::Tuple | Kind::Set | Kind::View))
+    }
+
+    /// `t op= v`, t's value being `cur`: Python changes t's object in place where its type
+    /// has an in-place operator: `xs += ys` on a list (`list.extend`), `d |= e` on a dict
+    /// (`dict.update`), `s |= t` (`&=`, `-=`, `^=`) on a set, the program's instances whose
+    /// class defines `__iop__`. Each of those runs on a path of its own, and every other part
+    /// of `cur` (an unknown object, a tuple, `9` of `[1] | 9`) gets `t op v` on another (None's
+    /// raise there); `store` binds t on each path. Sending the whole value through `binop`
+    /// when only some of it can change in place would make a new object, and an alias of the
+    /// old one would miss the change. Returns the result, or None (nothing changes in place:
+    /// `t = t op v`).
+    pub fn binop_in_place(&mut self, op: ast::Operator, cur: &Value, rhs: &Value, node: &Node, state: &mut State, store: &dyn Fn(&mut Analyzer, &Value, &mut State)) -> Option<Value> {
+        let in_place = |kind: Kind| match (op, kind) {
+            (ast::Operator::Add, Kind::List) => Some("list.extend"),
+            (ast::Operator::BitOr, Kind::Dict) => Some("dict.update"),
+            (ast::Operator::BitOr, Kind::Set) => Some("set.update"),
+            (ast::Operator::BitAnd, Kind::Set) => Some("set.intersection_update"),
+            (ast::Operator::Sub, Kind::Set) => Some("set.difference_update"),
+            (ast::Operator::BitXor, Kind::Set) => Some("set.symmetric_difference_update"),
+            _ => None,
+        };
+        let idunder = format!("__i{}__", dunder_stem(op));
+        let (dunder_calls, after) = self.method_calls(cur, &[idunder.as_str()]);
+        let mut groups: Vec<(&'static str, Vec<ObjId>)> = Vec::new();
+        let mut others: Vec<ObjId> = Vec::new();
+        for o in after.pts.iter() {
+            match in_place(self.heap.kind(o)) {
+                Some(m) => match groups.iter_mut().find(|(g, _)| *g == m) {
+                    Some((_, os)) => os.push(o),
+                    None => groups.push((m, vec![o])),
+                },
+                None => others.push(o),
+            }
+        }
+        if groups.is_empty() && dunder_calls.is_empty() {
+            return None;
+        }
+        let base = state.copy();
+        let mut paths = Vec::new();
+        let mut result = Value::new();
+        let rest = Value::with_kv(ObjSet::from_iter(others), cur.kv.clone());
+        if !rest.pts.is_empty() || !rest.kv.is_bot() {
+            let mut alt = base.copy();
+            store(self, &rest, &mut alt);
+            let r = self.binop(op, &rest, rhs, node, &mut alt);
+            store(self, &r, &mut alt);
+            result = result.join(&r);
+            paths.push(alt);
+        }
+        if !dunder_calls.is_empty() {
+            // (a method that returns NotImplemented: Python goes on with `t op v`)
+            let objs = Value::objs(cur.pts.filter(|o| !after.pts.contains(o)));
+            let mut path = base.copy();
+            store(self, &objs, &mut path);
+            if let Some((r, _)) = self.run_dunder(&objs, &[idunder.as_str()], vec![rhs.clone()], node, &mut path) {
+                let ni: Vec<ObjId> = r.pts.iter().filter(|o| self.heap.kind(*o) == Kind::External && self.heap.external_qual(*o) == "builtins.NotImplemented").collect();
+                let mut r = Value::with_kv(r.pts.filter(|o| !ni.contains(&o)), r.kv.clone());
+                if !ni.is_empty() {
+                    r = r.join(&self.binop(op, &objs, rhs, node, &mut path));
+                }
+                store(self, &r, &mut path);
+                result = result.join(&r);
+                paths.push(path);
+            }
+        }
+        for (m, os) in groups {
+            let mut path = base.copy();
+            let objs = Value::objs(ObjSet::from_iter(os));
+            let mv = self.method_value(m, &objs);
+            self.call_value(&mv, node, None, &mut path, Some(vec![rhs.clone()]));
+            store(self, &objs, &mut path);
+            result = result.join(&objs);
+            paths.push(path);
+        }
+        let mut paths = paths.into_iter();
+        let Some(first) = paths.next() else {
+            state.reachable = false;
+            return Some(result);
+        };
+        *state = first;
+        for mut p in paths {
+            *state = state.join(&mut p);
+        }
+        Some(result)
     }
 
     /// `a op b`: each part on its own (literals beside objects), CPython's result on known
@@ -843,22 +927,7 @@ impl Analyzer {
     /// `a op b` where every object `a` (or else `b`) may be is an instance of a class defining
     /// `__op__` (`__rop__`): that method's result. None: not decided this way.
     pub(in crate::interp) fn binop_dunder(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
-        use ast::Operator as O;
-        let name = match op {
-            O::Add => "add",
-            O::Sub => "sub",
-            O::Mult => "mul",
-            O::MatMult => "matmul",
-            O::Div => "truediv",
-            O::FloorDiv => "floordiv",
-            O::Mod => "mod",
-            O::Pow => "pow",
-            O::BitAnd => "and",
-            O::BitOr => "or",
-            O::BitXor => "xor",
-            O::LShift => "lshift",
-            O::RShift => "rshift",
-        };
+        let name = dunder_stem(op);
         let methods = |an: &Analyzer, v: &Value, dunder: &str| -> Option<Vec<(u32, u32)>> {
             if v.pts.is_empty() || !v.kv.is_bot() {
                 return None;
@@ -1167,6 +1236,26 @@ fn format_percent_alternatives(fmt: &str, args: &[Value]) -> Option<Vec<String>>
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
     crate::models::pyvalues::format_value(k, spec)
+}
+
+/// The stem of an operator's dunders: `add` for `__add__`, `__radd__`, `__iadd__`.
+pub(in crate::interp) fn dunder_stem(op: ast::Operator) -> &'static str {
+    use ast::Operator as O;
+    match op {
+        O::Add => "add",
+        O::Sub => "sub",
+        O::Mult => "mul",
+        O::MatMult => "matmul",
+        O::Div => "truediv",
+        O::FloorDiv => "floordiv",
+        O::Mod => "mod",
+        O::Pow => "pow",
+        O::BitAnd => "and",
+        O::BitOr => "or",
+        O::BitXor => "xor",
+        O::LShift => "lshift",
+        O::RShift => "rshift",
+    }
 }
 
 /// The builtin type of `a op b` for operands of builtin types `a`, `b` (None: not known, or

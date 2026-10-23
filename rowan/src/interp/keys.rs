@@ -194,7 +194,8 @@ enum Hashing {
 
 impl Analyzer {
     /// Hashing `v` (a dict key, a set item, `in` a dict or set, `hash(v)`) raises TypeError for a
-    /// list, dict or set, and for a tuple holding one: on every path when all of `v` is one, a
+    /// list, dict, set, keys or items view, an instance whose class sets `__hash__ = None` or
+    /// defines `__eq__` alone, and a tuple holding one: on every path when all of `v` is one, a
     /// possible raise when part of it is, or may be (in a running try: an unknown of no known
     /// type, an instance of a class with `__eq__` and no `__hash__`, a dataclass or model not
     /// frozen).

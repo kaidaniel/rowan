@@ -1,6 +1,8 @@
-// rowan VS Code extension: runs `rowan FILE --facts` and shows what rowan inferred about a
-// variable on hover (`name = value` as Python; what the code needs of it, what the program's
-// calls give, what the marks mean) and the accesses that may fail as diagnostics.  Plain JavaScript, no build step.
+// rowan VS Code extension: asks `rowan serve` (one server per binary and arguments, JSON lines
+// over stdio; `rowan FILE --facts` when the server fails or `rowan.useServer` is off) for a
+// file's facts, and shows what rowan inferred about a variable on hover (`name = value` as
+// Python; what the code needs of it, what the program's calls give, what the marks mean) and
+// the accesses that may fail as diagnostics. Plain JavaScript, no build step.
 "use strict";
 
 const path = require("path");
@@ -489,15 +491,29 @@ function runNote(run) {
 }
 
 /**
- * Markdown for one name, in the owner's format: a headline `name = value` (a parameter:
- * `name = (parameter)`, with its value for any call when something is known of it), then the
- * sections that have something: **Requirements** (what the code needs of a parameter, or of an
- * input read on this line), **In Calls** (what the program's own calls give, apart from the
- * value for any call), **Allocation Sites** (where its objects were made, keys they never have)
- * and **Notes** (what each name, mark and notation used above means; last, how the analysis
- * was cut). `facts`: the entries for (line, name), each with how its document was made
- * (`run`); `verdicts`: the accesses on that line that involve the name (those that may fail
- * are diagnostics, which the editor shows in the same hover).
+ * Markdown for one name, in the owner's format. `facts`: the entries for (line, name), each
+ * with how its document was made (`run`; the one at the hovered column, `factsAt`);
+ * `verdicts`: the accesses on that line that involve the name (those that may fail are
+ * diagnostics, which the editor shows in the same hover).
+ *
+ * - The headline `name = value`, the value as the engine writes it (`render.rs`): a parameter
+ *   `name = (parameter)`, with its value for any call when something is known (`int(?)`); an
+ *   assignment's target, the value assigned. An open record's keys that are only possible and
+ *   of values not known are its `**?`; a wide item's three or more alternatives go one per line
+ *   (`list[{` … `}]`), items that only name a key as many to a line as fit.
+ * - **Requirements**: what the code needs of a parameter (its function's contract, also inside
+ *   the body) or of an input read on this line: one line per read always made, one per test of
+ *   the arguments (`(only if x)`), one for those made on some paths.
+ * - **In Calls**: what the program's own calls give, apart from the value for any call
+ *   (`on line 83 in dp/api.py` when in another file); the values given at the same lines with
+ *   one outcome on one line (`10 | 14`); a call site the main run gives is not shown again from
+ *   an entry run.
+ * - **Allocation Sites**: where its objects were made and keys they never have (not one object
+ *   made by the name's own assignment).
+ * - **Notes**: only what is used above: the names the value mentions, where its `?` comes from
+ *   (a call longer than 40 characters as `f(…)`), how the analysis was cut; last, one legend
+ *   line of the notation and marks shown (`` `**?` other keys may exist · ✗ fails on every
+ *   path ``, `list[x]` / `dict[k, v]` too).
  */
 function renderHover(name, facts, verdicts) {
   // (a name of a function, class, module or library object: the language server says it)

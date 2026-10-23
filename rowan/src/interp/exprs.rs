@@ -507,8 +507,6 @@ impl Analyzer {
         kv_map(kv, f)
     }
 
-    /// `xs[lo:hi]` with constant bounds on one list/tuple with known positions: a container
-    /// with the selected positions.
     /// The single known int an expression evaluates to.
     pub(in crate::interp) fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
         let v = self.eval(e, state);
@@ -573,7 +571,6 @@ impl Analyzer {
         Value::obj(nid)
     }
 
-    /// True/False when a value is definitely truthy/falsy, else None.
     /// The members of a key view / set / frozenset when they are all known: a keys view of a
     /// closed dict, a set built from known literals.
     pub fn known_members(&self, v: &Value, state: &State) -> Option<intern::KeySet> {

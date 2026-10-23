@@ -1346,7 +1346,7 @@ pub struct PrintCtx {
     pub extra: Vec<u32>,
     pub sym_alias: FxHashMap<Sym, String>,
     pub dim_alias: FxHashMap<DimId, String>,
-    /// display names of shape dims (`B` for x.shape[0]): hover text only
+    /// display names of shape dims (`B` for `x.shape[0]`): hover text only
     pub atom_names: FxHashMap<AtomId, String>,
     /// symbols of strs: dim 0 prints as `len(s)`
     pub strs: FxHashSet<Sym>,

@@ -129,7 +129,8 @@ fn pure_value(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             pyvalues::math_call(name, &args?).map(Value::lit)
         }
         "operator" => {
-            if !c.kwargs.is_empty() {
+            // (`operator.ior(d, e)` changes d: not a value of literals)
+            if !c.kwargs.is_empty() || crate::models::operator_in_place(q) {
                 return None;
             }
             pyvalues::operator_call(name, &args?).map(|k| key_value(an, st, c, k, ""))

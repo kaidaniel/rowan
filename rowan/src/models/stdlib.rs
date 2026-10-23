@@ -1159,8 +1159,6 @@ pub(super) fn m_getenv(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_get(an, st, &call)
 }
 
-/// `range(...)` with known int bounds: a list whose items are known when it is short; its
-/// bounds decide membership at any length.
 /// The names a class (its MRO for `get_type_hints`) or a function annotates, in order.
 pub fn annotated_names(an: &Analyzer, o: crate::domain::ObjId, mro: bool) -> Option<Vec<String>> {
     match an.heap.kind(o) {

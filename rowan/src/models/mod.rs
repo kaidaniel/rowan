@@ -298,8 +298,7 @@ impl Registry {
         }
         // (functions of those modules that change what they are given are unknown calls)
         const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
-        let in_place_op = qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"));
-        if MUTATING.contains(&qual) || in_place_op || qual.starts_with("array.") {
+        if MUTATING.contains(&qual) || operator_in_place(qual) || qual.starts_with("array.") {
             return None;
         }
         for prefix in ALLOWLIST_PREFIXES {
@@ -314,6 +313,12 @@ impl Registry {
             _ => None,
         }
     }
+}
+
+/// `operator.iadd` & co.: `a op= b`, which changes a list, dict, set or instance in place
+/// (not `operator.index`, `is_`, `itemgetter`, `inv`).
+pub fn operator_in_place(qual: &str) -> bool {
+    qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"))
 }
 
 /// Is there a model for anything in module `name` (so following its source is not wanted)?
@@ -1108,8 +1113,11 @@ pub struct Tables {
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
-    /// one-shot iterators over containers, reading them as they are at each step (`iter(xs)`,
-    /// `reversed`, `map`, `filter`): the call that made each (`Analyzer::sync_live`)
+    /// one-shot iterators over containers (lists, dicts, sets, deques), reading them as they are
+    /// at each step (`iter(xs)`, `reversed`, `map`, `filter`, `islice`, `chain`, `zip` & co.):
+    /// the call that made each (`Analyzer::sync_live`: where the containers' facts changed since,
+    /// by the hashes in its `\u{1}srcfp` slot, it takes its items again, `refill_live` or the
+    /// model again; a reversed list's from its first index)
     pub live_iters: FxHashMap<ObjId, Rc<LiveIter>>,
     /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
     pub torch_on: bool,

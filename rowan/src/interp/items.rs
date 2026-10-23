@@ -781,7 +781,11 @@ impl Analyzer {
         self.mode.wide_read.as_ref().is_some_and(|(d, _)| *d == self.cx.frames.len())
     }
 
-    /// `_path_placeholder`: the (unknown) content of an open object's slot.
+    /// The content of an open object's slot `k` that no path wrote: a *placeholder* object per
+    /// object and key, made where a path first reads it (`mark_found`), whose row is open
+    /// through the input's part (`row["user"]["id"]`); `PATH_DEPTH` keys deep, then an unknown.
+    /// In a read on many objects (`wide_read`) one weak placeholder per key; a part annotated
+    /// with a class of the program is an instance of it.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
@@ -881,7 +885,9 @@ impl Analyzer {
     }
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
-    /// for the record model an unknown key (its literal part kept in the join).
+    /// for the record model an unknown key (its literal part kept in the join). Beside an
+    /// unknown object, which may be any of them, the literals are not the key either: a key, a
+    /// position, a `del` or an `==` test gets none, and a model gets no literals.
     pub fn opaque_key(&self, key: &Value, state: &State) -> Value {
         if key.pts.is_empty() {
             return key.clone();
@@ -1067,7 +1073,7 @@ impl Analyzer {
         }
     }
 
-    /// oid[ns] ∪= keys of every record in src (dict spread / update / dict(x)).
+    /// `oid[ns] ∪= keys` of every record in `src` (a dict spread, `update`, `dict(x)`).
     pub fn copy_into(&mut self, oid: u32, ns: Ns, src: &Value, state: &mut State, strong: bool, kill: &KeySet) {
         let recs = self.record_objects(src);
         // an unknown value copied in (`{**entry}` with entry unknown): any keys

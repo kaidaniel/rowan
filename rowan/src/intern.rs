@@ -124,6 +124,7 @@ impl Interners {
 
 /// The key of the `Elem` slot (`"*"`): what a list, set or iterator holds at no known position.
 pub const STAR: KeyId = KeyId(0);
+/// The interned empty string.
 pub const EMPTY_STR: StrId = StrId(0);
 /// The mutator standing for the ones a row no longer names (`domain::cap_mutators`).
 pub const MORE: StrId = StrId(1);
@@ -180,6 +181,7 @@ pub fn key_get(id: KeyId) -> Key {
     INTERN.with(|i| i.borrow().keys.get(id.0).clone())
 }
 
+/// `f` of the key `id` stands for (the interner is per thread; `f` must not intern).
 pub fn with_key<R>(id: KeyId, f: impl FnOnce(&Key) -> R) -> R {
     INTERN.with(|i| f(i.borrow().keys.get(id.0)))
 }
@@ -233,6 +235,7 @@ pub fn key_member_value(id: KeyId) -> Option<KeyId> {
     })
 }
 
+/// Is the key an Enum member (`Key::Member`)?
 pub fn key_is_member(id: KeyId) -> bool {
     with_key(id, |k| matches!(k, Key::Member(..)))
 }

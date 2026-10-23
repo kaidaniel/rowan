@@ -2563,6 +2563,8 @@ pub(super) fn pure_result(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId)
     }
 }
 
+/// `range(...)` with known int bounds: a list whose items are known when it is short; its
+/// bounds decide membership at any length.
 pub(super) fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ints: Option<Vec<i64>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().and_then(intern::key_as_int) } else { None }).collect();
     let bounds = match ints.as_deref() {
@@ -2875,7 +2877,6 @@ pub(super) fn literal_sort_key(an: &mut Analyzer, st: &mut State, c: &Call, item
     Some(ks)
 }
 
-/// The permutation `sorted` applies when every key is known (stable), else None.
 /// The items of `sorted(d.items())` when `d` is a closed dict whose keys are known,
 /// pairwise comparable literals and only some of them maybe there: (key, value, sure) in
 /// sorted order (the keys present at run time come in that order).
@@ -2904,6 +2905,7 @@ pub(super) fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) 
     Some(keys.into_iter().map(|k| (k, st.slot(d, Ns::Item, k), row.definite.contains(k))).collect())
 }
 
+/// The permutation `sorted` applies when every key is known (stable), else None.
 pub(super) fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Value]) -> Option<Vec<usize>> {
     // instances ordering themselves (no key=): a stable sort on their `__lt__`
     if c.kw("key").is_none() && !items.is_empty() && items.iter().all(|x| x.single().map(|o| an.heap.kind(o) == Kind::Instance).unwrap_or(false)) {

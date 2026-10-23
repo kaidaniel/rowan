@@ -718,8 +718,8 @@ impl Analyzer {
     }
 }
 
-/// Ordering of two literals of one kind: numbers (ints, floats, bools) or strings.
-/// How Python orders two literals (None: they do not compare).
+/// How Python orders two literals (None: they do not compare): numbers (ints, floats, bools)
+/// with numbers, texts with texts.
 pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
     crate::models::pyvalues::py_cmp(x, y)
 }

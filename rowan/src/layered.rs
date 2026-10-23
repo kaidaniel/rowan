@@ -36,7 +36,7 @@ impl PKey for SourceId {
 }
 
 /// A map's value. Writing a value the key already has (`same_write`) copies nothing, so the
-/// map stays shared with its copies.
+/// map stays shared with its copies (a row only when it is the same row, not an equal one).
 pub trait MapValue: Clone + PartialEq {
     fn same_write(&self, o: &Self) -> bool {
         self == o

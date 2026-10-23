@@ -1,6 +1,7 @@
 //! Inert code: a function body that runs a bounded handful of steps, making functions and
 //! storing attributes (a `functools.wraps` decorator), told from its text (`inert`). A call of
-//! it runs wherever it is called (`calls.rs`); a module's definition whose decorators are all
+//! it runs wherever it is called (`calls.rs`), also past a library entry's allowance or a run on
+//! demand's work; a module's definition whose decorators are all
 //! *plain* inert runs them when first read (`deferred.rs`).
 
 use ruff_python_ast::{self as ast, Expr, Stmt};

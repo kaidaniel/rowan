@@ -60,7 +60,7 @@ pub struct Budget {
     pub hover: Option<(usize, usize)>,
     /// on demand, a callee's call was past `past_hover_work` (the run's note says so)
     pub hover_cut: std::cell::Cell<bool>,
-    /// calls run no body (`skips_calls`): the main module's `if __name__ == "__main__":` block
+    /// calls run no body (`past_hover_work`): the main module's `if __name__ == "__main__":` block
     /// while the module code is set up for runs on demand (`Analyzer::main_block_unrun`)
     pub skip_calls: bool,
     /// the program's code entered a followed library's (`--follow`): the work done then
@@ -174,6 +174,7 @@ impl Budget {
         self.walked.set(self.walked.get() + 1);
     }
 
+    /// Seconds since the analysis started.
     pub fn now(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }

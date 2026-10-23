@@ -147,6 +147,7 @@ impl FuncNode {
             FuncNode::GenExp(_) => None,
         }
     }
+    /// The function's node: its position, and its identity (`FuncNode::addr`).
     pub(in crate::interp) fn node(&self) -> Node {
         match self {
             FuncNode::Def(f) => frontend::node(*f),
@@ -289,6 +290,7 @@ pub struct EnumKind {
 }
 
 impl EnumKind {
+    /// This kind with `o`'s traits added (an Enum class whose bases bring both).
     pub fn join(&mut self, o: EnumKind) {
         (self.mixed, self.repr_value, self.flag, self.is_str) = (self.mixed | o.mixed, self.repr_value | o.repr_value, self.flag | o.flag, self.is_str | o.is_str);
     }
@@ -477,6 +479,8 @@ impl Heap {
         }
     }
 
+    /// Was `o`'s state made (or last made new) before `mark` (`Obj::born`): the collector after
+    /// that mark leaves it alone.
     pub fn born_before(&self, o: ObjId, mark: u64) -> bool {
         self.objects[o as usize].born < mark
     }

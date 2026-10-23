@@ -18,8 +18,6 @@ use super::{Analyzer, Args, Call, Frame, FrameKind, FuncInfo, FuncNode, MAX_CLON
 
 impl Analyzer {
     // ---------------------------------------------------------------- calls
-    /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`),
-    /// generators among them run (`force_gen`), then each callee `fv` may be called.
     /// Is every callee among `fv` one that takes all of an iterable's items at once?
     pub(super) fn bulk_consumer(&self, fv: &Value) -> bool {
         !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
@@ -29,6 +27,14 @@ impl Analyzer {
         })
     }
 
+    /// A call of `fv` at `node`: the arguments of `call_ast` evaluated (or `override_args`), the
+    /// generators among them run (`force_gen`; not for the program's own code, whose loops run
+    /// them), then each callee `fv` may be called. One callee: `call_one`. Several: alternatives,
+    /// one state each (`several_callees`): unknown values one unknown call; a method of several
+    /// receivers one call per function; those out of their budget one call that does not run
+    /// (`budget_skipped`, also for more than `PICK_MAX` functions); once none runs any more (on
+    /// demand past the work its run may do, past the deadline) the rest one `skipped_calls`.
+    /// None, a number or a str among `fv` raise TypeError.
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
         let forced = self.force(fv.clone(), state);
         let fv = &forced;
@@ -1015,7 +1021,10 @@ impl Analyzer {
     }
 
     /// The caller's part of the state back after the callee's run (`take_caller`); the callee's
-    /// returns go, its exits replace the caller's when the caller had some.
+    /// returns go, its exits replace the caller's when the caller had some. (The caller's exits,
+    /// the heaps at its own `return`s so far, are out of the state while the callee runs: the
+    /// callee's end joins only its own returns, so a path the caller already returned on does
+    /// not come back through a later call: case y438.)
     fn give_back(&mut self, c: Caller, state: &mut State) {
         self.cx.env_stack.pop();
         self.cx.unbound_stack.pop();

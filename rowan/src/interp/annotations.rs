@@ -16,7 +16,6 @@ use crate::state::{Kind, State};
 use crate::syntax::dotted_last;
 
 impl Analyzer {
-    /// Strip `Optional[X]`, `list[X]`, `"X"`, `X | None` down to the inner expression.
     /// The class-bearing part of an annotation: wrappers that keep the value's class are
     /// unwrapped (`Optional`, `Annotated`, `Final`, `ClassVar`, `Required`, a union with `None`
     /// and one other member); a container (`list[Foo]`, `dict[str, Foo]`) is the container

@@ -38,8 +38,7 @@ Hovering `row` shows:
 > - `{"id": 3, "name": "eve"}` on line 11.
 >
 > **Notes**
-> - `(only if x)`: needed only on calls where `x` holds of the arguments as passed
-> - ✗: fails on every path
+> - `(only if x)` needed only on calls where `x` holds of the arguments as passed · ✗ fails on every path
 
 and hovering `ada` shows the value computed exactly, string methods included:
 
@@ -114,7 +113,7 @@ Hovering `x`:
 > - `Tensor[2, 10, 32]` on line 26: ✗ (Linear(64 -> 192) given last dim 32)
 >
 > **Notes**
-> - ✗: fails on every path
+> - ✗ fails on every path
 
 ## What a hover shows
 
@@ -126,8 +125,9 @@ when known), then:
 * **In Calls**: what each of your program's own calls gives or passes, with the reads that fail
   for it;
 * **Allocation Sites**: where its objects were made, and keys they never have;
-* **Notes**: what each mark and notation used above means; last, when the analysis was cut
-  short or ran function by function.
+* **Notes**: where the unknowns come from and what the names the value mentions are; when the
+  analysis was cut short or ran function by function; last, one line saying what each mark and
+  notation used above means.
 
 In values, `?` is something rowan cannot know, `a | b` one of several values, `"k"?:` a key
 present on some paths only, `**?` other keys that may exist, and `Tensor[B, T, 4*C]` a tensor's

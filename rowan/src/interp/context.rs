@@ -187,7 +187,8 @@ pub struct Modes {
     /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
     pub loop_converged: bool,
     /// a read on a value of more than `WIDE_READ` objects (its frame depth, site): what it
-    /// finds in their open rows is one placeholder per key there, not one per object
+    /// finds in their open rows is one placeholder per key there, not one per object (weak; a
+    /// library object's attribute: one unknown per name)
     pub wide_read: Option<(usize, String)>,
     /// a module's attribute read binds a deferred definition as it is (`from m import f` in a
     /// module's code, `deferred.rs`)

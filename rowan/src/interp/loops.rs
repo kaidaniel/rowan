@@ -886,7 +886,6 @@ impl Analyzer {
     }
 }
 
-/// `state` joined with `other` (its replacement when `state` is unreachable).
 /// What a running `for` watches of the container it iterates (`Analyzer::for_watch`): Python
 /// takes each next item from a list as it is then, and a dict or set whose keys change raises
 /// RuntimeError at the next step.
@@ -904,6 +903,8 @@ pub struct ForWatch {
     pub reads: Vec<ObjId>,
 }
 
+/// `state` joined with `other`, the states its `break`s left (its replacement when `state` is
+/// unreachable).
 pub(super) fn join_breaks(state: &mut State, other: Option<State>) {
     if let Some(mut o) = other {
         // (a state that is unreachable still gives its returns: a loop's `else: return`)

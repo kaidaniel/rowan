@@ -3,6 +3,29 @@
 //! (`GenEffects`); code a consumer runs between items is watched (`with_gen_restart`). A
 //! `@contextmanager`'s `with` body runs at each yield (`CmHook`).
 //!
+//! - `iter()` of a generator gives it back and runs nothing. One run on some of the paths
+//!   joined here only runs again on the others, its effects joined in; one made anew is younger
+//!   than every mark (`Heap::renew`).
+//! - A generator expression (`FuncNode::GenExp`) is a generator function with a scope of its
+//!   own (its free names are cells) of `iter()` of its first iterable, taken where it is
+//!   written; its run is no call site, and its items are positioned as a comprehension's. One
+//!   whose items are all taken before other code runs (`Scopes::eager_genexps`: `sum(…)`,
+//!   `[*g]`, `f(*g)`, a function's `xs = (…)` its next statement gives whole to one, out of a
+//!   `try`; alone given to a library function that takes the items at once, or to unknown
+//!   code) runs where it is written, as a comprehension. One given to a call that does not run,
+//!   or returned by an entry run, runs there.
+//! - `GenEffects` are on objects older than the call and on those it made and changes after a
+//!   yield; at a position not known, or one object for several runs, some yield's; joined in
+//!   where the consumer changed them too.
+//! - Code between items (`note_resume`; unknown code too: a key it made is there unless
+//!   removed, and its deletes) that changes what the generator reads after a yield (`Gens::watch`,
+//!   also after the call that started it, while held, or while a global holds it) makes it run
+//!   again with that change at each yield, and the changes reachable from it, through classes
+//!   too (`with_gen_restart`). A `for`'s list is read at each step (`ForWatch::reads`).
+//! - A loop or comprehension over a generator with effects, closing facts or raises moves its
+//!   cursor per item. Closing is `genclose.rs`, raises `genraise.rs`, consumers that stop early
+//!   `stopearly.rs`.
+//!
 //! For a call memo: `Gens` is the analyzer's flow-insensitive record of generator runs in
 //! progress and done (lazy generators not run yet, the per-yield states and effects of the
 //! generators run, the watched runs); a run that makes, runs or consumes a generator changes it.
@@ -36,6 +59,7 @@ impl YieldStates {
         self.list.len()
     }
 
+    /// One more state at a yield (the first under `key` is what `get_mut` finds).
     pub(in crate::interp) fn push(&mut self, key: YieldKey, st: State) {
         self.first.entry(key.clone()).or_insert(self.list.len());
         self.list.push((key, st));
@@ -463,7 +487,7 @@ impl Analyzer {
     /// Run `body` from `state`. A generator it ran whole for a consumer that runs code between
     /// the items (`Gens::watch`) did not see what that code changed: when the code changed objects
     /// the generator reaches, `body` runs again, those objects changed for the generator at each
-    /// of its yields (`gen_havoc`; at most three rounds, then everything it reaches). `close`:
+    /// of its yields (`gen_interference`, `Gens::havoc`; at most three rounds, then everything it reaches). `close`:
     /// the generators run in `body` are used up or out of reach after it (a loop without
     /// `break`, a call's end): no later code changes anything for them.
     pub(in crate::interp) fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
@@ -886,7 +910,6 @@ impl Analyzer {
         }
     }
 
-    /// A one-shot iterator iterated to its end: later iterations see nothing.
     /// A lazy iterator consumed (to the end, or partly: `full` false): what it takes from its
     /// sources.
     pub fn consume_lazy(&mut self, v: &Value, full: bool, state: &mut State) {
@@ -1368,6 +1391,8 @@ fn gen_footprint(st: &State, pre: &State, ys: &[&State]) -> Footprint {
     fp
 }
 
+/// Whether generator `o` may still be lazy (not run) on this path, and whether it may have run
+/// (its `\u{1}lazy` slot: 1 lazy, 0 run; both where paths that differ were joined).
 pub(super) fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
     match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
         Some(v) => {

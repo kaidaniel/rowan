@@ -1,7 +1,9 @@
 //! PyTorch model: tensors carry symbolic shapes (`shape.rs`), torch functions,
 //! tensor methods, `nn` layers and `nn.Module` subclasses compute them; operations check
 //! their conditions: decided false → a shape error (the op raises), undecided → a
-//! requirement recorded at the line and learned as a fact on the path.
+//! requirement recorded at the line and learned as a fact on the path. In torch modules `int`
+//! and `Tensor` annotations hold. A module-level unknown number names its dims; a module-level
+//! tensor's unknown dims are one value each.
 
 use indexmap::IndexMap;
 
@@ -4855,8 +4857,6 @@ pub fn t_list_elem(_an: &Analyzer, o: u32, st: &State) -> Value {
 // hover rendering
 // ---------------------------------------------------------------------------
 
-/// The torch part of a value for the hover (None: not ours): `Tensor[B, T, 4*C]`, a dim
-/// expression, a size.
 /// The shape of a named unknown (a parameter) when facts say something about it.
 pub fn t_known_param_shape(an: &Analyzer, v: &Value, st: &State) -> Option<Shape> {
     if !an.m.torch_on || !v.kv.is_bot() || v.pts.len() != 1 {
@@ -4871,6 +4871,8 @@ pub fn t_known_param_shape(an: &Analyzer, v: &Value, st: &State) -> Option<Shape
     Some(s)
 }
 
+/// The torch part of a value for the hover (None: not ours): `Tensor[B, T, 4*C]`, a dim
+/// expression, a size.
 pub fn t_render(an: &Analyzer, v: &Value, st: &State) -> Option<String> {
     if let Some(s) = t_known_param_shape(an, v, st) {
         return Some(tensor_text(&s));

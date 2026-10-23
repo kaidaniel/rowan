@@ -29,6 +29,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The facts of `state` as they are now (O(1): the maps are shared).
     pub fn of(state: &State) -> Snapshot {
         Snapshot { rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone() }
     }
@@ -62,8 +63,9 @@ pub struct HavocMemo {
 }
 
 /// The havoc walks of unknown code: their marks, a memo of recent walks (a cache: a walk
-/// from it gives what a full walk gives), the code the last walk met, and a skipped method's
-/// receiver walked only by the names its code uses.
+/// from it gives what a full walk gives; a walk from the same values, by any unknown code,
+/// redoes only what changed, and the tests of what it met no longer hold), the code the last
+/// walk met, and a skipped method's receiver walked only by the names its code uses.
 #[derive(Default)]
 pub struct Havoc {
     walks: u32,
@@ -573,8 +575,10 @@ impl Analyzer {
     /// What the code `roots` hold may change when it runs where rowan does not run it: the
     /// values at the slots its closure may change are havocked, the slots it rebinds may hold
     /// anything, and the code the data they hold is followed too, in rounds (each applies what
-    /// the closure gained). The same code followed before, with nothing it read or changed
-    /// changed since, changes nothing again (`Havoc::follows`).
+    /// the closure gained; the rounds resume one walk, and a class attribute's flags apply again
+    /// as they grow). The closure (`code_closure`) is cached per set of roots until a name it
+    /// read unbound is bound or a module it walked gains a name. The same code followed before,
+    /// with nothing it read or changed changed since, changes nothing again (`Havoc::follows`).
     pub(super) fn follow_code(&mut self, mut roots: Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State) {
         roots.sort_unstable();
         roots.dedup();
@@ -822,9 +826,10 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
     }
 }
 
-/// The rows of an unknown call's result: the items of the mappings it was given (up to
-/// `MAX_ARG_JOIN`; past that any record), else open through the call; changed by the call when
-/// it was given records.
+/// The rows of an unknown call's result: the items of the mappings it was given itself (up to
+/// `MAX_ARG_JOIN`; past that any record; not `**d`'s, which gives it d's values, nor the
+/// callable's own, nor an `int`'s), else open through the call (not through a value read under
+/// an input's key); changed by the call when it was given records.
 fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId, arg_recs: &[(u32, Ns)], item_recs: &[ObjId], callee: bool) {
     // (many records given — a value joined over many contexts: the result is any record,
     // an open row, rather than the join of them all and a copy of all their slots)

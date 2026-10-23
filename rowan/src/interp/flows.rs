@@ -8,6 +8,18 @@
 //! receiver is called on it. A local name is an alias of what is assigned to it, so `x = G`
 //! changes nothing until `x` does. What a value *holds* (its items, its attributes' values) is
 //! told apart from the value: `lib(G.x)`, `for v in G: lib(v)` give away what `G` holds, not `G`.
+//!
+//! By use: a value given to the program's functions changes as they use it (their parameters'
+//! flags); given to a library function that only reads and is given no code, not at all
+//! (`read_only_library`). A dict, list or set changed in place or unpacked (`{**d}`) changes in
+//! what it holds (`Level::Held`); a new container of its items (`dict(d)`, `list(xs)`) changed
+//! in place changes none of them (`Level::Copy`); `d["k"]` is its part under `"k"`, that slot
+//! alone (`Level::Part`). Code that may remove items (`del d[k]`, `pop`) removes those keys, any
+//! when not named, which are not `likely` after (`Flags::removes`). A parameter the code only
+//! keeps where the program reads it back (a container a global, class, module or the receiver
+//! holds, under a literal key or its own `__name__`, `setdefault` too; a global list's `append`;
+//! through a helper that does; the result) is put there, not walked (`Flags::kept`,
+//! `KeptPlace`); one the code only reads is not walked.
 
 use ruff_python_ast::{self as ast, Expr, Stmt};
 use rustc_hash::{FxHashMap, FxHashSet};

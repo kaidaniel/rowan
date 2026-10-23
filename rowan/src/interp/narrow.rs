@@ -26,7 +26,7 @@ pub struct Split {
     pub ops: Option<(Value, Value)>,
 }
 
-/// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
+/// Where a narrowed value is written back (`narrow_isinstance_value`'s `store`).
 #[derive(Clone)]
 pub enum StoreTarget {
     Name(StrId),
@@ -1009,8 +1009,6 @@ impl Analyzer {
     }
 }
 
-/// Classes whose isinstance checks go by structure (ABCs with subclass hooks, protocols):
-/// an unrelated user class may pass them.
 /// A value on the path where a truth test of it was `truth`: without its literals of the
 /// other truth (None, 0, "" on the true path; an unknown's it may be too). None: nothing to
 /// remove.

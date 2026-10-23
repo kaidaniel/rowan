@@ -5,7 +5,10 @@
 //! where it is decided — the generator stops there — and those where it goes on to its next item.
 //! Where it stops, CPython closes it when the consumer drops it: GeneratorExit is raised at
 //! that yield (its `finally` blocks and `__exit__`s run), caught where the consumer is.
-//! Other generators run whole, as consumers take them (`force_gen`).
+//! Other generators run whole, as consumers take them (`force_gen`); a held one is taken item
+//! by item from its cursor (after its last item it may be suspended there or ended: asked
+//! again, it goes on). `yield from` is no such consumer. A generator expression written as the
+//! argument runs its items in place, as a comprehension's (`stop_early_written`).
 
 use ruff_python_ast as ast;
 use rustc_hash::FxHashSet;

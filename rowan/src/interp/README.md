@@ -14,7 +14,8 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 
 | field | file | what it holds |
 | --- | --- | --- |
-| `program` | `program.rs` | the main file, import paths, the model registry, the modules imported, the classes defined |
+| `m` | `../models/mod.rs` (`Tables`) | the library models' side tables, keyed by objects (the collector follows them) |
+| `program` | `program.rs` | the main file, import paths, the model registry, the modules imported, the classes defined, the packages followed (`library.rs`) |
 | `heap` | `heap.rs` | every object (by allocation site and context) and its payload: the function, class or module it is, a bound method's parts, … |
 | `findings` | `findings.rs` | what is recorded for the output: verdicts, notes, summaries, golden row checks, hover facts |
 | `names` | `names.rs` | the report's names for unknowns (`row["id"]`, `json.loads(text)`) and unknown call sites |
@@ -92,6 +93,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
 | `summary.rs` | result summaries: the shape of what a function returns for any call (from a pre-pass's runs), made anew where a call of it does not run |
 | `libclosure.rs` | the closure followed libraries' calls that do not run share once theirs is large (`LibClosure`): walked once, applied again where it gained or the state changed |
+| `library.rs` | followed installed packages (`--follow`): each entry's allowance of work, the library's share, undoing an entry past it |
 | `inert.rs` | which function bodies are inert (a bounded handful of steps: `functools.wraps` decorators) |
 | `deferred.rs` | deferred definitions: a module's `@dec def f` with plain inert decorators, run when `f` is first read |
 | **output** | |

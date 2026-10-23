@@ -759,6 +759,7 @@ impl State {
         self.keys_type(ko.objs.iter(), ko.ns)
     }
 
+    /// Does this path have a row of `oid` in `ns` (the shared unknown object has every one)?
     pub fn has_row(&self, oid: ObjId, ns: Ns) -> bool {
         self.rows.contains_key(&(oid, ns)) || (is_any(oid) && matches!(ns, Ns::Item | Ns::Attr))
     }
@@ -823,6 +824,7 @@ impl State {
         self.slots.get(&oid, &(ns, key)).unwrap_or_default()
     }
 
+    /// The value under the key; None when no path wrote one (unlike `slot`'s empty value).
     pub fn slot_opt(&self, oid: ObjId, ns: Ns, key: KeyId) -> Option<Value> {
         self.slots.get(&oid, &(ns, key))
     }
@@ -1091,8 +1093,9 @@ fn set_found_bit(f: &mut Found, oid: ObjId) {
     f.bits[w] |= 1 << (oid % 64);
 }
 
-/// `oid` is made where a path first reads it, its row in `ns` starting as `init`
-/// (`one_side_row`).
+/// `oid` is made where a path first reads it (an input's part, its placeholder; an annotated
+/// part), its row in `ns` starting as `init` (`one_side_row`): a join with a path that has not
+/// read it joins what it starts with (`Found`).
 pub fn mark_found(oid: ObjId, ns: Ns, init: &Row) {
     FOUND.with(|m| {
         let f = &mut *m.borrow_mut();
@@ -1243,8 +1246,6 @@ pub fn view_hits() -> u64 {
     VIEW_HITS.with(|c| c.get())
 }
 
-/// A new analysis on this thread (`rowan serve` runs every request on one): object ids start
-/// again, so the merged set and the cost counters do too.
 /// The per-thread marks of one analysis (`reset_thread_state`), as a value: another analyzer
 /// on the thread (the result summaries' source, `interp/summary.rs`) runs with its own,
 /// exchanged for the thread's around each of its runs (`swap`).
@@ -1285,6 +1286,8 @@ impl ThreadState {
     }
 }
 
+/// A new analysis on this thread (`rowan serve` runs every request on one): object ids start
+/// again, so the merged set and the cost counters do too.
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
     FOUND.with(|m| *m.borrow_mut() = Found::default());
