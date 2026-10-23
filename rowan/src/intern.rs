@@ -491,13 +491,9 @@ impl<T: Copy + Ord> IdSet<T> {
         if total <= BITS_PAST {
             return Self::from_vec(parts.iter().flat_map(|p| p.iter()).collect());
         }
-        Self::union_bits(&parts, index, of_index)
-    }
-    /// `union_all`'s union by a bit per id.
-    fn union_bits(parts: &[&Self], index: impl Fn(T) -> usize, of_index: impl Fn(usize) -> T) -> Self {
         let top = parts.iter().filter_map(|p| p.s().last()).map(|x| index(*x)).max().unwrap_or(0);
         let mut bits = vec![0u64; top / 64 + 1];
-        for p in parts {
+        for p in &parts {
             for x in p.iter() {
                 let i = index(x);
                 bits[i / 64] |= 1 << (i % 64);
@@ -695,10 +691,6 @@ impl<T: Copy + Ord> From<Vec<T>> for IdSet<T> {
 
 /// A set of keys.
 pub type KeySet = IdSet<KeyId>;
-
-#[cfg(kani)]
-#[path = "laws/kani_sets.rs"]
-mod kani_proofs;
 
 #[cfg(test)]
 mod tests {

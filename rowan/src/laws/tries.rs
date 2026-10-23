@@ -14,7 +14,7 @@
 //!   map with its copy change nothing (the same root); a join allocates at most a path per key
 //!   either side wrote since a common ancestor (the cost "what two maps differ in").
 //!
-//! `PROPTEST_CASES=N` runs more cases (default 64 here; CI runs the default).
+//! `PROPTEST_CASES=N` runs more cases (`laws::config`).
 
 use super::*;
 use crate::laws::config;

@@ -1,5 +1,8 @@
 //! Bounded proofs (Kani) of the tries' bit arithmetic and key images, for all inputs where the
-//! property tests only sample: `cargo kani --harness <name>` in `rowan/` (`AGENTS.md`, Tests).
+//! property tests only sample: `cargo kani --lib` in `rowan/` (`AGENTS.md`, Tests; ~1 minute,
+//! mostly the build). Harnesses that allocate (a trie's `Arc` nodes beyond one link, an
+//! `IdSet`'s sorted `Arc<[T]>`) ran cbmc past 7-10 minutes even at two elements: the property
+//! tests cover those.
 
 use super::*;
 
@@ -20,6 +23,7 @@ fn branching_bit_splits_two_keys() {
 /// `link` puts the subtree whose prefix has the branching bit clear on the left, under a prefix
 /// both agree with.
 #[kani::proof]
+#[kani::unwind(3)]
 fn link_orders_its_subtrees() {
     let (p0, p1): (u64, u64) = (kani::any(), kani::any());
     kani::assume(p0 != p1);
@@ -60,38 +64,4 @@ fn slot_keys_are_injective() {
     assert_eq!(a.key64() == b.key64(), a == b);
     assert_ne!(a.1.key32(), SENTINEL);
     assert_eq!(a.key64() >> 32, o1 as u64);
-}
-
-/// Three writes into a trie: every key reads back its last value, the others nothing, and the
-/// trie is well formed (each leaf under the branches its image selects).
-#[kani::proof]
-#[kani::unwind(6)]
-fn three_inserts_read_back() {
-    let ks: [u32; 3] = [kani::any(), kani::any(), kani::any()];
-    let mut m: LayerMap<u32, u32> = LayerMap::new();
-    for (i, k) in ks.iter().enumerate() {
-        m.insert(*k, i as u32);
-    }
-    for (i, k) in ks.iter().enumerate() {
-        let last = (0..3).rev().find(|j| ks[*j] == *k).unwrap();
-        assert_eq!(m.get(k), Some(last as u32));
-        let _ = i;
-    }
-    let other: u32 = kani::any();
-    kani::assume(!ks.contains(&other));
-    assert_eq!(m.get(&other), None);
-    fn shape(t: &Tree<u32, u32>, above: Option<(u64, u64, bool)>) {
-        let fits = |h: u64| above.map_or(true, |(p, m, right)| match_prefix(h, p, m) && zero_bit(h, m) != right);
-        match &**t {
-            Node::Leaf { h, k, .. } => assert!(*h == *k as u64 && fits(*h)),
-            Node::Branch { p, m, l, r } => {
-                assert!(m.is_power_of_two() && mask(*p, *m) == *p && fits(*p));
-                shape(l, Some((*p, *m, false)));
-                shape(r, Some((*p, *m, true)));
-            }
-        }
-    }
-    if let Some(t) = &m.root {
-        shape(t, None);
-    }
 }
