@@ -260,7 +260,7 @@ impl Analyzer {
             Close::Sure if unstarted || ended(o, state).is_none() => Close::Maybe,
             h => h,
         };
-        // (closing resumes it: what the program changed since, it sees — `gen_interference_of`)
+        // (closing resumes it: what the program changed since, it sees — `gen_interference`)
         self.note_resume(o, state);
         let ge = self.gens.eff.get(&o).cloned();
         if super::debug_enabled() {

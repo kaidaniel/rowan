@@ -163,9 +163,10 @@ pub struct GenWatch {
     pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
     /// the birth mark after the run: objects born since are new
     pub born: u64,
-    /// the consumer's states where it asked for a later item (`note_resume`), and what it had
-    /// changed then of the facts of the objects the generator changes itself
-    pub resumed: Option<State>,
+    /// where the consumer's states since the run start in its generator's resume segments
+    /// (`Gens::resumes`), and what it had changed when it asked for a later item of the facts
+    /// of the objects the generator changes itself
+    pub seg: usize,
     pub own_hits: Vec<Hit>,
 }
 
@@ -202,6 +203,11 @@ pub struct LazyGen {
 /// The generators made and run so far, and the `@contextmanager` bodies running.
 #[derive(Default)]
 pub struct Gens {
+    /// per watched generator, the consumer's states where it asked for a later item
+    /// (`note_resume`), joined per segment: a watch starts one, and its run sees those from its
+    /// own on (a generator run again and again — a merged one, forced at each consumer — has a
+    /// watch per run: each consumer state is joined once, not once per watch)
+    pub resumes: FxHashMap<ObjId, Vec<Option<State>>>,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
     /// generators made but not run yet: the call that made each (`force_gen`)
@@ -355,7 +361,9 @@ impl Analyzer {
                 }
                 // (what it reads after a yield: through what it was given, its globals, its cells)
                 let reads = self.gens.last_reads.take().unwrap_or_default();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial(), resumed: None, own_hits: Vec::new() };
+                let segs = self.gens.resumes.entry(o).or_default();
+                segs.push(None);
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial(), seg: segs.len() - 1, own_hits: Vec::new() };
                 self.gens.watch.push(w);
             }
             self.gen_body_not_run(o, &r, &lg.node, state);
@@ -524,6 +532,7 @@ impl Analyzer {
                 self.budget.restore(&w.budget);
             }
             self.gens.watch.truncate(wmark);
+            self.prune_resumes();
             // (modules it imported stay imported: their facts go on)
             let mods: Vec<Value> = self.program.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
             let mut again = pre.copy();
@@ -603,6 +612,13 @@ impl Analyzer {
         };
         let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
         self.gens.watch.extend(tail.into_iter().filter(|w| kept.contains(&w.gid)));
+        self.prune_resumes();
+    }
+
+    /// The resume segments of generators no longer watched go.
+    fn prune_resumes(&mut self) {
+        let watched: FxHashSet<ObjId> = self.gens.watch.iter().map(|w| w.gid).collect();
+        self.gens.resumes.retain(|g, _| watched.contains(g));
     }
 
     /// Whether a generator may give more items in `state` (not known to be used up).
@@ -618,20 +634,55 @@ impl Analyzer {
     /// stored, or a whole object; beyond what is already changed for them (`all`: everything
     /// they reach).
     pub(super) fn gen_interference(&self, wmark: usize, fin: &State, all: bool) -> Vec<(ObjId, Vec<Hit>)> {
-        (wmark..self.gens.watch.len()).map(|i| (self.gens.watch[i].gid, self.gen_interference_of(i, fin, all))).filter(|(_, h)| !h.is_empty()).collect()
+        let watches = wmark..self.gens.watch.len();
+        let suffixes = self.resumed_suffixes(watches.clone());
+        watches
+            .map(|i| {
+                let w = &self.gens.watch[i];
+                (w.gid, self.gen_interference_with(i, fin, all, suffixes.get(&(w.gid, w.seg)).and_then(|r| r.as_ref())))
+            })
+            .filter(|(_, h)| !h.is_empty())
+            .collect()
     }
 
-    /// `gen_interference` for one watched generator: the keys / objects it reads after a
-    /// yield that later code changed by `fin` or by the time it asked for an item (unknown
-    /// code too; of the objects it changes itself, what changed of the facts it gave).
-    pub(super) fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<Hit> {
+    /// For watches `among`, by (generator, resume segment), the consumer's states from that
+    /// segment on, joined (one pass from the last segment per generator).
+    fn resumed_suffixes(&self, among: impl Iterator<Item = usize>) -> FxHashMap<(ObjId, usize), Option<State>> {
+        let mut from: FxHashMap<ObjId, usize> = FxHashMap::default();
+        for i in among {
+            let w = &self.gens.watch[i];
+            let f = from.entry(w.gid).or_insert(w.seg);
+            *f = (*f).min(w.seg);
+        }
+        let mut out: FxHashMap<(ObjId, usize), Option<State>> = FxHashMap::default();
+        for (gid, first) in from {
+            let segs = self.gens.resumes.get(&gid).map(|v| v.as_slice()).unwrap_or_default();
+            let mut acc: Option<State> = None;
+            for (i, s) in segs.iter().enumerate().skip(first).rev() {
+                if let Some(s) = s {
+                    acc = Some(match acc {
+                        Some(mut a) => a.join(&mut s.copy()),
+                        None => s.copy(),
+                    });
+                }
+                out.insert((gid, i), acc.as_ref().map(|a| a.copy()));
+            }
+        }
+        out
+    }
+
+    /// `gen_interference` for one watched generator (`resumed`: the consumer's states since its
+    /// run): the keys / objects it reads after a yield that later code changed by `fin` or by the
+    /// time it asked for an item (unknown code too; of the objects it changes itself, what
+    /// changed of the facts it gave).
+    fn gen_interference_with(&self, i: usize, fin: &State, all: bool, resumed: Option<&State>) -> Vec<Hit> {
         let w = &self.gens.watch[i];
         if !fin.reachable {
             return Vec::new();
         }
         // (what the consumer changed by the time it asked for an item, or by the end)
         let joined;
-        let fin = match &w.resumed {
+        let fin = match resumed {
             Some(r) if r.reachable => {
                 joined = fin.copy().join(&mut r.copy());
                 &joined
@@ -677,13 +728,20 @@ impl Analyzer {
     /// made them, to run again.
     pub(in crate::interp) fn gen_used_up(&mut self, used: &ObjSet, fin: &State) {
         let mut i = 0;
+        let suffixes = self.resumed_suffixes((0..self.gens.watch.len()).filter(|i| used.contains(self.gens.watch[*i].gid)));
         while i < self.gens.watch.len() {
-            if used.contains(self.gens.watch[i].gid) && self.gen_interference_of(i, fin, false).is_empty() {
+            let (gid, seg) = (self.gens.watch[i].gid, self.gens.watch[i].seg);
+            if !used.contains(gid) {
+                i += 1;
+                continue;
+            }
+            if self.gen_interference_with(i, fin, false, suffixes.get(&(gid, seg)).and_then(|r| r.as_ref())).is_empty() {
                 self.gens.watch.remove(i);
             } else {
                 i += 1;
             }
         }
+        self.prune_resumes();
     }
 
     /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found;
@@ -1039,7 +1097,7 @@ impl Analyzer {
     }
 
     /// The consumer asks a watched generator `o` for an item in `state`: what it changed by
-    /// then, the generator sees after its yield (`gen_interference_of`).
+    /// then, the generator sees after its yield (`gen_interference`).
     pub(in crate::interp) fn note_resume(&mut self, o: ObjId, state: &State) {
         if !state.reachable || !self.gens.watch.iter().any(|w| w.gid == o) {
             return;
@@ -1047,11 +1105,12 @@ impl Analyzer {
         // (the objects it changes itself: what the consumer changed of the facts it was given)
         let ge = self.gens.eff.get(&o).cloned();
         let own = ge.as_ref().and_then(|ge| effects_given(state, o, ge).map(|given| self.changes_in(given, state, &ge.rows, &ge.slots, ge.elems.iter().chain(&ge.lens).copied()))).unwrap_or_default();
+        if let Some(Some(last)) = self.gens.resumes.get_mut(&o).and_then(|segs| segs.last_mut()) {
+            last.replace_with(last.copy().join(&mut state.copy()));
+        } else if let Some(last) = self.gens.resumes.get_mut(&o).and_then(|segs| segs.last_mut()) {
+            *last = Some(state.copy());
+        }
         for w in self.gens.watch.iter_mut().filter(|w| w.gid == o) {
-            w.resumed = Some(match w.resumed.take() {
-                Some(mut r) => r.join(&mut state.copy()),
-                None => state.copy(),
-            });
             w.own_hits.extend(own.iter().cloned());
         }
     }

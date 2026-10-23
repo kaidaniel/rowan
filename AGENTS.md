@@ -52,7 +52,7 @@ Every call of the program's code runs the callee's body at the call site (`calls
 
 ### Generators and iterators
 
-* **Generators** (`gens.rs`) run whole at their first consumption (`force_gen`), in the creating call's context; `iter()` runs nothing. A consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code between items changes what the generator reads after a yield, it runs again with that change (`note_resume`, `with_gen_restart`).
+* **Generators** (`gens.rs`) run whole at their first consumption (`force_gen`), in the creating call's context; `iter()` runs nothing. A consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code between items changes what the generator reads after a yield, it runs again with that change (`note_resume`, `with_gen_restart`; each consumer state is joined once per generator, the runs watched since sharing it: `Gens::resumes`).
 * A generator expression is a generator of `iter()` of its first iterable (`FuncNode::GenExp`). One whose items are all taken before any other code runs is run where it is written, as a comprehension (`Scopes::eager_genexps`): unpacked, or given whole to a builtin taking every item at once whose name no scope around binds (`syntax::Bound`: a program's own `sum` may take none); given to a method or a library function, by what the callee is at the call (`bulk_genexp`).
 * `@contextmanager` bodies run at their yield. `any` / `all` / `next` / `in` of a generator made for them stop it where an item decides (`stopearly.rs`).
 * A generator dropped before its end is closed: GeneratorExit is raised at its yield (`genclose.rs`: `closing_loop`, `close_unheld`). Its raises happen where the consumer asks for the item it fails to give (`genraise.rs`, `exhaust_whole`).
