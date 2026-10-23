@@ -147,6 +147,7 @@ The folder READMEs are maps of the code, file by file, with a reading order: `ro
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~11.1 / ~0.65 / ~3.2 / ~4.9 s; 0.33 / 0.22 / 0.21 / 0.31 GB |
 | installed packages (`bench/sitepackages.py`, s1–s9), `--follow '*'` | 0.37 / 0.20 / 0.53 / 0.19 / 2.9 / 2.0 / 1.2 / 0.44 / 0.26 s; 30 / 29 / 62 / 73 / 401 / 406 / 169 / 79 / 87 MB; facts gained 6 / 33 / 13 / 13 / 6 / 2 / 14 / 6 / 10, lost 0 (none: < 0.01 s, 10 MB); `rowan serve`: first answer as without (13–23 ms), followed document at 0.18–2.2 s |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.11 / 6.6 / 1.0 / 0.7 s; per function p50 ≤ 5.7 ms, p99 0.12–0.20 s, max 0.46 / 0.51 / 0.41 / 1.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 0.94 / 0.08 s, max 1.2 / 5.2 / 1.2 / 1.0 s; `rowan serve` on each timm model file ≤ 0.5 GB |
+| held-out (`bench/heldout.py`, 52 modules, 49k lines), default limits / no deadline (60 s cut) | wall geomean 0.31 / 0.36 s, 9 / 0 cut, 51 / 46 of 52 finish; RSS geomean 43 MB, max 3.0 GB (deepdiff's diff.py, 6.2 GB at `ms=20000`); proven 54.6 %, known facts 56.0 %; `sound`: 10k tests, 29.7k values, 2.1k reads compared, 107 candidates (none a known unsound claim of rowan's; 32 not explained) |
 
 ## Known problems and next steps
 
