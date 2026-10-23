@@ -36,6 +36,19 @@ document `tests/run_golden.py` checks; `--facts` the hover document; `rowan serv
 editor's long-running server (JSON lines over stdio); `rowan hovers FILE` times every
 function's run on demand (`bench/hovers.py`). The options are in `src/main.rs`'s doc.
 
+## Where things live
+
+| question | where |
+| --- | --- |
+| what a value, a key set, a state is | `src/domain.rs` (`Value`, `KeyVal`, `Row`), `src/state.rs` (`State`) |
+| how a statement, expression or call runs | `src/interp/stmts.rs`, `exprs.rs`, `calls.rs` |
+| why a read is ✓, ⚠ or ✗ | `src/domain.rs` `classify`, `src/interp/items.rs` `load_item`, `findings.rs` `verdict` |
+| what a function needs of its parameters | `src/interp/access.rs`, `guards.rs`, `entry.rs` (runs for any call) |
+| what code rowan does not run may change | `src/interp/unknown.rs` (unknown calls), `effects.rs` and `flows.rs` (calls past their budget), `summary.rs` (what they return) |
+| budgets, the deadline, runs on demand | `src/interp/budget.rs`, `entry.rs` |
+| a library's behaviour | its file in `src/models/` (`src/models/README.md`) |
+| the text a hover shows | `src/interp/render.rs` (values), `facts.rs` (the document), `../vscode-rowan/extension.js` `renderHover` (the layout) |
+
 ## Where to start reading
 
 1. `src/domain.rs` and `src/state.rs`: what a value, a row (an object's keys) and a state are.
