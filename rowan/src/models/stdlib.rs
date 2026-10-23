@@ -632,17 +632,25 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
         }
         rest = &after[j..];
     }
-    let ngroups = pat.matches('(').count().saturating_sub(pat.matches("(?").count()) + names.len();
+    // (which groups every match has: the others are None, or the default, when they take no part;
+    // a pattern that does not parse here: none surely)
+    let re = crate::models::pyre::Regex::new(&pat, 0);
+    let ngroups = re.as_ref().map(|r| r.ngroups).unwrap_or_else(|| pat.matches('(').count().saturating_sub(pat.matches("(?").count()) + names.len());
+    let sure = re.as_ref().map(|r| r.sure_groups()).unwrap_or_else(|| vec![false; ngroups + 1]);
     let modname = format!("<re.Match {:?}>", &*pat);
     let moid = match an.module(&modname) {
         Some(m) => m,
         None => {
             // (an unknown text's groups: unknown strings, shown as `?`, not the helper's name)
-            let items = names.iter().map(|n| format!("{:?}: str(_GROUP)", n)).collect::<Vec<_>>().join(", ");
-            let groups = (0..ngroups).map(|_| "str(_GROUP)").collect::<Vec<_>>().join(", ");
+            let part = |g: usize, default: &str| if sure.get(g).copied().unwrap_or(false) { "str(_GROUP)".to_string() } else { format!("(str(_GROUP) if _GROUP else {})", default) };
+            let index = |n: &String| re.as_ref().and_then(|r| r.group_index(n)).unwrap_or(0);
+            let items = names.iter().map(|n| format!("{:?}: {}", n, if re.is_some() { part(index(n), "default") } else { part(usize::MAX, "default") })).collect::<Vec<_>>().join(", ");
+            let groups = (1..=ngroups).map(|g| part(g, "default")).collect::<Vec<_>>().join(", ");
+            let group = if sure.iter().all(|s| *s) { "str(_GROUP)".to_string() } else { part(usize::MAX, "None") };
             let src = format!(
-                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return str(_GROUP)\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return int(_POS)\n\n    def end(self, g=0):\n        return int(_POS)\n\n    def span(self, g=0):\n        return (int(_POS), int(_POS))\n\n\ndef matched():\n    return Match()\n",
+                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return {}\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return int(_POS)\n\n    def end(self, g=0):\n        return int(_POS)\n\n    def span(self, g=0):\n        return (int(_POS), int(_POS))\n\n\ndef matched():\n    return Match()\n",
                 items,
+                group,
                 groups,
                 if ngroups == 1 { "," } else { "" }
             );
