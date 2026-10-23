@@ -249,6 +249,67 @@ jobs:
           path: results/
           retention-days: 30
 
+  # Tuned-on versus held-out (bench/heldout.py metrics, default limits: the 10 s deadline): the
+  # held-out corpus (31 pinned packages no iteration tunes against, their sdists cached) and the
+  # eight benchmarks measured the same way: proven %, known hover facts %, time, memory, cut runs.
+  heldout:
+    name: held-out corpus
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - uses: actions/cache@v4
+        with:
+          path: bench/work/heldout/src
+          key: heldout-src-${{ hashFiles('bench/heldout/manifest.json') }}
+
+      - name: Prepare the eight
+        run: |
+          for p in stdlib12k email rich click pip timm sktime functional; do
+            uv run --no-project python bench/prepare.py $p > /dev/null
+          done
+
+      - name: Held-out corpus and the eight, default limits
+        run: |
+          mkdir -p results
+          uv run --no-project python bench/heldout.py fetch
+          uv run --no-project python bench/heldout.py metrics --mode default --rowan bin/rowan --json results/heldout.json | tee results/heldout.txt
+          uv run --no-project python bench/heldout.py metrics --mode default --corpus eight --rowan bin/rowan --json results/eight.json | tee results/eight.txt
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### held-out corpus and the eight (bench/heldout.py metrics --mode default)"
+            echo
+            echo '```'
+            echo "held-out:"; cat results/heldout.txt 2>/dev/null || echo "no result"
+            echo "the eight:"; cat results/eight.txt 2>/dev/null || echo "no result"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          # (not `bench-*`: history.py reads those as bench/run.py results)
+          name: heldout-metrics
+          path: results/
+          retention-days: 30
+
   # Soundness without per-call-site runs: the golden suites with `tab=0` (main before the
   # summaries were removed: every call used its function's summary) and `budget=0` (every call
   # past its function's budget: an unknown call, and a reporting run with open parameters).

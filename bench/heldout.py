@@ -11,6 +11,7 @@ numbers; they do not pick work from its individual sites (AGENTS.md, SUBAGENTS.m
     uv run --no-project python bench/heldout.py metrics [--rowan BIN] [--mode default|nodeadline]
             [--corpus heldout|eight] [--limits K=V,…] [--only PKG,…] [-j N] [--json OUT]
     uv run --no-project python bench/heldout.py sound [--rowan BIN] [--only PKG,…] [--json OUT] [-v]
+            [--baseline FILE] [--report OUT.md] [--write-baseline FILE]
     uv run --no-project python bench/heldout.py sweep [--rowan BIN] [--bins NAME=BIN,…] [--variants …]
             [--corpus heldout|eight] [--mode …] [--json OUT]
 
@@ -48,7 +49,9 @@ What is compared:
     line, or a `missing` line that ran without one.
 A mismatch is a candidate: each is either an unsound claim (shrink it into a repro) or a limit of
 this matching (tests calling with types the annotations exclude, monkeypatching, mocks); the
-report says which.
+report says which. `--baseline`: the candidate sites compared with the known ones
+(heldout/sound_baseline.json: identifiers, each with the kind that explains it), exit 1 when
+there are new ones (CI: heldout.yml, after every merge).
 
 `--corpus eight`: the eight benchmarks (bench/prepare.py) measured the same way, for the
 tuned-on side of the comparison.
@@ -79,7 +82,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 GUARD = ROOT / ".guard" / "run"
+# (the guard is for the owner's Mac (AGENTS.md); elsewhere, CI's runners, a run is cut by its
+# timeout here and timed by GNU time)
+DARWIN = sys.platform == "darwin"
+TIME = ["/usr/bin/time", "-l"] if DARWIN else ["/usr/bin/time", "-v"]
 MANIFEST = HERE / "heldout" / "manifest.json"
+BASELINE = HERE / "heldout" / "sound_baseline.json"
 WORK = HERE / "work" / "heldout"
 SRC = WORK / "src"
 RUST_BIN = ROOT / "rowan" / "target" / "release" / "rowan"
@@ -144,6 +152,21 @@ def cmd_fetch(a) -> None:
 WORK_FIELDS = {"work": r"^work: (\d+)", "units": r"units (\d+)", "objects": r"objects (\d+)", "skipped_calls": r"skipped calls (\d+)"}
 
 
+def run_guarded(cmd: list[str], timeout: int, **kw) -> tuple[int, bool]:
+    """`cmd` under the guard (macOS) or cut at `timeout` with its process group: (exit code,
+    whether the time limit cut it)."""
+    if DARWIN:
+        p = subprocess.run([str(GUARD), "-t", str(timeout), *cmd], stdin=subprocess.DEVNULL, **kw)
+        return p.returncode, p.returncode == 124
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, start_new_session=True, **kw)
+    try:
+        return p.wait(timeout=timeout), False
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, 9)
+        p.wait()
+        return 124, True
+
+
 def run_module(binary: Path, path: Path, limits: str | None, timeout: int, out_dir: Path) -> dict:
     """One `rowan PATH --facts` run, timed: tiers, fact levels, time, memory, counters."""
     from scoreboard import facts_summary
@@ -155,11 +178,12 @@ def run_module(binary: Path, path: Path, limits: str | None, timeout: int, out_d
     env.pop("ROWAN_LIMITS", None)
     if limits:
         env["ROWAN_LIMITS"] = limits
-    cmd = [str(GUARD), "-t", str(timeout), "/usr/bin/time", "-l", str(binary), str(path), "--facts"]
     t0 = time.monotonic()
     with open(out, "w") as so, open(err, "w") as se:
-        p = subprocess.run(cmd, stdout=so, stderr=se, env=env, cwd=path.parent, stdin=subprocess.DEVNULL)
-    r = {"finished": p.returncode == 0, "wall_s": round(time.monotonic() - t0, 2)}
+        rc, over = run_guarded([*TIME, str(binary), str(path), "--facts"], timeout, stdout=so, stderr=se, env=env, cwd=path.parent)
+    r = {"finished": rc == 0, "wall_s": round(time.monotonic() - t0, 2)}
+    if over:
+        r["why"] = f"over {timeout} s"
     for line in err.read_text(errors="replace").splitlines():
         if line.startswith("work: "):
             for k, pat in WORK_FIELDS.items():
@@ -169,10 +193,12 @@ def run_module(binary: Path, path: Path, limits: str | None, timeout: int, out_d
             r["wall_s"] = float(m.group(1))
         elif "maximum resident set size" in line:
             r["rss_mb"] = round(int(line.split()[0]) / 2**20)
+        elif "Maximum resident set size (kbytes)" in line:
+            r["rss_mb"] = round(int(line.split()[-1]) / 2**10)
         elif line.startswith("GUARD"):
             r["why"] = line.strip()
     if not r["finished"]:
-        r.setdefault("why", f"exit {p.returncode}")
+        r.setdefault("why", f"exit {rc}")
         if "over" in r["why"]:
             r["wall_s"] = timeout
     else:
@@ -375,7 +401,8 @@ def venv_python(p: dict) -> Path:
     d = WORK / "venv" / p["name"]
     stamp = json.dumps(p["tests"]["deps"])
     py = d / "bin" / "python"
-    if (d / ".stamp").exists() and (d / ".stamp").read_text() == stamp:
+    # (a venv restored from CI's cache whose interpreter is gone is made again)
+    if (d / ".stamp").exists() and (d / ".stamp").read_text() == stamp and subprocess.run([str(py), "-c", ""], capture_output=True).returncode == 0:
         return py
     shutil.rmtree(d, ignore_errors=True)
     subprocess.run(["uv", "venv", "-q", "--python", "3.14", str(d)], check=True, stdin=subprocess.DEVNULL)
@@ -397,16 +424,19 @@ def golden_claims(binary: Path, p: dict, mod: str, stmts: list[dict]) -> tuple[d
     (mirror / mod).write_text(annotate(src, stmts))
     # (a deadline the budget comes before: the claims do not depend on the machine's load)
     env = dict(os.environ, ROWAN_LIMITS=CLAIM_LIMITS)
+    so, se = WORK / "annot" / f"{p['name']}.out", WORK / "annot" / f"{p['name']}.err"
     try:
-        out = subprocess.run([str(GUARD), "-t", str(CLAIM_TIMEOUT_S), str(binary), str(mirror / mod), "--golden"], capture_output=True, text=True,
-                             env=env, stdin=subprocess.DEVNULL)
-        doc = json.loads(out.stdout)
+        with open(so, "w") as o, open(se, "w") as e:
+            rc, _ = run_guarded([str(binary), str(mirror / mod), "--golden"], CLAIM_TIMEOUT_S, stdout=o, stderr=e, env=env)
+        doc = json.loads(so.read_text())
     except (json.JSONDecodeError, OSError):
-        doc = {"rows": [], "verdicts": [], "error": out.stderr[-500:]}
+        rc, doc = 1, {"rows": [], "verdicts": [], "error": se.read_text(errors="replace")[-500:]}
     finally:
         (mirror / mod).write_text(src)
-    if "error" not in doc and out.returncode != 0:
-        doc["error"] = out.stderr[-500:]
+    if "error" not in doc and rc != 0:
+        doc["error"] = se.read_text(errors="replace")[-500:]
+    so.unlink(missing_ok=True)
+    se.unlink(missing_ok=True)
     rows: dict = {}
     for rc in doc["rows"]:
         if rc.get("file", "") == "":
@@ -623,6 +653,54 @@ def cmd_sound(a) -> None:
         tot.update(r.get("compared", {}))
         tot.update(Counter(m["what"] for m in r.get("mismatches", [])))
     print(f"total: {dict(tot)}")
+    if a.baseline or a.write_baseline:
+        sys.exit(check_baseline(out, a))
+
+
+# ---------------------------------------------------------------- sound: the known candidates
+def candidate_sites(out: dict) -> dict:
+    """Each candidate site (`PKG WHAT MODULE:LINE NAME`; a module rowan failed on `PKG crashed
+    MODULE`, a package whose tests did not run `PKG error`) with its first detail."""
+    sites: dict = {}
+    for pkg, r in out.items():
+        if r.get("error"):
+            sites[f"{pkg} error"] = r["error"]
+        for mod, info in r.get("modules", {}).items():
+            if info.get("error"):
+                sites[f"{pkg} crashed {mod}"] = info["error"][-200:]
+        for m in r.get("mismatches", []):
+            sites.setdefault(f"{pkg} {m['what']} {m['module']}:{m['line']} {m['name']}", m["detail"][:200])
+    return sites
+
+
+def check_baseline(out: dict, a) -> int:
+    """Compare the candidate sites with the checked-in baseline (BASELINE: identifiers of known
+    candidates, each with the kind that explains it; no work items, AGENTS.md): new ones fail
+    (exit 1), gone ones are reported. `--report` writes the comparison as Markdown;
+    `--write-baseline` writes today's sites, keeping known kinds (new ones `unexplained`)."""
+    base = json.loads(Path(a.baseline or BASELINE).read_text()) if Path(a.baseline or BASELINE).exists() else {"kinds": {}, "sites": {}}
+    sites = candidate_sites(out)
+    known = base["sites"]
+    new = sorted(k for k in sites if k not in known)
+    gone = sorted(k for k in known if k not in sites)
+    by_kind = Counter(known[k] for k in sites if k in known)
+    lines = [f"### held-out soundness (bench/heldout.py sound): {len(sites)} candidate sites, {len(new)} new, {len(gone)} gone", ""]
+    lines += ["| kind | sites | what explains them |", "| --- | --- | --- |"]
+    lines += [f"| {k} | {by_kind[k]} | {base['kinds'].get(k, '')} |" for k in base["kinds"]]
+    if new:
+        lines += ["", "New candidate sites (an unsound claim to shrink into a repro, or a limit of the matching to add to the baseline with its kind):", ""]
+        lines += [f"- `{k}`: {sites[k]}" for k in new]
+    if gone:
+        lines += ["", "No longer found (remove from the baseline):", ""] + [f"- `{k}`" for k in gone]
+    text = "\n".join(lines) + "\n"
+    print(text)
+    if a.report:
+        Path(a.report).write_text(text)
+    if a.write_baseline:
+        doc = {k: v for k, v in base.items() if k != "sites"}
+        doc["sites"] = {k: known.get(k, "unexplained") for k in sorted(sites)}
+        Path(a.write_baseline).write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
+    return 1 if new else 0
 
 
 def main() -> None:
@@ -640,6 +718,10 @@ def main() -> None:
             q.add_argument("--corpus", default="heldout", choices=["heldout", "eight"])
         if name == "metrics":
             q.add_argument("--limits")
+        if name == "sound":
+            q.add_argument("--baseline", help=f"compare with the known candidates (default {BASELINE.relative_to(ROOT)}); exit 1 on new ones")
+            q.add_argument("--report", help="the comparison as Markdown")
+            q.add_argument("--write-baseline", help="write today's candidate sites as a baseline")
         if name == "sweep":
             q.add_argument("--bins")
             q.add_argument("--variants", help="only these (current, budget=x0.5, …, the --bins names)")
