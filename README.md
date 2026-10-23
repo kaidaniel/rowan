@@ -1,7 +1,7 @@
 # rowan
 
 > [!WARNING]
-> **rowan is experimental.** It is extensively tested (about 1,300 example programs, checked
+> **rowan is experimental.** It is extensively tested (about 1,500 example programs, checked
 > against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been used in
 > practice on real code bases. On large programs (thousands of lines and up) it may be slow or
 > crash.
@@ -351,9 +351,19 @@ type or default when known), followed by up to four sections:
 
 Files are analysed when opened or saved, or with **Rowan: Analyse current file**. When a whole
 file takes longer than a second, rowan answers each function when you first hover in it (usually
-well under a second), and says so in the status bar. The extension bundles rowan for macOS,
-Linux and Windows; the `.vsix` packages of each version are attached to the
-[GitHub releases](https://github.com/kaidaniel/rowan/releases).
+well under a second), and says so in the status bar.
+
+## Installing
+
+* **VS Code:** install [rowan from the Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan).
+  It bundles the engine for macOS (Apple silicon and Intel), Linux (x64 and arm64) and Windows
+  (x64); nothing else is needed. The `.vsix` package of each version and platform is also
+  attached to the [GitHub releases](https://github.com/kaidaniel/rowan/releases)
+  (**Extensions: Install from VSIX…**). Its settings are in the
+  [extension's README](vscode-rowan/README.md).
+* **Command line:** build the engine with Rust (`cd rowan && cargo build --release`), then
+  `rowan/target/release/rowan your_file.py` prints what rowan found: the accesses that may fail,
+  the values of the module's names, and what the code reads from its inputs.
 
 ## What rowan knows
 
@@ -375,8 +385,11 @@ Linux and Windows; the `.vsix` packages of each version are attached to the
 * **PyTorch and numpy:** symbolic shapes through creation, broadcasting, `matmul` / `einsum`,
   shape operations, reductions, indexing and `nn` layers. dtype and device are not tracked.
 
-Your own modules are followed through their imports. Anything else from an installed package is
-taken to be able to do anything to what it is given.
+Your own modules are followed through their imports, and so are the installed packages your
+code imports (the extension's `rowan.followPackages`, on by default): rowan reads them from the
+site-packages of the Python interpreter you selected and runs them like your own code, within
+a budget of work. A call it does not follow, or one past that budget, is code rowan cannot see:
+it is taken to be able to do anything to what it is given.
 
 ## What you can rely on
 
@@ -387,6 +400,15 @@ above is right, and that annotations are true (a function analysed for any call 
 names not known, metaclasses and monkey-patching are not followed. Readings marked `~` assume
 that code rowan cannot see removed nothing, and say so. An analysis cut short is still right,
 only less precise.
+
+## What rowan does not do
+
+* It does not run your program, and it does not guess: what it cannot work out is `?`.
+* It is not a type checker or a linter. It does not check that annotations agree with each
+  other, or style; it shows values, keys, columns and shapes, and the accesses that may fail.
+* It does not track a tensor's dtype or device.
+* On large programs it may give up on a whole-file analysis after 10 seconds; hovers then
+  analyse one function at a time, which says less about what the rest of the program passes.
 
 ## More
 
