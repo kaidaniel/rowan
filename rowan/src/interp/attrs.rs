@@ -284,6 +284,32 @@ impl Analyzer {
         crate::models::builtins::scalar_attr(self, &lits, name)
     }
 
+    /// `del obj.name`: on an instance whose class has a property of the name, its deleter runs
+    /// (none: AttributeError); the others lose the attribute (`delete_item`).
+    pub(super) fn delete_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State) {
+        let nk = key_str_lit(name);
+        let prop = |an: &Analyzer, o: ObjId| -> Option<Option<ObjId>> {
+            let cls = an.heap.instance_class(o).filter(|_| an.heap.kind(o) == Kind::Instance)?;
+            let defc = an.class_lookup(cls, name)?;
+            let cv = an.heap.cls_slots.get(&(defc, Ns::Attr, nk))?;
+            let is_prop = !cv.pts.is_empty() && cv.pts.iter().all(|f| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get());
+            is_prop.then(|| an.heap.prop_deleters.get(&(defc, nk)).copied())
+        };
+        let mut one = |an: &mut Analyzer, o: &Value, st: &mut State| {
+            match o.single().and_then(|x| prop(an, x)) {
+                Some(Some(deleter)) => {
+                    an.call_user(deleter, Some(o.clone()), Args::pos(&[]), st, node, false);
+                }
+                Some(None) => an.raise_here("AttributeError", st),
+                None => an.delete_item(o, Ns::Attr, &Value::lit(nk), node, st, true),
+            }
+            Value::new()
+        };
+        if self.per_receiver(obj, &|an, o| prop(an, o).is_some(), state, &mut one).is_none() {
+            one(self, obj, state);
+        }
+    }
+
     /// A deque's `maxlen` and methods.
     fn deque_attr(&mut self, oid: ObjId, name: &str) -> Value {
         if name == "maxlen" {

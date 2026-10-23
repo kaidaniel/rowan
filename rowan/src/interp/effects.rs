@@ -515,6 +515,10 @@ impl Analyzer {
                     work.push(setter);
                     by_setter.insert(n);
                 }
+                // (and one with a deleter: `del` runs it)
+                if let (true, Some(&deleter)) = (u.deletes.contains(&n), self.heap.prop_deleters.get(&(owner, k))) {
+                    work.push(deleter);
+                }
             }
             for &n in u.supers.iter() {
                 let k = key_str_lit(&str_get(n));

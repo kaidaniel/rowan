@@ -172,14 +172,27 @@ impl Analyzer {
                 }
                 continue;
             }
-            let is_setter = q.ends_with(".setter") || matches!(&d.expression, ast::Expr::Attribute(a) if a.attr.id.as_str() == "setter");
-            if is_setter {
-                // `@name.setter`: remember the setter, keep the getter bound to the name
+            let accessor = |w: &str| q.ends_with(&format!(".{w}")) || matches!(&d.expression, ast::Expr::Attribute(a) if a.attr.id.as_str() == w);
+            if accessor("getter") && self.frame().class_oid.is_some() {
+                // `@name.getter`: the function is the property's getter now
+                if let Some(fi) = &fi {
+                    fi.is_property.set(true);
+                }
+                continue;
+            }
+            let is_setter = accessor("setter");
+            if is_setter || (accessor("deleter") && self.frame().class_oid.is_some()) {
+                // `@name.setter`: remember the setter; it and `@name.deleter` keep the getter
+                // bound to the name
                 if let (Some(cls), Some(f)) = (self.frame().class_oid, fobj) {
                     if let ast::Expr::Attribute(a) = &d.expression {
                         if let ast::Expr::Name(n) = &*a.value {
                             let nk = key_str_lit(n.id.as_str());
-                            self.heap.prop_setters.insert((cls, nk), f);
+                            if is_setter {
+                                self.heap.prop_setters.insert((cls, nk), f);
+                            } else {
+                                self.heap.prop_deleters.insert((cls, nk), f);
+                            }
                             if let Some(getter) = self.heap.cls_slots.get(&(cls, Ns::Attr, nk)).cloned() {
                                 if !getter.pts.is_empty() {
                                     fv = getter;
