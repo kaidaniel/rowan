@@ -448,7 +448,7 @@ impl Analyzer {
 
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
-        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), skipped calls {} ({} with a summary; {} summaries in {} ms), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.budget.skipped, self.summaries.applied, self.summaries.shapes.len(), self.summaries.spent.as_millis(), self.havoc.visited)
+        format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), skipped calls {} ({} with a summary; {} summaries in {} ms), havoc visits {}, verdicts {}, facts {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), row_joins(), self.budget.walked.get() + fp_visits(), self.budget.walked.get(), fp_visits(), self.budget.skipped, self.summaries.applied, self.summaries.shapes.len(), self.summaries.spent.as_millis(), self.havoc.visited, self.findings.verdicts().len(), self.findings.facts.len())
     }
 
     /// This analyzer as the result summaries' source (`interp/summary.rs`): the module's code

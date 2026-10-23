@@ -423,39 +423,49 @@ impl Analyzer {
         }
         // roots: the returned value, what older objects' changed slots hold (globals,
         // parameters, cells, …), and what the analyzer holds beyond the state
-        let mut work: Vec<u32> = roots;
+        // (only young objects are queued, each once: the walk stops at older ones, and only young
+        // ones are looked up after it; slots that share large object sets pushed them again and
+        // again, hundreds of MB of queue)
+        let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
+        let mut todo: Vec<u32> = Vec::new();
+        let mut buf: Vec<u32> = roots;
+        let queue = |an: &Analyzer, buf: &mut Vec<u32>, reached: &mut rustc_hash::FxHashSet<u32>, todo: &mut Vec<u32>| {
+            for o in buf.drain(..) {
+                if young(an, o) && reached.insert(o) {
+                    todo.push(o);
+                }
+            }
+        };
+        queue(self, &mut buf, &mut reached, &mut todo);
         for (o, sk) in fp.slots.iter() {
             if !young(self, *o) {
                 if let Some(val) = state.slots.get(o, sk) {
-                    work.extend(val.pts.iter());
+                    buf.extend(val.pts.iter());
                     if let KeyVal::KeysOf(ko) = &val.kv {
-                        work.extend(ko.objs.iter());
+                        buf.extend(ko.objs.iter());
                     }
+                    queue(self, &mut buf, &mut reached, &mut todo);
                 }
             }
         }
         for o in fp.elems.iter().filter(|o| !young(self, **o)) {
             if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
-                work.extend(ko.objs.iter());
+                buf.extend(ko.objs.iter());
             }
         }
-        self.gc_pinned(&mut work, unwind, Some(mark));
+        self.gc_pinned(&mut buf, unwind, Some(mark));
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         // (a loop's item is not found again by a path: garbage when nothing holds it)
         let input_part = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Unknown) && view_of(o).is_none();
-        work.extend(fresh.iter().copied().filter(|o| input_part(self, *o)));
+        buf.extend(fresh.iter().copied().filter(|o| input_part(self, *o)));
+        queue(self, &mut buf, &mut reached, &mut todo);
         // (older objects reach young ones only through those roots: a young one was made
         // since, so whatever refers to it was written since; only young ones expand)
-        let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
-        // (only young objects go into `reached`: the walk stops at older ones, and only young
-        // ones are looked up after it)
-        while let Some(o) = work.pop() {
-            if !young(self, o) || !reached.insert(o) {
-                continue;
-            }
+        while let Some(o) = todo.pop() {
             self.budget.walk_visit();
-            self.obj_edges(o, state, &mut work);
+            self.obj_edges(o, state, &mut buf);
+            queue(self, &mut buf, &mut reached, &mut todo);
         }
         // (a part of an input — an unknown object, a placeholder — is found again by its path
         // whenever that path is read: its rows belong to the input, never garbage)
