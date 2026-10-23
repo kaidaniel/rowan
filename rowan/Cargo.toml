@@ -30,3 +30,11 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+[dev-dependencies]
+# property tests of the domains' laws (src/laws/: `cargo test`; PROPTEST_CASES for deeper runs)
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints.rust]
+# (`cfg(kani)`: the bounded proofs in src/laws/kani_*.rs, `cargo kani`)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

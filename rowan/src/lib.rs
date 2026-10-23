@@ -8,6 +8,8 @@ pub mod frontend;
 pub mod intern;
 pub mod interp;
 pub mod layered;
+#[cfg(test)]
+mod laws;
 pub mod models;
 pub mod scopes;
 pub mod source;
