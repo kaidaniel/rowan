@@ -24,6 +24,8 @@
   --text-muted: #7a7974;
   --series-1: #2a78d6;
   --series-1-wash: rgba(42, 120, 214, 0.10);
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
   --good: #008300;
   --bad: #c0392b;
 }
@@ -39,6 +41,8 @@
     --text-muted: #8f8e88;
     --series-1: #3987e5;
     --series-1-wash: rgba(57, 135, 229, 0.14);
+    --series-2: #d95926;
+    --series-3: #199e70;
     --good: #3fb950;
     --bad: #f0706a;
   }
@@ -54,6 +58,8 @@
   --text-muted: #8f8e88;
   --series-1: #3987e5;
   --series-1-wash: rgba(57, 135, 229, 0.14);
+  --series-2: #d95926;
+  --series-3: #199e70;
   --good: #3fb950;
   --bad: #f0706a;
 }
@@ -74,6 +80,12 @@ a { color: var(--series-1); }
 .kpi .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .kpi .k { color: var(--text-secondary); font-size: 12px; }
 .kpi .d { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.kpi.combined { border-color: var(--series-1); }
+.kpigroup { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 -8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-secondary); margin-bottom: 4px; }
+.legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
+.legend i.dash { border-top-style: dashed; }
+tr.sub td { color: var(--text-muted); border-bottom-style: dotted; }
 .family { margin-top: 20px; }
 .family > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin-bottom: 6px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
@@ -109,6 +121,9 @@ svg text { fill: var(--text-muted); font-size: 10px; }
 <main>
   <h1>rowan: progress across releases</h1>
   <p class="lead" id="lead">Every release measured with one fixed measurement set (today's tests, fuzzer and benchmarks), so newer tests find older bugs. Loading…</p>
+  <div class="kpigroup">Combined headline: tuned-on (the eight + the cost set) and held-out, pooled</div>
+  <div class="kpis" id="kpis-combined"></div>
+  <div class="kpigroup">Tracked set (tuned-on: the eight benchmarks + the 23 cost-set modules) and the tests</div>
   <div class="kpis" id="kpis"></div>
 
   <h2>Overview: one curve per metric, by release</h2>
@@ -159,13 +174,18 @@ const niceTicks = (lo, hi, n = 4) => {
 };
 
 // A line chart of one series. points: [{x: index, y, label, lines: [text…]}]; opts: {unit, lower}
-function lineChart(points, opts = {}) {
+const lineChart = (points, opts = {}) => multiChart([{ points, color: "var(--series-1)" }], opts);
+// Line charts of several series over the same releases: [{name, points, color, dash}] (one axis;
+// the hover lists every series at the release under the crosshair)
+function multiChart(series, opts = {}) {
   const W = 300, H = 120, L = 34, R = 8, T = 8, B = 18;
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
-  const pts = points.filter(p => p.y != null && isFinite(p.y));
-  if (!pts.length) { const d = el("div", { class: "empty" }, "not measured"); return d; }
+  const ok = p => p.y != null && isFinite(p.y);
+  const all = series.flatMap(s => s.points.filter(ok));
+  if (!all.length) { const d = el("div", { class: "empty" }, "not measured"); return d; }
+  const points = series[0].points;
   const xs = points.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs);
-  let y0 = Math.min(...pts.map(p => p.y)), y1 = Math.max(...pts.map(p => p.y));
+  let y0 = Math.min(...all.map(p => p.y)), y1 = Math.max(...all.map(p => p.y));
   if (opts.zero && y0 > 0) y0 = 0;
   const pad = (y1 - y0) * 0.08 || Math.abs(y1) * 0.05 || 1; y0 -= opts.zero && y0 === 0 ? 0 : pad; y1 += pad;
   const sx = x => L + (x1 === x0 ? 0.5 : (x - x0) / (x1 - x0)) * (W - L - R);
@@ -184,40 +204,51 @@ function lineChart(points, opts = {}) {
     const tx = svgEl("text", { x: sx(p.x), y: H - 4, "text-anchor": i === 0 ? "start" : i === points.length - 1 ? "end" : "middle" });
     tx.textContent = p.short ?? p.label; svg.append(tx);
   });
-  // the line, broken where a value is missing; a wash under it
-  let d = "", open = false;
-  for (const p of points) {
-    if (p.y == null || !isFinite(p.y)) { open = false; continue; }
-    d += `${open ? "L" : "M"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`; open = true;
+  // each line, broken where a value is missing; a lone point as a dot
+  for (const s of series) {
+    let d = "", open = false;
+    for (const p of s.points) {
+      if (!ok(p)) { open = false; continue; }
+      d += `${open ? "L" : "M"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`; open = true;
+    }
+    svg.append(svgEl("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", ...(s.dash ? { "stroke-dasharray": "4 3" } : {}) }));
+    const pts = s.points.filter(ok);
+    // cut runs (a lower bound) as hollow markers
+    for (const p of pts) if (p.cut) svg.append(svgEl("circle", { cx: sx(p.x), cy: sy(p.y), r: 3, fill: "var(--surface-1)", stroke: s.color, "stroke-width": 1.5 }));
+    if (pts.length) { const last = pts[pts.length - 1]; svg.append(svgEl("circle", { cx: sx(last.x), cy: sy(last.y), r: 4, fill: s.color, stroke: "var(--surface-1)", "stroke-width": 2 })); }
   }
-  svg.append(svgEl("path", { d, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-  // cut runs (a lower bound) as hollow markers
-  for (const p of pts) if (p.cut) svg.append(svgEl("circle", { cx: sx(p.x), cy: sy(p.y), r: 3, fill: "var(--surface-1)", stroke: "var(--series-1)", "stroke-width": 1.5 }));
-  const last = pts[pts.length - 1];
-  svg.append(svgEl("circle", { cx: sx(last.x), cy: sy(last.y), r: 4, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 }));
   // hover: a crosshair snapped to the nearest release
   const cross = svgEl("line", { y1: T, y2: H - B, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" });
-  const dot = svgEl("circle", { r: 4, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
-  svg.append(cross, dot);
+  const dots = series.map(s => svgEl("circle", { r: 4, fill: s.color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" }));
+  svg.append(cross, ...dots);
   const hit = svgEl("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" });
   svg.append(hit);
+  const val = p => !ok(p) ? "not measured" : fmtNum(p.y, opts.digits) + (opts.unit ? " " + opts.unit : "") + (p.cut ? " (cut: at least)" : "");
   const show = ev => {
     const r = svg.getBoundingClientRect(), vx = (ev.clientX - r.left) / r.width * W;
-    let best = points[0];
-    for (const p of points) if (Math.abs(sx(p.x) - vx) < Math.abs(sx(best.x) - vx)) best = p;
+    let k = 0;
+    points.forEach((p, i) => { if (Math.abs(sx(p.x) - vx) < Math.abs(sx(points[k].x) - vx)) k = i; });
+    const best = points[k];
     cross.setAttribute("x1", sx(best.x)); cross.setAttribute("x2", sx(best.x)); cross.setAttribute("visibility", "visible");
-    if (best.y != null && isFinite(best.y)) { dot.setAttribute("cx", sx(best.x)); dot.setAttribute("cy", sy(best.y)); dot.setAttribute("visibility", "visible"); }
-    else dot.setAttribute("visibility", "hidden");
-    tip.replaceChildren(el("b", {}, best.y == null ? "not measured" : fmtNum(best.y, opts.digits) + (opts.unit ? " " + opts.unit : "") + (best.cut ? " (cut: at least)" : "")),
-      el("div", {}, best.label), ...(best.lines || []).map(t => el("div", { class: "m" }, t)));
+    series.forEach((s, j) => {
+      const p = s.points[k];
+      if (ok(p)) { dots[j].setAttribute("cx", sx(p.x)); dots[j].setAttribute("cy", sy(p.y)); dots[j].setAttribute("visibility", "visible"); }
+      else dots[j].setAttribute("visibility", "hidden");
+    });
+    const head = series.length === 1 ? [el("b", {}, val(series[0].points[k]))]
+      : series.map(s => el("div", {}, el("b", {}, val(s.points[k])), " ", el("span", { class: "m" }, s.name)));
+    tip.replaceChildren(...head, el("div", {}, best.label), ...(best.lines || []).map(t => el("div", { class: "m" }, t)));
     tip.style.display = "block";
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     tip.style.left = Math.min(ev.clientX + 12, innerWidth - tw - 8) + "px";
     tip.style.top = Math.max(8, ev.clientY - th - 12) + "px";
   };
   hit.addEventListener("pointermove", show);
-  hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); });
-  return svg;
+  hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); });
+  if (series.length === 1) return svg;
+  const legend = el("div", { class: "legend" });
+  for (const s of series) legend.append(el("span", {}, el("i", { class: s.dash ? "dash" : "", style: `border-top-color: ${s.color}` }), s.name));
+  return el("div", {}, legend, svg);
 }
 const card = (title, sub, chart) => el("div", { class: "card" }, el("h3", {}, title), el("div", { class: "sub" }, sub), chart);
 // a collapsed section whose contents are built the first time it opens
@@ -229,18 +260,39 @@ function lazyDetails(summary, sub, build) {
 }
 
 // ---------------------------------------------------------------- the scoreboard
+// The metrics. `v`: the value of a release's index (tracked metrics: the tracked set, else the
+// eight's, `alt` true); `eight` / `held`: the eight's and the held-out corpus's (the charts' other
+// series, the table's sub-row)
+const tracked = (k, fam8, k8) => ({ v: i => i.tracked ? [i.tracked[k], false] : [get(i, fam8 + "." + k8), true], t: i => (i.tracked || {})[k],
+  eight: i => get(i, fam8 + "." + k8), held: i => (i.heldout || {})[k], cuts: k === "wall_geomean_s" });
+const plain = key => ({ v: i => [get(i, key), false] });
 const METRICS = [
-  // family, key in index, title, unit, higher is better, digits, what
-  ["Soundness", "soundness.golden_pct", "Golden suites passing", "%", true, 1, "today's ~1,470 golden cases, PENDING left out"],
-  ["Soundness", "soundness.unsound_per_10k", "Fuzzing: unsound per 10k checks", "", false, 1, "today's fuzzer, 3 seeds CI never runs, ~10k checks"],
-  ["Precision", "precision.budget0_pct", "Golden passing with budget=0", "%", true, 1, "every call past its budget: what large programs fall back to"],
-  ["Precision", "precision.proven_pct", "Proven verdicts", "%", true, 1, "share of the 8 benchmarks' reads proven to succeed"],
-  ["Precision", "precision.known_facts_pct", "Hover facts known or typed", "%", true, 1, "share of the benchmarks' main-file hover values not `?`"],
-  ["Speed", "speed.wall_geomean_s", "Wall time, geometric mean", "s", false, 2, "8 benchmarks, no deadline, --facts; a cut run counts as 180 s"],
-  ["Speed", "speed.rss_geomean_mb", "Peak memory, geometric mean", "MB", false, 0, "8 benchmarks, runs that finished"],
-  ["Size", "size.engine_lines", "Engine lines", "", false, 0, "rowan/src outside models/ (objective: towards 10k)"],
-  ["Size", "size.model_lines", "Model lines", "", null, 0, "rowan/src/models/ (not an objective)"],
+  // family, title, unit, higher is better, digits, what, values
+  ["Soundness", "Golden suites passing", "%", true, 1, "today's ~1,470 golden cases, PENDING left out", plain("soundness.golden_pct")],
+  ["Soundness", "Fuzzing: unsound per 10k checks", "", false, 1, "today's fuzzer, 3 seeds CI never runs, ~10k checks", plain("soundness.unsound_per_10k")],
+  ["Precision", "Golden passing with budget=0", "%", true, 1, "every call past its budget: what large programs fall back to", plain("precision.budget0_pct")],
+  ["Precision", "Proven verdicts", "%", true, 1, "share of the tracked set's reads proven to succeed (pooled)", tracked("proven_pct", "precision", "proven_pct")],
+  ["Precision", "Possibly verdicts", "%", null, 1, "share of reads that may fail (pooled)", tracked("possibly_pct", "precision", "possibly_pct")],
+  ["Precision", "Hover facts known or typed", "%", true, 1, "share of the main files' hover values not `?` (pooled)", tracked("known_facts_pct", "precision", "known_facts_pct")],
+  ["Speed", "Wall time, geometric mean", "s", false, 2, "no deadline, --facts; a cut run counts as its timeout", tracked("wall_geomean_s", "speed", "wall_geomean_s")],
+  ["Speed", "Peak memory, geometric mean", "MB", false, 0, "runs that finished", tracked("rss_geomean_mb", "speed", "rss_geomean_mb")],
+  ["Speed", "Cut runs", "", false, 0, "the timeout or the memory bound cut it, or its analysis was cut", { v: i => [(i.tracked || {}).cuts, false], held: i => (i.heldout || {}).cuts }],
+  ["Combined", "Combined proven verdicts", "%", true, 1, "tracked + held-out, pooled", plain("combined.proven_pct")],
+  ["Combined", "Combined hover facts known", "%", true, 1, "tracked + held-out, pooled", plain("combined.known_facts_pct")],
+  ["Combined", "Combined wall time, geomean", "s", false, 2, "tracked + held-out, no deadline", plain("combined.wall_geomean_s")],
+  ["Combined", "Combined peak memory, geomean", "MB", false, 0, "tracked + held-out", plain("combined.rss_geomean_mb")],
+  ["Gap", "Gap: proven verdicts", "pts", null, 1, "tuned-on minus held-out; growing: overfitting", plain("combined.gap.proven_pct")],
+  ["Gap", "Gap: hover facts known", "pts", null, 1, "tuned-on minus held-out; growing: overfitting", plain("combined.gap.known_facts_pct")],
+  ["Gap", "Gap: wall time", "×", null, 2, "tuned-on / held-out geomean", plain("combined.gap.wall_geomean_s")],
+  ["Gap", "Gap: peak memory", "×", null, 2, "tuned-on / held-out geomean", plain("combined.gap.rss_geomean_mb")],
+  ["Size", "Engine lines", "", false, 0, "rowan/src outside models/ (objective: towards 10k)", plain("size.engine_lines")],
+  ["Size", "Model lines", "", null, 0, "rowan/src/models/ (not an objective)", plain("size.model_lines")],
 ];
+const FAMILY_NOTES = {
+  Precision: "Tracked: the eight benchmarks + the 23 cost-set modules (bench/costset.py), pooled; the eight alone dashed (the only series before the cost set was measured); held-out: bench/heldout.py's 52 modules nobody tunes against.",
+  Combined: "One number over everything measured: the tracked set and the held-out corpus pooled (verdict and fact shares over all their reads, geometric means over all their runs).",
+  Gap: "Tuned-on minus held-out. A gap that grows while the tuned-on numbers improve means the improvements do not carry over: overfitting.",
+};
 const get = (o, path) => path.split(".").reduce((a, k) => a == null ? a : a[k], o);
 const shortTag = t => t.startsWith("v0.1.") ? t.slice(5) : t.slice(0, 4);
 const prsText = r => (r.prs || []).map(p => `#${p.n} ${p.title}`);
@@ -252,41 +304,69 @@ function scoreboard(sb) {
   const rels = all.slice(start);
   const spread = noise(all);
   document.getElementById("lead").textContent =
-    `Every release (${all.length}, ${all[0].tag} to ${all[all.length - 1].tag}; the charts from ${rels[0].tag}, the first with merged pull requests) measured with one fixed measurement set: the tests, fuzzer, benchmark programs and site-packages scenarios of ${sb.measure_ref.slice(0, 7)}, on ${sb.machine}. Newer tests find older bugs, so this is how sound and precise each release really was, not how it did on the tests of its day.`;
-  // headline: the first loop release with numbers vs the latest
+    `Every release (${all.length}, ${all[0].tag} to ${all[all.length - 1].tag}; the charts from ${rels[0].tag}, the first with merged pull requests) measured with one fixed measurement set: the tests, fuzzer, benchmark programs and site-packages scenarios of ${sb.measure_ref.slice(0, 7)}, on ${sb.machine}. Newer tests find older bugs, so this is how sound and precise each release really was, not how it did on the tests of its day. Precision, time and memory are pooled over the tracked set (the eight benchmarks and the cost set's 23 dense modules, tuned on) and set beside the held-out corpus nobody tunes against.`;
   const first = rels[0], last = rels[rels.length - 1];
+  // headline: the combined numbers of the latest release that has them, with both parts and the gap
+  const comb = [...rels].reverse().find(r => r.index.combined);
+  const kc = document.getElementById("kpis-combined");
+  if (comb) {
+    const c = comb.index.combined, t = comb.index.tracked, h = comb.index.heldout;
+    for (const [title, k, unit, dg, ratio] of [["Proven verdicts", "proven_pct", "%", 1], ["Hover facts known", "known_facts_pct", "%", 1],
+                                              ["Wall time, geomean", "wall_geomean_s", "s", 2, true], ["Peak memory, geomean", "rss_geomean_mb", "MB", 0, true]]) {
+      const g = c.gap[k], gap = ratio ? `${fmtNum(g, 2)}×` : `${g >= 0 ? "+" : ""}${fmtNum(g, 1)} pts`;
+      kc.append(el("div", { class: "kpi combined" }, el("div", { class: "k" }, `${title}, combined`), el("div", { class: "v" }, fmtNum(c[k], dg) + " " + unit),
+        el("div", { class: "d" }, `tuned-on ${fmtNum(t[k], dg)} · held-out ${fmtNum(h[k], dg)}`),
+        el("div", { class: "d" }, `gap ${gap} (${comb.tag})`)));
+    }
+  } else kc.append(el("div", { class: "empty" }, "No release with both the tracked set and the held-out corpus measured yet."));
+  // the other headlines: the first loop release with numbers vs the latest
   const kpis = document.getElementById("kpis");
-  for (const [fam, key, title, unit, hib, dg] of METRICS) {
-    if (hib == null) continue;
-    const a = get(first.index, key), b = get(last.index, key);
-    kpis.append(el("div", { class: "kpi" }, el("div", { class: "k" }, title), el("div", { class: "v" }, fmtNum(b, dg) + (unit ? " " + unit : "")),
-      el("div", { class: "d" }, `${fmtNum(a, dg)} at ${first.tag}`)));
+  for (const [fam, title, unit, hib, dg, what, m] of METRICS) {
+    if (hib == null || fam === "Combined") continue;
+    const [b, balt] = m.v(last.index);
+    const firstT = rels.find(r => m.v(r.index)[0] != null && !m.v(r.index)[1]) || first;
+    const [a] = m.v(firstT.index);
+    kpis.append(el("div", { class: "kpi" }, el("div", { class: "k" }, title + (m.eight ? (balt ? " (the eight)" : " (tracked)") : "")),
+      el("div", { class: "v" }, fmtNum(b, dg) + (unit ? " " + unit : "")),
+      el("div", { class: "d" }, `${fmtNum(a, dg)} at ${firstT.tag}`),
+      ...(m.eight && !balt ? [el("div", { class: "d" }, `the eight: ${fmtNum(m.eight(last.index), dg)}`)] : [])));
   }
   // overview: small multiples by family
   const ov = document.getElementById("overview");
   const fams = [...new Set(METRICS.map(m => m[0]))];
-  const pointsFor = (key, extra) => rels.map((r, i) => ({ x: i, y: get(r.index, key), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
+  const pointsFor = (f, extra) => rels.map((r, i) => ({ x: i, y: f(r.index), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
   for (const fam of fams) {
     const g = el("div", { class: "grid" });
-    for (const [f, key, title, unit, hib, dg, what] of METRICS.filter(m => m[0] === fam))
-      g.append(card(title, `${what}; ${hib == null ? "" : hib ? "higher is better" : "lower is better"}`, lineChart(pointsFor(key, key.startsWith("speed.wall") ? r => ({ cut: r.index.speed.finished != null && r.index.speed.finished < 8 }) : null), { unit, digits: dg })));
-    ov.append(el("div", { class: "family" }, el("h3", {}, fam), g));
+    for (const [f, title, unit, hib, dg, what, m] of METRICS.filter(x => x[0] === fam)) {
+      const series = [];
+      if (m.eight) {
+        series.push({ name: "tracked (31)", color: "var(--series-1)", points: pointsFor(m.t) });
+        series.push({ name: "the eight", color: "var(--series-3)", dash: true, points: pointsFor(m.eight, m.cuts ? r => ({ cut: r.index.speed.finished != null && r.index.speed.finished < 8 }) : null) });
+      } else series.push({ name: fam === "Speed" ? "tracked (31)" : title, color: "var(--series-1)", points: pointsFor(i => m.v(i)[0]) });
+      if (m.held) series.push({ name: "held-out (52)", color: "var(--series-2)", points: pointsFor(m.held) });
+      g.append(card(title, what + (hib == null ? "" : hib ? "; higher is better" : "; lower is better"), multiChart(series, { unit, digits: dg })));
+    }
+    const fe = el("div", { class: "family" }, el("h3", {}, fam));
+    if (FAMILY_NOTES[fam]) fe.append(el("p", { class: "note" }, FAMILY_NOTES[fam]));
+    fe.append(g);
+    ov.append(fe);
   }
-  // the table
+  // the table: one row per release; the tracked metrics' values, † where only the eight were
+  // measured, and a sub-row with the eight's own
   const t = document.getElementById("table");
   const fh = el("tr", { class: "fam" }, el("th", { class: "l" }, "release"), el("th", { class: "l" }, "date"));
-  for (const m of METRICS) fh.append(el("th", { title: m[6] }, m[2] + (m[3] ? ` (${m[3]})` : "")));
+  for (const m of METRICS) fh.append(el("th", { title: m[5] }, m[1] + (m[2] ? ` (${m[2]})` : "")));
   fh.append(el("th", { class: "l" }, "pull requests"));
   t.append(el("thead", {}, fh));
   const tb = el("tbody");
   [...all].reverse().forEach((r, ri) => {
     const prev = all[all.length - 2 - ri];
     const tr = el("tr", {}, el("td", { class: "l" }, r.tag), el("td", { class: "l" }, r.date.slice(0, 10)));
-    for (const [fam, key, title, unit, hib, dg] of METRICS) {
-      const v = get(r.index, key), p = prev ? get(prev.index, key) : null;
-      const td = el("td", {}, fmtNum(v, dg));
-      if (v != null && p != null && Number(fmtNum(Math.abs(v - p), dg)) !== 0) {
-        const tol = key.startsWith("speed.wall") ? spread.wall : key.startsWith("speed.rss") ? spread.rss : 0;
+    for (const [fam, title, unit, hib, dg, what, m] of METRICS) {
+      const [v, alt] = m.v(r.index), [p, palt] = prev ? m.v(prev.index) : [null, false];
+      const td = el("td", {}, fmtNum(v, dg) + (alt && v != null ? "†" : ""));
+      if (v != null && p != null && alt === palt && Number(fmtNum(Math.abs(v - p), dg)) !== 0) {
+        const tol = /Wall/.test(title) ? spread.wall : /memory/.test(title) ? spread.rss : 0;
         const rel = p ? Math.abs(v - p) / Math.abs(p) : 1;
         const cls = hib == null || rel <= tol ? "flat" : (v > p) === hib ? "up" : "down";
         td.append(el("span", { class: "delta " + cls }, (v > p ? "+" : "") + fmtNum(v - p, dg)));
@@ -297,6 +377,12 @@ function scoreboard(sb) {
     (r.prs || []).forEach((p, i) => { if (i) prs.append("; "); prs.append(el("a", { href: `https://github.com/kaidaniel/rowan/pull/${p.n}` }, `#${p.n}`), " " + p.title); });
     tr.append(prs);
     tb.append(tr);
+    if (r.index.tracked) {
+      const sub = el("tr", { class: "sub" }, el("td", { class: "l" }, "↳ the eight"), el("td"));
+      for (const m of METRICS) sub.append(el("td", {}, m[6].eight ? fmtNum(m[6].eight(r.index), m[4]) : ""));
+      sub.append(el("td"));
+      tb.append(sub);
+    }
   });
   t.append(tb);
   drill(rels, pointsFor);
@@ -372,8 +458,8 @@ function drill(rels, pointsFor) {
     lazyDetails("Installed packages", "bench/sitepackages.py, from v0.1.40", body => {
       const scen = [...new Set(rels.flatMap(r => Object.keys(r.sitepackages || {}).filter(k => k !== "error")))].sort();
       const g = el("div", { class: "grid" });
-      g.append(card("facts gained by following", "all scenarios, --follow '*' against none", lineChart(pointsFor("sitepackages.gained"), { digits: 0 })));
-      g.append(card("facts lost by following", "should stay 0", lineChart(pointsFor("sitepackages.lost"), { digits: 0 })));
+      g.append(card("facts gained by following", "all scenarios, --follow '*' against none", lineChart(pointsFor(i => get(i, "sitepackages.gained")), { digits: 0 })));
+      g.append(card("facts lost by following", "should stay 0", lineChart(pointsFor(i => get(i, "sitepackages.lost")), { digits: 0 })));
       for (const s of scen) g.append(card(s, "--follow '*': wall time (s)", lineChart(rels.map((r, i) => ({ x: i, y: (((r.sitepackages || {})[s] || {}).follow || {}).wall_s, label: r.tag, lines: prsText(r) })), { unit: "s" })));
       body.append(g);
     }),

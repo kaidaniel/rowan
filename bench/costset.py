@@ -96,30 +96,35 @@ def cmd_fetch(a) -> None:
         print(f"{m['name']}: {p.read_text(errors='replace').count(chr(10))} lines")
 
 
-def cmd_metrics(a) -> None:
+def metrics(binary: Path, mode: str, limits: str | None, only: str | None, jobs: int, out_dir: Path) -> dict:
+    """Every module once (bench/heldout.py's `run_module`), pooled as there: the scoreboard's
+    `costset` family runs it with mode `nodeadline`, serially."""
     from concurrent.futures import ThreadPoolExecutor
 
     heldout.SRC = WORK / "src"
-    mods, pkgs = selected(a.only)
-    lim, timeout = a.limits, heldout.DEFAULT_TIMEOUT_S
-    if a.mode == "nodeadline":
-        lim = ",".join(x for x in [a.limits, "ms=100000000"] if x)
+    mods, pkgs = selected(only)
+    lim, timeout = limits, heldout.DEFAULT_TIMEOUT_S
+    if mode == "nodeadline":
+        lim = ",".join(x for x in [limits, "ms=100000000"] if x)
         timeout = heldout.NODEADLINE_TIMEOUT_S
     todo = [(m, module_path(m, pkgs)) for m in mods]
-    out_dir = WORK / "logs" / a.mode
 
     def one(t):
         m, path = t
-        r = heldout.run_module(Path(a.rowan), path, lim, timeout, out_dir)
+        r = heldout.run_module(Path(binary), path, lim, timeout, out_dir)
         r["kind"] = m["kind"]
         r["lines"] = path.read_text(errors="replace").count("\n")
         print(f"  {m['name']:<28} {r['lines']:>5} lines  {'ok ' if r['finished'] else r.get('why')} {str(r.get('wall_s')):>6} s"
               f"{' cut' if r.get('cut') else '    '} {str(r.get('rss_mb')):>5} MB  work {r.get('work')}", file=sys.stderr, flush=True)
         return m["name"], r
 
-    with ThreadPoolExecutor(a.j) as ex:
+    with ThreadPoolExecutor(jobs) as ex:
         runs = dict(ex.map(one, todo))
-    res = {"corpus": "costset", "mode": a.mode, "limits": lim, "binary": a.rowan, "pooled": heldout.pooled(runs), "runs": runs}
+    return {"corpus": "costset", "mode": mode, "limits": lim, "binary": str(binary), "pooled": heldout.pooled(runs), "runs": runs}
+
+
+def cmd_metrics(a) -> None:
+    res = metrics(Path(a.rowan), a.mode, a.limits, a.only, a.j, WORK / "logs" / a.mode)
     heldout.print_pooled("costset", res["pooled"])
     if a.json:
         Path(a.json).write_text(json.dumps(res, indent=1))
