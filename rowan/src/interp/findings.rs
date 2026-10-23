@@ -95,6 +95,22 @@ pub struct Fact {
     pub passed: Vec<(Chain, u32, Vec<ObjId>)>,
 }
 
+/// A hover fact's recording in a round of a loop's fixpoint, made (rendered, its rows joined)
+/// only once the round stands: most rounds are superseded by the next, and rendering every
+/// round's values was most of what hover facts cost. Its state is a copy of the one it was
+/// recorded in (O(1)); objects are never freed, so its ids still mean what they meant.
+pub(in crate::interp) struct PendingFact {
+    key: FactKey,
+    v: Value,
+    state: State,
+    /// the call it goes to (None: the general run's), whether it is an assignment's, made in
+    /// an entry run, the function whose names its text uses
+    call: Option<CallSite>,
+    writing: bool,
+    entry: bool,
+    scope: u32,
+}
+
 /// A call's site: its module (`frontend`'s index) and line.
 pub type CallSite = (u32, u32);
 
@@ -240,6 +256,9 @@ pub struct Findings {
     /// per loop running to a fixpoint (innermost last): the facts its running round changed, as
     /// they were before (None: not there), put back when the next round supersedes the round
     fact_rounds: Vec<FxHashMap<FactKey, Option<Fact>>>,
+    /// per loop running to a fixpoint (innermost last): the recordings its running round made,
+    /// in order, rendered only if that round stands (`PendingFact`)
+    pending: Vec<Vec<PendingFact>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -283,6 +302,7 @@ impl Findings {
     pub(in crate::interp) fn fact_rounds_begin(&mut self) {
         if self.facts_on {
             self.fact_rounds.push(FxHashMap::default());
+            self.pending.push(Vec::new());
         }
     }
 
@@ -290,6 +310,9 @@ impl Findings {
     /// loop's): the facts it recorded are put back as they were.
     pub(in crate::interp) fn fact_round_restart(&mut self) {
         let Some(j) = self.fact_rounds.last_mut() else { return };
+        if let Some(p) = self.pending.last_mut() {
+            p.clear();
+        }
         for (k, f) in std::mem::take(j) {
             match f {
                 Some(f) => drop(self.facts.insert(k, f)),
@@ -299,17 +322,23 @@ impl Findings {
     }
 
     /// The innermost loop's fixpoint ends: its last round's facts stand (an enclosing loop's
-    /// round may still put them back).
-    pub(in crate::interp) fn fact_rounds_end(&mut self) {
+    /// round may still put them back). Its recordings go to the enclosing loop's round, or,
+    /// outside any, are returned to be made (`Analyzer::apply_fact`).
+    pub(in crate::interp) fn fact_rounds_end(&mut self) -> Vec<PendingFact> {
         if !self.facts_on {
-            return;
+            return Vec::new();
         }
         let j = self.fact_rounds.pop().unwrap_or_default();
+        let mut p = self.pending.pop().unwrap_or_default();
         if let Some(outer) = self.fact_rounds.last_mut() {
             for (k, f) in j {
                 outer.entry(k).or_insert(f);
             }
+            if let Some(o) = self.pending.last_mut() {
+                o.append(&mut p);
+            }
         }
+        p
     }
 
     /// Fact `k` is about to change: keep what it was for the running round of a loop.
@@ -457,14 +486,35 @@ impl Analyzer {
         if !writing && self.findings.facts.get(&(node.line, node.col, name)).is_some_and(|e| e.written) {
             return;
         }
-        let rows = self.fact_rows(v, state);
         let scope = self.frame().func.unwrap_or(0);
+        let key = (node.line, node.col, name);
+        self.findings.touch_fact(key);
+        let p = PendingFact { key, v: v.clone(), state: state.copy(), call, writing, entry: self.entry.run.is_some(), scope };
+        // (in a loop's fixpoint: made once its round stands, the fact there for a parameter's
+        // own facts meanwhile; torch programs name dims by the running frame: at once)
+        if !self.m.torch_on && !self.findings.pending.is_empty() {
+            self.findings.facts.entry(key).or_default();
+            self.findings.pending.last_mut().unwrap().push(p);
+            return;
+        }
+        self.apply_fact(p);
+    }
+
+    /// A recording made (`PendingFact`): its value's text and legend into the fact's texts
+    /// (`add_text`), its objects' rows joined.
+    pub(in crate::interp) fn apply_fact(&mut self, p: PendingFact) {
+        let PendingFact { key, ref v, ref state, call, writing, entry, scope } = p;
+        let general = call.is_none();
+        if !writing && self.findings.facts.get(&key).is_some_and(|e| e.written) {
+            return;
+        }
+        let rows = self.fact_rows(v, state);
         // (a fact that has all the texts it shows only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
-        self.findings.touch_fact((node.line, node.col, name));
+        self.findings.touch_fact(key);
         if !self.m.torch_on {
-            if let Some(e) = self.findings.facts.get_mut(&(node.line, node.col, name)) {
+            if let Some(e) = self.findings.facts.get_mut(&key) {
                 if e.full(call) && (e.written || !writing) {
                     e.join_rows(rows, general);
                     return;
@@ -480,13 +530,19 @@ impl Analyzer {
         } else {
             (None, FxHashMap::default(), Vec::new())
         };
-        let render = |an: &Analyzer| crate::interp::render::in_scope(scope, || (crate::interp::render::render_value(an, state, v, 0, &mut Vec::new()), crate::interp::render::value_legend(an, state, v)));
+        let render = |an: &Analyzer| {
+            crate::interp::render::in_scope(scope, || {
+                let text = crate::interp::render::render_value(an, state, v, 0, &mut Vec::new());
+                let legend = crate::interp::render::value_legend(an, state, v, &text);
+                (text, legend)
+            })
+        };
         let (text, mut legend) = match pctx {
             Some(ctx) => crate::models::shape::with_ctx(ctx, || render(self)),
             None => render(self),
         };
         legend.extend(tlegend);
-        let e = self.findings.facts.entry((node.line, node.col, name)).or_default();
+        let e = self.findings.facts.entry(key).or_default();
         if writing && !e.written {
             e.written = true;
             e.general.clear();
@@ -504,7 +560,7 @@ impl Analyzer {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        e.add_text(text, call, legend, self.entry.run.is_some());
+        e.add_text(text, call, legend, entry);
         e.join_rows(rows, general);
     }
 

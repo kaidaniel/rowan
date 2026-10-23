@@ -126,8 +126,8 @@ impl Analyzer {
 
     /// A generator expression: a generator (`FuncNode::GenExp`) of the iterator its first
     /// iterable gives here, its body run when its items are taken (`force_gen`); one whose items
-    /// are all taken before other code runs (`Scopes::eager_genexps`), or an `async` one: run
-    /// here, a one-shot iterator over its items.
+    /// are all taken before other code runs (`Scopes::eager_genexps`, `bulk_genexp`), or an
+    /// `async` one: run here, a one-shot iterator over its items.
     fn expr_generator(&mut self, g: &'static ast::ExprGenerator, node: &'static ast::Expr, state: &mut State) -> Value {
         let addr = node as *const ast::Expr as usize;
         let eager = std::mem::take(&mut self.mode.bulk_genexp) == addr || self.heap.module_info(self.frame().module).scopes.eager_genexps.contains(&addr);

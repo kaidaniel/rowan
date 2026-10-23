@@ -185,7 +185,9 @@ impl Analyzer {
             self.cx.recent_stack.pop();
             self.unwind.loop_stack.pop();
         }
-        self.findings.fact_rounds_end();
+        for p in self.findings.fact_rounds_end() {
+            self.apply_fact(p);
+        }
         self.cx.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
         (head, breaks, back)

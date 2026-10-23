@@ -218,22 +218,41 @@ impl Analyzer {
         }
     }
 
+    /// Is the test's callee the library function `f` (`isinstance`, `hasattr`, `all`,
+    /// `inspect.isclass`), as evaluated in the test (`traced`), or, a test applied again, by the
+    /// name's binding here (none: the builtin's)?
+    fn callee_is_builtin(&self, call: &'static ast::ExprCall, f: &str, state: &State) -> bool {
+        let callee = self.traced(&call.func).or_else(|| match &*call.func {
+            ast::Expr::Name(n) => self.name_value(state, s(n.id.as_str())).or_else(|| {
+                let fr = self.frame();
+                let local = fr.kind == super::FrameKind::Function && self.heap.module_info(fr.module).scopes.get(fr.scope).is_local(n.id.as_str());
+                (!local).then(Value::new)
+            }),
+            _ => None,
+        });
+        let quals = ["builtins.isinstance", "builtins.hasattr", "builtins.all", "inspect.isclass"];
+        callee.is_some_and(|v| {
+            (v.pts.is_empty() && v.kv.is_bot() && f != "isclass")
+                || (v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && quals.contains(&q.as_str()))))
+        })
+    }
+
     /// A test that is a call on the path where it is `truth`: `isinstance`, `hasattr`, `callable`,
     /// `d.get(k)`, a user predicate, …
     fn narrow_call(&mut self, test: &'static ast::Expr, call: &'static ast::ExprCall, truth: bool, state: &mut State) {
         let args = &call.arguments.args;
-        // `isclass(x)` / `inspect.isclass(x)`
         let fname = match &*call.func {
             ast::Expr::Name(n) => Some(n.id.as_str()),
             ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
             _ => None,
         };
+        // (by the callee, not its name, `callee_is_builtin`; methods: their receivers tell)
+        let fname = fname.filter(|f| self.callee_is_builtin(call, f, state) || (matches!(&*call.func, ast::Expr::Attribute(_)) && *f != "isclass"));
         if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
             self.narrow_isclass(s(n.id.as_str()), truth, state);
             return;
         }
-        if let ast::Expr::Name(fnm) = &*call.func {
-            let fname = fnm.id.as_str();
+        if let (ast::Expr::Name(_), Some(fname)) = (&*call.func, fname) {
             if fname == "isinstance" && args.len() == 2 {
                 match &args[0] {
                     ast::Expr::Name(n) => self.narrow_isinstance(NarrowTarget::Name(n.id.to_string()), &args[1], truth, state),

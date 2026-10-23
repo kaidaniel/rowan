@@ -54,11 +54,6 @@ const NOTATION = [
   [(t) => / \| |(^|\n)\s*\| /.test(t), "a | b", "a or b (by path or call)"],
   [(t) => /\bTensor\[\*\]/.test(t), "Tensor[*]", "a tensor of any number of dimensions"],
   [(t) => /\[\*\]/.test(t.replace(/\bTensor\[\*\]/g, "")), "[*]", "any element"],
-  // (containers of unknown length or keys, in typing notation: `list[x]` is not a list of one x)
-  [(t) => /(^|[^\w.])list\[/.test(t), "list[x]", "a list of any length of `x`"],
-  [(t) => /(^|[^\w.])set\[/.test(t), "set[x]", "a set of any size of `x`"],
-  [(t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t), "tuple[x, ...]", "a tuple of any length of `x`"],
-  [(t) => /(^|[^\w.])dict\[/.test(t), "dict[k, v]", "a dict of any size, keys `k`, values `v`"],
   [(t) => t.includes("…"), "…", "not shown"],
   [(t) => t.includes(" (only if `"), "(only if x)", "needed only on calls where `x` holds of the arguments as passed"],
 ];
@@ -67,7 +62,8 @@ const NOTATION = [
  * Values are printed as Python with a few additions (see NOTATION): `?` an unknown value;
  * `{"a": 1, "b"?: ?, "c"~: ?, **?}` a dict with "a" always, "b" on some paths, "c" unless
  * unknown code removed it, and possibly other keys; `Name(a=1, **?)` an object; `list[X]` a
- * list of unknown length (`set[X]`, `tuple[X, ...]`, `dict[K, V]` likewise, each with its Note);
+ * list of unknown length (`set[X]`, `tuple[X, ...]`, `dict[K, V]` likewise: typing notation,
+ * not explained);
  * `…` what the printer left out; `<Match>` an object by its type.
  */
 const VALUE_WIDTH = 60;
@@ -470,7 +466,8 @@ function siteLines(f, shown) {
 /**
  * How the analysis that answered was cut, for the last Note (null when it ran whole): the whole
  * program's stopped at its deadline (`analysis.cut`); a module code's document while the whole
- * program's runs or after it was cut (`module`, `whole`); a function run on its own (`fn`).
+ * program's runs or after it was cut (`module`, `whole`); a function run on its own (`fn`) only
+ * when that run was cut too (the status bar says functions are analysed when hovered).
  */
 function runNote(run) {
   if (!run) return null;
@@ -480,9 +477,10 @@ function runNote(run) {
   const whole = ctx.whole ? `the whole program's analysis stopped at its ${secs(ctx.whole.deadline_ms)} time limit` : ctx.pending ? "the whole program's analysis is still running" : "the whole program's analysis took too long";
   if (run.fn) {
     const a = run.analysis || {};
+    if (!a.callees_cut && !a.cut) return null;
     const callees = a.callees_cut ? "; past its work limit, the calls made by the functions it calls count as code rowan cannot see" : "";
     const cut = a.cut ? `; this run stopped at its own ${secs(a.deadline_ms)} time limit too: code it had not reached ${unseen}` : "";
-    return `analysed alone, for any call (in ${secs(a.ms || 0)}): ${whole}${callees}${cut}`;
+    return `analysed alone, for any call: ${whole}${callees}${cut}`;
   }
   if (run.module) return `from the module's own code only (functions are analysed when you hover them): ${whole}`;
   const a = run.analysis;
@@ -1159,7 +1157,7 @@ function activate(context) {
               (r) => {
                 mergeResult(idx, r.result);
                 od.spans.push(r.span);
-                status.text = `$(check) rowan: ${od.spans.length} function${od.spans.length > 1 ? "s" : ""} analysed on demand`;
+                status.text = `$(check) rowan: ${od.spans.length} function${od.spans.length > 1 ? "s" : ""} analysed when hovered, each alone for any call`;
               },
               (e) => output.appendLine(`${doc.uri.fsPath}:${line}: ${e.message}`)
             ));

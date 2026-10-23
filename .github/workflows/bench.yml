@@ -374,6 +374,12 @@ jobs:
           ref: gh-pages
           path: site
 
+      - name: The overview page and the release scoreboard
+        run: |
+          cp site/dev/bench/index.html site/dev/bench/charts.html
+          cp bench/site/index.html site/dev/bench/index.html
+          cp bench/scoreboard.json site/dev/bench/scoreboard.json
+
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site

@@ -19,12 +19,31 @@ fn max_depth() -> u32 {
 }
 
 /// The values at positions `from..to` of sequence `o` (`?` where not known).
+/// (Past `RENDER_OBJECTS`, the rest one `…`.)
 fn position_texts(an: &Analyzer, state: &State, o: ObjId, from: usize, to: usize, depth: u32, seen: &mut Vec<ObjId>) -> Vec<String> {
-    (from..to).map(|i| render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), depth, seen)).collect()
+    let mut out = Vec::new();
+    for i in from..to {
+        if RENDER_LEFT.with(|c| c.get()) == 0 {
+            out.push("…".to_string());
+            break;
+        }
+        out.push(render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), depth, seen));
+    }
+    out
+}
+
+/// Alternatives in the order typing writes them: the unknown `?`, then `None`, last
+/// (`int(?) | None`, `1 | ? | None`).
+fn none_last<S: AsRef<str>>(parts: &mut [S]) {
+    parts.sort_by_key(|p| match p.as_ref() {
+        "?" => 1,
+        "None" => 2,
+        _ => 0,
+    });
 }
 
 /// Values rendered at several runs of a line as one: their alternatives (split at the top
-/// level, outside brackets and strings), each once, the unknown `?` last.
+/// level, outside brackets and strings), each once, `?` and `None` last (`none_last`).
 pub fn join_alternatives(texts: &[String]) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for t in texts {
@@ -53,10 +72,7 @@ pub fn join_alternatives(texts: &[String]) -> String {
             out.push(p);
         }
     }
-    if let Some(i) = out.iter().position(|p| *p == "?") {
-        let q = out.remove(i);
-        out.push(q);
-    }
+    none_last(&mut out);
     out.join(" | ")
 }
 
@@ -67,6 +83,9 @@ pub fn join_alternatives(texts: &[String]) -> String {
 /// anything unknown (`**?`: other keys or attributes may exist).  Depth and width are
 /// limited (`…` marks what is not shown; also a cycle).
 pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    if depth == 0 {
+        RENDER_LEFT.with(|c| c.set(RENDER_OBJECTS));
+    }
     let mut parts: Vec<String> = Vec::new();
     // literals
     // (an unknown's literals it may be: `8080 | ?`)
@@ -90,6 +109,10 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     }
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
+        if RENDER_LEFT.with(|c| c.get()) == 0 {
+            parts.push("…".into());
+            break;
+        }
     }
     // a part nothing is known about (data, keys of something): `?`; keys of a builtin type
     let keys = match &v.kv {
@@ -103,7 +126,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
     } else if let Some((t, opt)) = v.kv.data_site().and_then(|l| label_base(&intern::str_get(l))) {
-        // (an unknown of a type or None: `None | int(?)`)
+        // (an unknown of a type or None: `int(?) | None`)
         if opt {
             parts.push("None".into());
         }
@@ -116,11 +139,8 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     }
     parts.sort();
     parts.dedup();
-    // the unknown part last: `1 | 2 | ?`
-    if parts.len() > 1 && parts.iter().any(|p| p == "?") {
-        parts.retain(|p| p != "?");
-        parts.push("?".into());
-    }
+    // the unknown part and None last: `1 | 2 | ? | None`
+    none_last(&mut parts);
     // (literals left out, `…`, beside the literals: `"a" | "b" | … | str(?)`)
     if let Some(i) = parts.iter().position(|p| p == "…") {
         let dots = parts.remove(i);
@@ -137,6 +157,10 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         return "?".into();
     }
     let kind = an.heap.kind(o);
+    // (past `RENDER_OBJECTS` objects in one value: not shown)
+    if RENDER_LEFT.with(|c| c.replace(c.get().saturating_sub(1))) == 0 {
+        return "…".into();
+    }
     if seen.contains(&o) {
         // a cycle back to an object being printed
         return "…".into();
@@ -440,7 +464,13 @@ pub(super) fn is_internal_key(k: KeyId) -> bool {
     intern::key_as_str(k).map(|s| s.starts_with('\u{1}')).unwrap_or(false)
 }
 
+/// Objects one value's text shows at most: each of its objects may be several, each of
+/// theirs several again (40 tuples of 40 tuples, three deep: millions of texts).
+const RENDER_OBJECTS: u32 = 4096;
+
 thread_local! {
+    /// Objects the value being rendered may still show (`RENDER_OBJECTS`).
+    static RENDER_LEFT: std::cell::Cell<u32> = const { std::cell::Cell::new(RENDER_OBJECTS) };
     /// The function whose names expressions are printed for (`expr:` data from elsewhere —
     /// a callee's `1 + b` returned to its caller — prints as `?`).
     static RENDER_SCOPE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -563,8 +593,9 @@ fn exception_args(an: &Analyzer, state: &State, o: ObjId, ns: Ns, row: &crate::d
 }
 
 /// The symbols a value mentions (unknown objects printed by name) with what is known about
-/// each: the keys / attributes seen on it, what an unknown call may return, else `?`.
-pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, String)> {
+/// each: the keys / attributes seen on it, what an unknown call may return, else `?`; in the
+/// order the value's `text` (`render_value`'s) mentions them.
+pub fn value_legend(an: &Analyzer, state: &State, v: &Value, text: &str) -> Vec<(String, String)> {
     fn walk(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>, out: &mut Vec<(String, String)>) {
         if depth > max_depth() || out.len() >= 8 {
             return;
@@ -620,7 +651,6 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
     let mut out = Vec::new();
     walk(an, state, v, 0, &mut Vec::new(), &mut out);
     // in the order the value mentions them
-    let text = render_value(an, state, v, 0, &mut Vec::new());
     out.sort_by_key(|(s0, _)| text.find(s0.as_str()).unwrap_or(usize::MAX));
     out
 }
@@ -644,6 +674,7 @@ mod tests {
         let t = |xs: &[&str]| super::join_alternatives(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         assert_eq!(t(&["{\"a\": 1} | None", "None | {\"a\": 1}"]), "{\"a\": 1} | None");
         assert_eq!(t(&["{\"a\": 1 | 2}", "?", "3"]), "{\"a\": 1 | 2} | 3 | ?");
+        assert_eq!(t(&["None | int(?)", "?"]), "int(?) | ? | None");
         assert_eq!(t(&["\"x | y\" | ?", "\"x | y\""]), "\"x | y\" | ?");
     }
 }

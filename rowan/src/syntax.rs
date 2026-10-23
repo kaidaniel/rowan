@@ -216,18 +216,130 @@ pub fn contains_call(e: &ast::Expr) -> bool {
     found
 }
 
-/// Functions that take an iterable's items at once, by the name they are called by.
-const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "bytes", "bytearray", "join", "extend", "update", "Counter", "deque", "OrderedDict", "cat", "concat", "concatenate", "stack"];
+/// Builtins that take an iterable's items at once, by name (where the module binds no such name:
+/// `Bound`).
+const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "sum", "min", "max", "bytes", "bytearray"];
+
+/// The names each scope of a module binds (by its `def`, `lambda` or `class` node's address,
+/// 0 the module: targets, `def`, `class`, imports, parameters, `except … as`, patterns; a
+/// comprehension's in the scope around it; `global` ones the module's), and whether it has an
+/// `import *`, which may bind any: a name no scope around a place binds is the builtin there
+/// (monkey-patching `builtins` aside).
+#[derive(Default)]
+pub struct Bound {
+    names: rustc_hash::FxHashMap<usize, rustc_hash::FxHashSet<String>>,
+    star: bool,
+    at: Vec<usize>,
+}
+
+impl Bound {
+    pub fn of(body: &[ast::Stmt]) -> Bound {
+        let mut b = Bound { at: vec![0], ..Default::default() };
+        body.iter().for_each(|st| b.visit_stmt(st));
+        b
+    }
+
+    /// Is `name` surely the builtin of that name in code whose scopes (their nodes' addresses,
+    /// innermost first, the module's 0) are `chain`?
+    pub fn builtin(&self, name: &str, chain: &[usize]) -> bool {
+        !self.star && chain.iter().all(|a| self.names.get(a).is_none_or(|ns| !ns.contains(name)))
+    }
+
+    fn bind(&mut self, name: &str) {
+        let at = *self.at.last().unwrap_or(&0);
+        self.names.entry(at).or_default().insert(name.to_string());
+    }
+
+    /// Walk `f` inside the scope of node `addr`.
+    fn inside(&mut self, addr: usize, f: impl FnOnce(&mut Self)) {
+        self.at.push(addr);
+        f(self);
+        self.at.pop();
+    }
+}
+
+impl<'a> SourceOrderVisitor<'a> for Bound {
+    fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+        match st {
+            ast::Stmt::FunctionDef(f) => {
+                self.bind(&f.name.id);
+                // (decorators, defaults and annotations walked inside too: more bound, never less)
+                return self.inside(f as *const _ as usize, |b| source_order::walk_stmt(b, st));
+            }
+            ast::Stmt::ClassDef(c) => {
+                self.bind(&c.name.id);
+                return self.inside(c as *const _ as usize, |b| source_order::walk_stmt(b, st));
+            }
+            ast::Stmt::Import(i) => i.names.iter().for_each(|a| self.bind(a.asname.as_ref().map_or_else(|| a.name.id.split('.').next().unwrap_or(""), |x| x.id.as_str()))),
+            ast::Stmt::ImportFrom(i) => {
+                for a in &i.names {
+                    match (&a.asname, a.name.id.as_str()) {
+                        (None, "*") => self.star = true,
+                        (Some(x), _) => self.bind(&x.id),
+                        (None, n) => self.bind(n),
+                    }
+                }
+            }
+            ast::Stmt::Global(g) => g.names.iter().for_each(|n| { self.names.entry(0).or_default().insert(n.id.to_string()); }),
+            _ => {}
+        }
+        source_order::walk_stmt(self, st);
+    }
+    fn visit_expr(&mut self, e: &'a ast::Expr) {
+        match e {
+            ast::Expr::Name(n) if !matches!(n.ctx, ast::ExprContext::Load) => self.bind(&n.id),
+            ast::Expr::Lambda(l) => return self.inside(l as *const _ as usize, |b| source_order::walk_expr(b, e)),
+            _ => {}
+        }
+        source_order::walk_expr(self, e);
+    }
+    fn visit_parameter(&mut self, p: &'a ast::Parameter) {
+        self.bind(&p.name.id);
+        source_order::walk_parameter(self, p);
+    }
+    fn visit_except_handler(&mut self, h: &'a ast::ExceptHandler) {
+        let ast::ExceptHandler::ExceptHandler(x) = h;
+        if let Some(n) = &x.name {
+            self.bind(&n.id);
+        }
+        source_order::walk_except_handler(self, h);
+    }
+    fn visit_pattern(&mut self, p: &'a ast::Pattern) {
+        let name = match p {
+            ast::Pattern::MatchAs(m) => m.name.as_ref(),
+            ast::Pattern::MatchStar(m) => m.name.as_ref(),
+            ast::Pattern::MatchMapping(m) => m.rest.as_ref(),
+            _ => None,
+        };
+        if let Some(n) = name {
+            self.bind(&n.id);
+        }
+        source_order::walk_pattern(self, p);
+    }
+    fn visit_type_param(&mut self, t: &'a ast::TypeParam) {
+        self.bind(&t.name().id);
+        source_order::walk_type_param(self, t);
+    }
+}
+
+/// Does call `c` call, surely, a builtin taking every item at once: `sum(…)` where the module
+/// binds no `sum` (a program's own `sum` may take none), `"…".join(…)` of a literal str?
+fn calls_take_all(c: &ast::ExprCall, builtin: &dyn Fn(&str) -> bool) -> bool {
+    match &*c.func {
+        ast::Expr::Name(n) => TAKE_ALL.contains(&n.id.as_str()) && builtin(n.id.as_str()),
+        ast::Expr::Attribute(a) => a.attr.as_str() == "join" && matches!(&*a.value, ast::Expr::StringLiteral(_)),
+        _ => false,
+    }
+}
 
 /// The generator expressions whose items are all taken before any other code runs, which
 /// therefore run where they are written, as list comprehensions (their names the enclosing
 /// code's), among a call's or a display's parts: one unpacked (`f(*g)`, `[*g, x]`, taken as it
-/// is reached), and the sole argument of a builtin or method that takes an iterable's items at
-/// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`) with nothing evaluated after it. Taken by
-/// name: a name bound to something else (a shadowed `sum`) runs one so too, which is right only
-/// if that callee also takes the items at once; otherwise the items' effects come too early (a
-/// known gap).
-pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
+/// is reached), and the sole argument of a builtin that takes an iterable's items at once with
+/// nothing evaluated after it (`calls_take_all`). Others given alone to such a function (a
+/// method, `xs.extend(…)`, `torch.cat(…)`) are decided at the call by what the callee is
+/// (`bulk_genexp`).
+pub fn eager_genexps<'a>(e: &'a ast::Expr, builtin: &dyn Fn(&str) -> bool) -> Vec<&'a ast::Expr> {
     let parts: &[ast::Expr] = match e {
         ast::Expr::Call(c) => &c.arguments.args,
         ast::Expr::List(l) => &l.elts,
@@ -239,7 +351,7 @@ pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
         ast::Expr::Starred(st) if matches!(&*st.value, ast::Expr::Generator(_)) => Some(&*st.value),
         _ => None,
     }).collect();
-    if let Some(g) = e.as_call_expr().and_then(|c| sole_genexp(c).filter(|_| TAKE_ALL.contains(&callee_name(c)))) {
+    if let Some(g) = e.as_call_expr().and_then(|c| sole_genexp(c).filter(|_| calls_take_all(c, builtin))) {
         out.push(g);
     }
     out
@@ -249,7 +361,7 @@ pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
 /// whole to a function taking every item at once (`entries = (…)` then `for e in
 /// sorted(entries):`, `return dict(items)`): nothing runs between, so they may run where
 /// written (a raise in them then leaves the name unbound: not for bodies in a `try`).
-pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<&ast::Expr> {
+pub fn consumed_next_genexps<'a>(body: &'a [ast::Stmt], builtin: &dyn Fn(&str) -> bool) -> Vec<&'a ast::Expr> {
     let mut out = Vec::new();
     for w in body.windows(2) {
         let ast::Stmt::Assign(a) = &w[0] else { continue };
@@ -267,7 +379,7 @@ pub fn consumed_next_genexps(body: &[ast::Stmt]) -> Vec<&ast::Expr> {
         };
         let Some(ast::Expr::Call(c)) = first else { continue };
         let sole = matches!(&c.arguments.args[..], [ast::Expr::Name(x)] if x.id == n.id) && c.arguments.keywords.iter().all(|k| k.arg.is_some() && runs_no_code(&k.value));
-        if sole && TAKE_ALL.contains(&callee_name(c)) && matches!(&*c.func, ast::Expr::Name(_)) {
+        if sole && matches!(&*c.func, ast::Expr::Name(_)) && calls_take_all(c, builtin) {
             out.push(g);
         }
     }
@@ -280,15 +392,6 @@ pub fn sole_genexp(c: &ast::ExprCall) -> Option<&ast::Expr> {
     match c.arguments.args.as_ref() {
         [g @ ast::Expr::Generator(_)] if c.arguments.keywords.iter().all(|k| k.arg.is_some() && runs_no_code(&k.value)) => Some(g),
         _ => None,
-    }
-}
-
-/// The last name of what a call calls (`f` of `f(…)`, `join` of `s.join(…)`).
-fn callee_name(c: &ast::ExprCall) -> &str {
-    match &*c.func {
-        ast::Expr::Name(n) => n.id.as_str(),
-        ast::Expr::Attribute(a) => a.attr.as_str(),
-        _ => "",
     }
 }
 

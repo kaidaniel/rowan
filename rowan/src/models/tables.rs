@@ -128,6 +128,7 @@ pub const SELF_REPORTING: &[&str] = &["excinit", "str.format", "cfgparser.", "cf
 pub const BULK_CONSUMERS: &[&str] = &[
     "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max", "builtins.any", "builtins.all",
     "str.join", "list.extend", "set.update", "dict.update", "collections.Counter", "collections.deque", "collections.OrderedDict",
+    "builtins.bytes", "builtins.bytearray", "torch.cat", "torch.concat", "torch.concatenate", "torch.stack", "numpy.concatenate", "numpy.stack", "pandas.concat",
 ];
 
 pub const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super"];

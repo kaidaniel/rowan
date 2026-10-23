@@ -432,6 +432,8 @@ const PASSING_BUILTINS: &[&str] = &["list", "tuple", "set", "frozenset", "dict",
 /// The scan (`code_uses`): `locals` are the function's own names (parameters included).
 pub struct Flow<'a> {
     pub locals: &'a dyn Fn(&str) -> bool,
+    /// names bound around the code (by its module, an enclosing function): not builtins
+    pub shadows: &'a dyn Fn(&str) -> bool,
     /// the instance receiver's name, for a method run with one (not a static or class method)
     pub me: Option<&'a str>,
     pub pkg: String,
@@ -452,9 +454,10 @@ pub struct Flow<'a> {
 }
 
 impl<'a> Flow<'a> {
-    /// A scan of code whose own names `locals` picks, `me` its receiver's name, in package `pkg`.
-    pub fn new(locals: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
-        Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
+    /// A scan of code whose own names `locals` picks (and those bound around it `shadows`), `me`
+    /// its receiver's name, in package `pkg`.
+    pub fn new(locals: &'a dyn Fn(&str) -> bool, shadows: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
+        Flow { locals, shadows, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
     }
 
     /// For a generator expression's code: its first iterable `it` stands for its parameter `.0`.
@@ -635,7 +638,7 @@ impl<'a> Flow<'a> {
         }
         if kept.is_empty() {
             let callee = match &*c.func {
-                Expr::Name(f) if !self.local(f.id.as_str()) && !PASSING_BUILTINS.contains(&f.id.as_str()) && !super::PURE_BUILTINS.contains(&f.id.as_str()) => (s(f.id.as_str()), None),
+                Expr::Name(f) if !self.local(f.id.as_str()) && !(self.builtin(f.id.as_str()) && (PASSING_BUILTINS.contains(&f.id.as_str()) || super::PURE_BUILTINS.contains(&f.id.as_str()))) => (s(f.id.as_str()), None),
                 Expr::Attribute(a) => match &*a.value {
                     Expr::Name(n) if !self.local(n.id.as_str()) && !pure_method(a.attr.as_str()) => (s(n.id.as_str()), Some(s(a.attr.as_str()))),
                     _ => return false,
@@ -735,6 +738,12 @@ impl<'a> Flow<'a> {
         (self.locals)(n) && !self.out.imports.contains_key(&s(n))
     }
 
+    /// Is the name a builtin here (bound nowhere in the program around it: a program's own
+    /// `len` or `sorted` is a function like any other)?
+    fn builtin(&self, n: &str) -> bool {
+        !(self.locals)(n) && !(self.shadows)(n)
+    }
+
     // ------------------------------------------------------------- bindings
     /// The local names target `t` binds from `e` (`held`: from what `e` holds).
     fn bind_target(&self, t: &'static Expr, e: &'static Expr, held: bool, binds: &mut Vec<(StrId, &'static Expr, bool)>) {
@@ -811,6 +820,7 @@ impl<'a> Flow<'a> {
                         out.extend(args().flat_map(|x| self.srcs(x)));
                         out
                     }
+                    Expr::Name(f) if !self.local(f.id.as_str()) && !self.builtin(f.id.as_str()) => vec![(Origin::Result(s(f.id.as_str()), None), Level::Own)],
                     Expr::Name(f) if !self.local(f.id.as_str()) => match f.id.as_str() {
                         // (`getattr(x, "a", d)`: x.a or d; `vars(x)`: x's attributes)
                         "getattr" => {
@@ -1103,7 +1113,7 @@ impl<'a> Flow<'a> {
                 }
                 _ => false,
             },
-            Expr::Call(c) => matches!(&*c.func, Expr::Name(f) if super::PURE_BUILTINS.contains(&f.id.as_str()) && !self.local(f.id.as_str())),
+            Expr::Call(c) => matches!(&*c.func, Expr::Name(f) if super::PURE_BUILTINS.contains(&f.id.as_str()) && self.builtin(f.id.as_str())),
             _ => false,
         }
     }
@@ -1162,6 +1172,9 @@ impl<'a> Flow<'a> {
                 let f = f.id.as_str();
                 self.name(s(f), None);
                 self.mark(&[(Origin::Name(s(f)), Level::Own)], Pos::Call);
+                if !self.builtin(f) {
+                    return self.pass_args((s(f), None), c);
+                }
                 // (a builtin that only tells what the receiver is)
                 if matches!(f, "isinstance" | "issubclass" | "id" | "callable" | "type") && c.arguments.keywords.is_empty() && c.arguments.args.first().is_some_and(|x| self.recv_base(x)) {
                     if f == "type" {
