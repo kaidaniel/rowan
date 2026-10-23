@@ -1154,7 +1154,9 @@ impl Analyzer {
             if matches!(name, "append" | "extend" | "insert" | "remove" | "clear" | "sort" | "reverse" | "pop") {
                 self.kill_facts_on(&[oid], state);
             }
-            let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
+            // (a str's method on one known to be a str or bytes; of another unknown — a date, an
+            // object of the program's — its result's type is not known)
+            let q = if STR_METHOD_NAMES.contains(&name) && matches!(self.heap.obj(oid).ty, Some("str" | "bytes")) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             // (a parameter annotated `str`: a str, its methods' results known by type)
             let recv = match self.heap.obj(oid).ty {
                 Some(t @ ("str" | "bytes")) => Value::data(&typed_label(t, "")),

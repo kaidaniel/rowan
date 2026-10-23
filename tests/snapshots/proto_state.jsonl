@@ -78,7 +78,7 @@
 ["verdict", "", 193, 18, "'reqs'", "attr", "proven", [150], "State()"]
 ["verdict", "", 196, 18, "'reqs'", "attr", "proven", [150], "State()"]
 ["verdict", "", 196, 18, "'writable'", "attr", "input", [150], "result of layered.TwoLevel@L68"]
-["verdict", "", 198, 25, "'join'", "attr", "input", [150], "result of call of result of domain.ReqInfo@L40['join']@L198, result of domain.ReqInfo@L40"]
+["verdict", "", 198, 25, "'join'", "attr", "input", [150], "result of call of unknown.join@L198, result of domain.ReqInfo@L40, result of unknown.join@L198"]
 ["verdict", "", 202, 102, "'elems'", "attr", "proven", [200], "State()"]
 ["verdict", "", 202, 15, "'diff_keys'", "attr", "input", [200], "result of layered.LayerMap@L65"]
 ["verdict", "", 202, 15, "'rows'", "attr", "proven", [200], "State()"]
