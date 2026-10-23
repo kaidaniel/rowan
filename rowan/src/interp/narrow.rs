@@ -218,20 +218,10 @@ impl Analyzer {
         }
     }
 
-    /// A test that is a call on the path where it is `truth`: `isinstance`, `hasattr`, `callable`,
-    /// `d.get(k)`, a user predicate, …
-    fn narrow_call(&mut self, test: &'static ast::Expr, call: &'static ast::ExprCall, truth: bool, state: &mut State) {
-        let args = &call.arguments.args;
-        // `isclass(x)` / `inspect.isclass(x)`
-        let fname = match &*call.func {
-            ast::Expr::Name(n) => Some(n.id.as_str()),
-            ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
-            _ => None,
-        };
-        // (by what the callee was, not its name: a program's own `isinstance` tells nothing)
-        // (methods: `issubset` of literal keys, `get` of a dict-like receiver only)
-        // (not evaluated in this test's trace, a test applied again: the name's binding here, none
-        // but the builtin's)
+    /// Is the test's callee the library function `f` (`isinstance`, `hasattr`, `all`,
+    /// `inspect.isclass`), as evaluated in the test (`traced`), or, a test applied again, by the
+    /// name's binding here (none: the builtin's)?
+    fn callee_is_builtin(&self, call: &'static ast::ExprCall, f: &str, state: &State) -> bool {
         let callee = self.traced(&call.func).or_else(|| match &*call.func {
             ast::Expr::Name(n) => self.name_value(state, s(n.id.as_str())).or_else(|| {
                 let fr = self.frame();
@@ -240,8 +230,24 @@ impl Analyzer {
             }),
             _ => None,
         });
-        let builtin = |f: &str| callee.as_ref().is_some_and(|v| (v.pts.is_empty() && v.kv.is_bot() && f != "isclass") || (v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && matches!(q.as_str(), "builtins.isinstance" | "builtins.hasattr" | "builtins.all" | "inspect.isclass")))));
-        let fname = fname.filter(|f| builtin(f) || (matches!(&*call.func, ast::Expr::Attribute(_)) && *f != "isclass"));
+        let quals = ["builtins.isinstance", "builtins.hasattr", "builtins.all", "inspect.isclass"];
+        callee.is_some_and(|v| {
+            (v.pts.is_empty() && v.kv.is_bot() && f != "isclass")
+                || (v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && quals.contains(&q.as_str()))))
+        })
+    }
+
+    /// A test that is a call on the path where it is `truth`: `isinstance`, `hasattr`, `callable`,
+    /// `d.get(k)`, a user predicate, …
+    fn narrow_call(&mut self, test: &'static ast::Expr, call: &'static ast::ExprCall, truth: bool, state: &mut State) {
+        let args = &call.arguments.args;
+        let fname = match &*call.func {
+            ast::Expr::Name(n) => Some(n.id.as_str()),
+            ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
+            _ => None,
+        };
+        // (by the callee, not its name, `callee_is_builtin`; methods: their receivers tell)
+        let fname = fname.filter(|f| self.callee_is_builtin(call, f, state) || (matches!(&*call.func, ast::Expr::Attribute(_)) && *f != "isclass"));
         if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
             self.narrow_isclass(s(n.id.as_str()), truth, state);
             return;
