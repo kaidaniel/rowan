@@ -230,8 +230,17 @@ impl Analyzer {
         };
         // (by what the callee was, not its name: a program's own `isinstance` tells nothing)
         // (methods: `issubset` of literal keys, `get` of a dict-like receiver only)
-        let callee = self.traced(&call.func).filter(|v| v.kv.is_bot() && !v.pts.is_empty());
-        let builtin = |f: &str| callee.as_ref().is_some_and(|v| v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && matches!(q.as_str(), "builtins.isinstance" | "builtins.hasattr" | "builtins.all" | "inspect.isclass"))));
+        // (not evaluated in this test's trace, a test applied again: the name's binding here, none
+        // but the builtin's)
+        let callee = self.traced(&call.func).or_else(|| match &*call.func {
+            ast::Expr::Name(n) => self.name_value(state, s(n.id.as_str())).or_else(|| {
+                let fr = self.frame();
+                let local = fr.kind == super::FrameKind::Function && self.heap.module_info(fr.module).scopes.get(fr.scope).is_local(n.id.as_str());
+                (!local).then(Value::new)
+            }),
+            _ => None,
+        });
+        let builtin = |f: &str| callee.as_ref().is_some_and(|v| (v.pts.is_empty() && v.kv.is_bot() && f != "isclass") || (v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::External && matches!(&self.heap.obj(o).payload, super::Payload::Str(q) if q.rsplit('.').next() == Some(f) && matches!(q.as_str(), "builtins.isinstance" | "builtins.hasattr" | "builtins.all" | "inspect.isclass")))));
         let fname = fname.filter(|f| builtin(f) || (matches!(&*call.func, ast::Expr::Attribute(_)) && *f != "isclass"));
         if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
             self.narrow_isclass(s(n.id.as_str()), truth, state);

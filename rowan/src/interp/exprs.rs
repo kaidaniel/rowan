@@ -126,14 +126,11 @@ impl Analyzer {
 
     /// A generator expression: a generator (`FuncNode::GenExp`) of the iterator its first
     /// iterable gives here, its body run when its items are taken (`force_gen`); one whose items
-    /// are all taken before other code runs (`Scopes::eager_genexps`, `bulk_genexp`, a
-    /// `consumed_next` one whose consumer takes them at once), or an `async` one: run here, a
-    /// one-shot iterator over its items.
+    /// are all taken before other code runs (`Scopes::eager_genexps`, `bulk_genexp`), or an
+    /// `async` one: run here, a one-shot iterator over its items.
     fn expr_generator(&mut self, g: &'static ast::ExprGenerator, node: &'static ast::Expr, state: &mut State) -> Value {
         let addr = node as *const ast::Expr as usize;
-        let scopes = &self.heap.module_info(self.frame().module).scopes;
-        let next = scopes.consumed_next.get(&addr).map(|n| intern::s(n));
-        let eager = std::mem::take(&mut self.mode.bulk_genexp) == addr || scopes.eager_genexps.contains(&addr) || next.is_some_and(|n| self.names_bulk_consumer(n, state));
+        let eager = std::mem::take(&mut self.mode.bulk_genexp) == addr || self.heap.module_info(self.frame().module).scopes.eager_genexps.contains(&addr);
         if !eager && !g.generators.iter().any(|c| c.is_async) && !crate::syntax::has_await(node) {
             let nd = frontend::node(node);
             let src = self.eval(&g.generators[0].iter, state);
@@ -148,17 +145,6 @@ impl Analyzer {
             self.start_iterator(o, state);
         }
         v
-    }
-
-    /// Does the plain name `n` call, here, a library function taking every item at once (the
-    /// builtin `sorted`, not the program's own)?
-    fn names_bulk_consumer(&self, n: intern::StrId, state: &State) -> bool {
-        let fr = self.frame();
-        let local = fr.kind == super::FrameKind::Function && self.heap.module_info(fr.module).scopes.get(fr.scope).is_local(&intern::str_get(n));
-        match self.name_value(state, n) {
-            Some(v) => !state.unbound.contains(&n) && self.bulk_consumer(&v),
-            None => !local && super::BULK_CONSUMERS.contains(&format!("builtins.{}", intern::str_get(n)).as_str()),
-        }
     }
 
     /// A dict display (`**m` unpacked into it).

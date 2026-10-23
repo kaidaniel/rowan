@@ -79,3 +79,13 @@ d.update((note(i), i) for i in range(2))
 n6 = len(LOG)
 #@value n6: exactly={2}
 #@row d: present={0,1} definite={0,1} closed
+
+
+def given(max):
+    LOG.clear()
+    m = max(note(i) for i in range(2))
+    return len(LOG)
+
+
+n7 = given(lambda it: -1)
+#@value n7: exactly={0}

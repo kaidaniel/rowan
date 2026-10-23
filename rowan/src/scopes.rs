@@ -20,6 +20,8 @@ pub enum ScopeKind {
 #[derive(Debug, Default)]
 pub struct Scope {
     pub kind: ScopeKind,
+    /// the address of its `def`, `lambda` or `class` (0: the module, a generator expression's)
+    pub node: usize,
     /// the enclosing scope (None for the module and detached scopes)
     pub parent: Option<usize>,
     /// names the code binds (assignments, parameters, imports, `def`, `class`, `except … as`,
@@ -61,10 +63,6 @@ pub struct Scopes {
     /// generator expressions that run where they are written (`syntax::eager_genexps`), by
     /// address
     pub eager_genexps: FxHashSet<usize>,
-    /// generator expressions a name is bound to that the next statement gives whole to the
-    /// function called by this name (`syntax::consumed_next_genexps`): they run where written
-    /// if it takes every item at once there
-    pub consumed_next: FxHashMap<usize, String>,
     /// module names bound more than once (twice in the text, in a loop, or by a function
     /// through `global`): their value at a call depends on when the call happens
     pub rebound: FxHashSet<String>,
@@ -97,15 +95,27 @@ struct Collector<'a> {
     loop_depth: u32,
     /// try statements the walk is in (in the running function)
     try_depth: u32,
+    /// the names the module binds anywhere: not builtins (`syntax::Bound`)
+    bound: crate::syntax::Bound,
 }
 
 impl<'a> Collector<'a> {
     fn enter(&mut self, addr: usize, kind: ScopeKind) -> usize {
         let id = self.scopes.scopes.len();
-        self.scopes.scopes.push(Scope { kind, parent: Some(self.scope), ..Default::default() });
+        self.scopes.scopes.push(Scope { kind, parent: Some(self.scope), node: addr, ..Default::default() });
         self.scopes.by_node.insert(addr, id);
         self.scopes.scopes[self.scope].children.push(id);
         id
+    }
+    /// The nodes of the running scope and those around it (`syntax::Bound`).
+    fn chain(&self) -> Vec<usize> {
+        let mut out = vec![0];
+        let mut s = Some(self.scope);
+        while let Some(i) = s {
+            out.push(self.scopes.scopes[i].node);
+            s = self.scopes.scopes[i].parent;
+        }
+        out
     }
     fn cur(&mut self) -> &mut Scope {
         &mut self.scopes.scopes[self.scope]
@@ -249,8 +259,9 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     fn visit_body(&mut self, body: &'b [ast::Stmt]) {
         // (in a function, out of any try: `syntax::consumed_next_genexps`)
         if self.try_depth == 0 && self.scopes.scopes[self.scope].kind == ScopeKind::Function && !self.scopes.scopes[self.scope].genexp {
-            for (g, callee) in crate::syntax::consumed_next_genexps(body) {
-                self.scopes.consumed_next.insert(node_addr(g), callee.to_string());
+            let chain = self.chain();
+            for g in crate::syntax::consumed_next_genexps(body, &|n| self.bound.builtin(n, &chain)) {
+                self.scopes.eager_genexps.insert(node_addr(g));
             }
         }
         source_order::walk_body(self, body);
@@ -287,7 +298,8 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 self.visit_expr(&n.value);
             }
             ast::Expr::Call(_) | ast::Expr::List(_) | ast::Expr::Tuple(_) | ast::Expr::Set(_) => {
-                for g in crate::syntax::eager_genexps(expr) {
+                let chain = self.chain();
+                for g in crate::syntax::eager_genexps(expr, &|n| self.bound.builtin(n, &chain)) {
                     self.scopes.eager_genexps.insert(node_addr(g));
                 }
                 source_order::walk_expr(self, expr);
@@ -398,7 +410,8 @@ pub fn analyse(module: &ast::ModModule) -> Scopes {
     scopes.scopes.push(Scope { kind: ScopeKind::Module, parent: None, ..Default::default() });
     scopes.by_node.insert(node_addr(module), 0);
     {
-        let mut coll = Collector { scopes: &mut scopes, scope: 0, loop_depth: 0, try_depth: 0 };
+        let bound = crate::syntax::Bound::of(&module.body);
+        let mut coll = Collector { scopes: &mut scopes, scope: 0, loop_depth: 0, try_depth: 0, bound };
         for s in &module.body {
             coll.visit_stmt(s);
         }
