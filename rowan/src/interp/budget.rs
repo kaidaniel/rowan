@@ -16,6 +16,36 @@ use crate::domain::ObjId;
 /// (`ROWAN_LIMITS=fanout=N`): a function's run on demand, an entry into a followed library.
 const FANOUT: usize = 4;
 
+/// The memory past which the analysis is cut as at its deadline (the objective is 2 GB; what
+/// a cut analysis still does comes on top).
+const MEMORY_MB: usize = 1536;
+
+/// The process's resident memory now, in MB (None: not known on this platform).
+fn resident_mb() -> Option<usize> {
+    #[cfg(target_os = "macos")]
+    {
+        // (`proc_pid_rusage`'s `rusage_info_v2`: its physical footprint, as Activity Monitor shows)
+        unsafe extern "C" {
+            fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
+        }
+        let mut info = [0u64; 32];
+        let r = unsafe { proc_pid_rusage(std::process::id() as i32, 2, info.as_mut_ptr()) };
+        // (16 bytes of uuid, then user and system time, wakeups, pageins, wired and resident
+        // size, the footprint)
+        (r == 0).then(|| (info[9] >> 20) as usize)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * 4096 >> 20)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// When the analysis started (the deadline counts from it).
 #[derive(Clone, Copy)]
 pub struct Clock(std::time::Instant);
@@ -51,6 +81,9 @@ pub struct Budget {
     started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
+    /// past `MEMORY_MB`, as past the deadline (`over_memory`), and how often it was asked
+    pub memory_cut: std::cell::Cell<bool>,
+    memory_checks: std::cell::Cell<u32>,
     /// set from outside (`rowan serve`: the file changed, the request timed out): the
     /// analysis is stale, its deadline has passed
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -188,7 +221,22 @@ impl Budget {
     /// libraries (`library_ms`: theirs is a share of its own): calls of user code are unknown
     /// code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > self.deadline_ms.unwrap_or_else(|| limit("ms", DEADLINE_MS)) || self.cancelled()
+        self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > self.deadline_ms.unwrap_or_else(|| limit("ms", DEADLINE_MS)) || self.cancelled() || self.over_memory()
+    }
+
+    /// The process holds more than `MEMORY_MB` (looked at every 64th question; once past it,
+    /// for the rest of the analysis): the deadline's safety net for memory, which grows with
+    /// the time an analysis runs.
+    fn over_memory(&self) -> bool {
+        if self.memory_cut.get() {
+            return true;
+        }
+        let n = self.memory_checks.get().wrapping_add(1);
+        self.memory_checks.set(n);
+        if n % 64 == 0 && resident_mb().is_some_and(|mb| mb > MEMORY_MB) {
+            self.memory_cut.set(true);
+        }
+        self.memory_cut.get()
     }
 
     /// Set from outside: the analysis is stale (`cancel`).
@@ -208,6 +256,7 @@ impl Budget {
         self.out.clear();
         self.started = Clock::default();
         self.hard_cut = false;
+        self.memory_cut.set(false);
         self.hover_cut.set(false);
         self.lib_work = 0;
         (self.lib_time, self.lib_share, self.lib_out) = (Default::default(), 0, false);

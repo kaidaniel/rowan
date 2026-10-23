@@ -249,12 +249,13 @@ fn param_contract(an: &Analyzer, foid: ObjId, name: StrId) -> J {
 
 /// `roots` and the objects they hold in `st`, at any depth (at most 512).
 pub fn held_objects(heap: &crate::interp::Heap, roots: Vec<ObjId>, st: &crate::state::State) -> Vec<ObjId> {
+    // (each object queued once: large object sets in many slots are not copied over and over)
     let mut reach: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
     let mut out: Vec<ObjId> = Vec::new();
-    let mut work = roots;
+    let mut work: Vec<ObjId> = roots.into_iter().filter(|o| reach.insert(*o)).collect();
     while let Some(o) = work.pop() {
-        if reach.len() > 512 || !reach.insert(o) {
-            continue;
+        if out.len() > 512 {
+            break;
         }
         out.push(o);
         if matches!(heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
@@ -262,7 +263,7 @@ pub fn held_objects(heap: &crate::interp::Heap, roots: Vec<ObjId>, st: &crate::s
         }
         for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
             for (_, v) in st.obj_slots(o, ns) {
-                work.extend(v.pts.iter());
+                work.extend(v.pts.iter().filter(|x| reach.insert(*x)));
             }
         }
     }

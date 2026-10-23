@@ -149,7 +149,7 @@ def run_module(binary: Path, path: Path, limits: str | None, timeout: int, out_d
     from scoreboard import facts_summary
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = re.sub(r"\W", "_", str(path.relative_to(SRC) if path.is_relative_to(SRC) else path.relative_to(HERE)))
+    tag = re.sub(r"\W", "_", str(path.relative_to(SRC) if path.is_relative_to(SRC) else path.relative_to(HERE) if path.is_relative_to(HERE) else path))
     out, err = out_dir / f"{tag}.facts.json", out_dir / f"{tag}.err"
     env = dict(os.environ, ROWAN_DEBUG="1")
     env.pop("ROWAN_LIMITS", None)

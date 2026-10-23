@@ -69,8 +69,9 @@ pub struct HavocMemo {
 #[derive(Default)]
 pub struct Havoc {
     walks: u32,
-    /// per object, the last walk that met it
+    /// per object, the last walk that met it, and the last that queued it (`Queue`)
     marks: Vec<u32>,
+    queued: Vec<u32>,
     /// per values given (and receivers walked by names): what the last walk from them met, and
     /// the heap it left
     memo: FxHashMap<u64, HavocMemo>,
@@ -215,6 +216,13 @@ impl Havoc {
         // up in every slot it reaches)
         let any_id = any_object(heap);
         let any = Value::obj(any_id);
+        // (each object is queued once per walk: objects whose slots share large object sets
+        // pushed them again and again, `Queue`)
+        if self.marks.len() < heap.len() {
+            self.marks.resize(heap.len(), 0);
+            self.queued.resize(heap.len(), 0);
+        }
+        let guard: Vec<ObjId> = self.guard.iter().map(|(g, _, _)| *g).collect();
         while let Some(o) = work.pop() {
             // (a skipped method's receiver: what it holds is havocked, it is not, unless met
             // again through something else)
@@ -270,23 +278,23 @@ impl Havoc {
                     // (an instance of a NamedTuple class is a tuple: no instance dict, its
                     // fields read-only; what they hold is walked)
                     if heap.class_info_opt(c).is_some_and(|ci| ci.lib.named_tuple) {
-                        havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                        havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut Queue { work: &mut work, marks: &self.marks, queued: &mut self.queued, walk, guard: &guard });
                         continue;
                     }
                 }
                 (Kind::External | Kind::Method, _) => continue,
                 // (a compiled pattern, a match, a path, a frozenset: nothing to change)
                 (Kind::Namespace, Payload::Method(q, _)) if matches!(q.as_str(), "stdobj.repattern" | "stdobj.rematch" | "stdobj.path") => {
-                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut Queue { work: &mut work, marks: &self.marks, queued: &mut self.queued, walk, guard: &guard });
                     continue;
                 }
                 (Kind::Set, _) if heap.obj(o).label.starts_with("frozenset@") => {
-                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut Queue { work: &mut work, marks: &self.marks, queued: &mut self.queued, walk, guard: &guard });
                     continue;
                 }
                 _ => {}
             }
-            havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
+            havoc_object(heap, state, o, k, site, any_id, &any, &mut Queue { work: &mut work, marks: &self.marks, queued: &mut self.queued, walk, guard: &guard });
         }
     }
 
@@ -300,7 +308,7 @@ impl Havoc {
         for &o in objs {
             if change {
                 let k = heap.kind(o);
-                havoc_object(heap, state, o, k, site, any_id, &any, &mut met);
+                havoc_object(heap, state, o, k, site, any_id, &any, &mut Queue { work: &mut met, marks: &[], queued: &mut [], walk: 0, guard: &[] });
             } else {
                 state.slots.each(&o, &mut |_, v| met.extend(v.pts.iter()));
             }
@@ -354,8 +362,9 @@ impl Analyzer {
         }
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
-        // (what it is given, the receiver apart)
-        let mut vals: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
+        // (what it is given, the receiver apart; `*xs` / `**d`: their items, in a new tuple / dict)
+        let mut vals: Vec<Value> = args.iter().chain(kwargs.values()).cloned().collect();
+        vals.extend(star_args.iter().chain(star_kwargs.iter()).map(|v| self.unpacked(v, state)));
         // unknown code may change what an earlier test read: facts about it no longer hold
         if !state.facts.is_empty() {
             let objs: Vec<u32> = recv.into_iter().chain(vals.iter()).flat_map(|v| v.pts.iter()).collect();
@@ -419,6 +428,33 @@ impl Analyzer {
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// What `*v` / `**v` give the code called: a list's, tuple's, set's or dict's items, in a
+    /// new tuple or dict (the container is not given: its keys and length stay as they are; an
+    /// open one's items are anything); anything else itself (an iterator is consumed, an
+    /// instance's `keys` / `__iter__` run).
+    pub(in crate::interp) fn unpacked(&self, v: &Value, state: &State) -> Value {
+        let mut out = Value::with_kv(crate::domain::ObjSet::new(), v.kv.clone());
+        for o in v.pts.iter() {
+            let plain = matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !self.heap.obj(o).site.starts_with("gen:") && self.has_facts(o, state);
+            if !plain {
+                out = out.join(&Value::obj(o));
+                continue;
+            }
+            state.slots.each(&o, &mut |sk, sv| {
+                if matches!(sk.0, Ns::Item | Ns::Elem | Ns::Pos) {
+                    out = out.join(sv);
+                }
+            });
+            if let Some(kv) = state.elems.get(&o) {
+                out = out.join(&Value::with_kv(crate::domain::ObjSet::new(), kv));
+            }
+            if state.row(o, Ns::Item).open() || state.row(o, Ns::Attr).open() {
+                out = out.join(&Value::data("unpacked"));
+            }
+        }
+        out
     }
 
     /// The program's dunders of the classes among `found` that unknown code may run (`met`: the
@@ -748,6 +784,38 @@ fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work:
     }
 }
 
+/// The objects a havoc walk is still to visit: what an object holds is queued unless the walk
+/// met or queued it already (an object met again counts only as a skipped method's receiver,
+/// `guard`: met through something else, it is walked whole).
+struct Queue<'a> {
+    work: &'a mut Vec<ObjId>,
+    /// per object the last walk that met it, and that queued it (empty: queue everything)
+    marks: &'a [u32],
+    queued: &'a mut [u32],
+    walk: u32,
+    guard: &'a [ObjId],
+}
+
+impl Queue<'_> {
+    fn extend(&mut self, v: &Value) {
+        for o in v.pts.iter() {
+            let i = o as usize;
+            match self.queued.get_mut(i) {
+                Some(q) if self.marks[i] == self.walk || *q == self.walk => {
+                    if self.guard.contains(&o) {
+                        self.work.push(o);
+                    }
+                }
+                Some(q) => {
+                    *q = self.walk;
+                    self.work.push(o);
+                }
+                None => self.work.push(o),
+            }
+        }
+    }
+}
+
 /// Unknown code may have changed object `o` (of kind `k`): its slots may hold anything
 /// (`any_id`), its rows have the call as a mutator, a list or set any items and length (what
 /// the slots hold is walked next).
@@ -772,13 +840,14 @@ pub(super) fn may_have_removed(heap: &Heap, objs: &[(ObjId, Removes)], state: &m
     }
 }
 
-fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Vec<ObjId>) {
+#[allow(clippy::too_many_arguments)]
+fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Queue) {
     // (an enum member's `name` and `value` cannot be set or deleted)
     let member = heap.keys.member_key.contains_key(&o);
     let fixed = |ns: Ns, k: KeyId| member && ns == Ns::Attr && intern::key_as_str(k).is_some_and(|n| matches!(&*n, "name" | "value"));
     let mut writes: Vec<(SlotKey, Value)> = Vec::new();
     state.slots.each(&o, &mut |sk, v| {
-        work.extend(v.pts.iter());
+        work.extend(v);
         if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) && !fixed(sk.0, sk.1) {
             writes.push((*sk, v.join(any)));
         }

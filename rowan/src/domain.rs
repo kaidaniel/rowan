@@ -1502,24 +1502,14 @@ impl Value {
 
 /// The join of many values (the empty value for none).
 pub fn join_values(vals: impl IntoIterator<Item = Value>) -> Value {
-    // (the objects in one sort: pairwise unions of many large sets are quadratic)
-    let mut ids: Vec<ObjId> = Vec::new();
-    let mut kv = BOT;
-    let mut n = 0usize;
-    let mut first: Option<Value> = None;
-    for v in vals {
-        n += 1;
-        ids.extend(v.pts.iter());
-        kv = kv_join(&kv, &v.kv);
-        if n == 1 {
-            first = Some(v);
-        }
+    // (the objects at once: pairwise unions of many large sets are quadratic)
+    let vals: Vec<Value> = vals.into_iter().collect();
+    if vals.len() <= 1 {
+        return vals.into_iter().next().unwrap_or_default();
     }
-    match (n, first) {
-        (0, _) => Value::new(),
-        (1, Some(v)) => v,
-        _ => Value { pts: ObjSet::from_vec(ids), kv },
-    }
+    let kv = vals.iter().fold(BOT, |acc, v| kv_join(&acc, &v.kv));
+    let sets: Vec<&ObjSet> = vals.iter().map(|v| &v.pts).collect();
+    Value { pts: ObjSet::union_all(&sets, |o| o as usize, |i| i as ObjId), kv }
 }
 
 impl crate::layered::MapValue for Value {}

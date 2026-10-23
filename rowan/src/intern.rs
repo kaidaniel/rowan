@@ -470,6 +470,44 @@ impl<T: Copy + Ord> IdSet<T> {
         v.dedup();
         Self::sorted(v)
     }
+    /// The union of `sets` (each once, by storage: copies of one set are one): their elements
+    /// in one sort, or past `BITS_PAST` elements in all, by a bit per id (`index`: an id's
+    /// position, ids being dense): many large sets that share most of their elements cost
+    /// their total, not a sort (and a copy) of it.
+    pub fn union_all(sets: &[&Self], index: impl Fn(T) -> usize, of_index: impl Fn(usize) -> T) -> Self {
+        const BITS_PAST: usize = 4096;
+        let mut parts: Vec<&Self> = Vec::with_capacity(sets.len());
+        for s in sets {
+            if !s.is_empty() && !parts.iter().any(|p| p.s().as_ptr() == s.s().as_ptr()) {
+                parts.push(s);
+            }
+        }
+        match parts.as_slice() {
+            [] => return Self::new(),
+            [one] => return (*one).clone(),
+            _ => {}
+        }
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        if total <= BITS_PAST {
+            return Self::from_vec(parts.iter().flat_map(|p| p.iter()).collect());
+        }
+        let top = parts.iter().filter_map(|p| p.s().last()).map(|x| index(*x)).max().unwrap_or(0);
+        let mut bits = vec![0u64; top / 64 + 1];
+        for p in &parts {
+            for x in p.iter() {
+                let i = index(x);
+                bits[i / 64] |= 1 << (i % 64);
+            }
+        }
+        let mut out = Vec::new();
+        for (w, mut b) in bits.into_iter().enumerate() {
+            while b != 0 {
+                out.push(of_index(w * 64 + b.trailing_zeros() as usize));
+                b &= b - 1;
+            }
+        }
+        Self::sorted(out)
+    }
     pub fn from_iter(it: impl IntoIterator<Item = T>) -> Self {
         Self::from_vec(it.into_iter().collect())
     }
@@ -653,3 +691,27 @@ impl<T: Copy + Ord> From<Vec<T>> for IdSet<T> {
 
 /// A set of keys.
 pub type KeySet = IdSet<KeyId>;
+
+#[cfg(test)]
+mod tests {
+    use super::IdSet;
+
+    /// `union_all` is the union, below and past its bitset threshold, with sets given twice.
+    #[test]
+    fn union_all_is_the_union() {
+        let mut seed = 7u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for (n, size) in [(3, 5), (40, 300), (12, 2000)] {
+            let sets: Vec<IdSet<u32>> = (0..n).map(|_| IdSet::from_vec((0..size).map(|_| next() % 20000).collect())).collect();
+            let refs: Vec<&IdSet<u32>> = sets.iter().chain(sets.iter().take(2)).collect();
+            let want = IdSet::from_vec(sets.iter().flat_map(|s| s.iter()).collect());
+            assert!(IdSet::union_all(&refs, |x| x as usize, |i| i as u32) == want);
+        }
+        let one = IdSet::from_vec(vec![3u32, 9]);
+        assert!(IdSet::union_all(&[&one, &one], |x| x as usize, |i| i as u32) == one);
+        assert!(IdSet::<u32>::union_all(&[], |x| x as usize, |i| i as u32).is_empty());
+    }
+}

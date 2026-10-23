@@ -25,6 +25,9 @@ pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException
 /// Handlers that catch everything: a guard only around the read in its own function.
 pub(super) const CATCH_ALL: &[&str] = &["Exception", "BaseException", "*"];
 
+/// Receivers running code past which those of one class run it once (`per_receiver`).
+const WIDE_RECEIVERS: usize = 4;
+
 impl Analyzer {
     /// The handler names that guard a failing read in namespace `ns` here.
     fn guard_names(&self, ns: Ns) -> &'static [&'static str] {
@@ -132,8 +135,9 @@ impl Analyzer {
     /// A receiver of several objects (or objects and a scalar) some of which run user code for
     /// the operation (`dispatch`): those are alternatives, one state each (the second must not
     /// see the first's effects, nor the first's raise end the others' paths); the other objects
-    /// are one more (no code of theirs runs), the scalar another. None: no object runs code
-    /// (or there is only one part), the operation runs on `obj` as it is.
+    /// are one more (no code of theirs runs), the scalar another. Past `WIDE_RECEIVERS`, the
+    /// instances of one class are one part: its code runs once for all of them. None: no object
+    /// runs code (or there is only one part), the operation runs on `obj` as it is.
     pub(crate) fn per_receiver(&mut self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Option<Value> {
         if obj.pts.len() + usize::from(!obj.kv.is_bot()) <= 1 {
             return None;
@@ -142,7 +146,24 @@ impl Analyzer {
         if runs.is_empty() {
             return None;
         }
-        let mut parts: Vec<Value> = runs.into_iter().map(Value::obj).collect();
+        // (many instances: those of one class run its code once, on all of them — a wide value
+        // of instances made one run, and one call that does not run, per object)
+        let mut parts: Vec<Value> = if runs.len() > WIDE_RECEIVERS {
+            let mut by: Vec<(Option<ObjId>, Vec<ObjId>)> = Vec::new();
+            for o in runs {
+                let c = self.heap.instance_class(o);
+                match by.iter_mut().find(|(k, _)| k.is_some() && *k == c) {
+                    Some((_, v)) => v.push(o),
+                    None => by.push((c, vec![o])),
+                }
+            }
+            if by.len() == 1 && rest.is_empty() && obj.kv.is_bot() {
+                return None;
+            }
+            by.into_iter().map(|(_, v)| Value::objs(crate::domain::ObjSet::from_vec(v))).collect()
+        } else {
+            runs.into_iter().map(Value::obj).collect()
+        };
         if !rest.is_empty() {
             parts.push(Value::objs(crate::domain::ObjSet::from_vec(rest)));
         }
