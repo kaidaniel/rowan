@@ -402,30 +402,37 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `operator.add(a, b)` etc. called as functions (by `reduce`, `map`, …): the operators.
 pub fn m_operator_fn(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
-    if let Some(v) = crate::models::pure::try_pure(an, st, c) {
-        return v;
-    }
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
-    let op = match name.as_str() {
-        "add" | "concat" | "iadd" => Some(ast::Operator::Add),
-        "sub" | "isub" => Some(ast::Operator::Sub),
-        "mul" | "imul" => Some(ast::Operator::Mult),
+    // (`iadd` & co. are `a += b`: a list, dict, set or the program's instance with `__iadd__`
+    // changes in place, `binop_in_place`)
+    let in_place = crate::models::operator_in_place(&c.qual);
+    let op = match if in_place { &name[1..] } else { name.as_str() } {
+        "add" | "concat" => Some(ast::Operator::Add),
+        "sub" => Some(ast::Operator::Sub),
+        "mul" => Some(ast::Operator::Mult),
+        "matmul" => Some(ast::Operator::MatMult),
         "truediv" => Some(ast::Operator::Div),
         "floordiv" => Some(ast::Operator::FloorDiv),
         "mod" => Some(ast::Operator::Mod),
         "pow" => Some(ast::Operator::Pow),
-        "or_" | "ior" => Some(ast::Operator::BitOr),
-        "and_" | "iand" => Some(ast::Operator::BitAnd),
+        "or_" | "or" => Some(ast::Operator::BitOr),
+        "and_" | "and" => Some(ast::Operator::BitAnd),
         "xor" => Some(ast::Operator::BitXor),
         "lshift" => Some(ast::Operator::LShift),
         "rshift" => Some(ast::Operator::RShift),
         _ => None,
     };
-    if let Some(op) = op {
-        if c.args.len() == 2 {
-            return an.binop(op, &a, &b, &c.node, st);
+    if let (Some(op), true, 2) = (op, in_place, c.args.len()) {
+        if let Some(r) = an.binop_in_place(op, &a, &b, &c.node, st, &|_, _, _| {}) {
+            return r;
         }
+    }
+    if let Some(v) = crate::models::pure::try_pure(an, st, c) {
+        return v;
+    }
+    if let (Some(op), 2) = (op, c.args.len()) {
+        return an.binop(op, &a, &b, &c.node, st);
     }
     match name.as_str() {
         "getitem" if c.args.len() == 2 => an.load_item(&a, Ns::Item, &b, &c.node, st, true),
@@ -545,7 +552,8 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
         &[
             "operator.add", "operator.sub", "operator.mul", "operator.truediv", "operator.floordiv", "operator.mod", "operator.pow", "operator.or_",
             "operator.and_", "operator.xor", "operator.lshift", "operator.rshift", "operator.concat", "operator.getitem", "operator.contains",
-            "operator.iadd", "operator.isub", "operator.imul", "operator.ior", "operator.iand",
+            "operator.iadd", "operator.isub", "operator.imul", "operator.ior", "operator.iand", "operator.ixor", "operator.iconcat", "operator.imatmul",
+            "operator.itruediv", "operator.ifloordiv", "operator.imod", "operator.ipow", "operator.ilshift", "operator.irshift", "operator.matmul",
         ],
         m_operator_fn,
     );

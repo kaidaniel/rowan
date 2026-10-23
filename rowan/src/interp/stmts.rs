@@ -374,38 +374,8 @@ impl Analyzer {
             Some((o, Err(name))) => an.store_attr(o, name, v, &tn, state),
             None => an.bind_target(&a.target, v, state),
         };
-        // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
-        // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
-        if !cur.pts.is_empty() {
-            let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.heap.kind(o) == k);
-            let m = match a.op {
-                ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
-                ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
-                ast::Operator::BitOr if all(self, Kind::Set) => Some("set.update"),
-                ast::Operator::BitAnd if all(self, Kind::Set) => Some("set.intersection_update"),
-                ast::Operator::Sub if all(self, Kind::Set) => Some("set.difference_update"),
-                ast::Operator::BitXor if all(self, Kind::Set) => Some("set.symmetric_difference_update"),
-                _ => None,
-            };
-            if let Some(m) = m {
-                // (and a part that is no object, `9` of `[1] | 9`: its own result, on a path
-                // of its own — None's raises there)
-                let objs = Value::objs(cur.pts.clone());
-                let rest = (!cur.kv.is_bot()).then(|| {
-                    let mut alt = state.copy();
-                    store(self, &Value::kv_only(cur.kv.clone()), &mut alt);
-                    let r = self.binop(a.op, &Value::kv_only(cur.kv.clone()), &rhs, &n, &mut alt);
-                    store(self, &r, &mut alt);
-                    alt
-                });
-                let mv = self.method_value(m, &objs);
-                self.call_value(&mv, &n, None, state, Some(vec![rhs]));
-                store(self, &objs, state);
-                if let Some(mut alt) = rest {
-                    *state = state.join(&mut alt);
-                }
-                return;
-            }
+        if self.binop_in_place(a.op, &cur, &rhs, &n, state, &store).is_some() {
+            return;
         }
         let res = self.binop(a.op, &cur, &rhs, &n, state);
         // `t += u` on a tensor is in place: the result must keep t's shape

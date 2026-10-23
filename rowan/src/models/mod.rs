@@ -298,8 +298,7 @@ impl Registry {
         }
         // (functions of those modules that change what they are given are unknown calls)
         const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
-        let in_place_op = qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"));
-        if MUTATING.contains(&qual) || in_place_op || qual.starts_with("array.") {
+        if MUTATING.contains(&qual) || operator_in_place(qual) || qual.starts_with("array.") {
             return None;
         }
         for prefix in ALLOWLIST_PREFIXES {
@@ -314,6 +313,12 @@ impl Registry {
             _ => None,
         }
     }
+}
+
+/// `operator.iadd` & co.: `a op= b`, which changes a list, dict, set or instance in place
+/// (not `operator.index`, `is_`, `itemgetter`, `inv`).
+pub fn operator_in_place(qual: &str) -> bool {
+    qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"))
 }
 
 /// Is there a model for anything in module `name` (so following its source is not wanted)?

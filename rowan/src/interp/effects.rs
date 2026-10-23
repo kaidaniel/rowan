@@ -19,13 +19,21 @@ use super::{Analyzer, Args, FuncInfo, FuncNode, Payload};
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
 pub const CLOSURE_CACHE: usize = 1 << 21;
 
-/// The dunders library code may run on the objects it is given without changing them itself
-/// (`library_dunders`): formatting, comparing, hashing, converting, copying, arithmetic.
+/// The dunders code that is not the program's may run on the program's instances it is given
+/// or reaches (`library_dunders`, `met_dunders`): Python's data model, every protocol a
+/// library or unknown code can drive through an instance (formatting, comparing, hashing,
+/// converting, containers, attributes, copying, context managers, every operator with its
+/// reflected and in-place forms: `operator.iadd(b, 1)` runs `b.__iadd__`).
 const LIBRARY_DUNDERS: &[&str] = &[
     "__str__", "__repr__", "__format__", "__bytes__", "__hash__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__bool__", "__len__",
-    "__iter__", "__next__", "__contains__", "__getitem__", "__int__", "__float__", "__complex__", "__index__", "__round__", "__trunc__", "__floor__",
-    "__ceil__", "__fspath__", "__getattr__", "__getattribute__", "__copy__", "__deepcopy__", "__reduce__", "__reduce_ex__", "__getstate__", "__add__",
-    "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__truediv__", "__rtruediv__", "__neg__", "__abs__",
+    "__length_hint__", "__iter__", "__reversed__", "__next__", "__contains__", "__getitem__", "__setitem__", "__delitem__", "__missing__", "__int__",
+    "__float__", "__complex__", "__index__", "__round__", "__trunc__", "__floor__", "__ceil__", "__fspath__", "__getattr__", "__getattribute__",
+    "__setattr__", "__delattr__", "__copy__", "__deepcopy__", "__reduce__", "__reduce_ex__", "__getstate__", "__setstate__", "__enter__", "__exit__",
+    "__aenter__", "__aexit__", "__aiter__", "__anext__", "__await__", "__neg__", "__pos__", "__abs__", "__invert__", "__add__", "__radd__",
+    "__iadd__", "__sub__", "__rsub__", "__isub__", "__mul__", "__rmul__", "__imul__", "__matmul__", "__rmatmul__", "__imatmul__", "__truediv__",
+    "__rtruediv__", "__itruediv__", "__floordiv__", "__rfloordiv__", "__ifloordiv__", "__mod__", "__rmod__", "__imod__", "__divmod__", "__rdivmod__",
+    "__pow__", "__rpow__", "__ipow__", "__lshift__", "__rlshift__", "__ilshift__", "__rshift__", "__rrshift__", "__irshift__", "__and__", "__rand__",
+    "__iand__", "__xor__", "__rxor__", "__ixor__", "__or__", "__ror__", "__ior__",
 ];
 
 /// Caches of what code may change when it does not run. `code_uses` is a function of the
