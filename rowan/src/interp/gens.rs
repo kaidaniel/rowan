@@ -206,6 +206,9 @@ pub struct Gens {
     pub no_unroll_next: FxHashSet<ObjId>,
     /// generators made but not run yet: the call that made each (`force_gen`)
     pub lazy: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
+    /// generator expressions a call that does not run is taking the items of
+    /// (`force_given_genexps`): one built over itself (`g = (… for r in g)`) not again
+    pub forcing: Vec<ObjId>,
     /// generators run whole for a consumer that runs code between their items: (generator,
     /// the state after its run, what it was given and yields) — see `with_gen_restart`
     pub watch: Vec<GenWatch>,
@@ -391,9 +394,12 @@ impl Analyzer {
     /// call that does not run takes their items as unknown code does.
     pub(super) fn force_given_genexps(&mut self, a: &Args, state: &mut State) {
         for v in a.pos.iter().chain(a.kw.values()).chain(a.star.iter()) {
-            let genexps = v.pts.filter(|o| self.gens.lazy.get(&o).is_some_and(|lg| self.heap.func_info(lg.foid).node.is_genexp()));
+            let genexps = v.pts.filter(|o| !self.gens.forcing.contains(&o) && self.gens.lazy.get(&o).is_some_and(|lg| self.heap.func_info(lg.foid).node.is_genexp()));
             if !genexps.is_empty() {
+                let depth = self.gens.forcing.len();
+                self.gens.forcing.extend(genexps.iter());
                 self.force_gen(&Value::objs(genexps), state, true);
+                self.gens.forcing.truncate(depth);
             }
         }
     }
