@@ -456,18 +456,41 @@ def row_problem(claim: dict, keys: list[str], kind: str) -> str | None:
     return None
 
 
+def same_literal(data: str | None, lits: set) -> bool:
+    """Is the runtime value's repr one of the literals, by value (`b'a\\'b'` is `b"a'b"`)?"""
+    if data is None:
+        return False
+    if data in lits:
+        return True
+    try:
+        v = ast.literal_eval(data)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return False
+    for x in lits:
+        try:
+            w = ast.literal_eval(x)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            continue
+        if type(w) is type(v) and w == v:
+            return True
+    return False
+
+
 def value_problem(claim: dict, s: list) -> str | None:
     kind, data, tname = s
     lits = claim["lits"]
+    if kind in ("lit", "model") and same_literal(data, lits):
+        return None
+    if kind == "model":
+        # (a datetime / Decimal value rowan holds as a literal: compared by its repr)
+        kind = "obj"
     if kind == "lit":
-        if data is not None and data in lits:
-            return None
         if admits(claim, tname):
             return None
         if data is None and any(x.startswith(("'", '"', "b'", 'b"')) for x in lits) and tname in ("str", "bytes"):
             return None  # (a long str: its literal not compared)
         return f"{data or tname} not among {sorted(lits)}" + (f" / unknowns of {sorted(claim['types'])}" if claim["unknown"] else "") + (f" / objects {sorted(claim['objects'])}" if claim["objects"] else "")
-    if tname == "tuple" and (data in lits or (data is None and any(x.startswith("(") for x in lits))):
+    if tname == "tuple" and (same_literal(data, lits) or (data is None and any(x.startswith("(") for x in lits))):
         return None  # (a tuple of scalars: one of the literals; a long one's not compared)
     if not claim["objects"] and not claim["unknown"]:
         return f"{tname} {data or ''} where rowan claims only literals {sorted(lits)}"

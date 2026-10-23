@@ -15,7 +15,7 @@ rowan is a whole-program **abstract interpreter** for Python, written in Rust (`
 
 An unknown joined with None is optional (`optional_label`: `int(?) | None`); a test that removes None gives the type back (`kv_not_none`). Joined with literals, an operator's label loses its name (`max(1, n - 1)` is `int(?)`), and the literals become a *hint* (`8080 | ?`; up to 8, then `hint_sat`). The label alone always covers the value, so code that ignores hints stays sound. Operators, `try_pure` calls (`pure_hint`) and narrowing carry hints (`split_hinted`).
 
-**Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call chain, 2 deep).
+**Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call chain; past `CHAIN` (2) sites the older ones are folded into a hash, so contexts stay distinct at any depth).
 * A *single* object stands for one runtime object: stores into it are strong.
 * Allocating a site again while its earlier object is live gives a *variant* (up to 8), then a *merged* object, whose stores only join. Past 256 objects a site has one summary (16 more for calls the main file's own code makes, `MAIN_CLONES`).
 * An instance a call makes where its object is a summary is a strong *recent* object until the call returns or a raise leaves it; then it is folded into the summary (`call_recent`).

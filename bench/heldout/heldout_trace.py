@@ -14,7 +14,10 @@ go, at the end of the session:
 """
 from __future__ import annotations
 
+import datetime
+import decimal
 import enum
+import fractions
 import json
 import os
 import sys
@@ -22,10 +25,11 @@ import threading
 
 MAX_DISTINCT = 40
 SCALARS = (bool, int, float, str, bytes, type(None))
+MODEL_LITERALS = (datetime.date, datetime.time, datetime.timedelta, datetime.tzinfo, decimal.Decimal, fractions.Fraction)
 
 
 def summary(v, roots):
-    """(kind, data, type name): `lit` a scalar (its repr; None when longer than 300 characters),
+    """(kind, data, type name): `model` a value rowan may hold as a literal (its repr), `lit` a scalar (its repr; None when longer than 300 characters),
     `tuple` of up to 8 scalars (its repr), `dict` (its keys' reprs, None past 64), `inst` an
     instance of a class from the package (`roots`: its source directories; not a builtin's subclass
     or an Enum member) with its `__dict__`'s keys, `obj` anything else."""
@@ -38,6 +42,13 @@ def summary(v, roots):
         return ("tuple", r if len(r) <= 300 else None, "tuple")
     if t is dict:
         return ("dict", sorted(repr(k) for k in v) if len(v) <= 64 else None, "dict")
+    # (values rowan may hold as literals: an int-valued enum member (`re.IGNORECASE` is 2),
+    # datetime and Decimal values; compared by value, else as any object)
+    if isinstance(v, int) and isinstance(v, enum.Enum):
+        return ("model", repr(int(v)), t.__name__)
+    if isinstance(v, MODEL_LITERALS):
+        r = repr(v)
+        return ("model", r if len(r) <= 300 else None, t.__name__)
     # (builtin subclasses keep keys or attributes rowan models elsewhere; Enum members: their
     # class's; neither compared by keys)
     if isinstance(v, (dict, list, set, tuple, str, bytes, int, float)) or isinstance(v, enum.Enum):
