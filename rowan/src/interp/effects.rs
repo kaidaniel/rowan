@@ -551,7 +551,9 @@ impl Analyzer {
     }
 
     /// The attribute names method `foid`'s code stores on its receiver `recv` on every way it
-    /// completes (`MustWalk`), those of the method `super().m(…)` calls in it too.
+    /// completes (`MustWalk`), those of the method `super().m(…)` calls in it too: a skipped
+    /// call's receiver has them after (`must_after`; through a class's `__setattr__`, there
+    /// unless unknown code removed them: `likely`).
     pub(in crate::interp) fn must_stores(&self, foid: ObjId, recv: ObjId, depth: usize) -> KeySet {
         let Some(fi) = self.heap.func_info_opt(foid) else { return KeySet::new() };
         let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return KeySet::new() };
@@ -615,8 +617,9 @@ impl Analyzer {
     /// change (mutable defaults, bound receivers). Computed once per set of roots: the code a
     /// name holds is taken as fixed (rebinding a function or class is monkey-patching; a
     /// builtin's name holds the builtin), until a name it reads that was not bound then is
-    /// (`Closure::unbound`: a `def` later in the module); methods called by a computed name are not followed; the code in the data those values
-    /// hold is followed where the call is (`skipped_call`). `from`: the walk of a subset of the
+    /// (`Closure::unbound`: a `def` later in the module); methods called by a computed name are
+    /// not followed; the code in the data those values hold is followed where the call is
+    /// (`skipped_call`). `from`: the walk of a subset of the
     /// roots, resumed (and left there), unless the closure is cached.
     pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], from: &mut Option<ClosureWalk>, state: &State) -> std::rc::Rc<Closure> {
         // (the program followed whole is not the cache's: its returns go to known callers)
@@ -1070,9 +1073,9 @@ impl Analyzer {
     }
 
     /// Library code given `vals` (taken to change nothing it is given, or code rowan cannot
-    /// see) may run the dunders of the program's instances they reach (`LIBRARY_DUNDERS`:
-    /// formatting, comparing, hashing, converting, copying): those whose code may change
-    /// something (`changes_nothing`) are one call none of which runs (`skipped_calls`).
+    /// see) may run the dunders of the program's instances they reach (`LIBRARY_DUNDERS`: the
+    /// data model's protocols, operators too): those whose code may change something
+    /// (`changes_nothing`) are one call none of which runs (`skipped_calls`).
     pub fn library_dunders(&mut self, vals: &[Value], state: &mut State, node: &Node) {
         let fns = self.given_dunders(vals, state);
         if !fns.is_empty() {
@@ -1111,8 +1114,10 @@ impl Analyzer {
         out
     }
 
-    /// The dunders of class `c` library code may run (`LIBRARY_DUNDERS`) whose code may change
-    /// something.
+    /// The dunders of class `c` code that is not the program's may run (`LIBRARY_DUNDERS`) whose
+    /// code may change something (`changes_nothing`): library code given its instances runs them
+    /// as a call that does not run (`library_dunders`), unknown code as code it follows
+    /// (`met_dunders`), and a skipped call follows its classes.
     pub(in crate::interp) fn changing_dunders(&mut self, c: ObjId, state: &State) -> std::rc::Rc<[ObjId]> {
         if let Some(d) = self.effects.dunders.get(&c) {
             return d.clone();

@@ -81,7 +81,9 @@ impl Analyzer {
     /// Is a failing read in namespace `ns` here the program's own way, not a finding: a running
     /// handler names its exception (`except KeyError:`, a caller's too), or catches everything
     /// around the read in its own function. A catch-all of a caller (a CLI runner's `except
-    /// Exception:`, a worker's) is not about this read: it stays a finding, its key needed.
+    /// Exception:`, a worker's) is not about this read: it stays a finding, its key needed (the
+    /// caller still gets the raise: `catches`). A frame's column read inside a `try` is a probe,
+    /// no requirement (`models/pandas.rs`).
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want = self.guard_names(ns);
         let here = self.cx.frames.len();

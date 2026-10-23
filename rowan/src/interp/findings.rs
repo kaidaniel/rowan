@@ -82,15 +82,16 @@ pub struct Fact {
     pub main_sites: Vec<CallSite>,
     /// the symbols the texts mention, with what is known about each (`render::value_legend`)
     pub legend: Vec<(String, String)>,
-    /// display names of the tensor dims the texts mention (`B` for x.shape[0])
+    /// display names of the tensor dims the texts mention (`B` for `x.shape[0]`)
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
     /// recorded by an assignment (whose value the hover shows, not the read of the same name:
     /// `x += 1` is `x = 2`, not `1 | 2`)
     pub written: bool,
-    /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
-    /// call chain into the function, the file of its last call, the objects given and what they
-    /// held then; at most `PASSED`)
+    /// a parameter's fact at its `def`: its function
     pub param_of: Option<ObjId>,
+    /// a parameter's fact at its `def`: what the program's calls passed (the call chain into the
+    /// function, the file of its last call, the objects given and what they held then; at most
+    /// `PASSED`), which the hover's In Calls shows and its run's verdicts check
     pub passed: Vec<(Chain, u32, Vec<ObjId>)>,
 }
 

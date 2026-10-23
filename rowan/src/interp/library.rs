@@ -1,4 +1,5 @@
-//! Followed libraries (`--follow`): installed packages' source from site-packages, run as the
+//! Followed libraries (`--follow`): installed packages' source from site-packages (`main.rs`
+//! `site_packages_for`; not the packages rowan has models of, `has_module_models`), run as the
 //! program's code is, each function code within its budget (past it, its calls are calls that
 //! do not run, `skipped_call`). Each entry of the program's code into them (an import, a call)
 //! also has an allowance of work (`fanout_limit`): past it, the entry's calls of code (the

@@ -317,7 +317,6 @@ pub(super) fn json_str(s: &str, ascii: bool) -> String {
     out
 }
 
-/// The exact text `json.dumps` makes of fully known data (None: anything unknown in it).
 /// The JSON text httpx sends for a request's `json=` body (compact separators, no ASCII
 /// escaping), when the value is known.
 pub fn json_body_text(an: &Analyzer, st: &State, v: &Value) -> Option<String> {
@@ -325,6 +324,7 @@ pub fn json_body_text(an: &Analyzer, st: &State, v: &Value) -> Option<String> {
     json_text(an, st, v, &o, 0)
 }
 
+/// The exact text `json.dumps` makes of fully known data (None: anything unknown in it).
 pub(super) fn json_text(an: &Analyzer, st: &State, v: &Value, o: &JsonOpts, depth: usize) -> Option<String> {
     if depth > 32 {
         return None;

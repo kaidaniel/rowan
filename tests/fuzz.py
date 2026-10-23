@@ -12,7 +12,11 @@ expectations written by hand.
     uv run --no-project python tests/fuzz.py [KIND…] [--seed S] [-n N] [-j J] [--out DIR] [--shrink]
 
 KIND: lists, objects, calls, scalars, dicts, attrs, tries, gens, comps, formats, funcs, order, flow, summaries, decorators,
-unknown (default: all). Run it under `.guard/run`;
+unknown (default: all; 16 areas). Every program is checked as it is and at `budget=0` (`--limits`); summaries
+(result summaries and getters), decorators (in a second module the program imports) and unknown (code handed
+to unknown code, `operator.call`) also at `budget=6` (`KIND_LIMITS`). Positions, keys and attribute names are
+also used beside an unknown object (`lx`, `kx`, `ax`: a literal on some runs, an unknown call's result on
+others). Run it under `.guard/run`;
 `FUZZ_TRACE=1` (with `-j 1`) names each program before its check, to find one that a guard killed.
 """
 from __future__ import annotations

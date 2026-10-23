@@ -2,10 +2,12 @@
 //! loop, a comprehension or `next` inside a try, its raises are kept apart (`TryCtx::gen`), by
 //! how many items it had given (`GenRaises`), and taken where the consumer moves its cursor
 //! past them (`replay_gen_raises`): from the consumer's state then, with what the generator had
-//! changed by the raise joined in. A consumer that uses up one whose body surely raises before
-//! its end goes on nowhere after it. A try that ends takes the raises no consumer asked for
-//! yet as the run recorded them (code rowan does not follow may ask), and they stay kept for
-//! the tries around it.
+//! changed by the raise joined in (where it stands not known: where its loop asked, joined). A
+//! consumer that uses up one whose body surely raises before its end goes on nowhere after it
+//! (`exhaust_whole`). A try that ends takes the raises no consumer asked for
+//! yet as the run recorded them (code rowan does not follow may ask; a raise leaving the
+//! program, one state for several classes, has its footprint joined once), and they stay kept
+//! for the tries around it.
 
 use rustc_hash::FxHashSet;
 

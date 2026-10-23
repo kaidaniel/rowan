@@ -30,6 +30,7 @@ pub const MAX_CHAIN: usize = 6;
 
 /// An object, by its index in the `Heap`.
 pub type ObjId = u32;
+/// A set of objects, as a value's points-to set holds them.
 pub type ObjSet = IdSet<ObjId>;
 
 /// The namespace of an object's keys: a row and its slots are per (object, namespace).
@@ -91,6 +92,7 @@ fn join_order(a: &RowData, b: &RowData) -> Arc<[KeyId]> {
 
 /// The inputs a row is open through, each with the lens its keys came through.
 pub type SrcSet = IdSet<(SourceId, LensId)>;
+/// A set of interned strings.
 pub type StrSet = IdSet<StrId>;
 
 /// The key-set facts of a `Row` (see there).
@@ -177,6 +179,7 @@ pub fn swap_row_joins(n: &mut usize) {
     ROW_JOINS.with(|c| *n = c.replace(*n));
 }
 
+/// Start the row-join counter of this thread again (`ROWAN_DEBUG`'s `row joins`).
 pub fn reset_row_joins() {
     ROW_JOINS.with(|c| c.set(0));
 }
@@ -210,6 +213,7 @@ impl Row {
         Row::from_data(RowData { sources, ..Default::default() })
     }
 
+    /// An open row with no keys known, open through input `src` (unrenamed).
     pub fn with_source(src: SourceId) -> Row {
         Row::with_sources(SrcSet::one((src, EMPTY_LENS)))
     }
@@ -719,7 +723,9 @@ pub enum Tier {
     Proven,
     /// there unless unknown code removed it (✓~)
     Likely,
-    /// a key of a mapping built from data: not decided, and not a requirement
+    /// a key of a mapping built from data, a record filled under keys not known (what its `*`
+    /// slot holds, also where a path stored the key): not decided, and not a requirement; not
+    /// reported alone, beside other objects the read may fail
     Map,
     /// there if an input provides it: a requirement on the input
     Input,
@@ -932,9 +938,11 @@ impl KeyVal {
             KeyVal::Lits(ks)
         }
     }
+    /// No scalar at all (an unreachable path, a value that is only objects).
     pub fn is_bot(&self) -> bool {
         matches!(self, KeyVal::Bot)
     }
+    /// One literal or several, nothing unknown.
     pub fn is_literal(&self) -> bool {
         matches!(self, KeyVal::Lit(_) | KeyVal::Lits(_))
     }
@@ -947,12 +955,14 @@ impl KeyVal {
             _ => true,
         }
     }
+    /// The one literal it surely is (not one of several).
     pub fn as_lit(&self) -> Option<KeyId> {
         match self {
             KeyVal::Lit(k) => Some(*k),
             _ => None,
         }
     }
+    /// An unknown's label.
     pub fn data_site(&self) -> Option<StrId> {
         match self {
             KeyVal::Data(s, _) => Some(*s),
@@ -999,6 +1009,11 @@ pub const TYPE_NAMES: [&str; 5] = ["bool", "bytes", "float", "int", "str"];
 
 /// The label of an unknown of type `ty` (one of `TYPE_NAMES`), named `name` (a label as
 /// `Value::data` takes it, "" for none): `\u{2}int\u{2}expr:3:x + 1`.
+///
+/// Typed unknowns come from annotations in runs for any call; from builtins (`result_type`, a
+/// `range`'s items, `enumerate`'s index, `os.environ`'s values, `read_text`, a str's items);
+/// from operators on typed operands; and from the keys of records only typed stores filled
+/// (`State::keys_type`: the source `store@L4:str`).
 pub fn typed_label(ty: &str, name: &str) -> String {
     format!("\u{2}{}\u{2}{}", ty, label_name(name))
 }

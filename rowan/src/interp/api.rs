@@ -388,12 +388,12 @@ impl Analyzer {
         self.findings.facts_on = true;
     }
 
-    /// Follow these installed packages into these site-packages directories.
     /// The top-level names of the modules imported that rowan did not read.
     pub fn external_imports(&self) -> Vec<String> {
         self.program.external.iter().cloned().collect()
     }
 
+    /// Follow these installed packages into these site-packages directories.
     pub fn follow_packages(&mut self, follow: Vec<String>, site_paths: impl FnOnce() -> Vec<String>) {
         self.program.follow = follow;
         if !self.program.follow.is_empty() {

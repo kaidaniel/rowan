@@ -2154,7 +2154,6 @@ fn const_key(e: &ast::Expr) -> Option<KeyId> {
     })
 }
 
-/// The constraints of a `Field(…)` call.
 /// The error a known literal gets from `Field` / `Query` constraints (`gt`, `min_length`,
 /// `pattern`, …), if it breaks one.
 pub fn literal_breaks(cons: &[(String, KeyId)], k: KeyId) -> Option<&'static str> {
@@ -2202,6 +2201,7 @@ pub fn literal_breaks(cons: &[(String, KeyId)], k: KeyId) -> Option<&'static str
     None
 }
 
+/// The constraints of a `Field(…)` call.
 pub fn field_constraints(c: &ast::ExprCall) -> Vec<(String, KeyId)> {
     let mut out = Vec::new();
     for k in c.arguments.keywords.iter() {

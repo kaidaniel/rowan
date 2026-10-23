@@ -1113,8 +1113,11 @@ pub struct Tables {
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
-    /// one-shot iterators over containers, reading them as they are at each step (`iter(xs)`,
-    /// `reversed`, `map`, `filter`): the call that made each (`Analyzer::sync_live`)
+    /// one-shot iterators over containers (lists, dicts, sets, deques), reading them as they are
+    /// at each step (`iter(xs)`, `reversed`, `map`, `filter`, `islice`, `chain`, `zip` & co.):
+    /// the call that made each (`Analyzer::sync_live`: where the containers' facts changed since,
+    /// by the hashes in its `\u{1}srcfp` slot, it takes its items again, `refill_live` or the
+    /// model again; a reversed list's from its first index)
     pub live_iters: FxHashMap<ObjId, Rc<LiveIter>>,
     /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
     pub torch_on: bool,

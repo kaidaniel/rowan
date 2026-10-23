@@ -175,7 +175,9 @@ impl Analyzer {
     }
 
     /// `state` after any of the program's functions ran, given anything (unknown code's walk of
-    /// what their code may change), and as module code's calls saw it.
+    /// what their code may change: `follow_code` over all of them; a function's result as its
+    /// callers use it, `caller_returns`; instances by name, `methods_may_have_run`), and as
+    /// module code's calls saw it (`note_call`).
     fn after_any_code(&mut self, state: &mut State) {
         let code: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|o| self.heap.kind(*o) == Kind::Function && self.is_local_module(self.heap.func_info(*o).module)).collect();
         let rid = crate::interp::any_object(&mut self.heap);

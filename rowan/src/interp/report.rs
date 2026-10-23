@@ -377,9 +377,11 @@ fn code_list(an: &Analyzer, sites: &[String]) -> String {
     out
 }
 
-/// A place unknown values or changes come from, for people: an unknown call by its text
-/// (`` `mo.group(0)` (line 497) ``), a parameter (`` argument `x` of `f` ``), an input
-/// (`` `json.loads(…)` (line 6) ``).
+/// A place unknown values or changes come from, for people, never an internal site label:
+/// an unknown call or a model's input by the call as written, cut at 50 characters
+/// (`` `mo.group(0)` (line 497) ``, `line 83 in dp/api.py` when in another file; a call of the
+/// program's code rowan no longer follows says so), a parameter (`` argument `x` of `f` ``),
+/// an input (`` `json.loads(…)` (line 6) ``).
 pub fn site_text(an: &Analyzer, site: &str) -> String {
     let in_file = |m: u32, line: u32| {
         let f = an.program.rel_file(m);

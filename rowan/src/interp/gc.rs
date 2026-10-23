@@ -479,9 +479,9 @@ impl Analyzer {
     /// object as held (each looks at what the analyzer holds: timm's constructors raise often).
     const DROP_LOOKS: u32 = 4;
 
-    /// Whether `target`, an instance under construction (`fresh_init`), is held by what
-    /// `roots` (and what the analyzer holds, callers' names up to `envs`) reach in `state`: if
-    /// not, it loses its state there.
+    /// Whether `target`, an instance under construction (`fresh_init`; also in a `with` body), is
+    /// held by what `roots` (and what the analyzer holds, callers' names up to `envs`) reach in
+    /// `state` where a raise leaves it half-built: if not, it loses its state there.
     /// Older objects reach it only through slots written since its construction began (gathered
     /// from look to look); the walk expands only younger objects and ends when it finds the
     /// target, or past `DROP_WALK` objects (then it is held, and stays so).
@@ -551,9 +551,10 @@ impl Analyzer {
         false
     }
 
-    /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
-    /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
-    /// The mark at the loop's start (None: not in a function's call); `loop_gc_end` collects.
+    /// Garbage collection at a loop's exit (in a function), first half: the mark at the loop's
+    /// start (None: not in a function's call). `loop_gc_end` collects: the objects the loop made
+    /// that the frame's names, the enclosing frames and the analyzer no longer reach lose their
+    /// state.
     pub(super) fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
         if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;

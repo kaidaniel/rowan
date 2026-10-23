@@ -7,9 +7,12 @@
 //! it can run whenever `f` is first read instead of at the `def`, from those bindings as they
 //! were at the `def` (`Deferred::names`). The name is bound to a placeholder (an unknown
 //! object, `Payload::Deferred`) until a read of it (`force`: a name, a module's attribute, a
-//! call or an attribute of the value, a module's namespace as a whole); unknown code that may
+//! call or an attribute of the value, a module's namespace as a whole: `vars`, `globals()`,
+//! `import *` into the main module, `getattr` by a name not known); `from m import f` in a
+//! module's code binds the placeholder too. Unknown code that may
 //! reach it may run the decorators' code and `f`'s (`deferred_code`). A definition nobody
-//! reads costs nothing; one read gives what running it at the `def` gives.
+//! reads costs nothing; one read gives what running it at the `def` gives. Other decorators
+//! (registries, ones that may raise or read state) run at the `def`.
 
 use std::rc::Rc;
 

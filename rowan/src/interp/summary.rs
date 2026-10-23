@@ -10,15 +10,17 @@
 //! what no other object shares: an object the run was given, read from elsewhere (`self.cache`,
 //! a global), or stored where the program reads it back (the receiver, a global list, a
 //! registry, unknown code's object) is *not* the fresh record a shape would make, so it is
-//! `any` (the call's unknown result, as before). Keys unknown code may have added or removed
+//! `any` (the call's unknown result, as without a summary). Keys unknown code may have added or removed
 //! keep their row's mutators (reads are `likely`, as for the same code inline).
 //!
 //! The shapes come from a *source*: an analyzer of its own (`Analyzer::summary_source`) that ran
 //! the module's code with every call skipped and is set up for runs on demand (in them every
-//! call after a function's first is skipped, `Budget::cap`). It is made at the first call in the main module that does not run
-//! (the source costs one more run of the program's module code: a program that skips calls
-//! only in other modules, timm's registry decorators, does not pay it; once it is made, every
-//! skipped call uses it). A function's shape is made when a call of it first does not run
+//! call after a function's first is skipped, `Budget::cap`; installed packages not followed;
+//! a quarter of the deadline in all: `main.rs` `summaries_of`). It is made at the first call in
+//! the main module that does not run, and in `rowan serve`'s runs on demand (the source costs
+//! one more run of the program's module code: a program that skips calls only in other
+//! modules, timm's registry decorators, does not pay it; until it is made a skipped call there
+//! gives an unknown, and once it is made, every skipped call uses it). A function's shape is made when a call of it first does not run
 //! (`shape_for`): its run for any call in the source, with the thread's marks exchanged for the
 //! source's around it (`ThreadState`). So the cost is one run per function whose calls are
 //! skipped, within a share of the deadline, not a run of every function. Keyed by the `def`'s
@@ -299,7 +301,9 @@ impl Analyzer {
     }
 
     /// A value from a shape, made at `node`: `unknown` is the call's unknown result (the shape's
-    /// `any`); its records only where `records`, else the unknown result beside its scalars by type.
+    /// `any`, and the records past `RECORDS` or `DEPTH`); its records only where `records` (the
+    /// main module's call sites), else the unknown result beside its scalars by type (`int(?)`:
+    /// records made at every call site would cost every later walk and join).
     pub(in crate::interp) fn materialize(&mut self, sh: &Shape, unknown: &Value, node: &Node, state: &mut State, path: &str, records: bool) -> Value {
         // (elsewhere its scalars by type only: literal sets cost every join they reach)
         let mut v = Value::kv_only(if records { sh.kv.clone() } else { type_only(&sh.kv) });

@@ -111,11 +111,12 @@ impl Analyzer {
     }
 
     /// Recency per call: an instance a call makes where its site's object is a summary (merged,
-    /// or past the site's `MAX_CLONES`) is a strong *recent* object of the call's own, folded
-    /// into the summary when the call returns (`fold_call_recent`): what the call stores is
-    /// there for sure until then, and joins the summary with every key it got. Not while the
-    /// recent object is in use: made by a running call or held on a path, or an identity key. Instances of the program's classes only (no
-    /// side tables of models hold them).
+    /// or past the site's `MAX_CLONES`) is a strong *recent* object of the call's own (one per
+    /// call depth), folded into the summary when the call returns or a raise leaves it
+    /// (`fold_call_recent`; one nothing holds then is dropped): what the call stores is there
+    /// for sure until then, and joins the summary with every key it got. Not while the recent
+    /// object is in use: made by a running call or held on a path, or an identity key.
+    /// Instances of the program's classes only (no side tables of models hold them).
     fn call_recent(&mut self, kind: Kind, oid: ObjId, label: &str, state: &State) -> Option<ObjId> {
         if kind != Kind::Instance || self.heap.obj(oid).single || self.budget.over_hard_deadline() {
             return None;

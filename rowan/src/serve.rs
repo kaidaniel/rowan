@@ -195,7 +195,7 @@ struct Shared {
     latest: std::collections::HashMap<String, u64>,
     running: Vec<(String, Cancel)>,
     /// per file, the latest `analyse` whose analysis following installed packages answered
-    /// (`follow_followed`): the analyses without following say nothing after it
+    /// (`spawn_followed`): the analyses without following say nothing after it
     followed: std::collections::HashMap<String, u64>,
 }
 
@@ -348,7 +348,7 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
         (sh.cancel_flag(path), sh.cancel_flag(path))
     };
     // (following installed packages: the answer comes from analyses without; when they see the
-    // program import one it would follow, an analysis following them starts, `follow_later`)
+    // program import one it would follow, an analysis following them starts, `FollowLater`)
     let later = FollowLater { opts: opts.clone(), probe: Default::default(), spawned: Default::default() };
     let opts = &Opts { probe: (!opts.follow.is_empty()).then(|| (opts.follow.clone(), later.probe.clone())), ..unfollowed(opts) };
     let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, whole_cancel);

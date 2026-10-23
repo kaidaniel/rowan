@@ -535,6 +535,8 @@ impl Analyzer {
     /// (not a property, static or class method, cached property, lru_cache, singledispatch or
     /// contextmanager function, nor one a decorator not modelled gave back: those may be
     /// objects with attributes of their own; nor one unknown code was given, `escaped_fns`)?
+    /// What was stored on it (also through `__dict__`, `vars`, `setattr`) is all it has:
+    /// `hasattr` decides, and a read of what it surely lacks raises.
     pub fn plain_function(&self, f: ObjId) -> bool {
         let fi = self.heap.func_info(f);
         !(fi.is_property.get() || fi.is_static.get() || fi.is_classmethod.get() || fi.is_cached.get() || fi.is_memo.get() || fi.is_contextmanager.get() || fi.opaque.get() || self.m.sdispatch.contains_key(&f) || self.heap.escaped_fns.contains(&f))
@@ -1080,11 +1082,10 @@ impl Analyzer {
         !v.pts.is_empty() && !v.kv.is_bot() && v.kv.as_lit() != Some(intern::key_none()) && v.pts.iter().any(|o| self.heap.kind(o) != Kind::Unknown)
     }
 
-    /// An unknown object's row; none on this path (collected, or never made here): nothing is
-    /// known of it (an empty, closed row would claim every key missing).
-    /// The row a read classifies against: of an object this path has no facts about at all
-    /// (made on other paths: a recursion's deeper activations make what its widened
-    /// arguments hold), nothing is known.
+    /// The row a read classifies against. Of an object this path has no facts about at all
+    /// (collected, or made on other paths only: a recursion's deeper activations make what its
+    /// widened arguments hold), nothing is known: an empty, closed row would claim every key
+    /// missing.
     pub(in crate::interp) fn read_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
     }

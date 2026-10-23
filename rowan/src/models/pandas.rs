@@ -6,6 +6,12 @@
 //! columns may (and surely) hold, and its number of rows, are kept in its `Meta` slots
 //! (`labels`, `vals`, `nrows`). The interpreter calls the hooks here for item,
 //! attribute and `.loc` access on frames (`frame_getitem`, `frame_setattr`, `loc_get`, …).
+//!
+//! A selection by an unknown value (a mask, a list of columns, a `.loc` selection) holds the
+//! frame's columns, and `drop(columns=…)` of an unknown the others. A Series iterates its
+//! values, as Python scalars; a cell is an object column's value, a number column's an unknown
+//! (numpy's). Literal data keeps its values in row order (`cells`) until its values or labels
+//! change. The truth of a frame or a Series raises.
 
 use indexmap::IndexMap;
 

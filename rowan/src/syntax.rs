@@ -223,8 +223,10 @@ const TAKE_ALL: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted
 /// therefore run where they are written, as list comprehensions (their names the enclosing
 /// code's), among a call's or a display's parts: one unpacked (`f(*g)`, `[*g, x]`, taken as it
 /// is reached), and the sole argument of a builtin or method that takes an iterable's items at
-/// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`; by name: one bound to something else runs so
-/// too, as before generator expressions were lazy) with nothing evaluated after it.
+/// once (`sum(…)`, `", ".join(…)`, `torch.cat(…)`) with nothing evaluated after it. Taken by
+/// name: a name bound to something else (a shadowed `sum`) runs one so too, which is right only
+/// if that callee also takes the items at once; otherwise the items' effects come too early (a
+/// known gap).
 pub fn eager_genexps(e: &ast::Expr) -> Vec<&ast::Expr> {
     let parts: &[ast::Expr] = match e {
         ast::Expr::Call(c) => &c.arguments.args,

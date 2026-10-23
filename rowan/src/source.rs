@@ -291,11 +291,13 @@ pub struct Lens {
 }
 
 impl Lens {
+    /// This lens, then `o`.
     pub fn concat(&self, o: &Lens) -> Lens {
         let mut steps = self.steps.clone();
         steps.extend(o.steps.iter().cloned());
         Lens { steps }
     }
+    /// This lens, then one more step.
     pub fn with_step(&self, s: Step) -> Lens {
         let mut steps = self.steps.clone();
         steps.push(s);
@@ -490,6 +492,7 @@ pub fn source_is_outside(s: SourceId) -> bool {
     with_source(s, |src| matches!(src.kind, SourceKind::External | SourceKind::Call | SourceKind::Data))
 }
 
+/// The source's label (`json.loads@L7['items']`), as directives and the JSON name it.
 pub fn source_label(s: SourceId) -> String {
     with_source(s, |src| src.label())
 }
