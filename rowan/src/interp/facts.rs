@@ -43,8 +43,11 @@ pub fn facts_json(an: &Analyzer) -> J {
             }
         }
     }
+    // (a verdict taken for the main file's at a line it does not have — one of an annotation
+    // another module wrote as a string, parsed apart: tomlkit's items.py — is left out)
     let verdicts: Vec<J> = reported(an)
         .iter()
+        .filter(|v| !v.file.is_empty() || crate::frontend::has_line(main_idx, v.line))
         .map(|v| {
             let mut j = verdict_json(an, v);
             if v.file.is_empty() {

@@ -469,6 +469,9 @@ pub fn text_at(n: &Node) -> String {
 
 /// A column in UTF-16 code units (what editors count) from a byte column on a 1-based line.
 pub fn utf16_col(module: u32, line: u32, col: u32) -> u32 {
+    if !has_line(module, line) {
+        return col;
+    }
     REG.with(|r| {
         let r = r.borrow();
         let Some(m) = r.modules.get(module as usize) else { return col };
@@ -476,6 +479,11 @@ pub fn utf16_col(module: u32, line: u32, col: u32) -> u32 {
         let s = m.lines.line_start(l, &m.source).to_usize();
         m.source.get(s..s + col as usize).map(|t| t.encode_utf16().count() as u32).unwrap_or(col)
     })
+}
+
+/// Does module `module` have a line `line` (1-based)?
+pub fn has_line(module: u32, line: u32) -> bool {
+    REG.with(|r| r.borrow().modules.get(module as usize).is_some_and(|m| line >= 1 && (line as usize) <= m.lines.line_count()))
 }
 
 /// The modules parsed so far and their lines, all and those read from site-packages:
