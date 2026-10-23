@@ -587,18 +587,39 @@ impl Analyzer {
         if !swallowing {
             self.reraise_uncaught(&mut recs, &hclasses, fin);
         }
-        // where an exception leaves the body (for a finally without handlers)
-        let mut finally_escape = if has_finally && handlers.is_empty() && fin.swallows() { crate::interp::join_raise_recs(&recs) } else { None };
+        // where an exception no handler surely catches leaves the body, for a finally that
+        // swallows it
+        let escaping = |recs: &[crate::interp::RaiseRec]| State::join_all(recs.iter().filter(|r| !hclasses.iter().any(|hc| handler_matches(hc, &r.0) == Some(true))).map(|r| r.1.copy()).collect());
+        let mut finally_escape = if swallowing { escaping(&recs) } else { None };
         if crate::interp::debug_level() == 2 {
             eprintln!("  try at L{}: raises recorded={} reachable={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), recs.len(), state.reachable);
         }
         let mut body_end = state.copy();
         let mut results: Vec<State> = Vec::new();
+        // (a raise in the `else` or a handler passes the handlers by, not the finally: a try
+        // context catching nothing takes it there, and the finally runs on it as on the body's)
+        let wrap = has_finally && (!orelse.is_empty() || !handlers.is_empty());
+        if wrap {
+            self.enter_try(FxHashSet::default(), &mut pre.copy());
+            if let Some(t) = self.unwind.tries.last_mut() {
+                t.runs = runs;
+            }
+        }
         if !orelse.is_empty() && body_end.reachable {
             self.exec_block(orelse, &mut body_end);
         }
         results.push(body_end);
         self.run_handlers(handlers, &hclasses, &mut recs, &pre, &mut results);
+        if wrap {
+            let TryExit { recs: mut late, .. } = self.leave_try();
+            if swallowing {
+                let mut esc: Vec<State> = late.iter().map(|r| r.1.copy()).collect();
+                esc.extend(finally_escape.take());
+                finally_escape = State::join_all(esc);
+            } else {
+                self.reraise_uncaught(&mut late, &[], fin);
+            }
+        }
         self.cx.branch_depth -= 1;
         self.cx.cond_depth -= 1;
         let mut out = self.join_try_ways(body, orelse, handlers, results);
