@@ -1,0 +1,233 @@
+{
+ "python": "3.14",
+ "packages": [
+  {
+   "name": "pyasn1",
+   "version": "0.6.1",
+   "url": "https://files.pythonhosted.org/packages/ba/e9/01f1a64245b89f039897cb0130016d79f77d52669aae6ee7b159a6c4c018/pyasn1-0.6.1.tar.gz",
+   "sha256": "6f580d2bdd84365380830acf45550f2511469f673cb4a5ae3857a3170128b034"
+  },
+  {
+   "name": "httplib2",
+   "version": "0.22.0",
+   "url": "https://files.pythonhosted.org/packages/3d/ad/2371116b22d616c194aa25ec410c9c6c37f23599dcd590502b74db197584/httplib2-0.22.0.tar.gz",
+   "sha256": "d7a10bc5ef5ab08322488bde8c726eeee5c8618723fdb399597ec58f3d82df81"
+  },
+  {
+   "name": "PyYAML",
+   "version": "6.0.2",
+   "url": "https://files.pythonhosted.org/packages/54/ed/79a089b6be93607fa5cdaedf301d7dfb23af5f25c398d5ead2525b063e17/pyyaml-6.0.2.tar.gz",
+   "sha256": "d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e"
+  },
+  {
+   "name": "Jinja2",
+   "version": "3.1.4",
+   "url": "https://files.pythonhosted.org/packages/ed/55/39036716d19cab0747a5020fc7e907f362fbf48c984b14e62127f7e68e5d/jinja2-3.1.4.tar.gz",
+   "sha256": "4a3aee7acbbe7303aede8e9648d13b8bf88a429282aa6122a993f0ac800cb369"
+  },
+  {
+   "name": "pycparser",
+   "version": "2.22",
+   "url": "https://files.pythonhosted.org/packages/1d/b2/31537cf4b1ca988837256c910a668b553fceb8f069bedc4b1c826024b52c/pycparser-2.22.tar.gz",
+   "sha256": "491c8be9c040f5390f5bf44a5b07752bd07f56edf992381b05c701439eec10f6"
+  },
+  {
+   "name": "marshmallow",
+   "version": "3.23.1",
+   "url": "https://files.pythonhosted.org/packages/6d/30/14d8609f65c8aeddddd3181c06d2c9582da6278f063b27c910bbf9903441/marshmallow-3.23.1.tar.gz",
+   "sha256": "3a8dfda6edd8dcdbf216c0ede1d1e78d230a6dc9c5a088f58c4083b974a0d468"
+  },
+  {
+   "name": "pyflakes",
+   "version": "3.2.0",
+   "url": "https://files.pythonhosted.org/packages/57/f9/669d8c9c86613c9d568757c7f5824bd3197d7b1c6c27553bc5618a27cce2/pyflakes-3.2.0.tar.gz",
+   "sha256": "1c61603ff154621fb2a9172037d84dca3500def8c8b630657d1701f026f8af3f"
+  },
+  {
+   "name": "html5lib",
+   "version": "1.1",
+   "url": "https://files.pythonhosted.org/packages/ac/b6/b55c3f49042f1df3dcd422b7f224f939892ee94f22abcf503a9b7339eaf2/html5lib-1.1.tar.gz",
+   "sha256": "b2e5b40261e20f354d198eae92afc10d750afb487ed5e50f9c4eaf07c184146f"
+  }
+ ],
+ "modules": [
+  {
+   "name": "argparse",
+   "kind": "cli",
+   "source": "stdlib",
+   "path": "argparse.py",
+   "sha256": "c2cd895b117dbc4d55439773e3f11e57b833b1e20f05d311c4465b794b044898"
+  },
+  {
+   "name": "email_hvp",
+   "kind": "parser",
+   "source": "stdlib",
+   "path": "email/_header_value_parser.py",
+   "sha256": "cb79aaf3b57072daa004339a824db51e7029539afb1b07d1d807bdbd30495ca1"
+  },
+  {
+   "name": "pydoc",
+   "kind": "cli",
+   "source": "stdlib",
+   "path": "pydoc.py",
+   "sha256": "31eba9fea95609a7ce44c445251363830f81a4c2f4102cc74232e4f4f5ff1454"
+  },
+  {
+   "name": "tarfile",
+   "kind": "serial",
+   "source": "stdlib",
+   "path": "tarfile.py",
+   "sha256": "07e226f1b76043516d16c7185baf6ab3d37aac915373a0194b773dab0bf2330d"
+  },
+  {
+   "name": "pickle",
+   "kind": "serial",
+   "source": "stdlib",
+   "path": "pickle.py",
+   "sha256": "b24a348ff4c37e7db4f7e25edec94a83583ee9bd9a2f55c5df9f11b0c3237a51"
+  },
+  {
+   "name": "ast",
+   "kind": "parser",
+   "source": "stdlib",
+   "path": "ast.py",
+   "sha256": "5ea9a796353544bea0d706153516f04ef3d92be305d15a73238403837d77e34c"
+  },
+  {
+   "name": "inspect",
+   "kind": "classes",
+   "source": "stdlib",
+   "path": "inspect.py",
+   "sha256": "dd95bf21e36fcb4cdbcb9085e38d4c871cbea8c00c7e261f23f6384b9a6e648d"
+  },
+  {
+   "name": "glom_core",
+   "kind": "data",
+   "source": "bench",
+   "bench": "functional",
+   "path": "glom/core.py",
+   "sha256": "c6c076b1130fd86b09270cc767082740d5ca1eb72f5a249ab2e998ec4e06e1cf"
+  },
+  {
+   "name": "pyparsing_core",
+   "kind": "parser",
+   "source": "bench",
+   "bench": "functional",
+   "path": "pyparsing/core.py",
+   "sha256": "e84663e68207f710f8f49d970931685a13ac008694ec96b9ff430017fa46999a"
+  },
+  {
+   "name": "hypothesis_core",
+   "kind": "decorators",
+   "source": "bench",
+   "bench": "functional",
+   "path": "hypothesis/strategies/_internal/core.py",
+   "sha256": "917a125fc838c12fbb79cdbbd983f9cd004c5b9be00a955c75aa81e6f3bd9006"
+  },
+  {
+   "name": "packaging_specifiers",
+   "kind": "parser",
+   "source": "bench",
+   "bench": "pip",
+   "path": "pip/_vendor/packaging/specifiers.py",
+   "sha256": "dd705c4ac966f984041043bfcebbf817a751e70471b3812b26f274be33417c63"
+  },
+  {
+   "name": "click_core",
+   "kind": "cli",
+   "source": "bench",
+   "bench": "click",
+   "path": "click/core.py",
+   "sha256": "8faa045ad1a01a76bc25aac3e96c615e6367c4b9df463c178256c173ef23afb5"
+  },
+  {
+   "name": "rich_console",
+   "kind": "template",
+   "source": "bench",
+   "bench": "rich",
+   "path": "rich/console.py",
+   "sha256": "ce04b0bd10cf8835e1eb043f91b9cd4b17dffaceeeba58d599a4dea183f287a1"
+  },
+  {
+   "name": "rich_markdown",
+   "kind": "parser",
+   "source": "bench",
+   "bench": "rich",
+   "path": "rich/markdown.py",
+   "sha256": "7838bb74c37b4500f9bb6d6dbaa08e4a935619974a9b21ad2a669936ddb9eeb0"
+  },
+  {
+   "name": "rich_table",
+   "kind": "template",
+   "source": "bench",
+   "bench": "rich",
+   "path": "rich/table.py",
+   "sha256": "457dba53ca07574b3553e825e96ab295f7ac98e4f6aaded556d32d0b5f3e3e4d"
+  },
+  {
+   "name": "pyasn1_ber_decoder",
+   "kind": "serial",
+   "source": "pypi",
+   "package": "pyasn1",
+   "path": "pyasn1/codec/ber/decoder.py",
+   "sha256": "1d959cdccf78d3a6e1029b8917e4c062945f2d6bd04f9e02ad1103a833325346"
+  },
+  {
+   "name": "httplib2",
+   "kind": "web",
+   "source": "pypi",
+   "package": "httplib2",
+   "path": "python3/httplib2/__init__.py",
+   "sha256": "50ecdac46c06c1e1e22ecc4a05cdfdfc4cf437c6831f002efbe4e44db60b582c"
+  },
+  {
+   "name": "yaml_constructor",
+   "kind": "serial",
+   "source": "pypi",
+   "package": "PyYAML",
+   "path": "lib/yaml/constructor.py",
+   "sha256": "90d8247da78b524c10618fd0e857f54f3d97570fe91b5c5513d024ef3faf88b0"
+  },
+  {
+   "name": "jinja2_parser",
+   "kind": "template",
+   "source": "pypi",
+   "package": "Jinja2",
+   "path": "src/jinja2/parser.py",
+   "sha256": "0d5d62175151d91b1a8ffe7397cae6c7b8fa063e12f222c7a18b2f2746df122b"
+  },
+  {
+   "name": "pycparser_c_parser",
+   "kind": "parser",
+   "source": "pypi",
+   "package": "pycparser",
+   "path": "pycparser/c_parser.py",
+   "sha256": "5949c81cdc9d977d9006e454aabaa4f85da5c81e9644fe015181442ea5444f2c"
+  },
+  {
+   "name": "marshmallow_schema",
+   "kind": "data",
+   "source": "pypi",
+   "package": "marshmallow",
+   "path": "src/marshmallow/schema.py",
+   "sha256": "0b806c6240c141b7600c0eb0dfda12a9596c0f1e0d7db913fd7b5220a72ac48a"
+  },
+  {
+   "name": "pyflakes_checker",
+   "kind": "parser",
+   "source": "pypi",
+   "package": "pyflakes",
+   "path": "pyflakes/checker.py",
+   "sha256": "b2718d23d51c9e90d5f3ca2428ed0fe3ce77848c35de416908cc00e735a56169"
+  },
+  {
+   "name": "html5lib_parser",
+   "kind": "parser",
+   "source": "pypi",
+   "package": "html5lib",
+   "path": "html5lib/html5parser.py",
+   "sha256": "c39859261d1cbc3de0e024b5f7a0e24e6b86a522823187b5192e3afb27ff5994"
+  }
+ ],
+ "chosen": "2026-10-23: of 85 candidates (stdlib, the eight's files, 16 PyPI sdists; none in the held-out manifest), those the 10 s deadline cut or over 500 MB at v0.1.83 + z793, and the slowest others"
+}

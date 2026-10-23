@@ -106,6 +106,7 @@ uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # eac
 uv run --no-project python tests/ondemand_check.py [-j N]  # on-demand runs vs whole runs; bench/first_hover.py (as hovers.py): rowan serve's first hover in a file
 uv run --no-project python bench/sitepackages.py [-v] [--uncapped]  # installed packages followed: cost and hover precision per scenario, ~10 s (venvs in bench/work/)
 uv run --no-project python bench/heldout.py fetch|metrics|sound|sweep [--corpus heldout|eight] [-v]  # the held-out corpus (below): metrics, its own pytest suites vs rowan's claims, knob sweeps
+uv run --no-project python bench/costset.py fetch|metrics [--mode default|nodeadline] [-j 3]  # the cost set: 23 dense library modules (parsers, serialisers, templates, CLIs) tuned on for per-module time and memory
 uv run --no-project python bench/scoreboard.py run [--tags vX] [--since vX] [--ref REF]; … report [--md F]  # every release measured with one pinned test set into bench/scoreboard.json (~5 min a tag)
 ```
 
