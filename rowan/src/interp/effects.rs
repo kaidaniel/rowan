@@ -914,6 +914,7 @@ impl Analyzer {
         }
         let params = || fi.node.params().into_iter().flat_map(|p| p.posonlyargs.iter().chain(p.args.iter()));
         let recv_name = self_v.and_then(|_| params().next()).map(|a| s(a.parameter.name.id.as_str()));
+        let unpacked = a.star.iter().chain(a.star_kw).fold(Value::new(), |acc, v| acc.join(&self.unpacked(v, state)));
         let given = |p: StrId| -> Value {
             if let (Some(r), Some(v)) = (recv_name, self_v) {
                 if r == p {
@@ -923,7 +924,7 @@ impl Analyzer {
             let at = params().skip(usize::from(self_v.is_some())).position(|x| s(x.parameter.name.id.as_str()) == p);
             match (at.and_then(|i| a.pos.get(i)), a.kw.get(&p)) {
                 (Some(v), _) | (None, Some(v)) => v.clone(),
-                _ => a.pos.iter().chain(a.kw.values()).chain(a.star).chain(a.star_kw).fold(Value::new(), |acc, v| acc.join(v)),
+                _ => a.pos.iter().chain(a.kw.values()).fold(unpacked.clone(), |acc, v| acc.join(v)),
             }
         };
         let own = uses.kept_returned.iter().chain(uses.returns_params.iter()).fold(Value::new(), |acc, p| acc.join(&given(*p)));

@@ -354,8 +354,9 @@ impl Analyzer {
         }
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
-        // (what it is given, the receiver apart)
-        let mut vals: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
+        // (what it is given, the receiver apart; `*xs` / `**d`: their items, in a new tuple / dict)
+        let mut vals: Vec<Value> = args.iter().chain(kwargs.values()).cloned().collect();
+        vals.extend(star_args.iter().chain(star_kwargs.iter()).map(|v| self.unpacked(v, state)));
         // unknown code may change what an earlier test read: facts about it no longer hold
         if !state.facts.is_empty() {
             let objs: Vec<u32> = recv.into_iter().chain(vals.iter()).flat_map(|v| v.pts.iter()).collect();
@@ -419,6 +420,33 @@ impl Analyzer {
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// What `*v` / `**v` give the code called: a list's, tuple's, set's or dict's items, in a
+    /// new tuple or dict (the container is not given: its keys and length stay as they are; an
+    /// open one's items are anything); anything else itself (an iterator is consumed, an
+    /// instance's `keys` / `__iter__` run).
+    pub(in crate::interp) fn unpacked(&self, v: &Value, state: &State) -> Value {
+        let mut out = Value::with_kv(crate::domain::ObjSet::new(), v.kv.clone());
+        for o in v.pts.iter() {
+            let plain = matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !self.heap.obj(o).site.starts_with("gen:") && self.has_facts(o, state);
+            if !plain {
+                out = out.join(&Value::obj(o));
+                continue;
+            }
+            state.slots.each(&o, &mut |sk, sv| {
+                if matches!(sk.0, Ns::Item | Ns::Elem | Ns::Pos) {
+                    out = out.join(sv);
+                }
+            });
+            if let Some(kv) = state.elems.get(&o) {
+                out = out.join(&Value::with_kv(crate::domain::ObjSet::new(), kv));
+            }
+            if state.row(o, Ns::Item).open() || state.row(o, Ns::Attr).open() {
+                out = out.join(&Value::data("unpacked"));
+            }
+        }
+        out
     }
 
     /// The program's dunders of the classes among `found` that unknown code may run (`met`: the
