@@ -1146,9 +1146,16 @@ pub(super) fn m_partial_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Val
         // (bound `**opts` of unknown keys: passed on before the call's own)
         let mut star = an.m.partial_star.get(&x).cloned().unwrap_or_default();
         star.extend(c.star_kwargs.iter().cloned());
+        an.m.partial_calling.push(x);
         for fo in f.pts.iter() {
-            outs.push(an.call_one(fo, Args::new(&fake_args, &kw, &c.star_args, &star), st, &c.node, c.call_ast));
+            let a = Args::new(&fake_args, &kw, &c.star_args, &star);
+            if an.m.partial_calling.contains(&fo) {
+                outs.push(an.unknown_call("partial.__call__", Some(&Value::obj(fo)), a, st, &c.node));
+            } else {
+                outs.push(an.call_one(fo, a, st, &c.node, c.call_ast));
+            }
         }
+        an.m.partial_calling.pop();
     }
     if outs.is_empty() {
         Value::data("partial")
