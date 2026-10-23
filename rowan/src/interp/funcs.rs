@@ -140,6 +140,35 @@ impl Analyzer {
     /// `contextmanager` and setters mark the function; functools and FastAPI decorators go to
     /// their models; the program's own decorators are called with the function; known identity
     /// decorators change nothing; any other is noted and taken to return the function.
+    /// `@name.getter` (the function is the property's getter now), `@name.setter` (remembered;
+    /// the getter stays bound to the name) and `@name.deleter` (likewise): true when `d` is one.
+    fn property_accessor(&mut self, d: &'static ast::Decorator, q: &str, fobj: Option<ObjId>, fi: &Option<std::rc::Rc<FuncInfo>>, fv: &mut Value) -> bool {
+        let accessor = |w: &str| q.ends_with(&format!(".{w}")) || matches!(&d.expression, ast::Expr::Attribute(a) if a.attr.id.as_str() == w);
+        let in_class = self.frame().class_oid.is_some();
+        if accessor("getter") && in_class {
+            if let Some(fi) = fi {
+                fi.is_property.set(true);
+            }
+            return true;
+        }
+        let is_setter = accessor("setter");
+        if !is_setter && !(accessor("deleter") && in_class) {
+            return false;
+        }
+        let (Some(cls), Some(f), ast::Expr::Attribute(a)) = (self.frame().class_oid, fobj, &d.expression) else { return true };
+        let ast::Expr::Name(n) = &*a.value else { return true };
+        let nk = key_str_lit(n.id.as_str());
+        if is_setter {
+            self.heap.prop_setters.insert((cls, nk), f);
+        } else {
+            self.heap.prop_deleters.insert((cls, nk), f);
+        }
+        if let Some(getter) = self.heap.cls_slots.get(&(cls, Ns::Attr, nk)).cloned().filter(|g| !g.pts.is_empty()) {
+            *fv = getter;
+        }
+        true
+    }
+
     pub(in crate::interp) fn apply_decorators(&mut self, decorators: &'static [ast::Decorator], fnode: Node, mut fv: Value, state: &mut State) -> Value {
         for d in decorators.iter().rev() {
             let q = self.decorator_qualname(&d.expression, state).unwrap_or_default();
@@ -172,35 +201,7 @@ impl Analyzer {
                 }
                 continue;
             }
-            let accessor = |w: &str| q.ends_with(&format!(".{w}")) || matches!(&d.expression, ast::Expr::Attribute(a) if a.attr.id.as_str() == w);
-            if accessor("getter") && self.frame().class_oid.is_some() {
-                // `@name.getter`: the function is the property's getter now
-                if let Some(fi) = &fi {
-                    fi.is_property.set(true);
-                }
-                continue;
-            }
-            let is_setter = accessor("setter");
-            if is_setter || (accessor("deleter") && self.frame().class_oid.is_some()) {
-                // `@name.setter`: remember the setter; it and `@name.deleter` keep the getter
-                // bound to the name
-                if let (Some(cls), Some(f)) = (self.frame().class_oid, fobj) {
-                    if let ast::Expr::Attribute(a) = &d.expression {
-                        if let ast::Expr::Name(n) = &*a.value {
-                            let nk = key_str_lit(n.id.as_str());
-                            if is_setter {
-                                self.heap.prop_setters.insert((cls, nk), f);
-                            } else {
-                                self.heap.prop_deleters.insert((cls, nk), f);
-                            }
-                            if let Some(getter) = self.heap.cls_slots.get(&(cls, Ns::Attr, nk)).cloned() {
-                                if !getter.pts.is_empty() {
-                                    fv = getter;
-                                }
-                            }
-                        }
-                    }
-                }
+            if self.property_accessor(d, &q, fobj, &fi, &mut fv) {
                 continue;
             }
             // functools: singledispatch (and its `register`), lru_cache / cache, wraps
