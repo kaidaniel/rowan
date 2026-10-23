@@ -254,7 +254,12 @@ impl Analyzer {
         // (per part: Some(true) lacks it, Some(false) may, None has it or is not known)
         let parts: Vec<Option<bool>> = match &obj.kv {
             kv if kv.is_literal() => kv_literals(kv).iter().filter(|k| obj.pts.is_empty() || *k != key_none()).map(|k| builtin_has_attr(lit_type(k)?, name).and_then(|h| (!h).then_some(true))).collect(),
-            KeyVal::Data(l, _) => vec![crate::domain::label_type(&intern::str_get(*l)).and_then(|t| builtin_has_attr(t, name)).and_then(|h| (!h).then_some(false))],
+            // (an untyped unknown, or a key of some objects, may be any object: it may lack it)
+            KeyVal::Data(l, _) => vec![match crate::domain::label_type(&intern::str_get(*l)) {
+                Some(t) => builtin_has_attr(t, name).and_then(|h| (!h).then_some(false)),
+                None => Some(false),
+            }],
+            kv if !kv.is_bot() => vec![Some(false)],
             _ => vec![],
         };
         if obj.pts.is_empty() && !parts.is_empty() && parts.iter().all(|p| *p == Some(true)) {
