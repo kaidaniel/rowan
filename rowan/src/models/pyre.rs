@@ -580,6 +580,30 @@ impl Regex {
         Some(Regex { root, ngroups: p.ngroups, names: p.names, flags: p.flags })
     }
 
+    /// Per group (0: the whole match), whether every match has it: not under one of several
+    /// alternatives, a repetition that may run none, or a look-around.
+    pub fn sure_groups(&self) -> Vec<bool> {
+        fn walk(n: &Node, sure: bool, out: &mut Vec<bool>) {
+            match n {
+                Node::Group(g, x) => {
+                    if let Some(g) = g {
+                        out[*g] = sure;
+                    }
+                    walk(x, sure, out)
+                }
+                Node::Seq(xs) => xs.iter().for_each(|x| walk(x, sure, out)),
+                Node::Alt(xs) => xs.iter().for_each(|x| walk(x, sure && xs.len() == 1, out)),
+                Node::Rep(x, lo, _, _) => walk(x, sure && *lo > 0, out),
+                Node::Look(_, _, x, _) => walk(x, false, out),
+                _ => {}
+            }
+        }
+        let mut out = vec![false; self.ngroups + 1];
+        out[0] = true;
+        walk(&self.root, true, &mut out);
+        out
+    }
+
     pub fn group_index(&self, name: &str) -> Option<usize> {
         self.names.iter().find(|(n, _)| n == name).map(|(_, g)| *g)
     }

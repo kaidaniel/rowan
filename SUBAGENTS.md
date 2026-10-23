@@ -44,6 +44,12 @@ programs (stdlib12k, email, rich, click, golden-sized code) for the large ones (
 sktime, functional), nor on either for analysing installed packages (objective 11). A real
 soundness fix may cost them some speed.
 
+**The held-out corpus is not a target.** `bench/heldout.py` (AGENTS.md, Tests) measures rowan on
+real code nobody tunes against. Put its `metrics` (proven %, known facts %, time, memory, cut
+runs) and `sound` mismatch count in your before / after table, but never choose work from its
+individual modules, sites, hovers or timings, nor change its manifest. Only an unsound claim
+its `sound` check finds may become work: shrink it into a golden case written in your own words.
+
 **Imprecision is a trade-off,** never "accepted": call a gap "known" or "known to be hard",
 name its cost, and list it under Remaining.
 
@@ -96,7 +102,8 @@ CI and Bench green on the pull request. `AGENTS.md` true and under 200 lines.
 
 Also put it in the pull request's description.
 * **Commits:** one line each, with its effect.
-* **Objectives, before → after** (a table): benchmark time, memory and verdict counts; the
+* **Objectives, before → after** (a table): benchmark time, memory and verdict counts; the held-out
+  corpus's metrics and `sound` mismatches; the
   golden and `budget=0` counts; `#@todo`s; engine and model lines; the modularity proxies;
   knobs; what users see.
 * **Trade-offs:** what you made less precise or slower, and why.

@@ -613,7 +613,7 @@ impl Analyzer {
                 ast::Expr::Attribute(a) => {
                     let obj = self.eval(&a.value, state);
                     let n = frontend::node(t);
-                    self.delete_item(&obj, Ns::Attr, &Value::lit(key_str_lit(a.attr.id.as_str())), &n, state, true);
+                    self.delete_attr(&obj, a.attr.id.as_str(), &n, state);
                 }
                 ast::Expr::Name(nm) => {
                     state.env.shift_remove(&s(nm.id.as_str()));

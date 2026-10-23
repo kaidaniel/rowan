@@ -61,6 +61,9 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
             }
         }
+        if report {
+            self.unknown_scalar_may_raise(obj, state);
+        }
         if ns == Ns::Item {
             if let Some(v) = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__getitem__"), state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report)) {
                 return v;
@@ -1192,6 +1195,9 @@ impl Analyzer {
                 self.check_hashable(key, state);
             }
         }
+        if report {
+            self.unknown_scalar_may_raise(obj, state);
+        }
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);
         state.drop_name_keys(None);
@@ -1218,6 +1224,15 @@ impl Analyzer {
                 continue;
             }
             self.delete_key(oid, ns, key, strong, node, state, report);
+        }
+    }
+
+    /// A read or `del` on a value with an unknown scalar part (an element unpacked from an
+    /// unknown, an operator's result on unknowns), which may be any object: its subscript may
+    /// raise anything, as a library object's does.
+    fn unknown_scalar_may_raise(&mut self, obj: &Value, state: &mut State) {
+        if !obj.kv.is_literal() && !obj.kv.is_bot() {
+            self.flag_may_raise(state);
         }
     }
 

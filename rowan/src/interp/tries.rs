@@ -49,8 +49,10 @@ pub fn is_any_exc(c: &Option<ExcNames>) -> bool {
 /// `finally` or `__exit__` that runs code sees it, `finally_sees`); an operator (types that may
 /// not fit, a divisor that may be 0, a tensor dim's too: `scalar_binop_raises`; an ordering,
 /// `ordering_raises`; `%` formatting, `percent_raises`; an unknown object's operator is unknown
-/// code); an attribute a literal's type lacks (`literals_lack_attr`), a str's or dict's method
-/// of an unknown; a model's raise; any unknown call (class `any_exc`).
+/// code); an attribute a literal's type lacks (`literals_lack_attr`; an untyped unknown's may
+/// lack any), a str's or dict's method of an unknown; a subscript or `del` of an unknown scalar,
+/// which may be any object (`unknown_scalar_may_raise`: anything); a model's raise; any unknown
+/// call (class `any_exc`).
 pub struct TryCtx {
     /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
     /// handler ends by re-raising)

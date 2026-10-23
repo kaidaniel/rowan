@@ -254,7 +254,12 @@ impl Analyzer {
         // (per part: Some(true) lacks it, Some(false) may, None has it or is not known)
         let parts: Vec<Option<bool>> = match &obj.kv {
             kv if kv.is_literal() => kv_literals(kv).iter().filter(|k| obj.pts.is_empty() || *k != key_none()).map(|k| builtin_has_attr(lit_type(k)?, name).and_then(|h| (!h).then_some(true))).collect(),
-            KeyVal::Data(l, _) => vec![crate::domain::label_type(&intern::str_get(*l)).and_then(|t| builtin_has_attr(t, name)).and_then(|h| (!h).then_some(false))],
+            // (an untyped unknown, or a key of some objects, may be any object: it may lack it)
+            KeyVal::Data(l, _) => vec![match crate::domain::label_type(&intern::str_get(*l)) {
+                Some(t) => builtin_has_attr(t, name).and_then(|h| (!h).then_some(false)),
+                None => Some(false),
+            }],
+            kv if !kv.is_bot() => vec![Some(false)],
             _ => vec![],
         };
         if obj.pts.is_empty() && !parts.is_empty() && parts.iter().all(|p| *p == Some(true)) {
@@ -277,6 +282,32 @@ impl Analyzer {
             return Value::new();
         }
         crate::models::builtins::scalar_attr(self, &lits, name)
+    }
+
+    /// `del obj.name`: on an instance whose class has a property of the name, its deleter runs
+    /// (none: AttributeError); the others lose the attribute (`delete_item`).
+    pub(super) fn delete_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State) {
+        let nk = key_str_lit(name);
+        let prop = |an: &Analyzer, o: ObjId| -> Option<Option<ObjId>> {
+            let cls = an.heap.instance_class(o).filter(|_| an.heap.kind(o) == Kind::Instance)?;
+            let defc = an.class_lookup(cls, name)?;
+            let cv = an.heap.cls_slots.get(&(defc, Ns::Attr, nk))?;
+            let is_prop = !cv.pts.is_empty() && cv.pts.iter().all(|f| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get());
+            is_prop.then(|| an.heap.prop_deleters.get(&(defc, nk)).copied())
+        };
+        let mut one = |an: &mut Analyzer, o: &Value, st: &mut State| {
+            match o.single().and_then(|x| prop(an, x)) {
+                Some(Some(deleter)) => {
+                    an.call_user(deleter, Some(o.clone()), Args::pos(&[]), st, node, false);
+                }
+                Some(None) => an.raise_here("AttributeError", st),
+                None => an.delete_item(o, Ns::Attr, &Value::lit(nk), node, st, true),
+            }
+            Value::new()
+        };
+        if self.per_receiver(obj, &|an, o| prop(an, o).is_some(), state, &mut one).is_none() {
+            one(self, obj, state);
+        }
     }
 
     /// A deque's `maxlen` and methods.
@@ -1123,7 +1154,9 @@ impl Analyzer {
             if matches!(name, "append" | "extend" | "insert" | "remove" | "clear" | "sort" | "reverse" | "pop") {
                 self.kill_facts_on(&[oid], state);
             }
-            let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
+            // (a str's method on one known to be a str or bytes; of another unknown — a date, an
+            // object of the program's — its result's type is not known)
+            let q = if STR_METHOD_NAMES.contains(&name) && matches!(self.heap.obj(oid).ty, Some("str" | "bytes")) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             // (a parameter annotated `str`: a str, its methods' results known by type)
             let recv = match self.heap.obj(oid).ty {
                 Some(t @ ("str" | "bytes")) => Value::data(&typed_label(t, "")),

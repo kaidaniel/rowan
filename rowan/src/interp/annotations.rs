@@ -174,10 +174,12 @@ impl Analyzer {
             }
         }
         let label = format!("{} param", ci.name);
+        // (a TypedDict's value is a plain dict: dict's methods, its keys as declared)
+        let kind = if ci.lib.typed_dict { Kind::Dict } else { Kind::Instance };
         let inst = match param {
-            Some((fi, _)) => self.alloc(Kind::Instance, &format!("param:{}:{}#{}", path, ci.name, cls), state, &label, Payload::Cls(cls), Some(declared), ns, Some(true), Some(&format!("entry:{}", fi.qualname))),
+            Some((fi, _)) => self.alloc(kind, &format!("param:{}:{}#{}", path, ci.name, cls), state, &label, Payload::Cls(cls), Some(declared), ns, Some(true), Some(&format!("entry:{}", fi.qualname))),
             None => {
-                let o = self.heap.alloc_raw(Kind::Instance, &format!("ann:{}#{}", path, cls), "", single, &label, Payload::Cls(cls));
+                let o = self.heap.alloc_raw(kind, &format!("ann:{}#{}", path, cls), "", single, &label, Payload::Cls(cls));
                 if state.has_row(o, ns) {
                     return Some(Value::obj(o));
                 }

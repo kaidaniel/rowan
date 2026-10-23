@@ -32,6 +32,11 @@ e.g. no such feature yet):
              sitepackages  today's bench/sitepackages.py (modes none, follow, only), releases
                        from FOLLOW_SINCE on (following installed packages began with PR #43)
   size       size      engine lines (rowan/src/**/*.rs outside models/) and model lines
+  heldout    heldout   the held-out corpus (bench/heldout.py, bench/heldout/manifest.json: 31 real
+                       packages no iteration tunes against, 50 modules run as main files), measured
+                       like bench.P: with no deadline, cut at heldout.NODEADLINE_TIMEOUT_S, serially;
+                       pooled proven / possibly %, known facts %, wall and RSS geomeans, finished,
+                       cut, skipped calls; the manifest's sha256 (a changed corpus is another set)
 
 Every rowan run goes through .guard/run (the harnesses' runs too: the harness runs under it).
 Non-timing families run up to `-j` releases at once (the guard's three slots); timing runs one
@@ -39,7 +44,7 @@ at a time, nothing else running.
 
 Usage (run from anywhere, under `uv run --no-project python`):
   python bench/scoreboard.py run [--tags v0.1.8,v0.1.9|--since v0.1.40] [--ref REF…]
-         [--families soundness,precision,speed,size,sitepackages] [--redo FAMILY,…] [-j 3]
+         [--families soundness,precision,speed,size,sitepackages,heldout] [--redo FAMILY,…] [-j 3]
          [--cache DIR]
   python bench/scoreboard.py repeat --tags A,B [-n 3]   timing noise: the benchmarks again
   python bench/scoreboard.py report [--md OUT.md]        per-release deltas, top iterations,
@@ -52,6 +57,7 @@ Cache (binaries, worktrees, the pinned measurement set, raw outputs): bench/work
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -79,7 +85,7 @@ CASE_MEMORY_MB = 3000  # likewise (several run at once under the guard's 16 GB f
 BENCH_TIMEOUT_S = 180
 PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
-FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages"]
+FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "heldout"]
 LOCK = threading.RLock()
 
 
@@ -446,6 +452,17 @@ def measure_sitepackages(binary: Path, mset: Path, log: Path) -> dict:
     return {s: {m: {k: v for k, v in r.items() if k in keep} for m, r in modes.items()} for s, modes in doc["scenarios"].items()}
 
 
+def measure_heldout(binary: Path, logdir: Path) -> dict:
+    """The held-out corpus with today's bench/heldout.py and manifest (not MEASURE_REF's: the
+    corpus is pinned by its own manifest, whose hash is kept), no deadline, serially."""
+    import heldout
+
+    res = heldout.metrics(binary, "nodeadline", None, None, 1, logdir / "heldout")
+    keep = ("finished", "wall_s", "rss_mb", "cut", "skipped_calls", "work", "tiers", "facts", "why")
+    return {"manifest_sha256": hashlib.sha256(heldout.MANIFEST.read_bytes()).hexdigest(), "pooled": res["pooled"], "by_kind": res["by_kind"],
+            "runs": {m: {k: v for k, v in r.items() if k in keep} for m, r in res["runs"].items()}}
+
+
 # ---------------------------------------------------------------- run
 def cmd_run(a) -> None:
     cache = Path(a.cache).resolve()
@@ -459,7 +476,7 @@ def cmd_run(a) -> None:
     rels = releases(a.tags.split(",") if a.tags else None, a.since, a.ref or [])
     fams = a.families.split(",") if a.families else FAMILIES
     redo = set(FAMILIES if a.redo == "all" else (a.redo.split(",") if a.redo else []))
-    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"]}
+    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "heldout": ["heldout"]}
 
     def todo(e: dict, fam: str) -> bool:
         return fam in fams and (fam in redo or any(failed(e.get(k)) for k in keys[fam]))
@@ -518,6 +535,9 @@ def cmd_run(a) -> None:
         if todo(e, "sitepackages") and follows(rel):
             print(f"[{rel['tag']}] sitepackages", file=sys.stderr, flush=True)
             put(data, e, "sitepackages", measure_sitepackages(b, mset, logdir(rel) / "sitepackages.log"))
+        if todo(e, "heldout"):
+            print(f"[{rel['tag']}] heldout", file=sys.stderr, flush=True)
+            put(data, e, "heldout", measure_heldout(b, logdir(rel)))
     save_data(data)
 
 
@@ -591,6 +611,9 @@ def indices(e: dict) -> dict:
                     "work_geomean": geomean([r.get("work") for r in bench.values() if r.get("finished")]) if bench else None}
     s = e.get("size", {})
     out["size"] = {"engine_lines": s.get("engine_lines"), "model_lines": s.get("model_lines")}
+    ho = (e.get("heldout") or {}).get("pooled")
+    if ho:
+        out["heldout"] = {k: ho.get(k) for k in ("proven_pct", "possibly_pct", "known_facts_pct", "wall_geomean_s", "rss_geomean_mb", "finished", "modules", "cut", "skipped_calls")}
     sp = e.get("sitepackages")
     if sp and "error" not in sp:
         fol = [m.get("follow", {}) for m in sp.values()]
@@ -667,6 +690,16 @@ def cmd_report(a) -> None:
         w("| --- | --- | --- |")
         for d, e in deltas[:10]:
             w(f"| {e['tag']} | {d:+.2f} | {'; '.join(f'#{p['n']} {p['title']}' for p in e.get('prs', []))} |")
+    held = [(e, i["heldout"]) for e, i in zip(rels, idx) if i.get("heldout")]
+    if held:
+        w("\n**Tuned-on (the eight) and held-out (bench/heldout.py), both with no deadline**\n")
+        w("| release | proven % eight / held-out | known facts % eight / held-out | wall geomean eight / held-out | RSS geomean eight / held-out | finished eight / held-out |")
+        w("| --- | --- | --- | --- | --- | --- |")
+        for e, h in held:
+            i = indices(e)
+            w(f"| {e['tag']} | {fmt(i['precision']['proven_pct'])} / {fmt(h['proven_pct'])} | {fmt(i['precision']['known_facts_pct'])} / {fmt(h['known_facts_pct'])} | "
+              f"{fmt(i['speed']['wall_geomean_s'], 2)} / {fmt(h['wall_geomean_s'], 2)} s | {fmt(i['speed']['rss_geomean_mb'], 0)} / {fmt(h['rss_geomean_mb'], 0)} MB | "
+              f"{fmt(i['speed']['finished'], 0)}/8 / {h['finished']}/{h['modules']} |")
     w(f"\nNoise (repeats): {json.dumps(nz)}")
     w("\n" + flattening(rels, idx, heads))
     rows: list = []

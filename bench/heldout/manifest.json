@@ -1,0 +1,733 @@
+{
+ "snapshot": "2026-10-01",
+ "packages": [
+  {
+   "name": "docopt",
+   "version": "0.6.2",
+   "kind": "cli",
+   "why": "the usage-string CLI parser: small pattern classes, recursion over pattern trees, lists and dicts built per argv",
+   "sdist": "docopt-0.6.2.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz",
+   "sha256": "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491",
+   "root": ".",
+   "modules": [
+    "docopt.py"
+   ],
+   "tests": null
+  },
+  {
+   "name": "python-slugify",
+   "version": "9.1.2",
+   "kind": "cli",
+   "why": "a slug CLI and its regex pipeline: module-level constants, keyword-heavy calls, str processing",
+   "sdist": "python_slugify-9.1.2.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/ad/df/32c87abe18f7d0560e2154ffbe23dfca6edad5d0d2d6c4636c99f4fb8b02/python_slugify-9.1.2.tar.gz",
+   "sha256": "bd36ca98e5ebb1cd2b9dfa2f27b948ce87402fb083b762cbd9d0fa3aed489a92",
+   "root": ".",
+   "modules": [
+    "slugify/slugify.py",
+    "slugify/_legacy.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "text-unidecode"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "isodate",
+   "version": "0.7.2",
+   "kind": "cli",
+   "why": "ISO 8601 parsing and formatting: regex groupdicts, datetime and Decimal arithmetic, a Duration class with operators",
+   "sdist": "isodate-0.7.2.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/54/4d/e940025e2ce31a8ce1202635910747e5a87cc3a6a6bb2d00973375014749/isodate-0.7.2.tar.gz",
+   "sha256": "4cd1aa0f43ca76f4a6c6c0292a85f40b35ec2e43e315b59f06e6d32171a953e6",
+   "root": "src",
+   "modules": [
+    "src/isodate/duration.py",
+    "src/isodate/isodates.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "parse",
+   "version": "1.22.2",
+   "kind": "cli",
+   "why": "format strings turned into regexes (str.format in reverse): dicts of groups, converters looked up by name",
+   "sdist": "parse-1.22.2.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/c6/ee/0d009de843577b7a4893517fe517b54791e576dedd00ed9209c8498eddc2/parse-1.22.2.tar.gz",
+   "sha256": "8ff0b98202798b8cefa4f8fac06b670d6d00e5ec6ecbbacaf97ac0d0e93a54e6",
+   "root": ".",
+   "modules": [
+    "parse/__init__.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": [
+     "-o",
+     "addopts="
+    ]
+   }
+  },
+  {
+   "name": "sqlparse",
+   "version": "0.6.0",
+   "kind": "cli",
+   "why": "an SQL lexer and statement splitter with a CLI: generators throughout, a keyword table as dict literals, token classes",
+   "sdist": "sqlparse-0.6.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/5f/d3/3f06a1006f2261d1342aefb3c71eed02f5d4ca5bdbecd86ebc12ad38306e/sqlparse-0.6.0.tar.gz",
+   "sha256": "113c35c75365ab9cc9c7231d68c6428fb11c085fc8e9eb1ad659b7ddbf6cd2b9",
+   "root": ".",
+   "modules": [
+    "sqlparse/keywords.py",
+    "sqlparse/sql.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "termcolor",
+   "version": "3.3.0",
+   "kind": "cli",
+   "why": "ANSI colour helpers and a CLI: lookups in literal tables, os.environ, functools.cache",
+   "sdist": "termcolor-3.3.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/46/79/cf31d7a93a8fdc6aa0fbb665be84426a8c5a557d9240b6239e9e11e35fc5/termcolor-3.3.0.tar.gz",
+   "sha256": "348871ca648ec6a9a983a13ab626c0acce02f515b9e1983332b17af7979521c5",
+   "root": "src",
+   "modules": [
+    "src/termcolor/termcolor.py",
+    "src/termcolor/__main__.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "inflection",
+   "version": "0.5.1",
+   "kind": "cli",
+   "why": "English inflection by ordered regex rule lists: module-level lists mutated at import",
+   "sdist": "inflection-0.5.1.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/e1/7e/691d061b7329bc8d54edbf0ec22fbfb2afe61facb681f9aaa9bff7a27d04/inflection-0.5.1.tar.gz",
+   "sha256": "1a29730d366e996aaacffb2f1f1cb9593dc38e2ddd30c91250c6dde09ea9b417",
+   "root": ".",
+   "modules": [
+    "inflection/__init__.py"
+   ],
+   "tests": {
+    "paths": [
+     "test_inflection.py"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "jmespath",
+   "version": "1.1.0",
+   "kind": "data",
+   "why": "a JSON query language: tokenizer, Pratt parser, an interpreter walking dicts and lists, functions found by name",
+   "sdist": "jmespath-1.1.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz",
+   "sha256": "472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d",
+   "root": ".",
+   "modules": [
+    "jmespath/parser.py",
+    "jmespath/functions.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": [],
+    "shims": {
+     "tests/__init__.py": "# (left out of the sdist: what its tests import from it)\nimport json\nimport unittest\nfrom collections import OrderedDict\n"
+    }
+   }
+  },
+  {
+   "name": "jsonpointer",
+   "version": "3.1.1",
+   "kind": "data",
+   "why": "RFC 6901 pointers resolved through nested dicts and lists",
+   "sdist": "jsonpointer-3.1.1.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/18/c7/af399a2e7a67fd18d63c40c5e62d3af4e67b836a2107468b6a5ea24c4304/jsonpointer-3.1.1.tar.gz",
+   "sha256": "0b801c7db33a904024f6004d526dcc53bbb8a4a0f4e32bfd10beadf60adf1900",
+   "root": ".",
+   "modules": [
+    "jsonpointer.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests.py"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "jsonpatch",
+   "version": "1.33",
+   "kind": "data",
+   "why": "RFC 6902 patches: operations as dicts applied to JSON documents, an operation class per op",
+   "sdist": "jsonpatch-1.33.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/42/78/18813351fe5d63acad16aec57f94ec2b70a09e53ca98145589e185423873/jsonpatch-1.33.tar.gz",
+   "sha256": "9fcd4009c41e6d12348b4a0ff2563ba56a2923a7dfee731d004e212e1ee5030c",
+   "root": ".",
+   "modules": [
+    "jsonpatch.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests.py"
+    ],
+    "deps": [
+     "pytest",
+     "jsonpointer==3.1.1"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "dictdiffer",
+   "version": "0.10.0",
+   "kind": "data",
+   "why": "diffs, patches and merges of nested dicts as generators of tuples",
+   "sdist": "dictdiffer-0.10.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/0c/31/84b2b2113c2c972431582bffd74f0d04b5efd9126538127b766275580950/dictdiffer-0.10.0.tar.gz",
+   "sha256": "0b912acf663949d73b820d3ed59362140a188ab742c94efe13c762dbd24cbbd3",
+   "root": ".",
+   "modules": [
+    "dictdiffer/__init__.py",
+    "dictdiffer/utils.py"
+   ],
+   "tests": null
+  },
+  {
+   "name": "xmltodict",
+   "version": "1.0.4",
+   "kind": "data",
+   "why": "XML to nested dicts and back through SAX callbacks",
+   "sdist": "xmltodict-1.0.4.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/19/70/80f3b7c10d2630aa66414bf23d210386700aa390547278c789afa994fd7e/xmltodict-1.0.4.tar.gz",
+   "sha256": "6d94c9f834dd9e44514162799d344d815a3a4faec913717a9ecbfa5be1bb8e61",
+   "root": ".",
+   "modules": [
+    "xmltodict.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "toml",
+   "version": "0.10.2",
+   "kind": "data",
+   "why": "a hand-written TOML parser and encoder into nested dicts",
+   "sdist": "toml-0.10.2.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/be/ba/1f744cdc819428fc6b5084ec34d9b30660f6f9daaf70eead706e3203ec3c/toml-0.10.2.tar.gz",
+   "sha256": "b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f",
+   "root": ".",
+   "modules": [
+    "toml/decoder.py",
+    "toml/encoder.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "tomlkit",
+   "version": "0.15.1",
+   "kind": "data",
+   "why": "style-preserving TOML: container and item classes subclassing dict, list, str and int",
+   "sdist": "tomlkit-0.15.1.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/94/96/e07752635b98536177fa1f37671c8f3cdde2e724c6bcf6034b2cfb571565/tomlkit-0.15.1.tar.gz",
+   "sha256": "e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97",
+   "root": ".",
+   "modules": [
+    "tomlkit/items.py",
+    "tomlkit/parser.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "cerberus",
+   "version": "1.3.8",
+   "kind": "data",
+   "why": "schema validation of dicts by rules dispatched through getattr by name",
+   "sdist": "cerberus-1.3.8.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/7a/cf/845d32e330e49e34f1a22dc44868750e75485d7c08c07d37795bcf0a780e/cerberus-1.3.8.tar.gz",
+   "sha256": "579554887ffd189226774b87570f4a76db75cf0efcbaffcacd5e98b8ee877f61",
+   "root": ".",
+   "modules": [
+    "cerberus/validator.py",
+    "cerberus/errors.py"
+   ],
+   "tests": null
+  },
+  {
+   "name": "voluptuous",
+   "version": "0.16.0",
+   "kind": "data",
+   "why": "schema validation: schemas compiled into nested closures, validator decorators",
+   "sdist": "voluptuous-0.16.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/92/f4/0738e6849858deae22218be3bbb8207ba83a96e9d0ec7e8e8cd67b30e5ca/voluptuous-0.16.0.tar.gz",
+   "sha256": "006535e22fed944aec17bef6e8725472476194743c87bd233e912eb463f8ff05",
+   "root": ".",
+   "modules": [
+    "voluptuous/schema_builder.py",
+    "voluptuous/validators.py"
+   ],
+   "tests": {
+    "paths": [
+     "voluptuous/tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "python-box",
+   "version": "7.4.1",
+   "kind": "data",
+   "why": "a dict subclass with attribute access: __getattr__ / __setitem__ overrides, recursive conversion",
+   "sdist": "python_box-7.4.1.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/0f/0f/34e7ee0a72f1464b4c7a2e8bafb389f230477256af586bc82bcfad85295a/python_box-7.4.1.tar.gz",
+   "sha256": "e412e36c25fca8223560516d53ef6c7993591c3b0ec8bb4ec582bf7defdd79f0",
+   "root": ".",
+   "modules": [
+    "box/box.py",
+    "box/box_list.py"
+   ],
+   "tests": {
+    "paths": [
+     "test"
+    ],
+    "deps": [
+     "pytest",
+     "pyyaml",
+     "toml",
+     "msgpack",
+     "ruamel.yaml",
+     "tomli-w"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "deepdiff",
+   "version": "9.1.0",
+   "kind": "data",
+   "why": "deep diffs of nested structures: a large class walking any object, results as nested dicts",
+   "sdist": "deepdiff-9.1.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/f9/6b/6a4a5aaf38535eb332c2856aa08e73ed7c549d0851b1215401af0a2db1a7/deepdiff-9.1.0.tar.gz",
+   "sha256": "07e9e366fab4297755153c4eab795ad4ef3cbd0d51660e847f5751c6bd727687",
+   "root": ".",
+   "modules": [
+    "deepdiff/diff.py",
+    "deepdiff/delta.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "cachebox>=5.2,<6",
+     "orderly-set>=5.5.0,<6",
+     "pyyaml",
+     "toml",
+     "tomli-w",
+     "orjson",
+     "pydantic",
+     "numpy",
+     "pandas",
+     "polars",
+     "python-dateutil",
+     "tomli",
+     "uuid6",
+     "click",
+     "pytz"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "bottle",
+   "version": "0.13.4",
+   "kind": "web",
+   "why": "a single-file WSGI framework: routes by decorators, request / response objects over environ dicts, templates",
+   "sdist": "bottle-0.13.4.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/7a/71/cca6167c06d00c81375fd668719df245864076d284f7cb46a694cbeb5454/bottle-0.13.4.tar.gz",
+   "sha256": "787e78327e12b227938de02248333d788cfe45987edca735f8f88e03472c3f47",
+   "root": ".",
+   "modules": [
+    "bottle.py"
+   ],
+   "tests": {
+    "paths": [
+     "test"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "webob",
+   "version": "1.8.11",
+   "kind": "web",
+   "why": "WSGI request / response objects: environ dicts behind properties, header parsing classes",
+   "sdist": "webob-1.8.11.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/e6/92/9329872e36be90e25ba616ac6e9ee8c1be4326a1ea3fdffcdabd0eb48efb/webob-1.8.11.tar.gz",
+   "sha256": "aa8c27231070b135c025e567a9cd7eda03f4df71352ffaac740cb6a75f0f81a5",
+   "root": "src",
+   "modules": [
+    "src/webob/acceptparse.py",
+    "src/webob/request.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "legacy-cgi>=2.6"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "python-multipart",
+   "version": "0.0.32",
+   "kind": "web",
+   "why": "a streaming multipart/form-data parser: callbacks in a dict, a byte-at-a-time state machine",
+   "sdist": "python_multipart-0.0.32.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/5b/42/55c32bb9b12693c092ad250a0e82edb5b31ddeda6eb772de5f308b3804ad/python_multipart-0.0.32.tar.gz",
+   "sha256": "be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e",
+   "root": ".",
+   "modules": [
+    "python_multipart/multipart.py",
+    "python_multipart/decoders.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "pyyaml"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "datacompy",
+   "version": "1.1.0",
+   "kind": "pandas",
+   "why": "DataFrame comparison: merges, column renames, per-column statistics on pandas (its pandas backend: the two largest modules are Spark and Snowflake backends)",
+   "sdist": "datacompy-1.1.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/25/df/a67e0c1fa7f9fb2cace0f17d4e7e49f95b8a25238e6a016c13d02fa92b22/datacompy-1.1.0.tar.gz",
+   "sha256": "244d53328568c457532b1472ec98f8de84ba237ed4e8f30775880a1182ee6b36",
+   "root": ".",
+   "modules": [
+    "datacompy/pandas.py",
+    "datacompy/base.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests/test_pandas.py",
+     "tests/test_base.py"
+    ],
+    "deps": [
+     "pytest",
+     "pandas<3.1,>=2.2",
+     "numpy<2.6,>=1.26.4",
+     "jinja2>=3",
+     "ordered-set<=4.1,>=4.0.2",
+     "polars[pandas]<1.45,>=0.20.4",
+     "pytest-snapshot"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "pandas-schema",
+   "version": "0.3.6",
+   "kind": "pandas",
+   "why": "column validation of DataFrames: validation classes applied to Series",
+   "sdist": "pandas_schema-0.3.6.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/17/2a/d302fd983cdf3fb9a3d24d981e4a3c7340994030c0c46b397b4d9db83bea/pandas_schema-0.3.6.tar.gz",
+   "sha256": "c6bfc52c4bae9cdd7420fbe8c4b0622b769457827c3fc819928405638caf605f",
+   "root": ".",
+   "modules": [
+    "pandas_schema/validation.py",
+    "pandas_schema/schema.py"
+   ],
+   "tests": {
+    "paths": [
+     "test"
+    ],
+    "deps": [
+     "pytest",
+     "pandas",
+     "numpy",
+     "packaging"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "transitions",
+   "version": "0.9.3",
+   "kind": "classes",
+   "why": "state machines: model classes given methods at run time, callbacks resolved by name",
+   "sdist": "transitions-0.9.3.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/4f/83/9e90f3494057d73c9e6bd8de8488af7c9fa714666ccc2db30fe07d147818/transitions-0.9.3.tar.gz",
+   "sha256": "881fb75bb1654ed55d86060bb067f2c716f8e155f57bb73fd444e53713aafec8",
+   "root": ".",
+   "modules": [
+    "transitions/core.py",
+    "transitions/extensions/nesting.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "six",
+     "pycodestyle",
+     "pytz"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "anytree",
+   "version": "2.13.0",
+   "kind": "classes",
+   "why": "tree node mixins with property setters, iterators as generators, render classes",
+   "sdist": "anytree-2.13.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/bc/a8/eb55fab589c56f9b6be2b3fd6997aa04bb6f3da93b01154ce6fc8e799db2/anytree-2.13.0.tar.gz",
+   "sha256": "c9d3aa6825fdd06af7ebb05b4ef291d2db63e62bb1f9b7d9b71354be9d362714",
+   "root": "src",
+   "modules": [
+    "src/anytree/node/nodemixin.py",
+    "src/anytree/node/lightnodemixin.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "test2ref"
+    ],
+    "args": [
+     "-o",
+     "addopts="
+    ]
+   }
+  },
+  {
+   "name": "cachetools",
+   "version": "7.2.0",
+   "kind": "decorators",
+   "why": "cache classes subclassing MutableMapping and memoizing decorators",
+   "sdist": "cachetools-7.2.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/29/2c/3f18755527b03ca9ff6be724bd5370cb777c76a87f17301377cf04a4729b/cachetools-7.2.0.tar.gz",
+   "sha256": "bcac1a1b8da6909994a2957238a57b8140dab7c5c5c69a43669654fe87a33c1d",
+   "root": "src",
+   "modules": [
+    "src/cachetools/__init__.py",
+    "src/cachetools/_cachedmethod.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "schema",
+   "version": "0.7.8",
+   "kind": "classes",
+   "why": "schema validation by recursion over dicts, lists, types and callables",
+   "sdist": "schema-0.7.8.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/fb/2e/8da627b65577a8f130fe9dfa88ce94fcb24b1f8b59e0fc763ee61abef8b8/schema-0.7.8.tar.gz",
+   "sha256": "e86cc08edd6fe6e2522648f4e47e3a31920a76e82cce8937535422e310862ab5",
+   "root": ".",
+   "modules": [
+    "schema/__init__.py"
+   ],
+   "tests": {
+    "paths": [
+     "test_schema.py"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "ordered-set",
+   "version": "4.1.0",
+   "kind": "classes",
+   "why": "a MutableSet with list indexing: dunders throughout",
+   "sdist": "ordered-set-4.1.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/4c/ca/bfac8bc689799bcca4157e0e0ced07e70ce125193fc2e166d2e685b7e2fe/ordered-set-4.1.0.tar.gz",
+   "sha256": "694a8e44c87657c59292ede72891eb91d34131f6531463aab3009191c77364a8",
+   "root": ".",
+   "modules": [
+    "ordered_set/__init__.py"
+   ],
+   "tests": {
+    "paths": [
+     "test"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "tenacity",
+   "version": "9.1.4",
+   "kind": "decorators",
+   "why": "retrying decorators and context managers: attempt objects, strategies as callable classes combined by operators",
+   "sdist": "tenacity-9.1.4.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz",
+   "sha256": "adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a",
+   "root": ".",
+   "modules": [
+    "tenacity/__init__.py",
+    "tenacity/retry.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests"
+    ],
+    "deps": [
+     "pytest",
+     "tornado",
+     "typeguard"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "decorator",
+   "version": "5.3.1",
+   "kind": "decorators",
+   "why": "signature-preserving decorators from generated source, a contextmanager decorator",
+   "sdist": "decorator-5.3.1.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/60/8b/32f9823da46cde7df2087faa08cd98d01b908f8dcab982cdba9c84e85355/decorator-5.3.1.tar.gz",
+   "sha256": "4cbcdd55a6efadb9dbea26b858f4fb3264567b52d69ca0d25b721b553f60ea82",
+   "root": "src",
+   "modules": [
+    "src/decorator/__init__.py"
+   ],
+   "tests": {
+    "paths": [
+     "tests/test.py"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  },
+  {
+   "name": "pluggy",
+   "version": "1.6.0",
+   "kind": "decorators",
+   "why": "plugin hooks: marker decorators, hook callers, result objects, generator-based wrappers",
+   "sdist": "pluggy-1.6.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz",
+   "sha256": "7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3",
+   "root": "src",
+   "modules": [
+    "src/pluggy/_hooks.py",
+    "src/pluggy/_manager.py"
+   ],
+   "tests": {
+    "paths": [
+     "testing"
+    ],
+    "deps": [
+     "pytest"
+    ],
+    "args": []
+   }
+  }
+ ]
+}

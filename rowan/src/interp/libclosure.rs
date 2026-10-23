@@ -208,15 +208,25 @@ impl Analyzer {
     /// Is `o` a followed library's code (a function, class, instance of one, bound method,
     /// partial, module)?
     fn library_code(&self, o: ObjId) -> bool {
+        self.library_code_of(o, &mut Vec::new())
+    }
+
+    /// `library_code`, each object asked once (`seen`: a partial over itself, `cb = partial(cb, i)`
+    /// in a loop, holds itself).
+    fn library_code_of(&self, o: ObjId, seen: &mut Vec<ObjId>) -> bool {
+        if seen.contains(&o) {
+            return false;
+        }
+        seen.push(o);
         let m = match (self.heap.kind(o), &self.heap.obj(o).payload) {
             (Kind::Function, Payload::Func(fi)) => fi.module,
-            (Kind::Bound, Payload::Bound(f, _)) => return self.library_code(*f),
-            (Kind::Partial, Payload::Partial(f, _, _)) => return f.pts.iter().any(|f| self.library_code(f)),
+            (Kind::Bound, Payload::Bound(f, _)) => return self.library_code_of(*f, seen),
+            (Kind::Partial, Payload::Partial(f, _, _)) => return f.pts.iter().any(|f| self.library_code_of(f, seen)),
             (Kind::Class, _) => match self.heap.class_info_opt(o) {
                 Some(ci) => ci.module,
                 None => return false,
             },
-            (Kind::Instance, Payload::Cls(c)) => return self.library_code(*c),
+            (Kind::Instance, Payload::Cls(c)) => return self.library_code_of(*c, seen),
             (Kind::Module, _) => o,
             _ => return false,
         };

@@ -1027,6 +1027,9 @@ pub struct Tables {
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
     pub partial_star: FxHashMap<ObjId, Vec<Value>>,
+    /// partials being called (`m_partial_call`): one built over itself (`cb = partial(cb, i)`
+    /// in a loop) called again from within is unknown code there
+    pub partial_calling: Vec<ObjId>,
     /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
     pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
     pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
