@@ -1,6 +1,6 @@
 //! Loops: a `for` over at most `UNROLL_MAX` known items is unrolled (each iteration
-//! straight-line code); other loops run to a fixpoint (`loop_fixpoint`: `LOOP_MAX_ITER`
-//! rounds, then widened), with recency objects for what an iteration allocates.
+//! straight-line code); other loops run to a fixpoint (`loop_fixpoint`: past `LOOP_MAX_ITER`
+//! rounds, widened each round), with recency objects for what an iteration allocates.
 
 use ruff_python_ast as ast;
 
@@ -66,14 +66,14 @@ impl Analyzer {
         join_breaks(state, breaks);
     }
 
-    /// A loop fixpoint cut off at `LOOP_MAX_ITER`: what still changed between the last two
+    /// A loop fixpoint past `LOOP_MAX_ITER` rounds: what still changed between the last two
     /// heads is widened to unknown (names and slots get unknown data, rows open, lengths
-    /// unknown), so the exit state covers every later iteration.
+    /// unknown); `loop_fixpoint` does so each round until the head is stable.
     pub(crate) fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
         if crate::interp::debug_level() >= 1 {
             let fp0 = head.footprint(prev);
             let nn: Vec<String> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| intern::str_get(*k).to_string()).collect();
-            eprintln!("[rowan] loop fixpoint cut off after {} rounds: widening names {:?}, {} rows, {} slots, {} elems, lens {}", LOOP_MAX_ITER, nn, fp0.rows.len(), fp0.slots.len(), fp0.elems.len(), head.lens.diff_keys(&prev.lens).len());
+            eprintln!("[rowan] loop fixpoint past {} rounds: widening names {:?}, {} rows, {} slots, {} elems, lens {}", LOOP_MAX_ITER, nn, fp0.rows.len(), fp0.slots.len(), fp0.elems.len(), head.lens.diff_keys(&prev.lens).len());
             if crate::interp::debug_level() >= 2 {
                 for (o, ns) in fp0.rows.iter().take(5) {
                     eprintln!("    row {} {:?} {:?} -> {:?}", self.heap.obj(*o).label, ns, prev.row(*o, *ns), head.row(*o, *ns));
@@ -145,7 +145,10 @@ impl Analyzer {
         let mut prev_head = head.copy();
         let mut vmark = self.findings.mark();
         self.findings.fact_rounds_begin();
-        for _ in 0..LOOP_MAX_ITER {
+        // (past `LOOP_MAX_ITER` rounds, what still changes is widened each round until nothing
+        // does, at most as many rounds again: what changes later — a value passed down a chain of
+        // names, one step a round — is widened when it does, so the head is a fixpoint)
+        for rounds in 1..=2 * LOOP_MAX_ITER {
             // (a round before the fixpoint ran on less than the loop's states: what its accesses
             // said, and the values its lines showed, are superseded by the next round's)
             self.findings.drop_since(vmark);
@@ -166,15 +169,20 @@ impl Analyzer {
             };
             let recs = self.cx.recent_stack.pop().unwrap_or_default();
             self.rename_recent(&mut back, &head, recs, mark);
-            let new_head = head.join_loop(&mut back);
+            let mut new_head = head.join_loop(&mut back);
             if new_head.same(&head) {
                 converged = true;
                 break;
+            }
+            if rounds >= LOOP_MAX_ITER {
+                self.widen_unconverged(&mut new_head, &head);
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
         self.mode.loop_converged = converged;
         if !converged {
+            // (still changing after twice the rounds — a loop that makes new objects every round
+            // keeps changing — the head as widened last: what a later round changes it may miss)
             self.widen_unconverged(&mut head, &prev_head);
             // (the accesses as the widened states make them)
             self.findings.drop_since(vmark);

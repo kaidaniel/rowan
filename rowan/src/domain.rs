@@ -345,7 +345,8 @@ impl Row {
         let mut d = self.data();
         // (a key there on some paths only, stored: where it is in the order depends on the path;
         // so for a key there already at no known place)
-        if strong && ((d.order.contains(&k) && !d.definite.contains(k)) || (!d.order.contains(&k) && d.present.contains(k))) {
+        // (so for a weak store too: on the paths without it, the object it goes to puts it last)
+        if (d.order.contains(&k) && !d.definite.contains(k)) || (strong && !d.order.contains(&k) && d.present.contains(k)) {
             d.order = Arc::from(Vec::new());
         } else if strong && !d.order.contains(&k) {
             let mut o = d.order.to_vec();
@@ -366,6 +367,10 @@ impl Row {
     /// One of several keys was stored (weak).
     pub fn store_many(&self, ks: &KeySet) -> Row {
         let mut d = self.data();
+        // (a key at a place in the order but there on some paths only: put last where it was not)
+        if ks.iter().any(|k| d.order.contains(&k) && !d.definite.contains(k)) {
+            d.order = Arc::from(Vec::new());
+        }
         d.present = d.present.union(ks);
         d.absent = d.absent.difference(ks);
         d.absent_likely = d.absent_likely.difference(ks);
@@ -411,18 +416,30 @@ impl Row {
         let push = |l: LensId| lens_push(l, step.clone());
         // a key stays absent when every key renamed to it was absent
         let absent = { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
+        // (likely absent: likewise, and the absent ones)
+        let absent_likely = self.absent_likely.filter(|k| step.inverse(k).iter().all(|c| self.absent_likely.contains(c))).union(&absent);
         Row::from_data(RowData {
             present: f(&self.present),
             definite: f(&self.definite),
             likely: f(&self.likely),
             absent,
-            absent_likely: KeySet::new(),
+            absent_likely,
             sources: self.sources.map(|(s, l)| (s, push(l))),
             mutators: self.mutators.clone(),
             top: self.top,
-            order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
+            order: self.renamed_order(step).into(),
             stored: f(&self.stored),
         })
+    }
+
+    /// The insertion order after `rename`: not known once two present keys become one (a frame
+    /// then has the column twice, a comprehension keeps the first one's place: either way not a
+    /// key set's order).
+    fn renamed_order(&self, step: &Step) -> Vec<KeyId> {
+        if self.present.map(|k| step.apply(k)).len() < self.present.len() {
+            return Vec::new();
+        }
+        self.order.iter().map(|k| step.apply(*k)).collect()
     }
 
     /// self ∪= chain(o ∖ kill).  strong: definite keys of o are definitely copied.
@@ -468,9 +485,9 @@ impl Row {
                         }
                     }
                 }
-                // (a key at a place in the order but there on some paths only, copied in: on the
-                // paths without it, it goes last)
-                if strong && img(&o.present).iter().any(|k| self.order.contains(&k) && !self.definite.contains(k)) {
+                // (a key at a place in the order but there on some paths only, copied in, also
+                // weakly: on the paths without it, it goes last)
+                if img(&o.present).iter().any(|k| self.order.contains(&k) && !self.definite.contains(k)) {
                     ord.clear();
                 }
                 ord.into()
@@ -1209,10 +1226,13 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
         if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
         }
-        // (two unknowns of one type: an unknown of that type, or None if either may be)
+        // (two unknowns of one type: an unknown of that type, or None if either may be; named
+        // when both are by the same name, as an unknown joined with literals keeps its)
+        let n = label_name(&lx);
+        let name = if n == label_name(&ly) && hintable(&lx) && hintable(&ly) && !n.starts_with("expr:") && label_type(n).is_none() { n } else { "" };
         return match (label_base(&lx), label_base(&ly)) {
-            (Some((t, o)), Some((u, p))) if t == u => KeyVal::data(&if o || p { optional_label(t, "") } else { typed_label(t, "") }),
-            _ => DATA,
+            (Some((t, o)), Some((u, p))) if t == u => KeyVal::data(&if o || p { optional_label(t, name) } else { typed_label(t, name) }),
+            _ => KeyVal::data(name),
         };
     }
     for (d, l) in [(a, b), (b, a)] {
@@ -1234,11 +1254,13 @@ fn kv_join_unhinted(a: &KeyVal, b: &KeyVal) -> KeyVal {
             }
             let expr = label_name(&t).starts_with("expr:");
             // (an object's keys: of any type, not the unknown's)
+            // (a tensor's, a dim's or a text's label says what it is: no longer)
             if !l.is_literal() {
                 return match label_base(&t) {
                     Some(_) if expr => DATA,
                     Some(_) => untyped(*x),
-                    None => d.clone(),
+                    None if hintable(&t) => d.clone(),
+                    None => DATA,
                 };
             }
             // (of its type, or None: an unknown of its type or None, `None | int(?)`)
@@ -1523,3 +1545,11 @@ impl crate::layered::MapValue for Row {
         self.same_ptr(o)
     }
 }
+
+#[cfg(test)]
+#[path = "laws/values.rs"]
+pub(crate) mod laws_values;
+
+#[cfg(test)]
+#[path = "laws/rows.rs"]
+mod laws_rows;

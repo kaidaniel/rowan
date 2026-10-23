@@ -42,6 +42,9 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
     Some(format!("[{}]", b))
 }
 
+/// Objects a slice of several sequences makes, one per sequence (`item_of_sequence`).
+const SLICE_PARTS: usize = 8;
+
 impl Analyzer {
     /// A read `obj[key]` (`ns` Item; Attr for a model's attribute read through here): each part
     /// on its own (literals beside objects), a `__getitem__` of the program per receiver, else
@@ -374,8 +377,9 @@ impl Analyzer {
             // a slice is a container of the same elements (positions unknown)
             let elem = state.slot(oid, Ns::Elem, STAR);
             let kv = state.elems.get(&oid).unwrap_or(DATA);
-            // (one object per sequence sliced: of several, each its own)
-            let part = (!single_target).then(|| format!("part{}", parts.len()));
+            // (one object per sequence sliced: of several, each its own, up to `SLICE_PARTS`; past
+            // them one, else a loop slicing what it sliced makes more objects every round)
+            let part = (!single_target).then(|| format!("part{}", parts.len().min(SLICE_PARTS)));
             let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, part.as_deref());
             self.heap.set_llen(nid, state, None);
             state.set_slot(nid, Ns::Elem, STAR, elem, true);

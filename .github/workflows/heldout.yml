@@ -1,0 +1,77 @@
+# Held-out soundness: the held-out corpus's own test suites (about 10,000 tests of 28 pinned
+# packages no iteration tunes against) checked against rowan's claims on their modules
+# (bench/heldout.py sound, ~25 minutes), after every merge to main. The run fails (red) when it
+# finds candidate sites beyond the known ones in bench/heldout/sound_baseline.json (identifiers
+# with the kind that explains each); the report is an artifact and the job summary. It never
+# blocks a merge or a release: no pull-request trigger, and it is no required check.
+name: Held-out soundness
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # every merge gets its own result
+  group: heldout-sound
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_PYTHON_PREFERENCE: managed
+
+jobs:
+  sound:
+    name: held-out soundness
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rowan
+
+      - name: Build (release)
+        working-directory: rowan
+        run: cargo build --release --locked
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: |
+            .python-version
+            bench/heldout/manifest.json
+
+      # the sdists and the test venvs (with the interpreter uv installed them for)
+      - uses: actions/cache@v4
+        with:
+          path: |
+            bench/work/heldout/src
+            bench/work/heldout/venv
+            ~/.local/share/uv/python
+          key: heldout-sound-${{ runner.os }}-${{ hashFiles('bench/heldout/manifest.json', '.python-version') }}
+
+      - name: Fetch the corpus
+        run: uv run --no-project python bench/heldout.py fetch
+
+      - name: Tests against claims, compared with the known candidates
+        run: |
+          mkdir -p results
+          uv run --no-project python bench/heldout.py sound -v --json results/heldout-sound.json \
+            --baseline bench/heldout/sound_baseline.json --report results/heldout-sound.md
+
+      - name: Job summary
+        if: always()
+        run: cat results/heldout-sound.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "no report" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: heldout-sound
+          path: results/
+          retention-days: 30
