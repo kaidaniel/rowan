@@ -291,7 +291,7 @@ def print_pooled(name: str, s: dict) -> None:
 
 
 def cmd_metrics(a) -> None:
-    res = metrics(Path(a.rowan), a.mode, a.limits, a.only, a.j, WORK / "logs" / a.mode, a.corpus)
+    res = metrics(Path(a.rowan).resolve(), a.mode, a.limits, a.only, a.j, WORK / "logs" / a.mode, a.corpus)
     print_pooled("all", res["pooled"])
     for k, s in res["by_kind"].items():
         print_pooled(k, s)
@@ -300,9 +300,9 @@ def cmd_metrics(a) -> None:
 
 
 def cmd_sweep(a) -> None:
-    variants = [("current", Path(a.rowan), None)]
+    variants = [("current", Path(a.rowan).resolve(), None)]
     for k, v in (("budget", 4096), ("ms", 10000)):
-        variants += [(f"{k}=x0.5", Path(a.rowan), f"{k}={v // 2}"), (f"{k}=x2", Path(a.rowan), f"{k}={v * 2}")]
+        variants += [(f"{k}=x0.5", Path(a.rowan).resolve(), f"{k}={v // 2}"), (f"{k}=x2", Path(a.rowan).resolve(), f"{k}={v * 2}")]
     for spec in (a.bins.split(",") if a.bins else []):
         name, b = spec.split("=/", 1)  # (names and paths may hold "=": `unroll=x2=/abs/path`)
         b = "/" + b
@@ -629,7 +629,7 @@ def check_package(binary: Path, p: dict, verbose: bool) -> dict:
 
 
 def cmd_sound(a) -> None:
-    binary = Path(a.rowan)
+    binary = Path(a.rowan).resolve()
     out = {}
     for p in select(manifest(), a.only):
         if not p.get("tests"):
