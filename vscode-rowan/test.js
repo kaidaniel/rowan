@@ -289,7 +289,7 @@ assert.strictEqual(shortCalls("the result of `json.loads(os.environ.get(\"DIGEST
   assert.strictEqual(head("b"), "b = (parameter) int(?)");
   assert.strictEqual(head("c"), "c = (parameter) 3 | ?");
   assert.strictEqual(head("d"), "d = (parameter) 4 | int(?)");
-  assert.strictEqual(head("e"), "e = (parameter) None | str(?)");
+  assert.strictEqual(head("e"), "e = (parameter) str(?) | None");
   assert(hover(idx, src, 1, "c").includes("- `?`: unknown (whatever a call passes)"), hover(idx, src, 1, "c"));
   assert(hover(idx, src, 2, "b").includes("b = (parameter) int(?)"), hover(idx, src, 2, "b"));
   // (a dict whose keys only the program's stores under unknown keys put there; a list of
@@ -301,14 +301,13 @@ assert.strictEqual(shortCalls("the result of `json.loads(os.environ.get(\"DIGEST
   assert(out.includes("`int(?)` an int not known statically"), out);
   // (a builtin container annotation: with its parts' types)
   assert.strictEqual(head("hits", 12), "hits = (parameter) list[dict[str(?), str(?)]]");
-  assert.strictEqual(head("opt", 12), "opt = (parameter) None | dict[str(?), list[int(?) | None]]");
+  assert.strictEqual(head("opt", 12), "opt = (parameter) dict[str(?), list[int(?) | None]] | None");
   assert.strictEqual(head("t", 12), "t = (parameter) tuple[int(?), ...]");
   assert(hover(idx, src, 12, "hits").includes("`str(?)` a str not known statically"), hover(idx, src, 12, "hits"));
-  // (typing notation for a container of unknown length or keys: each with its legend line)
-  assert(hover(idx, src, 7, "nums").includes("`list[x]` a list of any length of `x`"), hover(idx, src, 7, "nums"));
-  assert(hover(idx, src, 6, "sizes").includes("`dict[k, v]` a dict of any size, keys `k`, values `v`"), hover(idx, src, 6, "sizes"));
-  assert(hover(idx, src, 12, "t").includes("`tuple[x, ...]` a tuple of any length of `x`"), hover(idx, src, 12, "t"));
-  assert(!hover(idx, src, 12, "t").includes("`list[x]`"), hover(idx, src, 12, "t"));
+  // (typing notation for a container of unknown length or keys: not explained, Python's own)
+  assert(!hover(idx, src, 7, "nums").includes("`list[x]`"), hover(idx, src, 7, "nums"));
+  assert(!hover(idx, src, 6, "sizes").includes("`dict[k, v]`"), hover(idx, src, 6, "sizes"));
+  assert(!hover(idx, src, 12, "t").includes("`tuple[x, ...]`"), hover(idx, src, 12, "t"));
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 
@@ -611,7 +610,7 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
 const z618 = path.join(root, "tests", "cases", "z618_annotated_field_classes.py");
 const z618src = fs.readFileSync(z618, "utf8").split("\n");
 const hIt = hover(indexResult(facts(z618)), z618src, z618src.findIndex((l) => l.startsWith("def describe(")) + 1, "it");
-for (const part of ["ident=int(?)", "label=str(?)", "note=None | str(?)", "tags=list[str(?)]"]) assert(hIt.includes(part), hIt);
+for (const part of ["ident=int(?)", "label=str(?)", "note=str(?) | None", "tags=list[str(?)]"]) assert(hIt.includes(part), hIt);
 
 // ---- a parameter's own argument beside its default, in its body and in In Calls (a framework's
 // request: the annotated type, never the parameter's name as a value)
@@ -645,8 +644,7 @@ const etl = path.join(root, "examples", "etl_report.py");
   assert(s109.startsWith("```python\ns = Summary(n_orders=int(?), region=str(?), total=?)\n```"), s109);
   const sum109 = hover(idx, src, 109, "summaries");
   assert(sum109.startsWith("```python\nsummaries = list[Summary(n_orders=int(?), region=str(?), total=?)]\n```"), sum109);
-  assert(sum109.includes("`list[x]` a list of any length of `x`"), sum109);
-  assert(!s109.includes("`list[x]`"), s109);
+  assert(!sum109.includes("`list[x]`") && !s109.includes("`list[x]`"), sum109);
 }
 const files = [
   a01, z, g, kinds, z618, f043, z619, etl,
@@ -667,10 +665,6 @@ const USES = {
   "[*]": (t) => /\[\*\]/.test(t.replace(/Tensor\[\*\]/g, "")),
   "…": (t) => t.includes("…"),
   "(only if x)": (t) => t.includes("(only if `"),
-  "list[x]": (t) => /(^|[^\w.])list\[/.test(t),
-  "set[x]": (t) => /(^|[^\w.])set\[/.test(t),
-  "tuple[x, ...]": (t) => /(^|[^\w.])tuple\[[^\n]*, \.\.\.\]/.test(t),
-  "dict[k, v]": (t) => /(^|[^\w.])dict\[/.test(t),
 };
 const MARKS = ["✗", "⚠~", "⚠", "◌"];
 /** How a whole program's or a function's run was cut: its Note's opening words. */
@@ -760,13 +754,15 @@ async function onDemand() {
   const bidx = indexResult(b.result);
   const d5 = hover(bidx, a01src, 5, "d");
   assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?` possible key'), d5);
+  // (analysed alone, for any call, as the status bar says: no Note unless the run was cut)
+  assert(!d5.includes("analysed alone"), d5);
   const u2 = hover(bidx, a01src, 2, "user");
   assert(u2.includes("```python\nuser = (parameter)\n```\n\n**Requirements**\n- `user.id`") && !u2.includes("In Calls"), u2);
   // (its callees past the work a run on demand may do: the note says their calls were unknown)
   const cutCallees = indexResult({ ...b.result, analysis: { ...b.result.analysis, callees_cut: 16384 } });
   const d5c = hover(cutCallees, a01src, 5, "d");
   // (then the legend: `"role"?` is a possible key)
-  assert(/\n- analysed alone, for any call \(in [^\n)]*\): the whole program's analysis took too long; past its work limit, the calls made by the functions it calls count as code rowan cannot see\n- `"k"\?` possible key$/.test(d5c), d5c);
+  assert(/\n- analysed alone, for any call: the whole program's analysis took too long; past its work limit, the calls made by the functions it calls count as code rowan cannot see\n- `"k"\?` possible key$/.test(d5c), d5c);
   // (and the engine says when it happened: `main` calls functions that call others, past a
   // budget of 5 statements)
   const deploy = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
@@ -800,8 +796,8 @@ async function onDemand() {
       const where = `${path.basename(f)}:${line} ${name} (on demand)\n${h}`;
       checkFormat(h, name, where, fs_);
       assert(!h.includes("**In Calls**"), where);
-      // (said last but for the legend: the function was analysed alone, for any call, and how long it took)
-      assert(/\n- analysed alone, for any call \(in [^\n)]*\): the whole program's analysis took too long(; past its work limit, the calls made by the functions it calls count as code rowan cannot see)?(\n- (?!`[^`]*`: )[^\n]*)?$/.test(h), where);
+      // (said only when the run was cut, last but for the legend)
+      if (h.includes("analysed alone")) assert(/\n- analysed alone, for any call: the whole program's analysis took too long; past its work limit, the calls made by the functions it calls count as code rowan cannot see(\n- (?!`[^`]*`: )[^\n]*)?$/.test(h), where);
     }
   }
   stopServers();

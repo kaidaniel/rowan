@@ -23,8 +23,18 @@ fn position_texts(an: &Analyzer, state: &State, o: ObjId, from: usize, to: usize
     (from..to).map(|i| render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), depth, seen)).collect()
 }
 
+/// Alternatives in the order typing writes them: the unknown `?`, then `None`, last
+/// (`int(?) | None`, `1 | ? | None`).
+fn none_last<S: AsRef<str>>(parts: &mut [S]) {
+    parts.sort_by_key(|p| match p.as_ref() {
+        "?" => 1,
+        "None" => 2,
+        _ => 0,
+    });
+}
+
 /// Values rendered at several runs of a line as one: their alternatives (split at the top
-/// level, outside brackets and strings), each once, the unknown `?` last.
+/// level, outside brackets and strings), each once, `?` and `None` last (`none_last`).
 pub fn join_alternatives(texts: &[String]) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for t in texts {
@@ -53,10 +63,7 @@ pub fn join_alternatives(texts: &[String]) -> String {
             out.push(p);
         }
     }
-    if let Some(i) = out.iter().position(|p| *p == "?") {
-        let q = out.remove(i);
-        out.push(q);
-    }
+    none_last(&mut out);
     out.join(" | ")
 }
 
@@ -103,7 +110,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
     } else if let Some((t, opt)) = v.kv.data_site().and_then(|l| label_base(&intern::str_get(l))) {
-        // (an unknown of a type or None: `None | int(?)`)
+        // (an unknown of a type or None: `int(?) | None`)
         if opt {
             parts.push("None".into());
         }
@@ -116,11 +123,8 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     }
     parts.sort();
     parts.dedup();
-    // the unknown part last: `1 | 2 | ?`
-    if parts.len() > 1 && parts.iter().any(|p| p == "?") {
-        parts.retain(|p| p != "?");
-        parts.push("?".into());
-    }
+    // the unknown part and None last: `1 | 2 | ? | None`
+    none_last(&mut parts);
     // (literals left out, `…`, beside the literals: `"a" | "b" | … | str(?)`)
     if let Some(i) = parts.iter().position(|p| p == "…") {
         let dots = parts.remove(i);
@@ -644,6 +648,7 @@ mod tests {
         let t = |xs: &[&str]| super::join_alternatives(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         assert_eq!(t(&["{\"a\": 1} | None", "None | {\"a\": 1}"]), "{\"a\": 1} | None");
         assert_eq!(t(&["{\"a\": 1 | 2}", "?", "3"]), "{\"a\": 1 | 2} | 3 | ?");
+        assert_eq!(t(&["None | int(?)", "?"]), "int(?) | ? | None");
         assert_eq!(t(&["\"x | y\" | ?", "\"x | y\""]), "\"x | y\" | ?");
     }
 }

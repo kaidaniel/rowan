@@ -126,12 +126,12 @@ when known), then:
   for it;
 * **Allocation Sites**: where its objects were made, and keys they never have;
 * **Notes**: where the unknowns come from and what the names the value mentions are; when the
-  analysis was cut short or ran function by function; last, one line saying what each mark and
-  notation used above means.
+  analysis was cut short; last, one line saying what each mark and notation used above means.
 
-In values, `?` is something rowan cannot know, `a | b` one of several values, `"k"?:` a key
-present on some paths only, `**?` other keys that may exist, and `Tensor[B, T, 4*C]` a tensor's
-shape.
+In values, `?` is something rowan cannot know, `a | b` one of several values (`int(?) | None`,
+`None` last as typing writes it), `"k"?:` a key present on some paths only, `**?` other keys
+that may exist, and `Tensor[B, T, 4*C]` a tensor's shape; `list[x]`, `dict[k, v]` are typing's
+notation for a container of unknown size.
 
 Besides Python's builtins and standard library, rowan models PyTorch, numpy, pandas, pydantic
 and FastAPI. Your own modules are followed through their imports, and so are the other

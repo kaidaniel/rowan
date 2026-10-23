@@ -327,18 +327,18 @@ type or default when known), followed by up to four sections:
   the reads that fail for it (`✗ row["since"]`); the values one line gives, together (`10 | 14`);
 * **Allocation Sites**: where its objects were made, and keys they never have there;
 * **Notes**: where the unknowns come from and what the names the value mentions are; when the
-  analysis was cut short or ran function by function; last, one line saying what each mark and
-  notation used above means (the tables below).
+  analysis was cut short; last, one line saying what each mark and rowan's own notation used
+  above mean (the tables below; typing's `list[X]` or `int | None` are not explained).
 
 | in values | means |
 | --- | --- |
 | `?` | a value rowan cannot know (it depends on input, or on code rowan cannot see) |
 | `int(?)` | an int whose value is not known |
-| `a \| b` | one of these, depending on the path or the call |
+| `a \| b` | one of these, depending on the path or the call (`None` last: `int(?) \| None`) |
 | `"k"?: v` | a key present on some paths only |
 | `"k"~: v` | present unless code rowan cannot see removed it |
 | `**?` | other keys or attributes may exist |
-| `list[X]` | a list of any length whose elements are like `X` |
+| `list[X]` | a list of any length whose elements are like `X` (typing notation: `set[X]`, `tuple[X, ...]`, `dict[K, V]` too) |
 | `DataFrame["a", "b"]` | a DataFrame's columns |
 | `Tensor[B, T, 4*C]` | a tensor's shape (named dims are explained in the Notes) |
 | `…` | not shown |
@@ -350,8 +350,8 @@ type or default when known), followed by up to four sections:
 | `⚠~` | fails unless code rowan cannot see sets the key first |
 
 Files are analysed when opened or saved, or with **Rowan: Analyse current file**. When a whole
-file takes longer than a second, rowan answers each function when you first hover in it (usually
-well under a second), and says so in the status bar.
+file takes longer than a second, rowan answers each function when you first hover in it, alone
+and for any call of it (usually well under a second), and says so in the status bar.
 
 ## Installing
 

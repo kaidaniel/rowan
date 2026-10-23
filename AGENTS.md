@@ -13,7 +13,7 @@ rowan is a whole-program **abstract interpreter** for Python, written in Rust (`
 * the keys of some objects (`KeysOf`), as they were when taken (`KeysOf::then`, `keys_now`);
 * `Data(label)`, an unknown. The label names where it comes from (`row["id"]`, `x.shape[0]`; an operator's or a call's result by its expression, `named_call`), or holds a tensor shape or a builtin type (`typed_label`: `int(?)`; its doc says where types come from).
 
-An unknown joined with None is optional (`optional_label`: `None | int(?)`); a test that removes None gives the type back (`kv_not_none`). Joined with literals, an operator's label loses its name (`max(1, n - 1)` is `int(?)`), and the literals become a *hint* (`8080 | ?`; up to 8, then `hint_sat`). The label alone always covers the value, so code that ignores hints stays sound. Operators, `try_pure` calls (`pure_hint`) and narrowing carry hints (`split_hinted`).
+An unknown joined with None is optional (`optional_label`: `int(?) | None`); a test that removes None gives the type back (`kv_not_none`). Joined with literals, an operator's label loses its name (`max(1, n - 1)` is `int(?)`), and the literals become a *hint* (`8080 | ?`; up to 8, then `hint_sat`). The label alone always covers the value, so code that ignores hints stays sound. Operators, `try_pure` calls (`pure_hint`) and narrowing carry hints (`split_hinted`).
 
 **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call chain, 2 deep).
 * A *single* object stands for one runtime object: stores into it are strong.
@@ -53,7 +53,7 @@ Every call of the program's code runs the callee's body at the call site (`calls
 ### Generators and iterators
 
 * **Generators** (`gens.rs`) run whole at their first consumption (`force_gen`), in the creating call's context; `iter()` runs nothing. A consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code between items changes what the generator reads after a yield, it runs again with that change (`note_resume`, `with_gen_restart`).
-* A generator expression is a generator of `iter()` of its first iterable (`FuncNode::GenExp`). One whose items are all taken before any other code runs is run where it is written, as a comprehension (`Scopes::eager_genexps`).
+* A generator expression is a generator of `iter()` of its first iterable (`FuncNode::GenExp`). One whose items are all taken before any other code runs is run where it is written, as a comprehension: unpacked (`Scopes::eager_genexps`), or given whole to a library function that takes every item at once, decided by what the callee is, never by its name (`bulk_genexp`, `Scopes::consumed_next`; a program's own `sum` may take none).
 * `@contextmanager` bodies run at their yield. `any` / `all` / `next` / `in` of a generator made for them stop it where an item decides (`stopearly.rs`).
 * A generator dropped before its end is closed: GeneratorExit is raised at its yield (`genclose.rs`: `closing_loop`, `close_unheld`). Its raises happen where the consumer asks for the item it fails to give (`genraise.rs`, `exhaust_whole`).
 * A `for` calls a user iterator's `__next__` each round (`for_user_iterator`); over a one-shot iterator its body also steps, each round takes the item where it stands (`for_stepping`).
@@ -78,7 +78,7 @@ Every call of the program's code runs the callee's body at the call site (`calls
 What rowan claims holds relative to the models and to annotations: of values whose class is unknown; a general run's `x: int` is an int (not a subclass overriding its operators); an unknown the program gives an annotated field is of its type (`field_as_annotated`), as a pydantic field's validated unknown is. Also assumed or ignored:
 * `getattr` by a name not known reads every attribute of the program's objects, quietly; known in part, those whose names fit (`Payload::Affix`, `template_affixes`); a container's, or past a wide read, one method per call site.
 * `exec`, `setattr` with unknown names on a class, metaclasses and monkey-patching (rebinding a function or class too) are unknown or ignored. A module's function the program calls only by name has no other callers. Unknown code does not shadow a class attribute on an instance of a library-based class.
-* An unknown beside objects is no instance of a class. `isinstance` against a builtin class decides by type, and narrows literals and typed unknowns (`int(?)` not against `bool`: `kv_isinstance_narrowed`).
+* An unknown beside objects is no instance of a class. `isinstance` against a builtin class decides by type, and narrows literals and typed unknowns (`int(?)` not against `bool`: `kv_isinstance_narrowed`). A builtin's name the program binds is its function, not the builtin: tests narrow by what the callee was (`narrow_call`), and `flows.rs` reads a name the module or an enclosing function binds as a call of the program's (`Flow::builtin`; names an `import *` binds are not counted).
 * List lengths are tracked up to 15 (a few per path, each with its positions; `xs[:n]` keeps `xs`'s). An object a path has no facts of reads as unknown (`read_row`). A set's items, and a dict's whose order depends on the path, have no order (`Iteration::items`, `any_order_items`).
 
 ## Working conventions (the owner's standing instructions)
@@ -89,7 +89,7 @@ What rowan claims holds relative to the models and to annotations: of values who
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test` pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
-* **Output is for Python engineers.** The report, hovers and diagnostics use words and Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels (`report::site_text`). The hover layout is `renderHover`'s doc (`vscode-rowan/extension.js`); `vscode-rowan/test.js` checks real hovers.
+* **Output is for Python engineers.** The report, hovers and diagnostics use words and Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels (`report::site_text`). The hover layout is `renderHover`'s doc (`vscode-rowan/extension.js`): values as typing writes them (`None` last), Notes explaining rowan's own notation only (not `list[x]`), and a function analysed on demand noted only when that run was cut; `vscode-rowan/test.js` checks real hovers.
 
 ## Commands
 
