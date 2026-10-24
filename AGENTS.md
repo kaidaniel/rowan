@@ -98,7 +98,7 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..  # with
 cd rowan && cargo kani --lib [--harness NAME] && cd ..  # bounded proofs (src/laws/kani_tries.rs; Kani: `cargo install --locked kani-verifier && cargo kani setup`)
 uv run --no-project python tests/try_protocol.py [--rowan N]  # the try routing: a model and rowan vs CPython on 24k bounded programs, ~2 min with N=30000
 uv run --no-project python tests/{gen,with,iter}_protocol.py [--rowan N | --all] [--seed S] [--strict] [-v]  # generators (58k programs), with (6.7k), iterators and aliasing (3.6k) vs CPython; N=2000 ~10 s each, --all: with 28 s, iter 14 s, gen ~4 min
-uv run --no-project python tests/metamorphic.py [--checks budget0,rename,wrap,swap,general] [--quick] [-j 3] [case…]  # rowan against itself on the golden cases, ~10 min (--quick: every 30th, ~20 s)
+uv run --no-project python tests/metamorphic.py [--checks budget0,rename,wrap,swap,general] [--quick] [-j 3] [case…]  # rowan against itself on the golden cases, ~10 min (--quick: every 40th, ~15 s)
 uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths select cases; -v; --pending [--prune]: cases in tests/*/PENDING
 uv run --no-project python tests/run_snapshots.py   # --update only after reviewing the diff
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min

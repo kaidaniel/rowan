@@ -395,7 +395,8 @@ pub(crate) fn live_after_model(an: &mut Analyzer, m: Model, call: &Call, r: &Val
     if !RERUN.contains(&call.qual.as_str()) {
         return;
     }
-    let Some(o) = r.single().filter(|o| an.heap.kind(*o) == Kind::List && !an.m.live_iters.contains_key(o)) else { return };
+    // (made at this site before, in another run: live on this path too, its containers as here)
+    let Some(o) = r.single().filter(|o| an.heap.kind(*o) == Kind::List && an.m.live_iters.get(o).is_none_or(|l| l.rerun.is_some())) else { return };
     let args: Vec<Value> = call.args.iter().chain(call.star_args.iter()).chain(call.kwargs.values()).cloned().collect();
     if !args.iter().any(|a| a.pts.iter().any(|x| an.changing_container(x))) {
         return;
