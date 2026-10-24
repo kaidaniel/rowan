@@ -593,6 +593,10 @@ impl Analyzer {
         let hint = self.literals_beside(at(&mut c, i));
         let mut out = r.kv.hint();
         for k in hint.iter() {
+            // (a str method's receiver that may be other literals: on those it raises, no result)
+            if c.qual.starts_with("str.") && i == 0 && c.recv.is_some() && !intern::key_is_str(k) {
+                continue;
+            }
             *at(&mut c, i) = Value::lit(k);
             let mut st = state.copy();
             let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, &mut st, &c)) else { continue };
