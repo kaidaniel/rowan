@@ -36,11 +36,23 @@ e.g. no such feature yet):
                        modules, tuned on), measured as heldout below, releases from COSTSET_SINCE
                        on; with the eight it is the
                        *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
+  protocols  protocols today's protocol enumerators (PROTOCOLS: tests/try_protocol.py, gen_, with_,
+                       iter_protocol.py at their CI bounds) run with the release's binary: per
+                       enumerator the points checked and those where rowan's claims miss a CPython run;
+                       the enumerators' sha256 (changed enumerators are another series)
+  heldsound  heldsound bench/heldout.py sound (the held-out corpus's own tests against rowan's claims,
+                       ~25 min) from HELDSOUND_SINCE on: candidate sites, and those not in
+                       bench/heldout/sound_baseline.json (`new`)
   heldout    heldout   the held-out corpus (bench/heldout.py, bench/heldout/manifest.json: 31 real
                        packages no iteration tunes against, 52 modules run as main files), measured
                        like bench.P: with no deadline, cut at heldout.NODEADLINE_TIMEOUT_S, serially;
                        pooled proven / possibly %, known facts %, wall and RSS geomeans, finished,
                        cut, skipped calls; the manifest's sha256 (a changed corpus is another set)
+
+The *wrong claims* (`indices`' `wrong`) pool the places where rowan's claims miss real Python:
+fuzz unsound checks at the fresh seeds, held-out `sound` sites not in the baseline, and the
+protocol enumerators' missed points; a source not measured for a release is listed in
+`missing` (the total then a lower bound), not counted as 0.
 
 The headline metrics (proven %, possibly %, known facts %, wall and RSS geomeans, cuts) pool the
 tracked set (the eight + the cost set); the eight's own numbers stay beside them (`precision`,
@@ -97,7 +109,11 @@ BENCH_TIMEOUT_S = 180
 PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
 COSTSET_SINCE = 80  # the cost set measured from v0.1.80 on (PR #89: older releases cost too much to measure)
-FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout"]
+HELDSOUND_SINCE = 86  # bench/heldout.py sound (~25 min a release) measured from v0.1.86 on
+# the protocol enumerators and their arguments (their CI bounds)
+PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests/gen_protocol.py", "--rowan", "2000"],
+             "with": ["tests/with_protocol.py", "--rowan", "2000"], "iter": ["tests/iter_protocol.py", "--rowan", "2000"]}
+FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 
 
@@ -488,6 +504,42 @@ def measure_costset(binary: Path, logdir: Path) -> dict:
             "runs": {m: {k: v for k, v in r.items() if k in KEEP} for m, r in res["runs"].items()}}
 
 
+def protocols_sha() -> str:
+    h = hashlib.sha256()
+    for f in sorted({ROOT / "tests" / "protocol_lib.py", *(ROOT / argv[0] for argv in PROTOCOLS.values())}):
+        h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def measure_protocols(binary: Path, logdir: Path) -> dict:
+    """Today's protocol enumerators (PROTOCOLS) with the release's binary: per enumerator the
+    points checked and missed (None: it could not run)."""
+    out: dict = {"sha256": protocols_sha()}
+    for name, argv in PROTOCOLS.items():
+        r = subprocess.run(["uv", "run", "--no-project", "python", str(ROOT / argv[0]), *argv[1:]], cwd=ROOT, capture_output=True, text=True,
+                           env={**os.environ, "ROWAN_BIN": str(binary)}, stdin=subprocess.DEVNULL)
+        (logdir / f"protocol-{name}.log").write_text(r.stdout + r.stderr)
+        m = re.search(r"^rowan: .*?(\d+) points checked, (\d+) with a run rowan's claims miss", r.stdout, re.M)
+        out[name] = {"points": int(m.group(1)), "missed": int(m.group(2))} if m else None
+    return out
+
+
+def measure_heldsound(binary: Path, logdir: Path) -> dict:
+    """bench/heldout.py sound with the release's binary: candidate sites, and those not in the
+    baseline (`new`)."""
+    import heldout
+
+    js = logdir / "heldsound.json"
+    r = subprocess.run(["uv", "run", "--no-project", "python", str(HERE / "heldout.py"), "sound", "--rowan", str(binary), "--json", str(js)],
+                       cwd=ROOT, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    (logdir / "heldsound.log").write_text(r.stdout + r.stderr)
+    if not js.exists():
+        return {"error": r.stderr[-500:]}
+    sites = heldout.candidate_sites(json.loads(js.read_text()))
+    known = json.loads(heldout.BASELINE.read_text())["sites"]
+    return {"sites": len(sites), "new": sum(1 for k in sites if k not in known)}
+
+
 # ---------------------------------------------------------------- run
 def cmd_run(a) -> None:
     cache = Path(a.cache).resolve()
@@ -501,11 +553,15 @@ def cmd_run(a) -> None:
     rels = releases(a.tags.split(",") if a.tags else None, a.since, a.ref or [])
     fams = a.families.split(",") if a.families else FAMILIES
     redo = set(FAMILIES if a.redo == "all" else (a.redo.split(",") if a.redo else []))
-    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "costset": ["costset"], "heldout": ["heldout"]}
+    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "costset": ["costset"],
+            "heldout": ["heldout"], "protocols": ["protocols"], "heldsound": ["heldsound"]}
 
     def todo(e: dict, fam: str) -> bool:
-        if fam == "costset" and not since(e, COSTSET_SINCE):
+        if (fam == "costset" and not since(e, COSTSET_SINCE)) or (fam == "heldsound" and not since(e, HELDSOUND_SINCE)):
             return False
+        # (the protocol enumerators changed: measured again)
+        if fam == "protocols" and fam in fams and (e.get("protocols") or {}).get("sha256") not in (None, protocols_sha()):
+            return True
         return fam in fams and (fam in redo or any(failed(e.get(k)) for k in keys[fam]))
 
     mset = measure_set(cache)
@@ -532,6 +588,9 @@ def cmd_run(a) -> None:
                     continue
                 print(f"[{rel['tag']}] {k}", file=sys.stderr, flush=True)
                 put(data, e, k, same_engine(data, rel, k) or f())
+        if todo(e, "protocols"):
+            print(f"[{rel['tag']}] protocols", file=sys.stderr, flush=True)
+            put(data, e, "protocols", measure_protocols(b, logdir(rel)))
         if todo(e, "precision"):
             print(f"[{rel['tag']}] budget0", file=sys.stderr, flush=True)
             r = dict(same_engine(data, rel, "budget0") or measure_golden(b, mset, "budget=0", logdir(rel) / "budget0.log"))
@@ -568,6 +627,9 @@ def cmd_run(a) -> None:
         if todo(e, "heldout"):
             print(f"[{rel['tag']}] heldout", file=sys.stderr, flush=True)
             put(data, e, "heldout", measure_heldout(b, logdir(rel)))
+        if todo(e, "heldsound"):
+            print(f"[{rel['tag']}] heldsound", file=sys.stderr, flush=True)
+            put(data, e, "heldsound", measure_heldsound(b, logdir(rel)))
     save_data(data)
 
 
@@ -666,6 +728,7 @@ def indices(e: dict) -> dict:
         gap = {k: t[k] - h[k] if t[k] is not None and h[k] is not None else None for k in ("proven_pct", "possibly_pct", "known_facts_pct")}
         gap.update({k: t[k] / h[k] if t[k] and h[k] else None for k in ("wall_geomean_s", "rss_geomean_mb")})
         out["combined"] = {**pool({**tracked, **held}), "gap": gap}
+    out["wrong"] = wrong_claims(e)
     sp = e.get("sitepackages")
     if sp and "error" not in sp:
         fol = [m.get("follow", {}) for m in sp.values()]
@@ -674,6 +737,18 @@ def indices(e: dict) -> dict:
                                "finished": sum(1 for r in fol if r.get("finished")),
                                "follow_wall_s": sum(r.get("wall_s", 0) for r in fol)}
     return out
+
+
+def wrong_claims(e: dict) -> dict:
+    """The places where a release's claims miss real Python, pooled: fuzz unsound checks at the
+    fresh seeds, held-out `sound` sites not in the baseline, each protocol enumerator's missed
+    points (`parts`; None: not measured, in `missing`); `total` the sum of those measured (a
+    lower bound where any is missing; None where none is)."""
+    f, hs, pr = e.get("fuzz") or {}, e.get("heldsound") or {}, e.get("protocols") or {}
+    parts = {"fuzz": f.get("unsound") if f.get("checks") else None, "held-out": hs.get("new") if "error" not in hs else None}
+    parts.update({f"protocol {k}": (pr.get(k) or {}).get("missed") for k in PROTOCOLS})
+    have = [v for v in parts.values() if v is not None]
+    return {"parts": parts, "total": sum(have) if have else None, "missing": [k for k, v in parts.items() if v is None]}
 
 
 def tracked_runs(e: dict) -> dict | None:
