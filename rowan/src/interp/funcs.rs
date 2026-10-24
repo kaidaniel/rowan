@@ -670,10 +670,30 @@ impl Analyzer {
             }
         }
         // (of a length not known: it may raise)
-        if parts.iter().all(|p| *p == Some(true)) && !parts.is_empty() {
-            self.raise_here("ValueError", state);
-        } else if parts.iter().any(|p| *p != Some(false)) {
-            self.may_raise_here("ValueError", state);
+        let sure = parts.iter().all(|p| *p == Some(true)) && !parts.is_empty();
+        if sure || parts.iter().any(|p| *p != Some(false)) {
+            // (from where a one-shot iterator stands then: it gave n + 1 items, or all it had)
+            let mut rs = state.copy();
+            self.unpack_raise_cursor(v, n, &mut rs);
+            self.may_raise_here("ValueError", &mut rs);
+            if sure {
+                self.note_items_at_raise(&Some(crate::interp::builtin_exc_names("ValueError")), &rs);
+                state.reachable = false;
+            }
+        }
+    }
+
+    /// Where the one-shot iterators among `v` stand when unpacking into `n` names raises: past
+    /// `n + 1` items of one with more, at the end of one with fewer (a generator's effects to
+    /// there), anywhere when that is not known.
+    fn unpack_raise_cursor(&mut self, v: &Value, n: usize, state: &mut State) {
+        let its: Vec<ObjId> = v.pts.iter().filter(|o| self.heap.obj(*o).iterator).collect();
+        for o in its {
+            match self.positions_left(o, state) {
+                Some((c, l)) if l > n => self.set_cursor(o, Some(c + n + 1), state),
+                Some(_) => self.exhaust(&Value::obj(o), state),
+                None => self.set_cursor(o, None, state),
+            }
         }
     }
 

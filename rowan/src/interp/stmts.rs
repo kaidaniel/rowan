@@ -310,9 +310,20 @@ impl Analyzer {
         if self.unwind.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
             self.unwind.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
         }
+        // (a bare raise in a handler of GeneratorExit raised at a yield to close the generator:
+        // that raise again, `genclose.rs`)
+        let reclose = self.unwind.closing.last().filter(|c| r.exc.is_none() && c.0 == self.cx.frames.len() && c.2 == self.unwind.handling.len()).map(|c| c.1);
+        if let Some(p) = reclose.filter(|_| state.reachable) {
+            let (exc, cls) = (self.unwind.cur_exc.clone(), self.unwind.cur_exc_cls.take());
+            self.unwind.cur_exc_cls = Some(super::genclose::close_class(p));
+            self.record_raise_state(&mut state.copy());
+            (self.unwind.cur_exc, self.unwind.cur_exc_cls) = (exc, cls);
+        }
         // (the running try, if any, takes it with this state; else it leaves the program)
         if state.reachable {
+            let cls = self.unwind.cur_exc_cls.clone();
             self.record_raise_state(state);
+            self.note_items_at_raise(&cls, state);
         }
         self.unwind.cur_exc = None;
         self.unwind.cur_exc_cls = None;

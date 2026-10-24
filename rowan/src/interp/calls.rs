@@ -953,7 +953,7 @@ impl Analyzer {
         let new_fr = self.callee_frame(foid, &fi, &ctx);
         let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
-        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
+        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
         let saved_files = std::mem::take(&mut self.cx.call_files);
         // (a generator expression's run is no call site of its own: its calls are those of the
@@ -977,6 +977,9 @@ impl Analyzer {
         self.bind_params(&fi, &self_v, a, state, node);
         // (a run whole: where GeneratorExit raised at its yields leaves its body, `genclose.rs`)
         let bound = gen_id.is_some() && !gen_cm && self.bound_begin(fnode);
+        if let Some(gid) = gen_id.filter(|_| bound) {
+            self.closing_begin(gid, state);
+        }
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
         let closes = if bound { self.gens.bounds.pop() } else { None };
         if let Some(gid) = gen_id {

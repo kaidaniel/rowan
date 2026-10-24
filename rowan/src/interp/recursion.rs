@@ -269,7 +269,7 @@ impl Analyzer {
             self.budget.runs += 1;
             let mut st = entry_state.copy();
             if let Some(g) = gen_id {
-                self.gens.reads.push((g, false, Default::default()));
+                self.gens.reads.push((g, false, Default::default(), self.cx.frames.len()));
             }
             self.run_body(fnode, gen_id, &mut st);
             if gen_id.is_some() {

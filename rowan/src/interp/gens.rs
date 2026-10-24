@@ -39,7 +39,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{Analyzer, Args, Payload};
 use crate::domain::{join_values, kv_join, kv_literals, DATA, KeyVal, Ns, ObjId, ObjSet, Row, Value};
 use crate::frontend::Node;
-use crate::intern::{self, key_int, key_str_lit, KeySet, StrId, STAR};
+use crate::intern::{self, key_int, key_str_lit, StrId, STAR};
 use crate::state::{join_env, join_len, Footprint, Kind, SlotKey, State};
 
 /// A generator's suspension point: the yield node, the `yield from` item, the unrolled loop
@@ -221,8 +221,9 @@ pub struct Gens {
     /// what the running `for` statements iterate (`gen_used_up`)
     pub for_iters: Vec<ObjSet>,
     /// running generator activations: whether they yielded, and what they read since (an
-    /// object's key, or the whole object) — what code between their items may change for them
-    pub reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>)>,
+    /// object's key, or the whole object) — what code between their items may change for them;
+    /// their frame depth
+    pub reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>, usize)>,
     /// the reads of the last generator run (`force_gen` takes them)
     pub last_reads: Option<rustc_hash::FxHashSet<Change>>,
     /// generators whose consumer changes objects they reach: those objects, changed for the
@@ -265,12 +266,15 @@ pub struct Gens {
     /// the raises of generators run whole for the running `for` loops, taken where they ask
     /// for items (`genraise.rs`)
     pub raises: Vec<super::genraise::GenRaises>,
+    /// per running activation that yielded, its items where its body raised since (joined,
+    /// `list_facts`): a consumer may take them and stop before the raise
+    pub raised_items: FxHashMap<ObjId, State>,
 }
 
 impl Gens {
     /// A running generator that yielded reads `o` (one key, or all of it).
     pub(in crate::interp) fn read(&mut self, o: ObjId, k: Option<SlotKey>) {
-        for (_, yielded, reads) in self.reads.iter_mut() {
+        for (_, yielded, reads, _) in self.reads.iter_mut() {
             if *yielded {
                 reads.insert((o, k));
             }
@@ -949,7 +953,7 @@ impl Analyzer {
         }
         self.record_yield_state(gid, site, state);
         self.consumer_between(gid, state);
-        self.close_point(pos, state);
+        self.close_point(gid, pos, state);
         Some(gid)
     }
 
@@ -1410,6 +1414,41 @@ fn made_as_after(pre: &State, st: &State, ge: &GenEffects) -> State {
     out
 }
 
+/// The facts of list `o` in `st` alone (its positions, element and length): a state of them.
+fn list_facts(st: &State, o: ObjId) -> State {
+    let mut out = State::new();
+    st.slots.each(&o, &mut |k, v| {
+        if matches!(k.0, Ns::Pos | Ns::Elem) {
+            out.slots.set(&o, *k, v.clone());
+        }
+    });
+    if let Some(e) = st.elems.get(&o) {
+        out.elems.insert(o, e);
+    }
+    if let Some(l) = st.lens.get(&o) {
+        out.set_lens(o, l);
+    }
+    out
+}
+
+/// `st`'s facts of list `o` joined with those of `f` (`list_facts`).
+fn join_list_facts(st: &mut State, f: &State, o: ObjId) {
+    let j = list_facts(st, o).join(&mut f.copy());
+    st.drop_obj_ns(o, Ns::Pos);
+    st.drop_obj_ns(o, Ns::Elem);
+    j.slots.each(&o, &mut |k, v| st.slots.set(&o, *k, v.clone()));
+    match j.elems.get(&o) {
+        Some(e) => st.elems.insert(o, e),
+        None => {
+            st.elems.remove(&o);
+        }
+    }
+    match j.lens.get(&o) {
+        Some(l) => st.set_lens(o, l),
+        None => st.forget_len(&o),
+    }
+}
+
 /// Has `s` facts of object `o` (one a generator's run made: made by then)?
 fn made_there(s: &State, o: ObjId) -> bool {
     s.lens.get(&o).is_some() || s.elems.get(&o).is_some() || s.rows.get(&(o, Ns::Attr)).is_some() || s.rows.get(&(o, Ns::Item)).is_some()
@@ -1589,29 +1628,47 @@ impl Analyzer {
 
     /// A generator activation begins (its frame pushed): its object of yielded values, new;
     /// what the activation's site held before (a running activation's yields, put back after).
-    pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, foid: ObjId, fi: &super::FuncInfo, ctx: &str, state: &mut State) -> Option<YieldStates> {
+    pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, state: &mut State) -> Option<YieldStates> {
         // (a new activation: not consumed yet, its own item states; a running one's
         // yields are put back after it)
-        // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
+        // (keyed as `yield_value` finds it: the site's object)
         let saved = self.gens.yield_states.remove(&ygid);
         // the yielded values of this activation (a generator expression's: none yet, those of
-        // an earlier activation at this site are not this one's)
-        let gid = match saved {
-            None if fi.node.is_genexp() => {
-                state.drop_obj_ns(ygid, Ns::Pos);
-                state.drop_obj_ns(ygid, Ns::Elem);
-                ygid
-            }
-            _ => self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(ctx)),
-        };
+        // an earlier activation at this site are not this one's), of the site's object: never
+        // a variant `alloc` would make, which `yield_value` would not find (one held by a name,
+        // or past the collector's walk: its items were lost); not renewed (made at its call)
+        let gid = ygid;
+        state.drop_obj_ns(gid, Ns::Pos);
+        state.drop_obj_ns(gid, Ns::Elem);
         self.heap.set_llen(gid, state, Some(0));
-        state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
+        // (its element not known until it yields: never none, which reads as no value)
+        state.elems.remove(&gid);
         state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
         state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
         self.gens.pos_states.remove(&gid);
         self.gens.pos_conflict.retain(|(g, _)| *g != gid);
         self.gens.eff.remove(&gid);
+        self.gens.raised_items.remove(&gid);
         saved
+    }
+
+    /// A path ends in a raise from `state`: the running generator activations that yielded
+    /// keep their items there (a consumer may take those and stop asking before the raise; a
+    /// path that may raise and goes on gives them all the same).
+    pub(in crate::interp) fn note_items_at_raise(&mut self, cls: &Option<super::ExcNames>, state: &State) {
+        if !state.reachable || !self.gens.reads.iter().any(|r| r.1) {
+            return;
+        }
+        // (not where a handler of the generator's own surely catches it)
+        let gids: Vec<ObjId> = self.gens.reads.iter().filter(|r| r.1 && !self.surely_caught_from(r.3, cls)).map(|r| r.0).collect();
+        for g in gids {
+            let mut f = list_facts(state, g);
+            let j = match self.gens.raised_items.remove(&g) {
+                Some(mut acc) => acc.join(&mut f),
+                None => f,
+            };
+            self.gens.raised_items.insert(g, j);
+        }
     }
 
     /// A generator activation ended: what its site held before it (`gen_activation_begin`), back.
@@ -1633,6 +1690,11 @@ impl Analyzer {
     /// body changed hold the join of those states (`gen_suspension_join`), and its effects per
     /// item are kept (`GenEffects`).
     pub(super) fn gen_activation_end(&mut self, gid: ObjId, gen_cm: bool, st: &mut State, pre_bind: &State, born_mark: u64, closes: Option<super::genclose::GenBound>) {
+        // (the items given before a raise on some paths: a consumer may take them, also where
+        // other paths end)
+        if let Some(raised) = self.gens.raised_items.remove(&gid).filter(|_| st.reachable && !gen_cm) {
+            join_list_facts(st, &raised, gid);
+        }
         let gen_yields = (!gen_cm).then(|| self.gens.yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default());
         // (a generator that ran to its end: the state there, for a consumer that uses it up)
         let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };

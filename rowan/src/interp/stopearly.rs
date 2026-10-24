@@ -243,7 +243,18 @@ impl Analyzer {
         if !state.reachable || decided == Some(false) {
             return;
         }
-        let mut here = if decided == Some(true) { std::mem::replace(state, State::bottom()) } else { state.copy() };
+        // (the generator's returns before this yield stay its own: its end, where the consumer
+        // goes on)
+        let mut here = if decided == Some(true) {
+            let (ret, exits) = (state.ret.take(), state.exits.take());
+            let here = std::mem::replace(state, State::bottom());
+            (state.ret, state.exits) = (ret, exits);
+            here
+        } else {
+            let mut c = state.copy();
+            (c.ret, c.exits) = (None, None);
+            c
+        };
         if let Some(h) = self.gens.stop_hooks.last_mut() {
             h.result = Some(match h.result.take() {
                 Some(r) => r.join(&answer),

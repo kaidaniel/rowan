@@ -186,6 +186,10 @@ pub struct Unwind {
     pub handling: Vec<FxHashSet<String>>,
     /// the exception values the running handlers hold (a bare `raise` re-raises them)
     pub handling_values: Vec<Value>,
+    /// the running handlers that may catch GeneratorExit raised at a yield to close a generator
+    /// run whole (`genclose.rs`): their frame depth, the yield's position (None: not known),
+    /// and their place in `handling`
+    pub closing: Vec<(usize, Option<usize>, usize)>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
@@ -420,8 +424,16 @@ impl Analyzer {
 
     /// An exception named `name` is raised here (the rest of the path is dead).
     pub fn raise_here(&mut self, name: &str, state: &mut State) {
+        let cls = self.unwind.cur_exc_cls.clone().unwrap_or_else(|| super::builtin_exc_names(name));
         self.may_raise_here(name, state);
+        self.note_items_at_raise(&Some(cls), state);
         state.reachable = false;
+    }
+
+    /// Does a handler of a running try begun at frame depth `depth` or deeper surely catch
+    /// exceptions of class `cls`?
+    pub(super) fn surely_caught_from(&self, depth: usize, cls: &Option<super::ExcNames>) -> bool {
+        self.unwind.tries.iter().any(|t| t.frames >= depth && t.hclasses.iter().any(|hc| handler_matches(hc, cls) == Some(true)))
     }
 
     /// An exception named `name` may be raised here: a running try records this state for its
@@ -733,6 +745,7 @@ impl Analyzer {
         for (hi, h) in handlers.iter().enumerate() {
             // the exceptions raised at the recorded points (anything else: unknown)
             let unknown = Value::data(&format!("exc@L{}", h.line));
+            let (mut closing, mut only_closing): (Option<Option<usize>>, bool) = (None, true);
             let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
                 let mut e = State::bottom();
@@ -740,6 +753,15 @@ impl Analyzer {
                 for (cls, st, x) in recs.iter_mut() {
                     if handler_matches(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
                         continue;
+                    }
+                    match super::genclose::close_pos(cls) {
+                        Some(p) => {
+                            closing = Some(match closing {
+                                Some(q) if q != p => None,
+                                _ => p,
+                            })
+                        }
+                        None => only_closing = false,
                     }
                     // (a raise of one of several exceptions, `raise` of a handler's: the handler
                     // binds those of its classes; none of them: it catches none of this raise)
@@ -761,7 +783,14 @@ impl Analyzer {
             }
             self.unwind.handling.push(h.names());
             self.unwind.handling_values.push(ev);
+            if let Some(p) = closing {
+                self.unwind.closing.push((self.cx.frames.len(), p, self.unwind.handling.len()));
+                self.closing_caught(p, only_closing, &mut hs);
+            }
             self.exec_block(h.body, &mut hs);
+            if closing.is_some() {
+                self.unwind.closing.pop();
+            }
             self.unwind.handling_values.pop();
             self.unwind.handling.pop();
             results.push(hs);
