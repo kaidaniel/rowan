@@ -553,9 +553,41 @@ pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
 }
 
 /// The literal texts a str template's result starts and ends with: an f-string (around its
-/// fields), `"…%s…" % x` (simple conversions, no `%%`), `"…{}…".format(…)` (no `{{` / `}}`);
+/// fields), `"…%s…" % x` (simple conversions, no `%%`), `"…{}…".format(…)` (no `{{` / `}}`),
+/// `"…" + x + "…"` (`concat_affix`: what a str's `+` makes, not a `__radd__` / `__add__`);
 /// None for other expressions.
 pub fn template_affix(e: &ast::Expr) -> Option<(String, String)> {
+    template_affix_of(e).or_else(|| concat_affix(e))
+}
+
+/// `"pre" + x + "post"`, a chain of `+` with a str literal at an end: the literal ends (None
+/// when neither end is one). What the chain gives only where `+` is str's own, so a caller
+/// needs that no `__radd__` / `__add__` of the operands' classes may run.
+pub fn concat_affix(e: &ast::Expr) -> Option<(String, String)> {
+    fn parts(e: &ast::Expr, out: &mut Vec<Option<String>>) {
+        match e {
+            ast::Expr::BinOp(b) if b.op == ast::Operator::Add => {
+                parts(&b.left, out);
+                parts(&b.right, out);
+            }
+            ast::Expr::StringLiteral(s) => out.push(Some(s.value.to_str().to_string())),
+            _ => out.push(None),
+        }
+    }
+    let ast::Expr::BinOp(b) = e else { return None };
+    if b.op != ast::Operator::Add {
+        return None;
+    }
+    let mut ps = Vec::new();
+    parts(e, &mut ps);
+    let first = ps.iter().position(Option::is_none)?;
+    let last = ps.iter().rposition(Option::is_none)? + 1;
+    let cat = |ps: &[Option<String>]| ps.iter().flatten().cloned().collect::<String>();
+    let (pre, post) = (cat(&ps[..first]), cat(&ps[last..]));
+    Some((pre, post)).filter(|(p, s)| !p.is_empty() || !s.is_empty())
+}
+
+fn template_affix_of(e: &ast::Expr) -> Option<(String, String)> {
     let ends = |parts: &[Option<String>]| -> (String, String) {
         let first = parts.iter().position(Option::is_none).unwrap_or(parts.len());
         let last = parts.iter().rposition(Option::is_none).map_or(parts.len(), |i| i + 1);
