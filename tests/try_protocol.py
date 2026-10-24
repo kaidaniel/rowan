@@ -22,7 +22,7 @@ Invariant: at every observation point, every state a CPython run reaches is amon
     uv run --no-project python tests/try_protocol.py [--rowan N] [--seed S] [-v]
 
 explores every program of the bounded grammar (`programs`) in the model against CPython, then
-runs rowan (through .guard/run when on macOS) on N of them (default 600; and on every program
+runs rowan (through .guard/run where it exists) on N of them (default 600; and on every program
 the model found a counterexample in), batched 150 to a file, and checks its claims the same way.
 """
 from __future__ import annotations
@@ -408,7 +408,8 @@ def rowan_claims(text: str, where: dict) -> dict:
         p = Path(d) / "protocol_batch.py"
         p.write_text("\n".join(lines))
         cmd = [RUST_BIN, str(p), "--golden"]
-        if sys.platform == "darwin":
+        # (the guard is the owner's Mac's; CI's macOS runners have none)
+        if sys.platform == "darwin" and GUARD.exists():
             cmd = [str(GUARD), "-t", "300", *cmd]
         r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     doc = json.loads(r.stdout)
