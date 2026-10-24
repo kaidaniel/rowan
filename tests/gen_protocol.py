@@ -112,13 +112,15 @@ def program(seq, wrap, kind, ctry) -> Prog:
 
 
 def programs():
-    for seq in seqs():
-        for wrap in WRAPS:
-            for kind in CONSUMERS:
-                for ctry in CTRY:
-                    yield program(seq, wrap, kind, ctry)
+    # (`throw` last: a program that calls `.throw(` makes every generator of its batch raise at
+    # its yields, `close_point`; batched apart, the others keep their precision)
+    for kinds in ([k for k in CONSUMERS if k != "throw"], ["throw"]):
+        for seq in seqs():
+            for wrap in WRAPS:
+                for kind in kinds:
+                    for ctry in CTRY:
+                        yield program(seq, wrap, kind, ctry)
 
 
 if __name__ == "__main__":
-    # (`generator.throw` is not modelled: its handlers' code is taken for unreachable)
-    cli(programs, NAMES, gaps=("throw",))
+    cli(programs, NAMES)

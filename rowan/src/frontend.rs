@@ -426,17 +426,29 @@ pub fn module_path(idx: u32) -> Option<String> {
 }
 
 /// Does a `.send(` call appear in any module parsed so far? (a `yield` expression is None
-/// unless something is sent; cached per module count)
+/// unless something is sent)
 pub fn any_send_call() -> bool {
+    any_source_has(0, ".send(")
+}
+
+/// Does a `.throw(` call appear in any module parsed so far? (a generator's handlers run only
+/// where something throws into it, `genclose.rs` `close_point`)
+pub fn any_throw_call() -> bool {
+    any_source_has(1, ".throw(")
+}
+
+/// Does `pat` appear in the text of any module parsed so far? (cached per module count, in
+/// slot `slot`)
+fn any_source_has(slot: usize, pat: &str) -> bool {
     thread_local! {
-        static SEND: RefCell<(usize, bool)> = const { RefCell::new((0, false)) };
+        static SEEN: RefCell<[(usize, bool); 2]> = const { RefCell::new([(0, false); 2]) };
     }
     REG.with(|r| {
         let r = r.borrow();
-        SEND.with(|c| {
-            let mut c = c.borrow_mut();
+        SEEN.with(|c| {
+            let c = &mut c.borrow_mut()[slot];
             if c.0 != r.modules.len() {
-                *c = (r.modules.len(), r.modules.iter().any(|m| m.source.contains(".send(")));
+                *c = (r.modules.len(), r.modules.iter().any(|m| m.source.contains(pat)));
             }
             c.1
         })

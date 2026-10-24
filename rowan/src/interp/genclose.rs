@@ -74,6 +74,17 @@ pub fn close_pos(cls: &Option<super::ExcNames>) -> Option<Option<usize>> {
     Some(n.parse::<usize>().ok())
 }
 
+/// The class of an exception `throw()` raises at a yield of a generator run whole (one of any
+/// class: every handler may catch it).
+pub fn thrown_class() -> super::ExcNames {
+    (std::rc::Rc::new(vec!["\u{1}thrown".to_string()]), false)
+}
+
+/// Is this the class `thrown_class` makes?
+pub fn is_thrown(cls: &Option<super::ExcNames>) -> bool {
+    cls.as_ref().is_some_and(|(n, _)| n.len() == 1 && n[0] == "\u{1}thrown")
+}
+
 fn closing_key() -> intern::KeyId {
     key_str_lit("\u{1}closing")
 }
@@ -162,6 +173,16 @@ impl Analyzer {
             let mut here = state.copy();
             self.unwind.cur_exc_cls = Some(close_class(pos));
             self.may_raise_here("GeneratorExit", &mut here);
+            // (`throw()` raises its exception here: where the program throws into generators,
+            // the generator's handlers and finally blocks run from this state; what leaves its
+            // body is the `throw` call's, an unknown call's, `record_close`)
+            if crate::frontend::any_throw_call() {
+                let mut here = state.copy();
+                self.unwind.cur_exc = None;
+                self.unwind.cur_exc_cls = Some(thrown_class());
+                self.record_raise_state(&mut here);
+                self.unwind.cur_exc_cls = None;
+            }
         }
     }
 
@@ -189,10 +210,14 @@ impl Analyzer {
     }
 
     /// GeneratorExit raised at a yield leaves the body of the generator run whole there:
-    /// recorded for its closed state (true), or not such a raise (false).
+    /// recorded for its closed state (true), or not such a raise (false). An exception
+    /// `throw()` raised at a yield leaving the body there is dropped (true).
     pub(super) fn record_close(&mut self, cls: &Option<super::ExcNames>, state: &State) -> bool {
-        let Some(pos) = close_pos(cls) else { return false };
         let n = self.unwind.tries.len();
+        if is_thrown(cls) {
+            return self.gens.bounds.last().is_some_and(|b| b.tries == n);
+        }
+        let Some(pos) = close_pos(cls) else { return false };
         match self.gens.bounds.last_mut().filter(|b| b.tries == n) {
             Some(b) => {
                 match b.recs.iter_mut().find(|r| r.0 == pos) {

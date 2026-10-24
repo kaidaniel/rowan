@@ -94,7 +94,7 @@ def module(progs: list, names: list) -> tuple[str, dict]:
                 where[base + i + 1] = (n, i, m.group(1))
         lines.append(f"run(p{n})")
         for i, ln in enumerate(p.end):
-            lines.append(ln)
+            lines.append(ln.replace("{N}", str(n)))
             m = OBS_RE.match(ln)
             if m:
                 where[len(lines)] = (n, ("end", i), m.group(1))

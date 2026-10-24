@@ -89,6 +89,10 @@ impl Analyzer {
                 }
             }
         }
+        // `in` a literal that is no container (None, a number), or a str of a non-str: TypeError
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && b.kv.is_literal() && self.in_literal_raises(a, b, state) {
+            return Value::new();
+        }
         if ordering {
             // library values (paths, Decimal, datetime); instances: their comparison methods
             // (`__lt__`, reflected, @total_ordering); tuples item by item
@@ -117,6 +121,36 @@ impl Analyzer {
             return Value::with_kv(both.filter(|o| self.heap.kind(o) == Kind::Frame), DATA);
         }
         Value::data("bool")
+    }
+
+    /// What `a in b` raises where `b` may be a literal (true: surely): a TypeError for each of
+    /// b's literals that is no container (None, a number, a bool), or a str when `a` is no str.
+    fn in_literal_raises(&mut self, a: &Value, b: &Value, state: &mut State) -> bool {
+        let left = kv_literals(&a.kv);
+        let left_known = a.pts.is_empty() && a.kv.is_literal() && !left.is_empty();
+        let left_strs = left.iter().filter(|k| intern::with_key(*k, |kk| matches!(kk, intern::Key::Str(_)))).count();
+        // per literal of b: Some(true) surely raises, Some(false) surely not, None: may
+        let outcomes: Vec<Option<bool>> = kv_literals(&b.kv)
+            .iter()
+            .map(|k| {
+                intern::with_key(k, |kk| match kk {
+                    intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Ellipsis | intern::Key::Dec(..) | intern::Key::Frac(..) | intern::Key::Chrono(..) => Some(true),
+                    intern::Key::Str(_) if left_known && left_strs == 0 => Some(true),
+                    intern::Key::Str(_) if left_known && left_strs == left.len() => Some(false),
+                    intern::Key::Tuple(_) | intern::Key::Frozen(_) => Some(false),
+                    _ => None,
+                })
+            })
+            .collect();
+        if outcomes.iter().all(|o| *o == Some(false)) {
+            return false;
+        }
+        if b.pts.is_empty() && outcomes.iter().all(|o| *o == Some(true)) {
+            self.raise_here("TypeError", state);
+            return true;
+        }
+        self.may_raise_here("TypeError", state);
+        false
     }
 
     /// What ordering `a` and `b` (`<` & co.) that no dunder or model ordered may raise (true:
@@ -746,7 +780,7 @@ fn literals_order(x: KeyId, y: KeyId) -> Option<bool> {
 
 /// Python's `==` on two literals (`1 == 1.0 == True`); Enum members and identity-hashed
 /// objects compare by identity (their keys), as the engine keys them.
-fn lit_eq(a: KeyId, b: KeyId) -> Option<bool> {
+pub(super) fn lit_eq(a: KeyId, b: KeyId) -> Option<bool> {
     let by_id = |k: KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Member(..) | intern::Key::Inv(..)));
     if a == b || by_id(a) || by_id(b) {
         return Some(a == b);

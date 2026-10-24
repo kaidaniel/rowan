@@ -978,6 +978,7 @@ impl Analyzer {
         let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
         self.recursion.begin(&key, (self_v.clone(), args.to_vec(), kwargs.clone()), pre_rc.clone(), born_mark);
+        self.recursion.set_depth(&key, self.cx.frames.len());
         if gen_id.is_none() {
             if let Some(fr) = self.cx.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(self.heap.mark(), pre_rc));
