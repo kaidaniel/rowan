@@ -668,9 +668,11 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
             return;
         }
     }
-    if LAZY_ALL.contains(&q) {
+    // (a zip of how many items each gives not known: some number, taken as it is consumed)
+    if LAZY_ALL.contains(&q) || q == "builtins.zip" {
         if let Some(ro) = robj {
-            an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+            let n = if q == "builtins.zip" { Some(crate::interp::SOME_ITEMS) } else { None };
+            an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, n)).collect());
             lazy_unconsumed(ro, state);
             return;
         }

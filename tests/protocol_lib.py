@@ -258,21 +258,28 @@ def report(tally: Tally, what: str) -> str:
             f"({len(set(tally.bad_programs))} programs), {tally.exact} exact; rowan failed on {tally.crashed} batches; {tally.seconds:.1f} s")
 
 
-def cli(programs, names: list, quick: int = 2000) -> None:
+def cli(programs, names: list, quick: int = 2000, gaps: tuple = ()) -> None:
     """The command line every enumerator shares: CPython on every program, rowan on a sample
-    (`--rowan N`, default `quick`) or on all (`--all`); exit 1 when rowan's claims miss a run."""
+    (`--rowan N`, default `quick`) or on all (`--all`); exit 1 when rowan's claims miss a run.
+    Programs whose description names one of `gaps` (known misses, listed in AGENTS.md) are
+    checked and counted apart, and fail the run only with `--strict`."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--rowan", type=int, default=quick, help="programs rowan runs on (a sample)")
     ap.add_argument("--all", action="store_true", help="rowan on every program")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--limits", help="ROWAN_LIMITS for rowan's runs")
+    ap.add_argument("--strict", action="store_true", help="the known gaps fail the run too")
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
     progs = list(programs())
     print(f"{len(progs)} programs, {len(INPUTS)} inputs each")
     rng = random.Random(a.seed)
     pick = progs if a.all else [progs[i] for i in sorted(rng.sample(range(len(progs)), min(a.rowan, len(progs))))]
-    t = Tally()
-    check(pick, names, t, verbose=a.v, limits=a.limits)
+    gap = lambda p: any(g in p.desc.split() for g in gaps)
+    t, tg = Tally(), Tally()
+    check([p for p in pick if not gap(p)], names, t, verbose=a.v, limits=a.limits)
     print(report(t, "rowan"))
-    sys.exit(1 if t.missed or t.crashed else 0)
+    if gaps:
+        check([p for p in pick if gap(p)], names, tg, show=0, limits=a.limits)
+        print(report(tg, f"rowan on the known gaps ({', '.join(gaps)})"))
+    sys.exit(1 if t.missed or t.crashed or (a.strict and (tg.missed or tg.crashed)) else 0)

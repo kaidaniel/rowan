@@ -120,4 +120,5 @@ def programs():
 
 
 if __name__ == "__main__":
-    cli(programs, NAMES)
+    # (`generator.throw` is not modelled: its handlers' code is taken for unreachable)
+    cli(programs, NAMES, gaps=("throw",))

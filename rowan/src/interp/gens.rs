@@ -109,6 +109,9 @@ pub struct CmHook {
     pub rest: Option<(&'static ast::StmtWith, usize)>,
 }
 
+/// A lazy iterator takes some number of its source's items, not known (`Tables::lazy_src`).
+pub const SOME_ITEMS: usize = usize::MAX;
+
 /// A with body's ways out besides its end (`CmHook::jumps`).
 pub const JUMP_RETURN: u8 = 1;
 pub const JUMP_BREAK: u8 = 2;
@@ -1060,6 +1063,11 @@ impl Analyzer {
             let some = was.is_some_and(|ks| ks.contains(intern::key_bool(true)));
             state.set_slot(lo, Ns::Attr, done, Value::lit(intern::key_bool(true)), true);
             for (src, n) in srcs {
+                // (a number not known: where it stands then not known)
+                if n == Some(SOME_ITEMS) {
+                    self.set_cursor(src, None, state);
+                    continue;
+                }
                 // (used up: so are the sources it takes all of, on the paths it was used up on
                 // before too)
                 if let (true, None) = (full, n) {

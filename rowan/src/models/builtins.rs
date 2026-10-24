@@ -1105,12 +1105,17 @@ fn next_item(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             _ => elem,
         },
     };
-    // (it may have ended: the default, else StopIteration)
+    // (it may have ended: the default, else StopIteration — raised where a one-shot iterator
+    // is used up, a generator run to its end)
     match c.args.get(1) {
         _ if has_item => item,
         Some(d) => item.join(d),
         None => {
-            an.may_raise_here("StopIteration", st);
+            let mut rs = st.copy();
+            if let Some(g) = a.single().filter(|g| a.kv.is_bot() && an.heap.obj(*g).iterator) {
+                an.end_iterator(g, &mut rs);
+            }
+            an.may_raise_here("StopIteration", &mut rs);
             item
         }
     }
