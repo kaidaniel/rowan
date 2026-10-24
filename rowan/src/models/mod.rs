@@ -742,7 +742,6 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
 /// `list(x)` iterates x): the dunders of their arguments themselves (`own`) and of the instances
 /// their containers hold, at any depth through containers (`items`).
 const COMPARE: &[&str] = &["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"];
-const ITERATE: &[&str] = &["__iter__", "__next__", "__len__", "__length_hint__", "__getitem__", "__reversed__"];
 const PRINT: &[&str] = &["__repr__", "__str__", "__format__"];
 const HASH: &[&str] = &["__hash__", "__eq__"];
 const ADD: &[&str] = &["__add__", "__radd__", "__iadd__"];
@@ -750,12 +749,17 @@ const COPY: &[&str] = &["__copy__", "__deepcopy__", "__reduce__", "__reduce_ex__
 
 /// (the dunders of the arguments themselves, those of the instances their containers hold)
 fn driven(qual: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    // (iterating an instance runs its `__iter__` / `__getitem__` where the models iterate it,
+    // `Analyzer::iterate`: here only what they do not, a size hint's `__len__`)
+    const HINT: &[&str] = &["__len__", "__length_hint__"];
     Some(match qual.strip_prefix("builtins.").unwrap_or(qual) {
-        "sorted" | "max" | "min" | "list.sort" => (ITERATE, COMPARE),
-        "sum" => (ITERATE, ADD),
-        "list" | "tuple" | "reversed" | "iter" | "next" | "enumerate" | "zip" => (ITERATE, &[]),
-        "any" | "all" => (ITERATE, &["__bool__", "__len__"]),
-        "set" | "frozenset" | "dict" => (ITERATE, HASH),
+        "sorted" | "list.sort" => (HINT, COMPARE),
+        "max" | "min" => (&[], COMPARE),
+        "sum" => (&[], ADD),
+        "list" | "tuple" => (HINT, &[]),
+        "reversed" => (&["__reversed__", "__len__", "__getitem__"], &[]),
+        "any" | "all" => (&[], &["__bool__", "__len__"]),
+        "set" | "frozenset" | "dict" => (&[], HASH),
         "str" | "repr" | "print" | "format" => (&[], PRINT),
         "hash" => (&[], HASH),
         "copy.copy" | "copy.deepcopy" => (&[], COPY),

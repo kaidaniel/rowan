@@ -155,14 +155,40 @@ impl Analyzer {
         // (none of the three: not a container, TypeError)
         let Some(b) = self.without_dunders(b, &["__contains__", "__iter__", "__getitem__"], state) else { return Some(Value::new()) };
         let b = &b;
-        let r = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
-            Some((r, rest)) if rest.empty() => r,
-            _ => {
-                self.instance_dunders(b.pts.iter().collect(), &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
-                Value::data("bool")
-            }
+        // (beside other objects, a container that may be any of them: what its dunders change,
+        // as library code runs them)
+        if b.pts.iter().any(|o| self.heap.kind(o) != Kind::Instance) || !b.kv.is_bot() {
+            self.instance_dunders(b.pts.iter().filter(|o| user(self, *o)).collect(), &["__contains__", "__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
+            return None;
+        }
+        // (those without `__contains__`: iterated, by `__iter__` or `__getitem__`, items compared)
+        let (r, rest) = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
+            Some((r, rest)) => (r, rest),
+            None => (Value::new(), b.clone()),
+        };
+        let iterated: Vec<ObjId> = rest.pts.iter().filter(|o| user(self, *o)).collect();
+        let r = if iterated.is_empty() {
+            r
+        } else {
+            self.instance_dunders(iterated, &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
+            Value::data("bool")
         };
         Some(if r.pts.is_empty() && r.kv.is_literal() && !r.kv.is_bot() { r } else { Value::data("bool") })
+    }
+
+    /// Does class `c`'s `__hash__` (the program's) give its instance's identity: its body one
+    /// `return id(self)` or `return object.__hash__(self)`? Then two objects hash alike only where
+    /// they are the same object.
+    pub(in crate::interp) fn hashes_by_identity(&self, c: ObjId) -> bool {
+        let Some(owner) = self.class_lookup(c, "__hash__") else { return false };
+        let Some(f) = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__hash__"))).and_then(|v| v.single()).filter(|f| self.heap.kind(*f) == Kind::Function) else { return false };
+        let fi = self.heap.func_info(f);
+        let (Some(ps), [ast::Stmt::Return(r)]) = (fi.node.params(), fi.node.body()) else { return false };
+        let Some(me) = ps.posonlyargs.iter().chain(ps.args.iter()).next().map(|p| p.parameter.name.id.as_str()) else { return false };
+        let Some(ast::Expr::Call(call)) = r.value.as_deref() else { return false };
+        let one_me = matches!(&call.arguments.args[..], [ast::Expr::Name(n)] if n.id.as_str() == me) && call.arguments.keywords.is_empty();
+        let callee = crate::frontend::text(&*call.func);
+        one_me && (callee == "id" || callee == "object.__hash__")
     }
 
     /// `a in b` where `a` holds instances whose class defines `__eq__` and `b` containers that
@@ -174,7 +200,10 @@ impl Analyzer {
         if eqs.is_empty() {
             return false;
         }
-        let cs: Vec<ObjId> = b.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set | Kind::Dict)).collect();
+        // (a set's or dict's lookup compares only keys of an equal hash that are not the very
+        // object: none, for a class that hashes by identity, `return id(self)`)
+        let by_id = a.pts.iter().all(|o| self.heap.instance_class(o).is_some_and(|c| self.hashes_by_identity(c)));
+        let cs: Vec<ObjId> = b.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple) || (matches!(self.heap.kind(*o), Kind::Set | Kind::Dict) && !by_id)).collect();
         if cs.is_empty() || cs.iter().all(|o| self.heap.llen(*o, state) == Some(0)) {
             return false;
         }

@@ -1121,7 +1121,10 @@ impl Analyzer {
         classes.sort_unstable();
         let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
         for (c, recvs) in classes {
-            for f in self.changing_dunders(c, state).iter().copied().filter(|f| names.contains(&self.heap.func_info(*f).name.as_str())) {
+            // (hashing compares a key with others of an equal hash: none for a class hashing by
+            // identity)
+            let no_eq = names.contains(&"__hash__") && self.hashes_by_identity(c);
+            for f in self.changing_dunders(c, state).iter().copied().filter(|f| names.contains(&self.heap.func_info(*f).name.as_str()) && !(no_eq && self.heap.func_info(*f).name == "__eq__")) {
                 let r = Value::objs(recvs.iter().copied().collect());
                 match fns.iter_mut().find(|(g, _)| *g == f) {
                     Some((_, Some(v))) => *v = v.join(&r),

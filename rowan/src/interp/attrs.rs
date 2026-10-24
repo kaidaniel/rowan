@@ -1023,8 +1023,7 @@ impl Analyzer {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
                     let by_data = self.data_stored(oid, nk, &row, state);
-                    // (surely missing only where nothing open may have set it)
-                    if !row.present.contains(nk) && by_data.is_none() && row.closed() {
+                    if !row.present.contains(nk) && by_data.is_none() {
                         return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
                     }
                     // (there unless unknown code removed it: on the path where it did, what
