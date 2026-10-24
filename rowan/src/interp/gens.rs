@@ -294,6 +294,14 @@ impl Gens {
             }
         }
     }
+
+    /// The running generators iterate `o` (all of it): a loop reads it at each of its steps,
+    /// after their yields too, though its items are taken at once.
+    pub(in crate::interp) fn read_iterated(&mut self, o: ObjId) {
+        for (_, _, reads, _) in self.reads.iter_mut() {
+            reads.insert((o, None));
+        }
+    }
 }
 
 impl Analyzer {
@@ -529,7 +537,18 @@ impl Analyzer {
         for round in 0..4 {
             let wmark = self.gens.watch.len();
             body(self, state);
-            let found = self.gen_interference(wmark, state, round == 3);
+            // (where the code returned: what it changed by its returns too)
+            let found = match state.exits.as_deref() {
+                Some(ex) => {
+                    let mut at = ex.copy();
+                    at.reachable = true;
+                    if state.reachable {
+                        at = at.join(&mut state.copy());
+                    }
+                    self.gen_interference(wmark, &at, round == 3)
+                }
+                None => self.gen_interference(wmark, state, round == 3),
+            };
             if found.is_empty() || round == 3 {
                 if close {
                     self.close_watches(wmark, &pre, state);
@@ -695,17 +714,17 @@ impl Analyzer {
     /// changed of the facts it gave).
     fn gen_interference_with(&self, i: usize, fin: &State, all: bool, resumed: Option<&State>) -> Vec<Hit> {
         let w = &self.gens.watch[i];
-        if !fin.reachable {
-            return Vec::new();
-        }
-        // (what the consumer changed by the time it asked for an item, or by the end)
+        // (what the consumer changed by the time it asked for an item, or by the end; where it
+        // ends nowhere, by the time it asked: an item it was taken to lack, perhaps)
         let joined;
         let fin = match resumed {
-            Some(r) if r.reachable => {
+            Some(r) if r.reachable && fin.reachable => {
                 joined = fin.copy().join(&mut r.copy());
                 &joined
             }
-            _ => fin,
+            Some(r) if r.reachable => r,
+            _ if fin.reachable => fin,
+            _ => return Vec::new(),
         };
         let changed = self.changes_between(&w.after, fin);
         let read = |(o, k, _): &Hit| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
@@ -1096,6 +1115,10 @@ impl Analyzer {
             None => Value::data("cursor"),
         };
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), cv, true);
+        // (a live one used up stays so, whatever its containers gain)
+        if at_end && self.m.live_iters.contains_key(&o) {
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}done"), Value::lit(intern::key_bool(true)), true);
+        }
         // (where its frame is suspended, it holds what its names do: `genclose.rs`)
         self.note_closable(o);
         self.note_ended(o, at_end, state);
@@ -1203,9 +1226,6 @@ impl Analyzer {
             Some(n) => self.set_cursor_ex(o, Some(n), true, state),
             None => self.set_cursor_ex(o, None, true, state),
         }
-        if self.m.live_iters.contains_key(&o) {
-            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}done"), Value::lit(intern::key_bool(true)), true);
-        }
     }
 
     /// Live iterator `o` (`Tables::live_iters`) reads `srcs` as they are at each step: what
@@ -1283,7 +1303,13 @@ impl Analyzer {
                 continue;
             }
             let old = (state.slot(o, Ns::Elem, STAR), state.elems.get(&o));
+            // (used up on some of the paths joined here: there it gives nothing more)
+            let maybe_done = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}done")).is_some_and(|d| kv_literals(&d.kv).contains(intern::key_bool(true)));
             crate::models::builtins::refill_live(self, state, o, &call, &srcs);
+            if maybe_done {
+                state.drop_obj_ns(o, Ns::Pos);
+                self.heap.set_llen(o, state, None);
+            }
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}srcfp"), all, true);
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}keysfp"), keys, true);
             if !keys_changed {

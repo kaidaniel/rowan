@@ -383,9 +383,32 @@ impl Analyzer {
         if scalar(a) && scalar(b) && self.scalar_binop_raises(op, a, b, state) {
             return Value::new();
         }
+        if self.seq_binop_raises(op, a, b) {
+            self.raise_here("TypeError", state);
+            return Value::new();
+        }
         let r = self.binop_untyped(op, a, b, node, state);
         let ty = binop_type(op, self.value_type(a), self.value_type(b));
         self.as_type(r, ty, true)
+    }
+
+    /// Does `a op b` surely raise TypeError for a builtin list or tuple operand: an operator
+    /// sequences do not have (`[1] | [2]`, `xs - ys`) with another builtin value, or `+` of a
+    /// list and a tuple.
+    fn seq_binop_raises(&self, op: ast::Operator, a: &Value, b: &Value) -> bool {
+        use ast::Operator::*;
+        let kind = |v: &Value| -> Option<Kind> {
+            let k = self.heap.kind(v.pts.iter().next()?);
+            (v.kv.is_bot() && matches!(k, Kind::List | Kind::Tuple) && v.pts.iter().all(|o| self.heap.kind(o) == k && !self.heap.obj(o).iterator)).then_some(k)
+        };
+        // (literals other than str, which `%` formats with a sequence)
+        let lits = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !kv_literals(&v.kv).iter().any(intern::key_is_str);
+        let builtin = |v: &Value| kind(v).is_some() || lits(v) || (v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Set)));
+        match op {
+            Add => matches!((kind(a), kind(b)), (Some(x), Some(y)) if x != y),
+            BitOr | BitAnd | BitXor | Sub | Div | FloorDiv | Pow | LShift | RShift | MatMult | Mod => (kind(a).is_some() && builtin(b)) || (kind(b).is_some() && (kind(a).is_some() || lits(a))),
+            _ => false,
+        }
     }
 
     /// `a op b` before the result's type is applied: the program's dunders and the models'

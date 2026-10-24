@@ -47,9 +47,9 @@ use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use super::{Analyzer, CmHook, ExcNames, Frame, FrameKind, FuncInfo, Names};
-use crate::domain::{row_joins, ObjId, Value};
+use crate::domain::{row_joins, Ns, ObjId, Value};
 use crate::frontend::Node;
-use crate::intern::{s, KeyId, StrId};
+use crate::intern::{key_str_lit, s, KeyId, StrId};
 use crate::state::{fp_visits, State};
 
 /// A call's arguments as given: positional ones, keywords, and the values of `*xs` and `**kw`.
@@ -341,6 +341,40 @@ impl Analyzer {
         if had_cls {
             self.unwind.cur_exc_cls = None;
         }
+    }
+
+    /// A lazy iterator `o` whose items a model computed at once by calling code (`map(f, xs)`):
+    /// `pre` the state before the calls (`mark`: the heap's serial then), `steps` the state after
+    /// each item's call. Where the calls changed objects older than them, those changes come
+    /// with the items as a consumer takes them (`GenEffects`, as a generator's), and `st` (after
+    /// all calls) has them as before the first.
+    pub fn effects_per_item(&mut self, o: ObjId, pre: &State, steps: Vec<State>, mark: u64, st: &mut State) {
+        self.gens.eff.remove(&o);
+        let fp = st.footprint(pre);
+        let old = |x: ObjId| self.heap.born_before(x, mark) && x != o;
+        let rows: Vec<(ObjId, Ns)> = fp.rows.into_iter().filter(|k| old(k.0)).collect();
+        let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.into_iter().filter(|k| old(k.0)).collect();
+        let elems: Vec<ObjId> = fp.elems.into_iter().filter(|x| old(*x)).collect();
+        if rows.is_empty() && slots.is_empty() && elems.is_empty() || !st.reachable {
+            return;
+        }
+        let mut lens: Vec<ObjId> = slots.iter().map(|k| k.0).chain(elems.iter().copied()).collect();
+        lens.sort_unstable();
+        lens.dedup();
+        let mut join = pre.copy();
+        for s in &steps {
+            join = join.join(&mut s.copy());
+        }
+        let at: Vec<Option<State>> = steps.into_iter().map(Some).collect();
+        let ge = super::GenEffects { rows, slots, elems, lens, made: Default::default(), pre: pre.copy(), at, end: Some(st.copy()), join, taken: Default::default(), closed_at: Vec::new(), closed: None };
+        super::gens::gen_copy_facts(st, &ge.pre, &ge);
+        st.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
+        self.gens.eff.insert(o, std::rc::Rc::new(ge));
+    }
+
+    /// Lazy iterator `o`'s items are computed again: no effects per item from before.
+    pub fn clear_item_effects(&mut self, o: ObjId) {
+        self.gens.eff.remove(&o);
     }
 
     /// Does generator `o`'s run change objects older than it (its effects per item)?

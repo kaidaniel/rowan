@@ -301,7 +301,8 @@ impl Analyzer {
         if let Some(r) = self.stop_early(super::stopearly::Stop::In(a.clone()), b, right, state) {
             return self.truthiness(&r, state);
         }
-        self.force_gen(b, state, false);
+        // (it may stop before its end: later code runs between its items)
+        self.force_gen(b, state, true);
         self.sync_live(b, state, true);
         let one = b.single().filter(|_| b.kv.is_bot() && a.pts.is_empty() && lits.len() == 1);
         if let (Some(o), Some((c0, n))) = (one, one.and_then(|o| self.positions_left(o, state))) {
@@ -323,6 +324,7 @@ impl Analyzer {
                 }
             }
             if n == 0 {
+                self.set_cursor_ex(o, Some(c0), true, state);
                 return Some(false);
             }
         }

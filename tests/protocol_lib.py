@@ -4,7 +4,8 @@ cover every run.
 
 A *program* is a list of module-level lines: the functions it defines and its entry function
 `pN` (`Prog.lines`, written for N = 0; `{N}` in them is replaced). Observation lines are
-assignments to a global whose name starts with `O` (`OG = G`): CPython's value there is read by
+assignments to a global whose name starts with `O` of a name's value (`OG = G`: no call, which
+the tracer would read inside of): CPython's value there is read by
 a line tracer once the line ran; rowan's claim is `#@general NAME` on that line (its main run's
 rows and, where present, its rows for any call). Each program runs once at module level,
 `run(pN)` (any raise caught), followed by its end observations (module-level lines `OG = G`…).

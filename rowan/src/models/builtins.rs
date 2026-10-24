@@ -439,7 +439,9 @@ pub fn refill_live(an: &mut Analyzer, st: &mut State, o: ObjId, live: &LiveIter,
     match c.qual.as_str() {
         "builtins.map" | "builtins.filter" => {
             let f = st.slot(o, Ns::Attr, key_str_lit("\u{1}fn"));
-            fill_map(an, st, &Call { args: vec![f, srcs.clone()], ..c.clone() }, o);
+            // (the items taken already are not computed again: no call for them)
+            let from = if c.qual.ends_with("map") { an.cursor_of(o, st).unwrap_or(0) } else { 0 };
+            fill_map(an, st, &Call { args: vec![f, srcs.clone()], ..c.clone() }, o, from);
         }
         // (a list's: from the index it started at, `n0` - 1, down; an index past the list's
         // end now ends it)
@@ -456,8 +458,15 @@ pub fn refill_live(an: &mut Analyzer, st: &mut State, o: ObjId, live: &LiveIter,
                         }
                     }
                     an.heap.set_llen(o, st, Some(n0));
-                    if an.cursor_of(o, st).is_some_and(|cur| m < n0 && cur < n0 - m) {
-                        an.end_iterator(o, st);
+                    match an.cursor_of(o, st) {
+                        _ if m == 0 => an.end_iterator(o, st),
+                        Some(cur) if m < n0 && cur < n0 - m => an.end_iterator(o, st),
+                        // (where it stands not known: it may have run past the list's end)
+                        None if m < n0 => {
+                            st.drop_obj_ns(o, Ns::Pos);
+                            an.heap.set_llen(o, st, None);
+                        }
+                        _ => {}
                     }
                 }
                 // (its element the list's)
@@ -1715,7 +1724,7 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
-    fill_map(an, st, c, oid);
+    fill_map(an, st, c, oid, 0);
     an.start_iterator(oid, st);
     // (over one iterable: the function's results on its items as they are at each step)
     if let [f, a] = c.args.as_slice() {
@@ -1726,8 +1735,9 @@ pub(super) fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 /// `map(f, xs…)` / `filter(f, xs)` (`c`): the function's results (the items it keeps) written
-/// into `oid`.
-fn fill_map(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId) {
+/// into `oid` (a map's from item `from` on: the function is not called for those before).
+fn fill_map(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, from: usize) {
+    an.clear_item_effects(oid);
     an.heap.set_llen(oid, st, None);
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
@@ -1773,9 +1783,19 @@ fn fill_map(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId) {
             let n_known = std::iter::once(it.items.as_ref().map(|x| x.len())).chain(others.iter().map(|o| o.items.as_ref().map(|x| x.len()))).collect::<Option<Vec<usize>>>().and_then(|v| v.into_iter().min());
             if let (Some(items), Some(n)) = (&it.items, n_known) {
                 if items.len() <= crate::interp::UNROLL_MAX {
-                    // known items: the function per item, positions kept
+                    // known items: the function per item, positions kept; what its calls
+                    // change comes with each item as it is taken (`effects_per_item`)
+                    let (pre, mark) = (st.copy(), an.heap.serial());
+                    let mut steps = Vec::new();
                     let mut outs = Vec::new();
                     for (i, item) in items.iter().take(n).enumerate() {
+                        if i < from {
+                            let r = Value::data("map");
+                            st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), r.clone(), true);
+                            outs.push(r);
+                            steps.push(st.copy());
+                            continue;
+                        }
                         an.frame_mut().unroll.push(i);
                         let mut call_args = vec![item.clone()];
                         call_args.extend(others.iter().map(|o| o.items.as_ref().unwrap()[i].clone()));
@@ -1783,11 +1803,13 @@ fn fill_map(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId) {
                         an.frame_mut().unroll.pop();
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), r.clone(), true);
                         outs.push(r);
+                        steps.push(st.copy());
                     }
                     let res = join_values(outs);
                     st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                     st.elems.insert(oid, res.kv);
                     an.heap.set_llen(oid, st, Some(n.min(items.len())));
+                    an.effects_per_item(oid, &pre, steps, mark, st);
                     return;
                 }
             }
