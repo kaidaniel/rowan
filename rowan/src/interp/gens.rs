@@ -93,12 +93,26 @@ pub struct CmHook {
     pub env_before: Option<IndexMap<StrId, Value>>,
     /// the body may run again at another reachable yield (not a `then` callback: it runs once)
     pub multi: bool,
-    /// the caller's exits from the body (its `return`s), joined over the runs: the caller's
-    /// once the with statement ends (the generator's own are restored after each run)
-    pub body_exits: Option<State>,
-    /// the values the body returned (with `body_exits`)
+    /// how the body left besides its end, on some run (`JUMP_*`): a `return`, a `break` or a
+    /// `continue` of the caller's loop resumes the generator first (`__exit__`), and goes on
+    /// from where it ends once the with statement does
+    pub jumps: u8,
+    /// the values the body returned
     pub body_ret: Option<Value>,
+    /// the generator's code may catch the body's exceptions (an `except` of its own): it may go
+    /// on after a body that did not end
+    pub catches: bool,
+    /// the finally blocks running when the with statement began: those of the generator's
+    /// frame above them run on its way on, not on a jump of the body
+    pub fin_depth: usize,
+    /// the with statement's items after this one (`with a, b: body`): they run as its body
+    pub rest: Option<(&'static ast::StmtWith, usize)>,
 }
+
+/// A with body's ways out besides its end (`CmHook::jumps`).
+pub const JUMP_RETURN: u8 = 1;
+pub const JUMP_BREAK: u8 = 2;
+pub const JUMP_CONTINUE: u8 = 4;
 
 /// What a generator's body does to objects older than its call (and to those it made and
 /// changes after a yield), by how far it has run: the
@@ -784,18 +798,51 @@ impl Analyzer {
             self.bind_target(t, &v, state);
         }
         self.gens.cm_frames.push((self.cx.frames.len() + 1, callee_env.clone(), self.cx.env_stack.len(), state.unbound.clone()));
+        // (the caller's loop's breaks and continues before the body: the body's own apart)
+        let saved_jumps = self.unwind.loop_stack.last_mut().map(|l| (l.breaks.take(), l.continues.take()));
+        h.catches = callee_fr.func.is_some_and(|f| match self.heap.func_info(f).node {
+            super::FuncNode::Def(d) => crate::syntax::has_handler(&d.body),
+            _ => true,
+        });
+        let hidden: Vec<usize> = (h.fin_depth..self.unwind.finally_stack.len()).filter(|i| self.unwind.finally_stack[*i].2).collect();
+        for i in &hidden {
+            self.unwind.finally_stack[*i].2 = false;
+        }
         match h.then.take() {
             Some(f) => f(self, v, state),
-            None => self.exec_block(h.body, state),
+            None => match h.rest {
+                Some((w, i)) => self.stmt_with_from(w, i, state),
+                None => self.exec_block(h.body, state),
+            },
+        }
+        for i in hidden {
+            if let Some(e) = self.unwind.finally_stack.get_mut(i) {
+                e.2 = true;
+            }
         }
         h.body_died = !state.reachable && (!h.ran || h.body_died);
-        // (the body's `return`s are the caller's: kept for when the with statement ends)
+        // (the body's `return`s, `break`s and `continue`s go through the generator's rest, as
+        // its end does: joined with it, taken up again where the with statement ends)
+        let mut ways: Vec<State> = Vec::new();
         if let Some(ex) = state.exits.take() {
-            let mut ex = ex.copy();
-            h.body_exits = Some(match h.body_exits.take() {
-                Some(mut prev) => prev.join(&mut ex),
-                None => ex,
-            });
+            h.jumps |= JUMP_RETURN;
+            ways.push(ex.copy());
+        }
+        if let (Some((b, c)), Some(l)) = (saved_jumps, self.unwind.loop_stack.last_mut()) {
+            for (st, flag) in [(l.breaks.take(), JUMP_BREAK), (l.continues.take(), JUMP_CONTINUE)] {
+                if let Some(st) = st {
+                    h.jumps |= flag;
+                    ways.push(st);
+                }
+            }
+            (l.breaks, l.continues) = (b, c);
+        }
+        for mut w in ways {
+            (w.ret, w.exits, w.reachable) = (None, None, true);
+            let j = if state.reachable { state.join(&mut w) } else { w };
+            let r = state.ret.take();
+            state.replace_with(j);
+            state.ret = r;
         }
         if let Some(r) = state.ret.take() {
             h.body_ret = Some(match h.body_ret.take() {

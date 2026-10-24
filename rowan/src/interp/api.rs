@@ -252,7 +252,7 @@ impl Analyzer {
     /// `f` runs with `then` as the body of the `@contextmanager`-style generator it calls next
     /// (run with the yielded value at the yield); the hook as it was left.
     pub fn with_cm_then(&mut self, then: Box<dyn FnOnce(&mut Analyzer, Value, &mut State)>, f: impl FnOnce(&mut Analyzer)) -> Option<CmHook> {
-        let hook = CmHook { body: &[], target: None, depth: self.cx.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None };
+        let hook = CmHook { body: &[], target: None, depth: self.cx.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, jumps: 0, body_ret: None, catches: true, fin_depth: self.unwind.finally_stack.len(), rest: None };
         let prev = self.gens.cm_hook.replace(hook);
         f(self);
         std::mem::replace(&mut self.gens.cm_hook, prev)

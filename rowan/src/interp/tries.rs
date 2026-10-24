@@ -553,12 +553,18 @@ impl Analyzer {
 
     /// A try statement from its parts (a with statement is one: its finally is `__exit__`).
     pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: Vec<Handler>, orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
+        self.stmt_try_parts_rest(body, None, handlers, orelse, fin, state)
+    }
+
+    /// `stmt_try_parts`, whose body is the rest of a with statement's items when `rest` says
+    /// (`with a, b: body` is `with a: with b: body`).
+    pub(super) fn stmt_try_parts_rest(&mut self, body: &'static [ast::Stmt], rest: Option<(&'static ast::StmtWith, usize)>, handlers: Vec<Handler>, orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
         let pushed = !fin.is_empty();
         if pushed {
             self.unwind.finally_stack.push((self.unwind.loop_stack.len(), fin.clone(), true));
         }
         let depth = self.unwind.finally_stack.len();
-        self.stmt_try_inner(body, &handlers, orelse, &fin, state);
+        self.stmt_try_inner(body, rest, &handlers, orelse, &fin, state);
         if pushed {
             self.unwind.finally_stack.truncate(depth - 1);
         }
@@ -568,7 +574,7 @@ impl Analyzer {
     /// surely catches go on (through the finally); each handler runs from those it may catch;
     /// the ways out (the body's end and `else`, each handler's end) are joined, then the
     /// finally runs on each way out.
-    pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
+    pub(super) fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], rest: Option<(&'static ast::StmtWith, usize)>, handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         // (a handler for a class catches its subclasses too: `enter_try`)
         let mut caught: FxHashSet<String> = handlers.iter().flat_map(|h| h.names()).collect();
         // handlers that all end by re-raising: the body's reads are still required
@@ -591,7 +597,10 @@ impl Analyzer {
         }
         self.cx.cond_depth += 1;
         self.cx.branch_depth += 1;
-        self.exec_block(body, state);
+        match rest {
+            Some((w, i)) => self.stmt_with_from(w, i, state),
+            None => self.exec_block(body, state),
+        }
         let TryExit { mut recs, .. } = self.leave_try();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
