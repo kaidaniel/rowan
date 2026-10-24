@@ -243,6 +243,8 @@ impl Analyzer {
             if let Some(fp) = fp {
                 prev = state.copy();
                 prev.join_heap_fp(&raised, &fp);
+                // (it raised: it is done, nothing closes it on the raise's way out)
+                prev.set_slot(o, Ns::Attr, crate::intern::key_str_lit("__cursor"), Value::data("cursor-end"), true);
             }
             self.reraise_rec((cls, prev.copy(), exc));
         }

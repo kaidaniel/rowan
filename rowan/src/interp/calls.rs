@@ -94,8 +94,10 @@ impl Analyzer {
         let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class) || matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.iter" && self.heap.kind(o) == Kind::External));
         // (`next`'s generator raises where it is asked for the item it fails to give, `genraise.rs`)
         let next = fv.single().is_some_and(|o| matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.next"));
+        // (so does one a lazy iterator takes items of, where that is asked for them)
+        let lazy = fv.single().filter(|o| self.heap.kind(*o) == Kind::External).is_some_and(|o| matches!(self.heap.external_qual(o).as_str(), "builtins.zip" | "builtins.map" | "builtins.filter" | "builtins.enumerate"));
         for (i, a) in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user).enumerate() {
-            if next && i == 0 {
+            if (next && i == 0) || lazy {
                 self.force_gen_deferring(a, state, false);
             } else {
                 self.force_gen(a, state, !bulk);

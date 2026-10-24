@@ -1030,9 +1030,15 @@ impl Analyzer {
     /// cursor stands after its last item is suspended at its last yield until asked for more.
     pub(in crate::interp) fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
         self.note_resume(o, state);
-        // (asked for the items up to there: its raises there, `genraise.rs`)
+        // (asked for the items up to there: its raises there, `genraise.rs`; a zip's or an
+        // enumerate's item is its sources' item at that position)
         if !self.gens.raises.is_empty() {
             let from = self.cursor_of(o, state);
+            if let (Some(to), true) = (c.filter(|_| !at_end), matches!(self.heap.kind(o), Kind::Zip | Kind::Enumerate)) {
+                for (src, _) in self.m.lazy_src.get(&o).cloned().unwrap_or_default() {
+                    self.replay_gen_raises(src, from, Some(to), false, state);
+                }
+            }
             self.replay_gen_raises(o, from, c.filter(|_| !at_end), at_end, state);
         }
         let cv = match c {
@@ -1049,8 +1055,12 @@ impl Analyzer {
         self.set_holds(o, at_end || c == Some(0), state);
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let tk = key_str_lit("\u{1}effpos");
-        let Some(expected) = effects_given(state, o, &ge) else { return };
-        let equal = gen_facts_equal(state, expected, &ge);
+        // (facts given not known — joined with code's between the items before: what it
+        // changes, all joined in)
+        let bottom = State::bottom();
+        let given = effects_given(state, o, &ge);
+        let expected = given.unwrap_or(&bottom);
+        let equal = given.is_some() && gen_facts_equal(state, expected, &ge);
         let ended = at_end;
         let (target, ntag): (&State, String) = match c {
             // (used up: at its end, also when it yields nothing)
@@ -1083,8 +1093,10 @@ impl Analyzer {
         self.note_ended(o, false, state);
         self.set_holds(o, false, state);
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
-        let Some(expected) = effects_given(state, o, &ge) else { return };
-        if !gen_facts_equal(state, expected, &ge) {
+        let bottom = State::bottom();
+        let given = effects_given(state, o, &ge);
+        let expected = given.unwrap_or(&bottom);
+        if given.is_none() || !gen_facts_equal(state, expected, &ge) {
             gen_join_facts(state, &ge.join, &ge, expected);
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::data("effpos"), true);
             return;

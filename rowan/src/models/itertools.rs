@@ -691,7 +691,8 @@ fn lazy_unconsumed(ro: ObjId, state: &mut State) {
 
 /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
 /// rounds = the shortest length; in the last round the arguments before the first that
-/// ran out each gave one more.
+/// ran out each gave one more, and that one was asked for one more (a generator runs to its
+/// end there: its effects and raises).
 pub(crate) fn zip_pulls(an: &mut Analyzer, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
     if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
         return None;
@@ -724,7 +725,7 @@ pub(crate) fn zip_pulls(an: &mut Analyzer, call: &Call, state: &mut State) -> Op
     let mut out = Vec::new();
     for (i, (_, _, o)) in lens.iter().enumerate() {
         if let Some(o) = o {
-            out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
+            out.push((*o, Some(if i <= first_out { rounds + 1 } else { rounds })));
         }
     }
     Some(out)
