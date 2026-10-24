@@ -152,6 +152,7 @@ impl Analyzer {
         if o.is_some() {
             work.extend(self.heap.copy_root.get(&o.unwrap()).copied());
         }
+        work.extend(each(&self.heap.attr_of, o).flatten());
         for m in [&self.m.attr_mirrors, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
         }
