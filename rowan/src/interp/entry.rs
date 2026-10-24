@@ -53,9 +53,6 @@ pub struct Entries {
     pub general_instances: FxHashMap<ObjId, Option<ObjId>>,
     /// instances made for this run are general ones (`general_instances`)
     any_instance: bool,
-    /// the reporting run of a function whose calls its budget refused: its receiver is any of
-    /// the program's instances, whatever their attributes (an open one)
-    open_receiver: bool,
     /// an instance made with `__init__`'s defaults was made for this run: its values are not
     /// those of any call
     used_defaults: bool,
@@ -437,12 +434,9 @@ impl Analyzer {
         self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
         // (a run with verdicts takes instances made with `__init__`'s defaults, as a caller
-        // that passes nothing — its verdicts are those; the others, torch modules', and the
-        // reporting run of a function whose calls its budget refused — on the program's own
-        // instances —, any instance)
-        let refused = self.budget.out.contains(&oid) && run == Run::Verdicts && !self.entry.on_demand;
+        // that passes nothing — its verdicts are those; the others, and torch modules', any
+        // instance)
         let saved_any = std::mem::replace(&mut self.entry.any_instance, run != Run::Verdicts || self.entry.torch_modules.contains(&fi.module));
-        let saved_open = std::mem::replace(&mut self.entry.open_receiver, refused);
         let saved_used = std::mem::replace(&mut self.entry.used_defaults, false);
         let saved_q = std::mem::replace(&mut self.findings.quiet, quiet);
         let mut params = scopemod::all_params(fparams);
@@ -461,7 +455,6 @@ impl Analyzer {
         self.findings.quiet = saved_q;
         let defaults = std::mem::replace(&mut self.entry.used_defaults, saved_used);
         self.entry.any_instance = saved_any;
-        self.entry.open_receiver = saved_open;
         self.entry.for_any = saved_for_any;
         self.entry.scope = None;
         // (its values hold for any call: not one with an instance made with the defaults, nor
@@ -564,19 +557,6 @@ impl Analyzer {
                         params.remove(0);
                     }
                     return Some(Value::objs(crate::domain::ObjSet::from_vec(subs)));
-                }
-                // (the calls its budget refused: on the program's instances, any attributes)
-                if self.entry.open_receiver && !torch {
-                    let mut insts: Vec<ObjId> = subs.iter().map(|c| {
-                        let ci = self.heap.class_info(*c);
-                        self.open_instance(*c, &ci, state, &format!("entry:refused:{}", ci.name))
-                    }).collect();
-                    insts.sort_unstable();
-                    insts.dedup();
-                    if !params.is_empty() {
-                        params.remove(0);
-                    }
-                    return Some(Value::objs(crate::domain::ObjSet::from_vec(insts)));
                 }
                 let mut insts: Vec<ObjId> = Vec::new();
                 // (on demand, a base class of very many: any instance of a subclass has any
