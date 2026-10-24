@@ -66,6 +66,10 @@ jobs:
       - name: Fuzzer, fixed seed (random programs vs CPython, also at budget=0)
         run: uv run --no-project python tests/fuzz.py -n 50 --seed 1 --shrink --out fuzz-fixed
 
+      - name: Try routing (bounded try / except / finally programs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/try_protocol.py; about 15 s)
+        run: uv run --no-project python tests/try_protocol.py --rowan 2000
+
       - name: Fuzzer, a new seed per run (informational)
         id: fuzz-rotating
         # different programs each run; a failure here is a real unsoundness, but one the change
