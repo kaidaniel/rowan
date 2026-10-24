@@ -37,7 +37,7 @@ e.g. no such feature yet):
                        on; with the eight it is the
                        *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
   protocols  protocols today's protocol enumerators (PROTOCOLS: tests/try_protocol.py, gen_, with_,
-                       iter_protocol.py at their CI bounds) run with the release's binary: per
+                       iter_protocol.py, call_ at their CI bounds) run with the release's binary: per
                        enumerator the points checked and those where rowan's claims miss a CPython run;
                        the enumerators' sha256 (changed enumerators are another series)
   heldsound  heldsound bench/heldout.py sound (the held-out corpus's own tests against rowan's claims,
@@ -112,7 +112,8 @@ COSTSET_SINCE = 80  # the cost set measured from v0.1.80 on (PR #89: older relea
 HELDSOUND_SINCE = 86  # bench/heldout.py sound (~25 min a release) measured from v0.1.86 on
 # the protocol enumerators and their arguments (their CI bounds)
 PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests/gen_protocol.py", "--rowan", "2000"],
-             "with": ["tests/with_protocol.py", "--rowan", "2000"], "iter": ["tests/iter_protocol.py", "--rowan", "2000"]}
+             "with": ["tests/with_protocol.py", "--rowan", "2000"], "iter": ["tests/iter_protocol.py", "--rowan", "2000"],
+             "call": ["tests/call_protocol.py", "--rowan", "2000"]}
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 
@@ -519,12 +520,13 @@ def measure_protocols(binary: Path, logdir: Path) -> dict:
         r = subprocess.run(["uv", "run", "--no-project", "python", str(ROOT / argv[0]), *argv[1:]], cwd=ROOT, capture_output=True, text=True,
                            env={**os.environ, "ROWAN_BIN": str(binary)}, stdin=subprocess.DEVNULL)
         (logdir / f"protocol-{name}.log").write_text(r.stdout + r.stderr)
-        m = re.search(r"^rowan: .*?(\d+) points checked, (\d+) with a run rowan's claims miss.*?(?:rowan failed on (\d+) batches)?", r.stdout, re.M)
-        failed_batches = re.search(r"^rowan: .*rowan failed on (\d+) batches", r.stdout, re.M)
+        # (one line per limit set an enumerator runs under, `rowan (ROWAN_LIMITS=…):`: summed)
+        lines = re.findall(r"^rowan(?: \(ROWAN_LIMITS=[^)]*\))?: .*?(\d+) points checked, (\d+) with a run rowan's claims miss.*rowan failed on (\d+) batches", r.stdout, re.M)
+        points, missed, failed = (sum(int(x[i]) for x in lines) for i in range(3))
         # (a rowan that could not answer a batch, or claimed nothing anywhere — one without
         # `#@general` rows: not measured)
-        ok = m and not (failed_batches and int(failed_batches.group(1))) and int(m.group(2)) < int(m.group(1))
-        out[name] = {"points": int(m.group(1)), "missed": int(m.group(2))} if ok else None
+        ok = lines and not failed and missed < points
+        out[name] = {"points": points, "missed": missed} if ok else None
     return out
 
 
