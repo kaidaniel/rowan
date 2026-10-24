@@ -81,6 +81,9 @@ pub enum Level {
     Own,
     /// something it holds (its items, its attributes' values)
     Held,
+    /// an attribute of it (`o.m`): as `Held`, but called it may be a method bound to it, which
+    /// runs on it
+    Bound,
     /// what it holds under one literal key (`d["k"]`)
     Part(KeyId),
     /// a new container of what it holds (`dict(d)`, `list(xs)`, `sorted(xs)`): a change to
@@ -238,6 +241,7 @@ impl Flags {
         match level {
             Level::Own => Flags { rebinds: false, ..*self },
             Level::Held => Flags { held: self.changes || self.kept || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
+            Level::Bound => Flags { methods: self.called, ..self.lift(Level::Held) },
             Level::Part(k) => Flags { parts: Parts::key(k), ..self.lift(Level::Held) },
             // (the container itself is new: only what it holds is the source's — given away
             // whole, all of that; else the parts its own `held` concerns)
@@ -772,6 +776,8 @@ impl<'a> Flow<'a> {
     /// Where the value of `e` may come from (empty: a value made here, or unknown).
     fn srcs(&self, e: &Expr) -> Vec<Src> {
         let held = |v: Vec<Src>| v.into_iter().map(|(o, _)| (o, Level::Held)).collect::<Vec<Src>>();
+        // (an attribute of the value itself: perhaps a method bound to it)
+        let bound = |v: Vec<Src>| v.into_iter().map(|(o, l)| (o, if l == Level::Own { Level::Bound } else { Level::Held })).collect::<Vec<Src>>();
         if e as *const Expr as usize == self.genexp_first {
             return vec![(Origin::Param(s(".0")), Level::Own)];
         }
@@ -787,7 +793,7 @@ impl<'a> Flow<'a> {
             Expr::Attribute(a) => match &*a.value {
                 Expr::Name(n) if !self.local(n.id.as_str()) => vec![(Origin::NameAttr(s(n.id.as_str()), s(a.attr.as_str())), Level::Own)],
                 v => {
-                    let mut out = held(self.srcs(v));
+                    let mut out = bound(self.srcs(v));
                     out.push((Origin::Attr(s(a.attr.as_str())), Level::Own));
                     if a.attr.as_str() == "__class__" {
                         out.push((Origin::TypeOf, Level::Own));
@@ -826,11 +832,11 @@ impl<'a> Flow<'a> {
                         "getattr" => {
                             let mut out = match (c.arguments.args.first(), c.arguments.args.get(1)) {
                                 (Some(x), Some(Expr::StringLiteral(l))) => {
-                                    let mut v = held(self.srcs(x));
+                                    let mut v = bound(self.srcs(x));
                                     v.push((Origin::Attr(s(l.value.to_str())), Level::Own));
                                     v
                                 }
-                                (Some(x), _) => held(self.srcs(x)),
+                                (Some(x), _) => bound(self.srcs(x)),
                                 _ => Vec::new(),
                             };
                             out.extend(c.arguments.args.get(2).map(|d| self.srcs(d)).unwrap_or_default());
@@ -872,7 +878,11 @@ impl<'a> Flow<'a> {
                 (Pos::Read | Pos::Bind, _) => {}
                 // (a copy changed in place, iterated: not its source)
                 (Pos::Edit | Pos::Remove(_) | Pos::Iterate, Level::Copy) => {}
-                (_, Level::Held | Level::Copy) => f.hold(Parts::All),
+                (Pos::Call, Level::Bound) => {
+                    f.hold(Parts::All);
+                    f.methods = true;
+                }
+                (_, Level::Held | Level::Bound | Level::Copy) => f.hold(Parts::All),
                 (_, Level::Part(k)) => f.hold(Parts::key(*k)),
                 (Pos::Change, Level::Own) => f.changes = true,
                 (Pos::Iterate, Level::Own) => f.iterated = true,
@@ -1200,6 +1210,22 @@ impl<'a> Flow<'a> {
                     _ => self.pass_args((s(f), None), c),
                 }
             }
+            // (`getattr(x, "m")(…)`: a method of x called, as `x.m(…)`; by a name not in the
+            // text, any method)
+            f @ Expr::Call(g) if matches!(&*g.func, Expr::Name(n) if n.id.as_str() == "getattr" && !self.local("getattr") && self.builtin("getattr")) && !g.arguments.args.is_empty() => {
+                let x = &g.arguments.args[0];
+                if self.recv_base(x) {
+                    match self.attr_name(g.arguments.args.get(1)).0 {
+                        Some(m) => drop(self.recv.calls.insert(m)),
+                        None => self.recv.escapes = true,
+                    }
+                } else {
+                    let recv = self.srcs(x);
+                    self.mark(&recv, Pos::Method);
+                }
+                self.expr(f, Pos::Call);
+                args.iter().for_each(|x| self.expr(x, Pos::Change));
+            }
             // (the receiver called: its `__call__` runs, a torch module's `forward`)
             f if self.recv_base(f) => {
                 self.recv.calls.extend([s("__call__"), s("forward")]);
@@ -1272,7 +1298,7 @@ impl<'a> Flow<'a> {
                     self.name(n, Some(a));
                     self.flags.entry(Origin::NameAttr(n, a)).or_default().rebinds = true;
                 }
-                (Origin::Name(n), Level::Held | Level::Part(_) | Level::Copy) => {
+                (Origin::Name(n), Level::Held | Level::Bound | Level::Part(_) | Level::Copy) => {
                     self.name(n, None);
                     self.out.class_stores_in.push((n, a));
                 }

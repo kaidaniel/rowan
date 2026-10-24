@@ -849,7 +849,10 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
         let r = self.put_kept(kept, r, node, state);
-        let r = self.summarized(foid, r, node, state);
+        // (a shape holds for parameters that are no instances of the program's: given ones whose
+        // dunders change something, run unseen there by operators, loops, `with`, not here)
+        let given: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).chain(self_v).cloned().collect();
+        let r = if self.given_dunders(&given, state).is_empty() { self.summarized(foid, r, node, state) } else { r };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -951,7 +954,7 @@ impl Analyzer {
             let v = match o {
                 // (what an argument holds: not where unknown code is given the arguments whole —
                 // it may change the functions they hold, `skipped_calls`)
-                Origin::Param(_) if l == Level::Held && !param_held => continue,
+                Origin::Param(_) if matches!(l, Level::Held | Level::Bound) && !param_held => continue,
                 Origin::Param(p) => match given {
                     Some(g) => g(p),
                     None => continue,
@@ -977,7 +980,7 @@ impl Analyzer {
             let part = match l {
                 Level::Own => Value::objs(v.pts.clone()),
                 Level::Part(k) => join_values(v.pts.iter().map(|x| state.slot(x, Ns::Item, k)).collect::<Vec<_>>()),
-                Level::Held => self.code_held(&v, state),
+                Level::Held | Level::Bound => self.code_held(&v, state),
                 Level::Copy => continue,
             };
             *out = out.join(&Value::objs(part.pts));
@@ -1260,6 +1263,10 @@ impl Analyzer {
         }
         let kw = flags.split_off(args.len());
         let pos = flags;
+        // (the program's instances an argument reaches whose dunders change something: its code
+        // may run them, by an operator, `len`, `str`, a comparison — not in its text's names)
+        let dunder_recvs: Vec<Value> = args.iter().chain(kwargs.values()).map(|v| join_values(self.given_dunders(std::slice::from_ref(v), state).into_iter().map(|(_, r)| r).collect::<Vec<_>>())).collect();
+        let mut dunder_recvs = dunder_recvs.into_iter();
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
@@ -1287,8 +1294,8 @@ impl Analyzer {
                 _ => Value::new(),
             }
         };
-        let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v)).collect();
-        let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v))).collect();
+        let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default())).collect();
+        let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default()))).collect();
         Seen { args, kwargs, code, kept }
     }
 
