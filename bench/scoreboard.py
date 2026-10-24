@@ -519,8 +519,12 @@ def measure_protocols(binary: Path, logdir: Path) -> dict:
         r = subprocess.run(["uv", "run", "--no-project", "python", str(ROOT / argv[0]), *argv[1:]], cwd=ROOT, capture_output=True, text=True,
                            env={**os.environ, "ROWAN_BIN": str(binary)}, stdin=subprocess.DEVNULL)
         (logdir / f"protocol-{name}.log").write_text(r.stdout + r.stderr)
-        m = re.search(r"^rowan: .*?(\d+) points checked, (\d+) with a run rowan's claims miss", r.stdout, re.M)
-        out[name] = {"points": int(m.group(1)), "missed": int(m.group(2))} if m else None
+        m = re.search(r"^rowan: .*?(\d+) points checked, (\d+) with a run rowan's claims miss.*?(?:rowan failed on (\d+) batches)?", r.stdout, re.M)
+        failed_batches = re.search(r"^rowan: .*rowan failed on (\d+) batches", r.stdout, re.M)
+        # (a rowan that could not answer a batch, or claimed nothing anywhere — one without
+        # `#@general` rows: not measured)
+        ok = m and not (failed_batches and int(failed_batches.group(1))) and int(m.group(2)) < int(m.group(1))
+        out[name] = {"points": int(m.group(1)), "missed": int(m.group(2))} if ok else None
     return out
 
 

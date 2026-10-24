@@ -172,6 +172,10 @@ def rowan_claims(text: str, where: dict, limits: str | None = None, timeout: int
         lits, unk = tgt.get((n, pt), (set(), False))
         unk = unk or v["unknown"] or bool(v.get("objects"))
         tgt[(n, pt)] = (lits | set(v["lits"]), unk)
+    # (no claim at any observation line: a rowan without `#@general` rows, not one claiming
+    # every line unreached)
+    if not main and not gen:
+        return None, None, "no rows: this rowan writes no claims for #@general lines"
     return main, gen, r.stderr
 
 
