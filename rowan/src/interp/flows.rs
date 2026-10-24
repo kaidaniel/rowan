@@ -729,7 +729,7 @@ impl<'a> Flow<'a> {
 
     /// Whether `e` is parameter `p`'s `__name__` (`fn.__name__`, or a local bound to only that).
     fn name_of(&self, e: &Expr, p: StrId) -> bool {
-        let own = [(Origin::Param(p), Level::Held), (Origin::Attr(s("__name__")), Level::Own)];
+        let own = [(Origin::Param(p), Level::Bound), (Origin::Attr(s("__name__")), Level::Own)];
         match e {
             Expr::Attribute(a) => a.attr.as_str() == "__name__" && self.params_of(&a.value) == Some(vec![p]),
             Expr::Name(n) => self.depth == 0 && self.local(n.id.as_str()) && self.alias.get(&s(n.id.as_str())).is_some_and(|v| v.len() == 2 && own.iter().all(|x| v.contains(x))),

@@ -832,7 +832,9 @@ impl Analyzer {
     }
 
     /// `pid` was read as an attribute of `oid` (`Heap::attr_of`); not of an instance whose
-    /// library bases are builtin classes (`list`), whose methods keep its attributes.
+    /// library bases are builtin classes (`list`) or torch modules, whose methods keep its
+    /// attributes (the torch model's premise: `train`, `to`, `state_dict` change only what the
+    /// module's own code made, `training`, tensors' values).
     fn note_attr_of(&mut self, pid: ObjId, oid: ObjId, ns: Ns) {
         if ns != Ns::Attr || self.heap.instance_class(oid).is_some_and(|c| self.builtin_based(c)) {
             return;
@@ -843,16 +845,22 @@ impl Analyzer {
         }
     }
 
-    /// Is every base of `cls` rowan does not see a builtin class (`list`, `dict`, …)?
-    fn builtin_based(&self, cls: ObjId) -> bool {
+    /// Is every base of `cls` rowan does not see a builtin class (`list`, `dict`, …) or a torch
+    /// module?
+    fn builtin_based(&mut self, cls: ObjId) -> bool {
+        if let Some(b) = self.heap.builtin_based.get(&cls) {
+            return *b;
+        }
         let mro = self.heap.mro(cls);
-        mro.iter().enumerate().all(|(i, c)| {
+        let b = mro.iter().enumerate().all(|(i, c)| {
             let Some(ci) = self.heap.class_info_opt(*c) else { return false };
-            let builtin = ci.lib.quals.iter().all(|q| q.strip_prefix("builtins.").is_some_and(|n| matches!(n, "object" | "list" | "dict" | "set" | "frozenset" | "tuple" | "str" | "int" | "float" | "bytes" | "bool" | "complex")));
+            let builtin = ci.lib.quals.iter().all(|q| q.starts_with("torch.nn.") || q.strip_prefix("builtins.").is_some_and(|n| matches!(n, "object" | "list" | "dict" | "set" | "frozenset" | "tuple" | "str" | "int" | "float" | "bytes" | "bool" | "complex")));
             // (open by a base or metaclass that is no library class: unknown)
             let unexplained = ci.open_base.get() && !ci.lib.open && !mro[i + 1..].iter().any(|b| self.heap.class_info_opt(*b).is_none_or(|bi| bi.open_base.get()));
             builtin && !unexplained
-        })
+        });
+        self.heap.builtin_based.insert(cls, b);
+        b
     }
 
     /// The placeholder `pid` for what `oid` holds under `k` (`elem`: the element a loop takes,

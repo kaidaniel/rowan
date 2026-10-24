@@ -58,6 +58,9 @@ pub struct EffectsCache {
     /// per class: its dunders library code may run whose code may change something
     /// (`changing_dunders`; the code a class attribute holds is taken as fixed, as for closures)
     dunders: FxHashMap<ObjId, std::rc::Rc<[ObjId]>>,
+    /// per (dunder, class): whether it leaves its receiver's attributes as they are
+    /// (`dunders_given`)
+    dunder_keeps: FxHashMap<(ObjId, ObjId), bool>,
     /// per function code (`FuncNode::addr`): what its body does when it is inert
     /// (`inert::inert`), None when it is not
     inert: FxHashMap<usize, Option<std::rc::Rc<super::inert::Inert>>>,
@@ -849,10 +852,11 @@ impl Analyzer {
         self.follow_code(roots, rid, site, state);
         super::unknown::may_have_removed(&self.heap, &removed, state);
         let r = self.put_kept(kept, r, node, state);
-        // (a shape holds for parameters that are no instances of the program's: given ones whose
-        // dunders change something, run unseen there by operators, loops, `with`, not here)
-        let given: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).chain(self_v).cloned().collect();
-        let r = if self.given_dunders(&given, state).is_empty() { self.summarized(foid, r, node, state) } else { r };
+        // (a shape holds for parameters that are no instances of the program's — a method's
+        // receiver is one there —: given ones whose dunders change them, run unseen there by
+        // operators, loops, `with`, not here)
+        let given: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
+        let r = if self.dunders_given(&given, state).1.pts.is_empty() { self.summarized(foid, r, node, state) } else { r };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -1263,11 +1267,17 @@ impl Analyzer {
         }
         let kw = flags.split_off(args.len());
         let pos = flags;
-        // (the program's instances an argument reaches whose dunders change something: its code
-        // may run them, by an operator, `len`, `str`, a comparison — not in its text's names)
-        let dunder_recvs: Vec<Value> = args.iter().chain(kwargs.values()).map(|v| join_values(self.given_dunders(std::slice::from_ref(v), state).into_iter().map(|(_, r)| r).collect::<Vec<_>>())).collect();
-        let mut dunder_recvs = dunder_recvs.into_iter();
+        // (the dunders of the program's instances an argument reaches that change something:
+        // its code may run them, by an operator, `len`, `str`, a comparison — not by its text's
+        // names; followed, and the instances given where one changes its receiver)
         let mut code: Vec<ObjId> = Vec::new();
+        let mut dunder_recvs: Vec<Value> = Vec::new();
+        for v in args.iter().chain(kwargs.values()) {
+            let (fs, given) = self.dunders_given(std::slice::from_ref(v), state);
+            code.extend(fs);
+            dunder_recvs.push(given);
+        }
+        let mut dunder_recvs = dunder_recvs.into_iter();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
             let (own, held) = (own || f.edits, held || f.held2);
@@ -1297,6 +1307,31 @@ impl Analyzer {
         let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default())).collect();
         let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default()))).collect();
         Seen { args, kwargs, code, kept }
+    }
+
+    /// The dunders of the program's instances `vals` reach that change something (`given_dunders`),
+    /// and those instances one of them may change (by `receiver_effects`).
+    fn dunders_given(&mut self, vals: &[Value], state: &State) -> (Vec<ObjId>, Value) {
+        let (mut fs, mut given) = (Vec::new(), Value::new());
+        for (f, r) in self.given_dunders(vals, state) {
+            fs.push(f);
+            for o in r.pts.iter() {
+                // (by class: what a dunder's code does to its receiver, the same for each instance)
+                let key = (f, self.heap.instance_class(o).unwrap_or(o));
+                let keeps = match self.effects.dunder_keeps.get(&key) {
+                    Some(k) => *k,
+                    None => {
+                        let k = self.receiver_effects(f, o, state, &|_| None).is_some_and(|e| e.stores.is_empty() && e.deletes.is_empty() && e.stores_like.is_empty());
+                        self.effects.dunder_keeps.insert(key, k);
+                        k
+                    }
+                };
+                if !keeps {
+                    given = given.join(&Value::obj(o));
+                }
+            }
+        }
+        (fs, given)
     }
 
     /// Where the code of `foid` (on receiver `recv`, if bound) keeps the argument in `slot`

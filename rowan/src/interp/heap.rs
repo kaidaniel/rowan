@@ -401,12 +401,14 @@ pub struct Heap {
     /// a placeholder read as an attribute of these objects (`o.m` of an unknown `o`): called,
     /// it may be a method bound to one of them, which it is given (`call_one`)
     pub attr_of: FxHashMap<ObjId, Vec<ObjId>>,
+    /// per class: whether its library bases are all builtin classes (`Analyzer::builtin_based`)
+    pub builtin_based: FxHashMap<ObjId, bool>,
 }
 
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), attr_of: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
 
