@@ -89,7 +89,7 @@ impl TryCtx {
     /// Can a raise of class `cls` change what this try's handlers or way out see? Not when
     /// every handler surely misses it and nothing runs on the way out: the raise only passes
     /// through, to the tries around it.
-    fn sees(&self, cls: &Option<ExcNames>) -> bool {
+    pub(in crate::interp) fn sees(&self, cls: &Option<ExcNames>) -> bool {
         self.runs || self.hclasses.iter().any(|hc| handler_matches(hc, cls) != Some(false))
     }
 }
@@ -281,6 +281,10 @@ impl Analyzer {
         // (GeneratorExit raised at a yield, leaving the body of the generator run whole there)
         if self.record_close(&cls, state) {
             return true;
+        }
+        // (a raise leaving a recursive activation: its recursive calls raise it next round)
+        if !self.recursion.collecting.is_empty() {
+            self.collect_rec_raise(&cls, &exc, state);
         }
         let Some(t) = self.unwind.tries.last() else { return false };
         // (no running try sees it: it leaves the program, through ways out that run nothing)
@@ -745,7 +749,7 @@ impl Analyzer {
     /// its class matters to nothing on the way.
     fn leaves_program(&self, cls: &Option<crate::interp::ExcNames>, hclasses: &[(FxHashSet<String>, bool)]) -> bool {
         let misses = |hcs: &[(FxHashSet<String>, bool)]| hcs.iter().all(|hc| handler_matches(hc, cls) == Some(false));
-        self.unwind.catching_depth == 0 && super::genclose::close_pos(cls).is_none() && misses(hclasses) && self.unwind.tries.iter().all(|t| misses(&t.hclasses))
+        self.unwind.catching_depth == 0 && super::genclose::close_pos(cls).is_none() && !super::genclose::is_thrown(cls) && misses(hclasses) && self.unwind.tries.iter().all(|t| misses(&t.hclasses))
     }
 
     /// Each handler runs from the raises it may catch that no earlier one surely catches; its

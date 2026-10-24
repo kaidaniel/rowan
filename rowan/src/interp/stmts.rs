@@ -66,7 +66,16 @@ impl Analyzer {
             ast::Stmt::Return(r) => self.stmt_return(r, state),
             ast::Stmt::Raise(r) => self.stmt_raise(r, state),
             ast::Stmt::Assert(a) => {
-                let sp = self.split(&a.test, state.copy());
+                let mut sp = self.split(&a.test, state.copy());
+                // (where the test fails: its message, then AssertionError)
+                if sp.f.reachable {
+                    if let Some(m) = &a.msg {
+                        self.eval(m, &mut sp.f);
+                    }
+                    if sp.f.reachable {
+                        self.raise_here("AssertionError", &mut sp.f);
+                    }
+                }
                 state.replace_with(sp.t);
             }
             ast::Stmt::Delete(d) => self.stmt_delete(d, state),
@@ -522,17 +531,18 @@ impl Analyzer {
                     ast::Singleton::True => intern::key_bool(true),
                     ast::Singleton::False => intern::key_bool(false),
                 };
+                // (by identity: the literal part holds it or not; containers and instances never are it)
+                let objs_miss = subj.pts.iter().all(|o| self.heap.kind(o).is_container() || matches!(self.heap.kind(o), Kind::Instance | Kind::Dict));
+                if !objs_miss {
+                    return None;
+                }
                 let lits = kv_literals(&subj.kv);
-                if subj.pts.is_empty() && subj.kv.is_literal() && !lits.is_empty() {
-                    if lits.len() == 1 {
-                        return Some(lits.contains(want));
-                    }
-                    return if lits.contains(want) { None } else { Some(false) };
+                match (subj.kv.is_literal() && !lits.is_empty(), subj.kv.is_bot()) {
+                    (_, true) => Some(false),
+                    (true, _) if !lits.contains(want) => Some(false),
+                    (true, _) if lits.len() == 1 && subj.pts.is_empty() => Some(true),
+                    _ => None,
                 }
-                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance) {
-                    return Some(false);
-                }
-                None
             }
             ast::Pattern::MatchMapping(mm) => self.match_mapping(pat, mm, subj, state),
             ast::Pattern::MatchClass(c) => {
@@ -565,21 +575,27 @@ impl Analyzer {
         let pv = self.eval(&v.value, state);
         let a = kv_literals(&subj.kv);
         let b = kv_literals(&pv.kv);
-        if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
-            let k = b.iter().next().unwrap();
-            if a.len() == 1 {
-                return Some(a.contains(k));
-            }
-            if !a.contains(k) {
-                return Some(false);
-            }
+        // containers / plain instances never equal a literal
+        let objs_miss = subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Dict || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false));
+        if !objs_miss {
             return None;
         }
-        if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
-            // containers / plain instances never equal a literal
+        if subj.kv.is_bot() {
             return Some(false);
         }
-        None
+        if !(pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty()) {
+            return None;
+        }
+        // (by Python's `==` on the literal part: `case 1` matches True)
+        let k = b.iter().next().unwrap();
+        let eqs: Vec<Option<bool>> = a.iter().map(|x| super::compare::lit_eq(x, k)).collect();
+        if eqs.iter().all(|e| *e == Some(false)) {
+            Some(false)
+        } else if subj.pts.is_empty() && eqs.iter().all(|e| *e == Some(true)) {
+            Some(true)
+        } else {
+            None
+        }
     }
 
     /// `case {"k": p, **rest}`: a mapping with the keys (each value matching its pattern).
@@ -591,8 +607,10 @@ impl Analyzer {
             return None;
         }
         let recs: Vec<u32> = subj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Dict).collect();
-        if recs.len() != subj.pts.len() {
-            if subj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
+        // (literals beside the objects never match; the dicts may)
+        if recs.len() != subj.pts.len() || !subj.kv.is_bot() {
+            // (sequences, sets and instances of classes of the program's alone are no mappings)
+            if subj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set) || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).is_some_and(|c| self.hierarchy_closed(c))) && (subj.kv.is_bot() || subj.kv.is_literal()) {
                 return Some(false);
             }
             for p in &mm.patterns {

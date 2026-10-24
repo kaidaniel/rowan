@@ -768,6 +768,11 @@ impl Analyzer {
             }
         }
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
+        // (a record beside a str, an unknown scalar or another container: the test may be about
+        // either, no record narrows)
+        if !recs.is_empty() && (!rv.kv.is_bot() || recs.len() != rv.pts.len()) {
+            return;
+        }
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
