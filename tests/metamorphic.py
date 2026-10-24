@@ -19,7 +19,7 @@ place unreached) is a *miss*: one of the two runs is unsound or the analysis dep
 should not matter; the oracle (tests/oracle.py) tells which.
 
     uv run --no-project python tests/metamorphic.py [--checks budget0,rename,wrap,swap,general]
-        [--suites cases,stdlib] [-j 3] [-v] [--limit N] [case…]
+        [--suites cases,stdlib] [-j 3] [-v] [--limit N] [--quick] [case…]
 """
 from __future__ import annotations
 
@@ -298,10 +298,13 @@ def main() -> None:
     ap.add_argument("--suites", default="cases,stdlib")
     ap.add_argument("-j", type=int, default=3)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--quick", action="store_true", help="the CI bound: every 30th case")
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
     checks = a.checks.split(",")
     paths = cases(a.suites.split(","), a.case)
+    if a.quick:
+        paths = paths[::30]
     if a.limit:
         paths = paths[: a.limit]
     t0 = time.time()
