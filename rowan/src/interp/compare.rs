@@ -89,6 +89,11 @@ impl Analyzer {
                 }
             }
         }
+        // `x in c` of an instance whose class has `__eq__`, c a container of the program's:
+        // `item == x` runs it (reflected) on some of the items, or none
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && self.in_runs_eq(a, b, nd, state) {
+            return Value::data("bool");
+        }
         // `in` a literal that is no container (None, a number), or a str of a non-str: TypeError
         if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && b.kv.is_literal() && self.in_literal_raises(a, b, state) {
             return Value::new();
@@ -121,6 +126,51 @@ impl Analyzer {
             return Value::with_kv(both.filter(|o| self.heap.kind(o) == Kind::Frame), DATA);
         }
         Value::data("bool")
+    }
+
+    /// `a in b` where `a` holds instances whose class defines `__eq__` and `b` containers that
+    /// may hold items: `item == a` runs it (reflected) item by item until one is equal — over
+    /// one list or tuple of known items in order; else as a call that does not run, any number
+    /// of times (`skipped_calls`). True where it may run.
+    fn in_runs_eq(&mut self, a: &Value, b: &Value, nd: &Node, state: &mut State) -> bool {
+        let eqs: Vec<ObjId> = a.pts.iter().filter_map(|o| self.cmp_dunder(o, "__eq__")).collect();
+        if eqs.is_empty() {
+            return false;
+        }
+        let cs: Vec<ObjId> = b.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set | Kind::Dict)).collect();
+        if cs.is_empty() || cs.iter().all(|o| self.heap.llen(*o, state) == Some(0)) {
+            return false;
+        }
+        let items = match (&cs[..], b.kv.is_bot()) {
+            ([o], true) if matches!(self.heap.kind(*o), Kind::List | Kind::Tuple) => self.known_positions(*o, state),
+            _ => None,
+        };
+        let Some(items) = items else {
+            let fns: Vec<(ObjId, Option<Value>)> = eqs.into_iter().map(|f| (f, Some(a.clone()))).collect();
+            self.skipped_calls(&fns, Args::pos(&[Value::data("item")]), state, nd, None);
+            return true;
+        };
+        // (each item compared on the paths where none before was equal)
+        let mut done = State::bottom();
+        for item in items {
+            if !state.reachable {
+                break;
+            }
+            let r = self.rich_compare(ast::CmpOp::Eq, &item, a, nd, state).unwrap_or_else(|| Value::data("bool"));
+            let ks = kv_literals(&r.kv);
+            let sure = r.pts.is_empty() && r.kv.is_literal() && !ks.is_empty() && ks.iter().all(|k| k == intern::key_bool(true));
+            let never = r.pts.is_empty() && r.kv.is_literal() && !ks.is_empty() && ks.iter().all(|k| k == intern::key_bool(false));
+            if !never {
+                done = if done.reachable { done.join(&mut state.copy()) } else { state.copy() };
+            }
+            if sure {
+                state.reachable = false;
+            }
+        }
+        if done.reachable {
+            *state = if state.reachable { state.join(&mut done) } else { done };
+        }
+        true
     }
 
     /// What `a in b` raises where `b` may be a literal (true: surely): a TypeError for each of

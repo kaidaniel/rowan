@@ -4,8 +4,9 @@ skipped calls and what `effects.rs` lets them change, result summaries, unknown 
 - a callee `fN(a, d, o, acc=[])` whose body is one effect, or two of `PAIRED` (`EFFECTS`: a
   global, the list, dict or instance it is given, a default, a module-level list or name it gives
   its argument away to, a helper, a method (also by `getattr`), a class attribute, a closure, a
-  generator, an operator / `str` / iteration / `with` / property running the instance's dunders,
-  a raise; plain or under `if c1:`) and a result (`RESULTS`: none, a literal, an argument, a new
+  generator, an operator / `str` / iteration / `with` / property / subscript / truth / `==` / `in`
+  / f-string running the instance's dunders, or a helper given it that does, `isinstance` and
+  `is` that run none, a raise; plain or under `if c1:`) and a result (`RESULTS`: none, a literal, an argument, a new
   list, a global, an attribute, an item, a closure);
 - called by `pN` in one of the call shapes (`CALLS`: positional, keywords, `*args`, `**kw`, twice,
   through a name, in a loop, a wrapper, a `try`, a method taking it, `functools.partial`, a
@@ -64,6 +65,13 @@ EFFECTS = {
     "clsm": ["type(o).bump()"],
     "inner": ["def inner():", "    a.append(2)", "    o.v = 6", "inner()"],
     "gen": ["G = G * 10 + sum(gn{N}(a, o))"],
+    "item": ["G = G * 10 + o[0]"],
+    "truth": ["if o:", "    G = G * 10 + 1"],
+    "eq": ["if o == 1:", "    G = G * 10 + 1"],
+    "contains": ["G = G * 10 + (o in [1])"],
+    "fstr": ["G = G * 10 + len(f'{o}')"],
+    "passed": ["hh{N}(o)"],
+    "isinst": ["if isinstance(o, B{N}) and o is not None:", "    G = G * 10 + 1"],
 }
 # pairs only of these (every single effect alone)
 PAIRED = ["g", "app", "pop", "dset", "ddel", "attr", "keep", "give", "acc", "helper", "method", "boom", "getattr", "store", "dunder", "gen"]
@@ -141,6 +149,17 @@ def program(effects, cond, result, call) -> Prog:
         "    def __str__(self):",
         "        self.v = 11",
         "        return 'b'",
+        "    def __getitem__(self, k):",
+        "        self.v = 13",
+        "        return 1",
+        "    def __bool__(self):",
+        "        self.v = 15",
+        "        return True",
+        "    def __eq__(self, x):",
+        "        self.v = 14",
+        "        return False",
+        "    def __hash__(self):",
+        "        return 1",
         "    @classmethod",
         "    def bump(cls):",
         "        cls.count = cls.count + 3",
@@ -150,6 +169,9 @@ def program(effects, cond, result, call) -> Prog:
         "    yield 1",
         "    o.v = 12",
         "    yield 2",
+        "",
+        "def hh{N}(o):",
+        "    return o + 1",
         "",
         "def h{N}(a, o):",
         "    a.append(4)",
