@@ -735,6 +735,14 @@ impl Analyzer {
             } else {
                 // an iterable whose items are known by position (zip / enumerate of known lists,
                 // a dict's keys)
+                // (the program's instance: what iterating it runs, `__iter__` or `__getitem__`)
+                if kind == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.plain_program_class(c)) {
+                    let e = self.iterate(&Value::obj(oid), node, state).elem.flat();
+                    for p in parts.iter_mut() {
+                        *p = p.join(&e);
+                    }
+                    continue;
+                }
                 if matches!(kind, Kind::Zip | Kind::Enumerate | Kind::Dict | Kind::View) {
                     let it = self.iterate(&Value::obj(oid), node, state);
                     if let Some(items) = it.items.filter(|v| v.len() == n) {

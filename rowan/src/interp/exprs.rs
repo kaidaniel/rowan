@@ -317,7 +317,19 @@ impl Analyzer {
                 return v;
             }
         }
-        let key = self.eval_key(&sub.slice, state);
+        // (a sequence indexed by the program's instance: its `__index__` gives the position)
+        let seq = obj.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple)) || !obj.kv.is_bot();
+        let key = match &*sub.slice {
+            e if seq && !matches!(e, ast::Expr::Tuple(_) | ast::Expr::Slice(_)) => {
+                let v = self.eval(e, state);
+                let v = match self.run_dunder(&v, &["__index__"], Vec::new(), &frontend::node(node), state) {
+                    Some((r, rest)) => r.join(&rest),
+                    None => v,
+                };
+                self.keyify_in(&v, state)
+            }
+            _ => self.eval_key(&sub.slice, state),
+        };
         if let Some(v) = crate::models::pandas::unknown_selection(self, &obj, sub, &key, &frontend::node(node), state) {
             return v;
         }

@@ -64,6 +64,10 @@ impl Analyzer {
             return lit(op == ast::CmpOp::IsNot);
         }
         let ordering = !matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
+        // (containers compared item by item: what their items' dunders run, as library code does)
+        if ordering && [a, b].iter().any(|v| v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set))) {
+            self.library_dunders(&[a.clone(), b.clone()], state, nd);
+        }
         if ordering && crate::models::torch::is_tensor(a) {
             return crate::models::torch::t_compare(self, a, b, nd, state);
         }
@@ -87,6 +91,12 @@ impl Analyzer {
                     self.may_raise_here("TypeError", state);
                     return if first { self.compare_untyped(op, &rest, y, right, nd, state) } else { self.compare_untyped(op, y, &rest, right, nd, state) };
                 }
+            }
+        }
+        // `x in c` of c an instance of the program's: its `__contains__`, else its iteration
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) {
+            if let Some(r) = self.in_instance(a, b, nd, state) {
+                return if op == ast::CmpOp::In { r } else { Value::data("bool") };
             }
         }
         // `x in c` of an instance whose class has `__eq__`, c a container of the program's:
@@ -126,6 +136,30 @@ impl Analyzer {
             return Value::with_kv(both.filter(|o| self.heap.kind(o) == Kind::Frame), DATA);
         }
         Value::data("bool")
+    }
+
+    /// `a in b` where `b` holds the program's instances: their `__contains__` (its result's
+    /// truth: a bool not known), else what iterating them runs (`__iter__`, `__getitem__` until
+    /// it raises: any of their dunders, as library code runs them, `library_dunders`); None
+    /// where b holds none.
+    fn in_instance(&mut self, a: &Value, b: &Value, nd: &Node, state: &mut State) -> Option<Value> {
+        // (of classes of the program's alone: a library base's — an Enum Flag's `in` — is its
+        // model's)
+        let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c));
+        if !b.pts.iter().any(|o| user(self, o)) {
+            return None;
+        }
+        // (none of the three: not a container, TypeError)
+        let Some(b) = self.without_dunders(b, &["__contains__", "__iter__", "__getitem__"], state) else { return Some(Value::new()) };
+        let b = &b;
+        let r = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
+            Some((r, rest)) if rest.empty() => r,
+            _ => {
+                self.library_dunders(&[b.clone()], state, nd);
+                Value::data("bool")
+            }
+        };
+        Some(if r.pts.is_empty() && r.kv.is_literal() && !r.kv.is_bot() { r } else { Value::data("bool") })
     }
 
     /// `a in b` where `a` holds instances whose class defines `__eq__` and `b` containers that

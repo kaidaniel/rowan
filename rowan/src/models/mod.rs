@@ -112,6 +112,7 @@ impl Registry {
         r(&["reprlib.repr"], m_reprlib_repr);
         r(&["operator.setitem"], m_op_setitem);
         r(&["builtins.object.__setattr__"], m_object_setattr);
+        r(&["builtins.object.__delattr__"], m_object_delattr);
         r(&["builtins.object.__new__"], m_object_new);
         r(&["builtins.object.__init__"], m_object_init);
         r(&["builtins.delattr"], m_delattr);
@@ -735,6 +736,28 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
 /// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`; `pprint`'s
 /// printers (`__repr__`). The dunders run
 /// (their effects happen) and give the result; the rest of the argument goes to the model.
+/// The builtins and container methods that run dunders of what they are given or hold that no
+/// model of theirs runs as CPython does (how many times, which: `sorted` compares items, `sum`
+/// adds them, `str([x])` runs `x.__repr__`, `d.get(x)` hashes x, `xs.count(x)` compares x,
+/// `list(x)` iterates x): those of the program's instances they reach, as library code runs
+/// them (`library_dunders`).
+const DUNDER_DRIVERS: &[&str] = &[
+    "builtins.sorted", "builtins.max", "builtins.min", "builtins.sum", "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset",
+    "builtins.dict", "builtins.reversed", "builtins.iter", "builtins.any", "builtins.all", "builtins.str", "builtins.repr", "builtins.print",
+    "builtins.format", "builtins.hash", "builtins.next", "builtins.enumerate", "builtins.zip", "copy.copy", "copy.deepcopy", "list.count",
+    "list.index", "list.remove", "list.sort", "list.__contains__", "tuple.count", "tuple.index", "dict.get", "dict.setdefault", "dict.pop",
+    "dict.__contains__", "dict.fromkeys", "dict.update", "set.add", "set.discard", "set.remove", "set.update", "set.__contains__",
+];
+
+/// A call of a builtin or container method that runs dunders no model runs (`DUNDER_DRIVERS`):
+/// those of the program's instances its arguments and receiver reach.
+pub fn driven_dunders(an: &mut Analyzer, qual: &str, recv: Option<&Value>, args: &[Value], state: &mut State, node: &crate::frontend::Node) {
+    if DUNDER_DRIVERS.contains(&qual) {
+        let vals: Vec<Value> = recv.into_iter().chain(args.iter()).cloned().collect();
+        an.library_dunders(&vals, state, node);
+    }
+}
+
 pub fn builtin_dunder(an: &mut Analyzer, qual: &str, a: Args, state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
     let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
     let names: &[&str] = match qual.strip_prefix("builtins.").unwrap_or(qual) {

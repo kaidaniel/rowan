@@ -243,6 +243,16 @@ impl Analyzer {
 
     /// `op v` (`not`, `-`, `+`, `~`) before the result's type is applied.
     fn unary_untyped(&mut self, u: &'static ast::ExprUnaryOp, v: Value, node: &'static ast::Expr, state: &mut State) -> Value {
+        // (the program's instances: their `__neg__` / `__pos__` / `__invert__`)
+        let dunder = match u.op {
+            ast::UnaryOp::USub => Some("__neg__"),
+            ast::UnaryOp::UAdd => Some("__pos__"),
+            ast::UnaryOp::Invert => Some("__invert__"),
+            ast::UnaryOp::Not => None,
+        };
+        if let Some((r, rest)) = dunder.and_then(|d| self.run_dunder(&v, &[d], Vec::new(), &frontend::node(node), state)) {
+            return if rest.empty() { r } else { r.join(&self.unary_untyped(u, rest, node, state)) };
+        }
         match u.op {
             ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
                 Some(b) => Value::lit(intern::key_bool(!b)),

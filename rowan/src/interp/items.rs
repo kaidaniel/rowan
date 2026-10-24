@@ -944,6 +944,8 @@ impl Analyzer {
     /// list's position, a frame's column, a record's key (`store_key`), strong into a single
     /// object.
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
+        let Some(obj) = (if ns == Ns::Item { self.without_dunder(obj, "__setitem__", state) } else { Some(obj.clone()) }) else { return };
+        let obj = &obj;
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__setitem__"), state, &mut |an, o, st| {
                 an.store_item(o, ns, key, v, node, st);
@@ -955,6 +957,11 @@ impl Analyzer {
             if obj.pts.iter().any(|o| self.hashes_keys(o)) {
                 self.check_hashable(key, state);
             }
+        }
+        // (an input's object — a parameter for any call, data read in — or an unknown scalar may
+        // be anything: one that takes no item store, TypeError)
+        if ns == Ns::Item && (obj.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown || (self.heap.is_record(o) && !state.row(o, Ns::Item).sources.is_empty())) || !(obj.kv.is_literal() || obj.kv.is_bot())) {
+            self.may_raise_here("TypeError", state);
         }
         let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
@@ -1221,6 +1228,8 @@ impl Analyzer {
     /// `del obj[key]`: a `__delitem__` of the program per receiver, else per object its verdict
     /// (a missing key raises) and the key removed (strongly from a single object).
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
+        let Some(obj) = (if ns == Ns::Item { self.without_dunder(obj, "__delitem__", state) } else { Some(obj.clone()) }) else { return };
+        let obj = &obj;
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__delitem__"), state, &mut |an, o, st| {
                 an.delete_item(o, ns, key, node, st, report);
@@ -1263,6 +1272,29 @@ impl Analyzer {
             }
             self.delete_key(oid, ns, key, strong, node, state, report);
         }
+    }
+
+    /// `obj` without the instances of the program's classes alone that lack dunder `name`
+    /// (`x[k] = v`, `del x[k]`, `with x`: a TypeError there); None where it is only such
+    /// instances (the TypeError surely raised).
+    pub(in crate::interp) fn without_dunder(&mut self, obj: &Value, name: &str, state: &mut State) -> Option<Value> {
+        self.without_dunders(obj, &[name], state)
+    }
+
+    /// `obj` without the instances of the program's classes alone that lack every one of the
+    /// dunders `names`: a TypeError there (`without_dunder`).
+    pub(in crate::interp) fn without_dunders(&mut self, obj: &Value, names: &[&str], state: &mut State) -> Option<Value> {
+        let lacking = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c) && names.iter().all(|n| an.class_lookup(c, n).is_none()));
+        if !obj.pts.iter().any(|o| lacking(self, o)) {
+            return Some(obj.clone());
+        }
+        let rest = Value::with_kv(obj.pts.filter(|o| !lacking(self, o)), obj.kv.clone());
+        if rest.pts.is_empty() && rest.kv.is_bot() {
+            self.raise_here("TypeError", state);
+            return None;
+        }
+        self.may_raise_here("TypeError", state);
+        Some(rest)
     }
 
     /// A read or `del` on a value with an unknown scalar part (an element unpacked from an

@@ -202,6 +202,9 @@ impl Analyzer {
         }
         let item = &w.items[i];
         let v = self.eval(&item.context_expr, state);
+        // (a manager whose class lacks `__enter__` or `__exit__`: TypeError)
+        let (enter, exit) = if w.is_async { ("__aenter__", "__aexit__") } else { ("__enter__", "__exit__") };
+        let Some(v) = self.without_dunder(&v, enter, state).and_then(|v| self.without_dunder(&v, exit, state)) else { return };
         let n = frontend::node(&item.context_expr);
         let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
         if entered.is_none() {

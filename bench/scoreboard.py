@@ -37,7 +37,7 @@ e.g. no such feature yet):
                        on; with the eight it is the
                        *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
   protocols  protocols today's protocol enumerators (PROTOCOLS: tests/try_protocol.py, gen_, with_,
-                       iter_, call_, rec_, method_, closure_, narrow_protocol.py at their CI bounds) run with the release's binary: per
+                       iter_, call_, rec_, method_, closure_, narrow_, dunder_protocol.py at their CI bounds) run with the release's binary: per
                        enumerator the points checked and those where rowan's claims miss a CPython run;
                        the enumerators' sha256 (changed enumerators are another series)
   heldsound  heldsound bench/heldout.py sound (the held-out corpus's own tests against rowan's claims,
@@ -115,7 +115,7 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "with": ["tests/with_protocol.py", "--rowan", "2000"], "iter": ["tests/iter_protocol.py", "--rowan", "2000"],
              "call": ["tests/call_protocol.py", "--rowan", "2000"], "rec": ["tests/rec_protocol.py", "--rowan", "1500"],
              "method": ["tests/method_protocol.py", "--rowan", "1500"], "closure": ["tests/closure_protocol.py", "--rowan", "2000"],
-             "narrow": ["tests/narrow_protocol.py", "--rowan", "5000"]}
+             "narrow": ["tests/narrow_protocol.py", "--rowan", "5000"], "dunder": ["tests/dunder_protocol.py", "--all"]}
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 

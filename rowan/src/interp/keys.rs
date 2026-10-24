@@ -208,6 +208,12 @@ impl Analyzer {
     pub fn check_hashable_if(&mut self, v: &Value, hashed: bool, state: &mut State) {
         // (an Enum member as a key is its object: its class may not hash)
         let v = &self.unkey(v);
+        // (the program's instances whose class defines `__hash__`: it runs, once, or maybe)
+        if v.pts.iter().any(|o| self.cmp_dunder(o, "__hash__").is_some() && self.heap.instance_class(o).is_some_and(|c| self.plain_program_class(c))) {
+            let mut ran = state.copy();
+            self.run_dunder(v, &["__hash__"], Vec::new(), &crate::frontend::Node::none(), &mut ran);
+            *state = if hashed { ran } else { state.join(&mut ran) };
+        }
         if v.pts.is_empty() && !(self.in_try() && kv_hashing(&v.kv) == Hashing::Maybe) {
             return;
         }

@@ -157,6 +157,16 @@ impl Analyzer {
                     acc.elems.push(join_values(ms));
                 }
                 Kind::Instance if self.heap.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => self.iter_user(oid, node, state, &mut acc),
+                // (the program's instance without `__iter__`: `__getitem__` from 0 until it
+                // raises, as library code runs its dunders; with neither, TypeError)
+                Kind::Instance if self.heap.instance_class(oid).is_some_and(|c| self.plain_program_class(c)) => {
+                    if self.without_dunders(&Value::obj(oid), &["__iter__", "__getitem__"], state).is_some() {
+                        self.library_dunders(&[Value::obj(oid)], state, node);
+                    }
+                    acc.items = None;
+                    acc.exhaustive = false;
+                    acc.elems.push(line_data.clone());
+                }
                 Kind::Unknown => self.iter_unknown(oid, node, state, &mut acc),
                 _ => {
                     acc.items = None;
