@@ -49,13 +49,13 @@ pub struct Recursion {
     heap: FxHashMap<ActKey, (std::rc::Rc<State>, Option<State>, u64)>,
     /// per recursive activation running a round (its frame depth): the raises leaving its
     /// frame, joined per class
-    pub(in crate::interp) collecting: Vec<(ActKey, usize, Vec<RaiseRec>)>,
+    pub(in crate::interp) collecting: Vec<(ActKey, usize, Vec<(Option<ExcNames>, crate::state::Joins, Value)>)>,
     /// a recursive activation's raises of its last round, with what each changed of its entry:
     /// its recursive calls raise them
-    raises: FxHashMap<ActKey, Vec<(RaiseRec, Footprint)>>,
+    raises: FxHashMap<ActKey, Vec<RaiseRec>>,
     /// recursive activations a recursive call of which ran inside a try of their own frames or
     /// deeper (their raises matter there: collected), and each running activation's frame depth
-    wants_raises: FxHashSet<ActKey>,
+    wants_raises: FxHashMap<ActKey, Vec<(FxHashSet<String>, bool)>>,
     depth_of: FxHashMap<ActKey, usize>,
 }
 
@@ -195,8 +195,15 @@ impl Analyzer {
         self.recursion.hit.insert(key.clone());
         // (inside a try of the activation's frames: what the activation raises matters here)
         if let Some(d) = self.recursion.depth_of.get(key).copied() {
-            if self.unwind.tries.iter().any(|t| t.frames >= d) {
-                self.recursion.wants_raises.insert(key.clone());
+            // (what those tries' handlers catch, and whether a finally runs: the raises they see)
+            let seen: Vec<(FxHashSet<String>, bool)> = self.unwind.tries.iter().filter(|t| t.frames >= d).flat_map(|t| t.hclasses.iter().cloned().chain(t.runs.then(|| (std::iter::once("*".to_string()).collect(), false)))).collect();
+            if !seen.is_empty() {
+                let w = self.recursion.wants_raises.entry(key.clone()).or_default();
+                for h in seen {
+                    if !w.contains(&h) {
+                        w.push(h);
+                    }
+                }
             }
         }
         // widen the entry arguments with the ones of this recursive call
@@ -254,9 +261,13 @@ impl Analyzer {
         }
         // (the activation's raises of its last round, from here with what they changed)
         if let Some(rs) = self.recursion.raises.get(key).filter(|_| state.reachable) {
-            for ((cls, rst, exc), fp) in rs.clone() {
-                let mut here = state.copy();
-                here.join_heap_fp(&rst, &fp);
+            for (cls, rst, exc) in rs.clone() {
+                // (the heap at the raise, which the activation's entry, widened by its recursive
+                // calls' heaps, covers; this frame's names)
+                let mut here = rst.copy();
+                here.env = state.env.clone();
+                here.unbound = state.unbound.clone();
+                here.path = state.path.clone();
                 self.unwind.cur_exc = (!exc.pts.is_empty()).then_some(exc);
                 self.unwind.cur_exc_cls = cls;
                 self.record_raise_state(&mut here);
@@ -281,13 +292,22 @@ impl Analyzer {
             if depth < d || self.unwind.tries.iter().any(|t| t.frames >= d && t.sees(cls)) {
                 continue;
             }
+            // (one no try around the activation's recursive calls may see: nothing to replay)
+            let key = &self.recursion.collecting[i].0;
+            if !self.recursion.wants_raises.get(key).is_some_and(|hs| hs.iter().any(|hc| super::tries::handler_matches(hc, cls) != Some(false))) {
+                continue;
+            }
             let recs = &mut self.recursion.collecting[i].2;
             match recs.iter_mut().find(|r| r.0 == *cls) {
                 Some(r) => {
-                    r.1 = r.1.join(&mut state.copy());
+                    r.1.add(state.copy());
                     r.2 = r.2.join(exc);
                 }
-                None => recs.push((cls.clone(), state.copy(), exc.clone())),
+                None => {
+                    let mut j = crate::state::Joins::default();
+                    j.add(state.copy());
+                    recs.push((cls.clone(), j, exc.clone()));
+                }
             }
         }
     }
@@ -327,23 +347,20 @@ impl Analyzer {
             if let Some(g) = gen_id {
                 self.gens.reads.push((g, false, Default::default(), self.cx.frames.len()));
             }
-            let collect = gen_id.is_none() && self.recursion.wants_raises.contains(key);
+            let collect = gen_id.is_none() && self.recursion.wants_raises.contains_key(key);
             if collect {
                 self.recursion.collecting.push((key.clone(), self.cx.frames.len(), Vec::new()));
             }
             self.run_body(fnode, gen_id, &mut st);
             // (what this round raised; its recursive calls raised the last round's)
-            let raised: Option<Vec<(RaiseRec, Footprint)>> = collect.then(|| {
+            let raised: Option<Vec<RaiseRec>> = collect.then(|| {
                 let (_, _, recs) = self.recursion.collecting.pop().unwrap();
-                recs.into_iter().map(|r| {
-                    let fp = r.1.footprint(&entry_state);
-                    (r, fp)
-                }).collect()
+                recs.into_iter().filter_map(|(c, j, e)| Some((c, j.finish()?, e))).collect()
             });
             // (a round that began collecting only now is not the last)
-            let raises_stable = (collect || !self.recursion.wants_raises.contains(key)) && raised.as_ref().is_none_or(|now| {
+            let raises_stable = (collect || !self.recursion.wants_raises.contains_key(key)) && raised.as_ref().is_none_or(|now| {
                 let last = self.recursion.raises.get(key).map(|v| v.as_slice()).unwrap_or(&[]);
-                now.len() == last.len() && now.iter().all(|((c, s, e), _)| last.iter().any(|((c2, s2, e2), _)| c == c2 && e == e2 && s.same(s2)))
+                now.len() == last.len() && now.iter().all(|(c, s, e)| last.iter().any(|(c2, s2, e2)| c == c2 && e == e2 && s.same(s2)))
             });
             if let Some(r) = raised {
                 if !r.is_empty() || self.recursion.raises.contains_key(key) {

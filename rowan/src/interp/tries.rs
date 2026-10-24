@@ -897,7 +897,7 @@ impl Analyzer {
 
 /// Does a handler (its class names, and whether they are all known exception classes) catch a
 /// raise of this class: surely (Some(true)), surely not (Some(false)), or maybe (None)?
-fn handler_matches(hc: &(FxHashSet<String>, bool), cls: &Option<crate::interp::ExcNames>) -> Option<bool> {
+pub(in crate::interp) fn handler_matches(hc: &(FxHashSet<String>, bool), cls: &Option<crate::interp::ExcNames>) -> Option<bool> {
     if hc.0.contains("*") {
         return Some(true);
     }
