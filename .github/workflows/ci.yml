@@ -82,6 +82,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/iter_protocol.py; about 10 s)
         run: uv run --no-project python tests/iter_protocol.py --rowan 2000
 
+      - name: Calls and skipped calls (bounded callee / call-shape programs vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/call_protocol.py; about 30 s)
+        run: uv run --no-project python tests/call_protocol.py --rowan 2000
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

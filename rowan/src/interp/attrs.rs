@@ -1139,6 +1139,10 @@ impl Analyzer {
         if raises && method && !(STR_METHOD_NAMES.contains(&name) && self.heap.obj(oid).ty == Some("str")) {
             self.may_raise_here("AttributeError", state);
         }
+        // (one holding attributes of its own is no dict: its method is its own, given it)
+        if DICT_METHOD_NAMES.contains(&name) && !opaque && !state.obj_slots(oid, Ns::Attr).is_empty() {
+            return self.method_value(&format!("unknown.{}", name), &Value::obj(oid));
+        }
         if DICT_METHOD_NAMES.contains(&name) && !opaque {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
         }
@@ -1146,6 +1150,10 @@ impl Analyzer {
             // a mutating method of a list-like unknown: facts about tests on it are void
             if matches!(name, "append" | "extend" | "insert" | "remove" | "clear" | "sort" | "reverse" | "pop") {
                 self.kill_facts_on(&[oid], state);
+            }
+            // (one that moves the items it has, or any object's own method of the name: given it)
+            if matches!(name, "sort" | "reverse" | "remove" | "insert") {
+                return self.method_value(&format!("unknown.{}", name), &Value::obj(oid));
             }
             // (a str's method on one known to be a str or bytes; of another unknown — a date, an
             // object of the program's — its result's type is not known)

@@ -460,7 +460,12 @@ impl Analyzer {
             Kind::Method => self.call_method_object(oid, a, state, node, call_ast),
             Kind::Unknown => {
                 let q = format!("call of {}", self.heap.obj(oid).label);
-                self.unknown_call(&q, Some(&Value::obj(oid)), a, state, node)
+                // (`o.m(…)` of an unknown `o`: a method bound to it, given it)
+                let mut recv = Value::obj(oid);
+                for p in self.heap.attr_of.get(&oid).into_iter().flatten() {
+                    recv.pts = recv.pts.insert(*p);
+                }
+                self.unknown_call(&q, Some(&recv), a, state, node)
             }
             Kind::Partial => {
                 let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };

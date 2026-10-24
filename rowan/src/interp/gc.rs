@@ -151,6 +151,8 @@ impl Analyzer {
         each(&self.m.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
         if o.is_some() {
             work.extend(self.heap.copy_root.get(&o.unwrap()).copied());
+            // (a method read off an object holds it; no root of its own)
+            work.extend(self.heap.attr_of.get(&o.unwrap()).into_iter().flatten().copied());
         }
         for m in [&self.m.attr_mirrors, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
