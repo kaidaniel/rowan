@@ -105,6 +105,13 @@ impl Analyzer {
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
+        // (a loop reads the containers it is over at each step, through a live iterator too:
+        // later code may change them)
+        if !self.gens.reads.is_empty() {
+            for o in v.pts.iter().flat_map(|o| self.iter_sources(o, state)).filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Dict | Kind::Set) && !self.heap.obj(*o).iterator).collect::<Vec<_>>() {
+                self.gens.read_iterated(o);
+            }
+        }
         for o in v.pts.iter() {
             self.gens.read(o, None);
         }
@@ -159,6 +166,13 @@ impl Analyzer {
             }
         }
         let ItemsAcc { mut items, mut elems, pairs, pair, mut exhaustive, unordered } = acc;
+        // (a running generator iterating what its consumer changes between its items, `Gens::havoc`:
+        // its later items are not these, and may be anything)
+        if self.consumer_changes(v, state) {
+            items = None;
+            exhaustive = false;
+            elems.push(line_data.clone());
+        }
         // (and a part that is no object: an unknown, a str)
         if v.pts.is_empty() || v.kv.may_have_items() {
             self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
@@ -188,6 +202,36 @@ impl Analyzer {
             items = alt_items;
         }
         Iteration::new(items, Elem::One(elem), exh, unordered)
+    }
+
+    /// Does the consumer of the running generator change what `v` is or reads (its containers,
+    /// a live iterator's) between the generator's items (`Gens::havoc`)?
+    fn consumer_changes(&self, v: &Value, state: &State) -> bool {
+        let Some(hits) = self.gens.reads.last().and_then(|r| self.gens.havoc.get(&r.0)).filter(|h| !h.is_empty()) else { return false };
+        // (a container's: an iterator object changed is where it stands, which its consumer moves)
+        v.pts.iter().flat_map(|o| self.iter_sources(o, state)).filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Dict | Kind::Set) && !self.heap.obj(*o).iterator).any(|o| hits.iter().any(|h| h.0 == o))
+    }
+
+    /// `o` and what it iterates over, at any depth: a live iterator's containers, a lazy
+    /// iterator's sources (`zip`, `enumerate`, `map` over them).
+    fn iter_sources(&self, o: ObjId, state: &State) -> Vec<ObjId> {
+        let (mut out, mut work) = (Vec::new(), vec![o]);
+        while let Some(x) = work.pop() {
+            if out.contains(&x) || out.len() > 16 {
+                continue;
+            }
+            out.push(x);
+            if self.m.live_iters.contains_key(&x) {
+                work.extend(state.slot_opt(x, Ns::Attr, intern::key_str_lit("\u{1}src")).iter().flat_map(|s| s.pts.iter()));
+            }
+            work.extend(self.m.lazy_src.get(&x).into_iter().flatten().map(|(s, _)| *s));
+            match &self.heap.obj(x).payload {
+                Payload::Enumerate(v, _) => work.extend(v.pts.iter()),
+                Payload::Zip(a, b) => work.extend(a.pts.iter().chain(b.pts.iter())),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// The items of one of several containers (or strings), position by position: when every

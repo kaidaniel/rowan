@@ -93,8 +93,7 @@ impl Analyzer {
             ast::Stmt::Break(_) | ast::Stmt::Continue(_) => self.stmt_jump(node, state),
             ast::Stmt::Try(t) => self.stmt_try(t, state),
             ast::Stmt::With(w) if crate::models::csvio::with_suppress(self, w, state) => {}
-            ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
-            ast::Stmt::With(w) => self.stmt_with(w, state),
+            ast::Stmt::With(w) => self.stmt_with_from(w, 0, state),
             ast::Stmt::FunctionDef(f) => {
                 let v = self.make_function(FuncNode::Def(f), state, None);
                 let v = match self.decorate_def(f, &v, state) {
@@ -182,34 +181,38 @@ impl Analyzer {
     }
 
     /// `with`: a try whose finally is the managers' `__exit__`.
-    fn stmt_with(&mut self, w: &'static ast::StmtWith, state: &mut State) {
-        let mut managers: Vec<(Value, Node)> = Vec::new();
-        for item in &w.items {
-            let v = self.eval(&item.context_expr, state);
-            let n = frontend::node(&item.context_expr);
-            let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
-            if entered.is_none() {
-                entered = crate::models::csvio::enter_value(self, state, &v);
-            }
-            if entered.is_none() {
-                entered = Some(if v.pts.iter().any(|o| self.heap.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
-            }
-            if let Some(ov) = &item.optional_vars {
-                self.bind_target(ov, &entered.unwrap(), state);
-            }
-            managers.push((v, n));
+    /// The with statement `w` from its item `i` on: that item's manager entered, then a try
+    /// whose finally is its `__exit__` and whose body is the rest (the next item's, or the
+    /// body): `with a, b: body` is `with a: with b: body`. It runs however the body ends
+    /// (normally, by return / break / continue, or by an exception); a manager whose
+    /// `__exit__` returns True swallows the exception: a catch-all handler that does nothing,
+    /// for the exceptions it may swallow (the others go on).
+    pub(super) fn stmt_with_from(&mut self, w: &'static ast::StmtWith, i: usize, state: &mut State) {
+        if self.with_contextmanager(w, i, state) {
+            return;
         }
+        let item = &w.items[i];
+        let v = self.eval(&item.context_expr, state);
+        let n = frontend::node(&item.context_expr);
+        let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
+        if entered.is_none() {
+            entered = crate::models::csvio::enter_value(self, state, &v);
+        }
+        if entered.is_none() {
+            entered = Some(if v.pts.iter().any(|o| self.heap.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
+        }
+        if let Some(ov) = &item.optional_vars {
+            self.bind_target(ov, &entered.unwrap(), state);
+        }
+        let managers = vec![(v, n)];
         // `redirect_stdout(buf)`: prints in the body go to buf
         let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
         let n_redirects = redirects.len();
         self.m.stdout_redirect.extend(redirects);
-        // a try whose finally is the managers' `__exit__`: it runs however the body ends
-        // (normally, by return / break / continue, or by an exception); a manager whose
-        // `__exit__` returns True swallows the exception: a catch-all handler that does
-        // nothing, for the exceptions it may swallow (the others go on)
         let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
         let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line, maybe: true }] } else { vec![] };
-        self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+        let rest = (i + 1 < w.items.len()).then_some((w, i + 1));
+        self.stmt_try_parts_rest(&w.body, rest, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
         for _ in 0..n_redirects {
             self.m.stdout_redirect.pop();
         }
@@ -310,9 +313,20 @@ impl Analyzer {
         if self.unwind.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
             self.unwind.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
         }
+        // (a bare raise in a handler of GeneratorExit raised at a yield to close the generator:
+        // that raise again, `genclose.rs`)
+        let reclose = self.unwind.closing.last().filter(|c| r.exc.is_none() && c.0 == self.cx.frames.len() && c.2 == self.unwind.handling.len()).map(|c| c.1);
+        if let Some(p) = reclose.filter(|_| state.reachable) {
+            let (exc, cls) = (self.unwind.cur_exc.clone(), self.unwind.cur_exc_cls.take());
+            self.unwind.cur_exc_cls = Some(super::genclose::close_class(p));
+            self.record_raise_state(&mut state.copy());
+            (self.unwind.cur_exc, self.unwind.cur_exc_cls) = (exc, cls);
+        }
         // (the running try, if any, takes it with this state; else it leaves the program)
         if state.reachable {
+            let cls = self.unwind.cur_exc_cls.clone();
             self.record_raise_state(state);
+            self.note_items_at_raise(&cls, state);
         }
         self.unwind.cur_exc = None;
         self.unwind.cur_exc_cls = None;
@@ -400,11 +414,8 @@ impl Analyzer {
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
     /// generator runs concretely and the body runs at its yield. False: not that case.
-    fn with_contextmanager(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
-        if w.items.len() != 1 {
-            return false;
-        }
-        let item = &w.items[0];
+    fn with_contextmanager(&mut self, w: &'static ast::StmtWith, i: usize, state: &mut State) -> bool {
+        let item = &w.items[i];
         let ast::Expr::Call(call) = &item.context_expr else { return false };
         // only a plain name / attribute callee (evaluating it twice has no effect)
         if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) {
@@ -416,7 +427,7 @@ impl Analyzer {
         if self.heap.kind(f) != Kind::Function || !self.heap.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.gens.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.cx.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
+        let prev = self.gens.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.cx.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, jumps: 0, body_ret: None, catches: true, fin_depth: self.unwind.finally_stack.len(), rest: (i + 1 < w.items.len()).then_some((w, i + 1)) });
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
         self.call_value(&fv, &n, Some(call), state, None);
@@ -426,9 +437,11 @@ impl Analyzer {
                 if let Some(env) = h.env_after.take() {
                     state.env = env;
                 }
-                // the body's returns: the caller's exits
-                if let Some(mut bx) = h.body_exits.take() {
-                    bx.reachable = true;
+                // the body's returns, breaks and continues: from where the generator ended
+                // (`run_cm_body`), the caller's
+                let end = state.reachable.then(|| state.copy());
+                if let Some(mut bx) = end.as_ref().filter(|_| h.jumps & super::gens::JUMP_RETURN != 0).map(|e| e.copy()) {
+                    (bx.ret, bx.exits) = (None, None);
                     let joined = match state.exits.take() {
                         Some(cur) => cur.copy().join(&mut bx),
                         None => bx,
@@ -441,10 +454,27 @@ impl Analyzer {
                         None => r,
                     });
                 }
+                if let (Some(e), Some(l)) = (&end, self.unwind.loop_stack.last_mut()) {
+                    for (flag, acc) in [(super::gens::JUMP_BREAK, &mut l.breaks), (super::gens::JUMP_CONTINUE, &mut l.continues)] {
+                        if h.jumps & flag != 0 {
+                            let mut w = e.copy();
+                            (w.ret, w.exits) = (None, None);
+                            *acc = Some(match acc.take() {
+                                Some(mut a) => a.join(&mut w),
+                                None => w,
+                            });
+                        }
+                    }
+                }
                 if !state.reachable && !h.body_died {
                     // the generator did not finish normally after a body that did: still go on
                     // after the with (an exception there would be the body's)
                     state.reachable = true;
+                }
+                // (a body that never ended, its exceptions not caught by the generator: only
+                // its jumps reach the generator's end, nothing goes on after the with statement)
+                if h.jumps != 0 && h.body_died && !h.catches {
+                    state.reachable = false;
                 }
             }
             _ => {
@@ -452,7 +482,10 @@ impl Analyzer {
                 if let Some(t) = item.optional_vars.as_deref() {
                     self.bind_target(t, &Value::data("with"), state);
                 }
-                self.exec_block(&w.body, state);
+                match i + 1 < w.items.len() {
+                    true => self.stmt_with_from(w, i + 1, state),
+                    false => self.exec_block(&w.body, state),
+                }
             }
         }
         true

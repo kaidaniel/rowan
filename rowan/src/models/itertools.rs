@@ -668,9 +668,11 @@ pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, sta
             return;
         }
     }
-    if LAZY_ALL.contains(&q) {
+    // (a zip of how many items each gives not known: some number, taken as it is consumed)
+    if LAZY_ALL.contains(&q) || q == "builtins.zip" {
         if let Some(ro) = robj {
-            an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+            let n = if q == "builtins.zip" { Some(crate::interp::SOME_ITEMS) } else { None };
+            an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, n)).collect());
             lazy_unconsumed(ro, state);
             return;
         }
@@ -691,7 +693,8 @@ fn lazy_unconsumed(ro: ObjId, state: &mut State) {
 
 /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
 /// rounds = the shortest length; in the last round the arguments before the first that
-/// ran out each gave one more.
+/// ran out each gave one more, and that one was asked for one more (a generator runs to its
+/// end there: its effects and raises).
 pub(crate) fn zip_pulls(an: &mut Analyzer, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
     if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
         return None;
@@ -724,7 +727,7 @@ pub(crate) fn zip_pulls(an: &mut Analyzer, call: &Call, state: &mut State) -> Op
     let mut out = Vec::new();
     for (i, (_, _, o)) in lens.iter().enumerate() {
         if let Some(o) = o {
-            out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
+            out.push((*o, Some(if i <= first_out { rounds + 1 } else { rounds })));
         }
     }
     Some(out)

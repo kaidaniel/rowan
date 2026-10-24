@@ -74,6 +74,32 @@ pub fn close_pos(cls: &Option<super::ExcNames>) -> Option<Option<usize>> {
     Some(n.parse::<usize>().ok())
 }
 
+fn closing_key() -> intern::KeyId {
+    key_str_lit("\u{1}closing")
+}
+
+/// The slot `\u{1}closing` of a generator run whole whose code may catch GeneratorExit, on a
+/// path not closing it.
+const NOT_CLOSING: i64 = -2;
+
+/// On this path (or on some of the paths joined here), generator `gid`'s code caught
+/// GeneratorExit raised at a yield to close it: at that yield's position (None: not known),
+/// and whether on every path joined here.
+fn closing_at(gid: ObjId, state: &State) -> Option<(Option<usize>, bool)> {
+    let v = state.slot_opt(gid, Ns::Attr, closing_key())?;
+    let ks: Vec<Option<i64>> = crate::domain::kv_literals(&v.kv).iter().map(intern::key_as_int).collect();
+    let sure = v.kv.is_literal() && !ks.contains(&Some(NOT_CLOSING));
+    let at: Vec<Option<i64>> = ks.into_iter().filter(|k| *k != Some(NOT_CLOSING)).collect();
+    if at.is_empty() && v.kv.is_literal() {
+        return None;
+    }
+    let pos = match at[..] {
+        [Some(p)] if p >= 0 => Some(p as usize),
+        _ => None,
+    };
+    Some((pos, sure))
+}
+
 fn holds_key() -> intern::KeyId {
     key_str_lit("\u{1}holds")
 }
@@ -99,10 +125,30 @@ impl Analyzer {
     /// may be raised here, when a try of its own is running (its handlers, finally blocks and
     /// with statements, a loop over a generator made for it, run on it); the generators its
     /// frame holds are what its object holds while suspended.
-    pub(super) fn close_point(&mut self, pos: Option<usize>, state: &State) {
+    pub(super) fn close_point(&mut self, gid: ObjId, pos: Option<usize>, state: &mut State) {
         let depth = self.cx.frames.len();
         let Some(b) = self.gens.bounds.last().filter(|b| b.depth == depth) else { return };
         let tries = b.tries;
+        // (reached on a path where its code caught GeneratorExit raised at an earlier yield:
+        // closing it ends here — `close()` raises RuntimeError, nothing of it runs on — and
+        // no consumer resumes it from here)
+        if let Some((p, sure)) = closing_at(gid, state) {
+            let b = self.gens.bounds.last_mut().unwrap();
+            b.ran = true;
+            match b.recs.iter_mut().find(|r| r.0 == p) {
+                Some(r) => r.1.add(state.copy()),
+                None => {
+                    let mut j = crate::state::Joins::default();
+                    j.add(state.copy());
+                    b.recs.push((p, j));
+                }
+            }
+            if sure {
+                state.reachable = false;
+                return;
+            }
+            state.set_slot(gid, Ns::Attr, closing_key(), Value::lit(key_int(NOT_CLOSING)), true);
+        }
         if !self.gens.closable.is_empty() {
             let mut held: Vec<ObjId> = self.gens.fresh_loops.iter().filter(|l| l.1 == depth).map(|l| l.2).collect();
             for v in state.env.values() {
@@ -203,13 +249,41 @@ impl Analyzer {
             }
             join(&mut all, &s);
         }
-        if let (true, Some(e), true) = (b.catches, end, all.is_some()) {
-            for c in at.iter_mut().filter(|c| c.is_some()) {
-                join(c, e);
+        // (its code caught GeneratorExit raised at a yield and went on to its end)
+        if let Some((p, e)) = end.and_then(|e| Some((closing_at(gid, e)?.0, e))) {
+            match p {
+                Some(p) => {
+                    if at.len() <= p {
+                        at.resize_with(p + 1, || None);
+                    }
+                    join(&mut at[p], e);
+                }
+                None => marked_only = false,
             }
             join(&mut all, e);
         }
         (at, all, marked_only)
+    }
+
+    /// A generator's run whole begins: where its code may catch GeneratorExit, its paths are
+    /// not closing it yet (`closing_caught`).
+    pub(super) fn closing_begin(&self, gid: ObjId, state: &mut State) {
+        if self.gens.bounds.last().is_some_and(|b| b.catches) {
+            state.set_slot(gid, Ns::Attr, closing_key(), Value::lit(key_int(NOT_CLOSING)), true);
+        }
+    }
+
+    /// A handler of the running generator's own catches GeneratorExit raised at its yield
+    /// `pos` to close it (`state`: the handler's): its path is one of closing it.
+    pub(in crate::interp) fn closing_caught(&self, pos: Option<usize>, only: bool, state: &mut State) {
+        let Some(foid) = self.frame().func else { return };
+        let Some(gid) = self.heap.find(crate::state::Kind::List, &format!("gen:{}", foid), &self.frame().ctx) else { return };
+        // (beside other raises it catches: on some of its paths only)
+        let mut v = Value::lit(key_int(pos.map_or(-1, |p| p as i64)));
+        if !only {
+            v = v.join(&Value::lit(key_int(NOT_CLOSING)));
+        }
+        state.set_slot(gid, Ns::Attr, closing_key(), v, true);
     }
 
     /// Is `o` a generator that may be suspended on this path, with closing facts of its own,

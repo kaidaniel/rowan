@@ -94,8 +94,10 @@ impl Analyzer {
         let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class) || matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.iter" && self.heap.kind(o) == Kind::External));
         // (`next`'s generator raises where it is asked for the item it fails to give, `genraise.rs`)
         let next = fv.single().is_some_and(|o| matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.next"));
+        // (so does one a lazy iterator takes items of, where that is asked for them)
+        let lazy = fv.single().filter(|o| self.heap.kind(*o) == Kind::External).is_some_and(|o| matches!(self.heap.external_qual(o).as_str(), "builtins.zip" | "builtins.map" | "builtins.filter" | "builtins.enumerate"));
         for (i, a) in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user).enumerate() {
-            if next && i == 0 {
+            if (next && i == 0) || lazy {
                 self.force_gen_deferring(a, state, false);
             } else {
                 self.force_gen(a, state, !bulk);
@@ -591,6 +593,10 @@ impl Analyzer {
         let hint = self.literals_beside(at(&mut c, i));
         let mut out = r.kv.hint();
         for k in hint.iter() {
+            // (a str method's receiver that may be other literals: on those it raises, no result)
+            if c.qual.starts_with("str.") && i == 0 && c.recv.is_some() && !intern::key_is_str(k) {
+                continue;
+            }
             *at(&mut c, i) = Value::lit(k);
             let mut st = state.copy();
             let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, &mut st, &c)) else { continue };
@@ -953,7 +959,7 @@ impl Analyzer {
         let new_fr = self.callee_frame(foid, &fi, &ctx);
         let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
-        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
+        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, &fi, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
         let saved_files = std::mem::take(&mut self.cx.call_files);
         // (a generator expression's run is no call site of its own: its calls are those of the
@@ -977,6 +983,9 @@ impl Analyzer {
         self.bind_params(&fi, &self_v, a, state, node);
         // (a run whole: where GeneratorExit raised at its yields leaves its body, `genclose.rs`)
         let bound = gen_id.is_some() && !gen_cm && self.bound_begin(fnode);
+        if let Some(gid) = gen_id.filter(|_| bound) {
+            self.closing_begin(gid, state);
+        }
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
         let closes = if bound { self.gens.bounds.pop() } else { None };
         if let Some(gid) = gen_id {

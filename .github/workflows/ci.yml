@@ -70,6 +70,22 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/try_protocol.py; about 15 s)
         run: uv run --no-project python tests/try_protocol.py --rowan 2000
 
+      - name: Generators (bounded generator / consumer programs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/gen_protocol.py; about 10 s)
+        run: uv run --no-project python tests/gen_protocol.py --rowan 2000
+
+      - name: With statements (bounded with / __exit__ / contextmanager programs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/with_protocol.py; about 10 s)
+        run: uv run --no-project python tests/with_protocol.py --rowan 2000
+
+      - name: Iterators and aliasing (bounded one-shot / live iterator programs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/iter_protocol.py; about 10 s)
+        run: uv run --no-project python tests/iter_protocol.py --rowan 2000
+
+      - name: Metamorphic checks (rowan against itself, quick bound)
+        # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
+        run: uv run --no-project python tests/metamorphic.py --quick
+
       - name: Fuzzer, a new seed per run (informational)
         id: fuzz-rotating
         # different programs each run; a failure here is a real unsoundness, but one the change

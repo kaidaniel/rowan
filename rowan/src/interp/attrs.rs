@@ -242,15 +242,6 @@ impl Analyzer {
     /// type may be a subclass's (it may). None beside objects is `none_beside_lacks`'.
     fn literals_lack_attr(&mut self, obj: &Value, name: &str, state: &mut State) -> bool {
         use crate::models::tables::builtin_has_attr;
-        let lit_type = |k: KeyId| intern::with_key(k, |k| match k {
-            intern::Key::Str(_) => Some("str"),
-            intern::Key::Int(_) => Some("int"),
-            intern::Key::Bool(_) => Some("bool"),
-            intern::Key::Float(_) => Some("float"),
-            intern::Key::Bytes(_) => Some("bytes"),
-            intern::Key::None => Some("NoneType"),
-            _ => None,
-        });
         // (per part: Some(true) lacks it, Some(false) may, None has it or is not known)
         let parts: Vec<Option<bool>> = match &obj.kv {
             kv if kv.is_literal() => kv_literals(kv).iter().filter(|k| obj.pts.is_empty() || *k != key_none()).map(|k| builtin_has_attr(lit_type(k)?, name).and_then(|h| (!h).then_some(true))).collect(),
@@ -277,7 +268,9 @@ impl Analyzer {
         if !self.mixed(obj) {
             return Value::new();
         }
-        let lits = Value::kv_only(kv_exclude(&obj.kv, &crate::intern::KeySet::one(key_none())).unwrap_or(BOT));
+        // (not those whose type surely lacks it: they raise, `literals_lack_attr`)
+        let lacks: crate::intern::KeySet = kv_literals(&obj.kv).iter().filter(|k| *k == key_none() || lit_type(*k).and_then(|t| crate::models::tables::builtin_has_attr(t, name)) == Some(false)).collect();
+        let lits = Value::kv_only(kv_exclude(&obj.kv, &lacks).unwrap_or(BOT));
         if lits.kv.is_bot() {
             return Value::new();
         }
@@ -1339,4 +1332,17 @@ impl Analyzer {
         }
         false
     }
+}
+
+/// The builtin type of a literal key (None: not one of these).
+fn lit_type(k: KeyId) -> Option<&'static str> {
+    intern::with_key(k, |k| match k {
+        intern::Key::Str(_) => Some("str"),
+        intern::Key::Int(_) => Some("int"),
+        intern::Key::Bool(_) => Some("bool"),
+        intern::Key::Float(_) => Some("float"),
+        intern::Key::Bytes(_) => Some("bytes"),
+        intern::Key::None => Some("NoneType"),
+        _ => None,
+    })
 }

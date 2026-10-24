@@ -115,12 +115,19 @@ tr.fam th { top: 0; }
 .tip .m { color: var(--text-secondary); }
 svg text { fill: var(--text-muted); font-size: 10px; }
 .empty { color: var(--text-muted); font-size: 12px; padding: 20px 0; text-align: center; }
+.headline { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; margin: 16px 0 24px; }
+.headline .card { padding: 12px 14px 8px; }
+.headline h3 { font-size: 15px; }
+details.details > summary { font-size: 15px; }
 </style>
 </head>
 <body>
 <main>
   <h1>rowan: progress across releases</h1>
-  <p class="lead" id="lead">Every release measured with one fixed measurement set (today's tests, fuzzer and benchmarks), so newer tests find older bugs. Loading…</p>
+  <p class="lead" id="lead">Every release measured with one fixed measurement set, so newer tests find older bugs. Loading…</p>
+  <div class="headline" id="headline"></div>
+
+  <details class="details"><summary>Details <span class="sub">every metric, the table, the stop criterion, per benchmark, every commit on main</span></summary><div class="body">
   <div class="kpigroup">Combined headline: tuned-on (the eight + the cost set) and held-out, pooled</div>
   <div class="kpis" id="kpis-combined"></div>
   <div class="kpigroup">Tracked set (tuned-on: the eight benchmarks + the 23 cost-set modules) and the tests</div>
@@ -144,6 +151,7 @@ svg text { fill: var(--text-muted); font-size: 10px; }
   <h2>Every commit on main (CI history)</h2>
   <p class="note" id="cinote">The Bench workflow's numbers on GitHub's runners (wall time and memory vary 10–20% between runners; work counters are deterministic). Each metric is aggregated as the geometric mean over the programs, as a ratio to its first commit with all of them; every program's own chart is inside. <a href="charts.html">The previous page</a> (every series, uncollapsed) is kept.</p>
   <div id="ci"></div>
+  </div></details>
 </main>
 <div class="tip" id="tip"></div>
 <script src="data.js"></script>
@@ -186,6 +194,7 @@ function multiChart(series, opts = {}) {
   const points = series[0].points;
   const xs = points.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs);
   let y0 = Math.min(...all.map(p => p.y)), y1 = Math.max(...all.map(p => p.y));
+  if (opts.target != null) { y0 = Math.min(y0, opts.target); y1 = Math.max(y1, opts.target); }
   if (opts.zero && y0 > 0) y0 = 0;
   const pad = (y1 - y0) * 0.08 || Math.abs(y1) * 0.05 || 1; y0 -= opts.zero && y0 === 0 ? 0 : pad; y1 += pad;
   const sx = x => L + (x1 === x0 ? 0.5 : (x - x0) / (x1 - x0)) * (W - L - R);
@@ -204,6 +213,8 @@ function multiChart(series, opts = {}) {
     const tx = svgEl("text", { x: sx(p.x), y: H - 4, "text-anchor": i === 0 ? "start" : i === points.length - 1 ? "end" : "middle" });
     tx.textContent = p.short ?? p.label; svg.append(tx);
   });
+  // a target (a dashed line)
+  if (opts.target != null) svg.append(svgEl("line", { x1: L, x2: W - R, y1: sy(opts.target), y2: sy(opts.target), stroke: "var(--good)", "stroke-width": 1.5, "stroke-dasharray": "5 4" }));
   // each line, broken where a value is missing; a lone point as a dot
   for (const s of series) {
     let d = "", open = false;
@@ -223,7 +234,7 @@ function multiChart(series, opts = {}) {
   svg.append(cross, ...dots);
   const hit = svgEl("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" });
   svg.append(hit);
-  const val = p => !ok(p) ? "not measured" : fmtNum(p.y, opts.digits) + (opts.unit ? " " + opts.unit : "") + (p.cut ? " (cut: at least)" : "");
+  const val = p => !ok(p) ? "not measured" : fmtNum(p.y, opts.digits) + (opts.unit ? " " + opts.unit : "") + (p.cut ? ` (${opts.atLeast || "cut"}: at least)` : "");
   const show = ev => {
     const r = svg.getBoundingClientRect(), vx = (ev.clientX - r.left) / r.width * W;
     let k = 0;
@@ -304,7 +315,8 @@ function scoreboard(sb) {
   const rels = all.slice(start);
   const spread = noise(all);
   document.getElementById("lead").textContent =
-    `Every release (${all.length}, ${all[0].tag} to ${all[all.length - 1].tag}; the charts from ${rels[0].tag}, the first with merged pull requests) measured with one fixed measurement set: the tests, fuzzer, benchmark programs and site-packages scenarios of ${sb.measure_ref.slice(0, 7)}, on ${sb.machine}. Newer tests find older bugs, so this is how sound and precise each release really was, not how it did on the tests of its day. Precision, time and memory are pooled over the tracked set (the eight benchmarks and the cost set's 23 dense modules, tuned on) and set beside the held-out corpus nobody tunes against.`;
+    `Every release (${all.length}, ${all[0].tag} to ${all[all.length - 1].tag}) measured with one fixed measurement set (the tests, fuzzer and benchmarks of ${sb.measure_ref.slice(0, 7)}, on ${sb.machine}), so newer tests find older bugs. Hover a chart for the release and its pull requests; every other number is under Details.`;
+  headline(rels);
   const first = rels[0], last = rels[rels.length - 1];
   // headline: the combined numbers of the latest release that has them, with both parts and the gap
   const comb = [...rels].reverse().find(r => r.index.combined);
@@ -391,6 +403,44 @@ function scoreboard(sb) {
   t.append(tb);
   drill(rels, pointsFor);
   stopTable(sb.stop);
+}
+
+// The five headline charts: wrong claims (pooled, `index.wrong`), answer quality (known hover
+// facts, tuned-on and held-out), time, memory, code size. One axis each.
+function headline(rels) {
+  const root = document.getElementById("headline");
+  const pts = (f, extra) => rels.map((r, i) => ({ x: i, y: f(r.index), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
+  const latest = (f, dg, unit) => {
+    const r = [...rels].reverse().find(r => f(r.index) != null);
+    if (!r) return "not measured yet";
+    const miss = f === charts_wrong ? (W(r.index).missing || []) : [];
+    return `${fmtNum(f(r.index), dg)}${unit ? " " + unit : ""} at ${r.tag}` + (miss.length ? ` (at least: ${miss.join(", ")} not measured)` : "");
+  };
+  const W = i => i.wrong || {};
+  const charts_wrong = i => W(i).total;
+  const parts = r => { const w = W(r.index); return Object.entries(w.parts || {}).map(([k, v]) => `${k}: ${v == null ? "not measured" : v}`); };
+  const charts = [
+    ["Wrong claims", "Places where rowan's claims miss what real Python does: fuzzing at fresh seeds, held-out test runs beyond the known sites, and the protocol enumerators. Lower is better; the target is 0.",
+      [{ name: "wrong claims", color: "var(--bad)", points: pts(i => W(i).total, r => ({ cut: !!(W(r.index).missing || []).length, lines: [...parts(r), ...prsText(r)] })) }],
+      { digits: 0, target: 0, atLeast: "some sources not measured" }, charts_wrong, 0, ""],
+    ["Answer quality", "Hover facts known or typed, %: tuned-on (the 31 tracked modules) and held-out (52 modules nobody tunes against). Higher is better; a gap that grows means overfitting.",
+      [{ name: "tuned-on (31)", color: "var(--series-1)", points: pts(i => (i.tracked || {}).known_facts_pct) },
+       { name: "held-out (52)", color: "var(--series-2)", points: pts(i => (i.heldout || {}).known_facts_pct) }],
+      { unit: "%", digits: 1 }, i => (i.tracked || {}).known_facts_pct, 1, "%"],
+    ["Time", "Wall time, geometric mean over the 31 tracked modules, no deadline. Lower is better.",
+      [{ name: "tracked", color: "var(--series-1)", points: pts(i => (i.tracked || {}).wall_geomean_s) }], { unit: "s", digits: 2 }, i => (i.tracked || {}).wall_geomean_s, 2, "s"],
+    ["Memory", "Peak memory, geometric mean over the 31 tracked modules. Lower is better.",
+      [{ name: "tracked", color: "var(--series-1)", points: pts(i => (i.tracked || {}).rss_geomean_mb) }], { unit: "MB", digits: 0 }, i => (i.tracked || {}).rss_geomean_mb, 0, "MB"],
+    ["Code size", "Engine lines (rowan/src outside models/). Lower is better (objective: towards 10k).",
+      [{ name: "engine lines", color: "var(--series-1)", points: pts(i => (i.size || {}).engine_lines) }], { digits: 0 }, i => (i.size || {}).engine_lines, 0, ""],
+  ];
+  for (const [title, what, series, opts, f, dg, unit] of charts) {
+    // (from the first release any series has a value for: the measurement began there)
+    const first = Math.max(0, rels.findIndex((_, i) => series.some(s => s.points[i].y != null)));
+    const trimmed = series.map(s => ({ ...s, points: s.points.slice(first) }));
+    root.append(el("div", { class: "card" }, el("h3", {}, title), el("div", { class: "sub" }, what),
+      el("div", { class: "sub" }, "Latest: " + latest(f, dg, unit) + (first ? ` · measured from ${rels[first].tag}` : "")), multiChart(trimmed, opts)));
+  }
 }
 
 // the stop criterion over the last releases: which held-out metric moved (* beyond noise)
@@ -529,6 +579,8 @@ function ciHistory() {
 try { ciHistory(); } catch (e) {
   document.getElementById("ci").append(el("p", { class: "note" }, "The CI history could not be drawn: " + e));
 }
+// (a link to #details opens them)
+if (location.hash === "#details") document.querySelector("details.details").open = true;
 fetch("scoreboard.json").then(r => r.json()).then(scoreboard).catch(e => {
   document.getElementById("lead").textContent = "The scoreboard (scoreboard.json) could not be loaded: " + e;
 });

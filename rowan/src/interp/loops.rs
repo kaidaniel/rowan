@@ -434,7 +434,9 @@ impl Analyzer {
         let has_jump = contains_jump(&f.body) || stepping || closing;
         // (a generator with effects the loop uses up: the body sees each item's, its end after)
         // (or one that may raise: where the loop asks for the item it fails to give, `genraise.rs`)
-        let stepped = has_jump || once.is_some_and(|o| self.gens.eff.contains_key(&o) || self.raises_kept(o));
+        // (a lazy iterator over one: likewise, where it takes the generator's items)
+        let gen_like = |an: &Self, o: ObjId| an.gens.eff.contains_key(&o) || an.raises_kept(o);
+        let stepped = has_jump || once.is_some_and(|o| gen_like(self, o) || self.m.lazy_src.get(&o).is_some_and(|srcs| srcs.iter().any(|(s, _)| gen_like(self, *s))));
         let at = once.and_then(|o| self.cursor_of(o, state));
         let c0 = at.unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the

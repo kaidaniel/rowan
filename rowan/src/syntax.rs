@@ -166,6 +166,11 @@ pub fn catches_generator_exit(body: &[ast::Stmt]) -> bool {
     own_stmts(body).into_iter().any(|st| matches!(st, ast::Stmt::Try(t) if t.handlers.iter().any(catches)))
 }
 
+/// Does the function body have an `except` clause of its own (nested functions apart)?
+pub fn has_handler(body: &[ast::Stmt]) -> bool {
+    own_stmts(body).into_iter().any(|st| matches!(st, ast::Stmt::Try(t) if !t.handlers.is_empty()))
+}
+
 /// The last part of a callee as written: `json.loads` → `loads`, `f(x)(y)` → `f`; another
 /// expression's text.
 pub fn dotted_last(n: &ast::Expr) -> String {

@@ -172,8 +172,10 @@ impl Analyzer {
         // (one made for it alone is closed where a raise — GeneratorExit at a yield — leaves it)
         let fresh = self.fresh_gen(&v, &y.value, state);
         let it = self.iterate(&v, &nd, state);
+        // (a generator's effects per item: given as it is asked for each, all of them at its end)
+        let stepped = v.single().filter(|o| v.kv.is_bot() && self.gens.eff.contains_key(o));
         self.closing_loop(fresh, usize::MAX, state, &mut |an, st| {
-            let closing = an.gens.fresh_loops.last().map(|l| l.2).filter(|_| fresh.is_some());
+            let closing = an.gens.fresh_loops.last().map(|l| l.2).filter(|_| fresh.is_some()).or(stepped);
             match &it.items {
                 // known items: yielded one by one, in order
                 Some(items) => {
