@@ -33,7 +33,8 @@ e.g. no such feature yet):
                        from FOLLOW_SINCE on (following installed packages began with PR #43)
   size       size      engine lines (rowan/src/**/*.rs outside models/) and model lines
   costset    costset   the cost set (bench/costset.py, bench/costset/manifest.json: 23 dense library
-                       modules, tuned on), measured as heldout below; with the eight it is the
+                       modules, tuned on), measured as heldout below, releases from COSTSET_SINCE
+                       on; with the eight it is the
                        *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
   heldout    heldout   the held-out corpus (bench/heldout.py, bench/heldout/manifest.json: 31 real
                        packages no iteration tunes against, 52 modules run as main files), measured
@@ -95,6 +96,7 @@ CASE_MEMORY_MB = 3000  # likewise (several run at once under the guard's 16 GB f
 BENCH_TIMEOUT_S = 180
 PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
+COSTSET_SINCE = 80  # the cost set measured from v0.1.80 on (PR #89: older releases cost too much to measure)
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout"]
 LOCK = threading.RLock()
 
@@ -502,6 +504,8 @@ def cmd_run(a) -> None:
     keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "costset": ["costset"], "heldout": ["heldout"]}
 
     def todo(e: dict, fam: str) -> bool:
+        if fam == "costset" and not since(e, COSTSET_SINCE):
+            return False
         return fam in fams and (fam in redo or any(failed(e.get(k)) for k in keys[fam]))
 
     mset = measure_set(cache)
@@ -569,7 +573,12 @@ def cmd_run(a) -> None:
 
 def follows(rel: dict) -> bool:
     """Whether the release can follow installed packages (an untagged commit: a recent one)."""
-    return not rel["tag"].startswith("v") or int(rel["tag"].rsplit(".", 1)[-1]) >= FOLLOW_SINCE
+    return since(rel, FOLLOW_SINCE)
+
+
+def since(rel: dict, n: int) -> bool:
+    """Is the release v0.1.N or later (an untagged commit: a recent one)?"""
+    return not rel["tag"].startswith("v") or int(rel["tag"].rsplit(".", 1)[-1]) >= n
 
 
 def cmd_repeat(a) -> None:

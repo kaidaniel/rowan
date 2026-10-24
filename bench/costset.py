@@ -101,7 +101,7 @@ def metrics(binary: Path, mode: str, limits: str | None, only: str | None, jobs:
     `costset` family runs it with mode `nodeadline`, serially."""
     from concurrent.futures import ThreadPoolExecutor
 
-    heldout.SRC = WORK / "src"
+    saved, heldout.SRC = heldout.SRC, WORK / "src"
     mods, pkgs = selected(only)
     lim, timeout = limits, heldout.DEFAULT_TIMEOUT_S
     if mode == "nodeadline":
@@ -120,6 +120,8 @@ def metrics(binary: Path, mode: str, limits: str | None, only: str | None, jobs:
 
     with ThreadPoolExecutor(jobs) as ex:
         runs = dict(ex.map(one, todo))
+    # (the held-out corpus's sources where its own runs, e.g. the scoreboard's next family, find them)
+    heldout.SRC = saved
     return {"corpus": "costset", "mode": mode, "limits": lim, "binary": str(binary), "pooled": heldout.pooled(runs), "runs": runs}
 
 

@@ -334,15 +334,19 @@ function scoreboard(sb) {
   // overview: small multiples by family
   const ov = document.getElementById("overview");
   const fams = [...new Set(METRICS.map(m => m[0]))];
-  const pointsFor = (f, extra) => rels.map((r, i) => ({ x: i, y: f(r.index), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
+  const pointsFor = (f, extra, among = rels) => among.map((r, i) => ({ x: i, y: f(r.index), label: r.tag + " · " + r.date.slice(0, 10), short: shortTag(r.tag), lines: prsText(r), ...(extra ? extra(r) : {}) }));
   for (const fam of fams) {
     const g = el("div", { class: "grid" });
+    // (the combined numbers and the gap exist from the first release with the cost set
+    // measured: those families are drawn over those releases only)
+    const late = fam === "Combined" || fam === "Gap";
+    const among = late ? rels.filter(r => r.index.combined) : rels;
     for (const [f, title, unit, hib, dg, what, m] of METRICS.filter(x => x[0] === fam)) {
       const series = [];
       if (m.eight) {
         series.push({ name: "tracked (31)", color: "var(--series-1)", points: pointsFor(m.t) });
         series.push({ name: "the eight", color: "var(--series-3)", dash: true, points: pointsFor(m.eight, m.cuts ? r => ({ cut: r.index.speed.finished != null && r.index.speed.finished < 8 }) : null) });
-      } else series.push({ name: fam === "Speed" ? "tracked (31)" : title, color: "var(--series-1)", points: pointsFor(i => m.v(i)[0]) });
+      } else series.push({ name: fam === "Speed" ? "tracked (31)" : title, color: "var(--series-1)", points: pointsFor(i => m.v(i)[0], null, among) });
       if (m.held) series.push({ name: "held-out (52)", color: "var(--series-2)", points: pointsFor(m.held) });
       g.append(card(title, what + (hib == null ? "" : hib ? "; higher is better" : "; lower is better"), multiChart(series, { unit, digits: dg })));
     }
