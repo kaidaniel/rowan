@@ -837,7 +837,15 @@ impl Analyzer {
         let (walked, walks) = (self.havoc.visited, self.budget.walked.get());
         let by_names = !effs.is_empty();
         let removed = self.removed_args(foid, self_v.is_some(), args, kwargs);
-        let Seen { args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v, args, kwargs, state);
+        // (the dunders of the program's instances the arguments reach that change something: its
+        // code may run them, by an operator, `len`, `str`, a comparison — not by its text's
+        // names; followed, and the instances given where one may change its receiver)
+        let given: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
+        let (dunders, dunder_recvs) = self.dunders_given(&given, state);
+        let Seen { mut args, kwargs, code: arg_code, kept } = self.args_as_seen(foid, self_v, args, kwargs, state);
+        if !dunder_recvs.pts.is_empty() {
+            args.push(dunder_recvs.clone());
+        }
         // (the classes it meets are followed below, their dunders among their code)
         self.havoc.classes_followed = true;
         let r = self.unknown_call(q, self_v, Args::new(&args, &kwargs, star_args, star_kwargs), state, node);
@@ -846,6 +854,7 @@ impl Analyzer {
         let mut roots = vec![foid];
         roots.append(&mut self.havoc.code);
         roots.extend(arg_code);
+        roots.extend(dunders);
         // (the methods that run with the receiver: what its code reaches through it)
         roots.extend(effs.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
@@ -855,8 +864,7 @@ impl Analyzer {
         // (a shape holds for parameters that are no instances of the program's — a method's
         // receiver is one there —: given ones whose dunders change them, run unseen there by
         // operators, loops, `with`, not here)
-        let given: Vec<Value> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).cloned().collect();
-        let r = if self.dunders_given(&given, state).1.pts.is_empty() { self.summarized(foid, r, node, state) } else { r };
+        let r = if dunder_recvs.pts.is_empty() { self.summarized(foid, r, node, state) } else { r };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
@@ -1267,17 +1275,7 @@ impl Analyzer {
         }
         let kw = flags.split_off(args.len());
         let pos = flags;
-        // (the dunders of the program's instances an argument reaches that change something:
-        // its code may run them, by an operator, `len`, `str`, a comparison — not by its text's
-        // names; followed, and the instances given where one changes its receiver)
         let mut code: Vec<ObjId> = Vec::new();
-        let mut dunder_recvs: Vec<Value> = Vec::new();
-        for v in args.iter().chain(kwargs.values()) {
-            let (fs, given) = self.dunders_given(std::slice::from_ref(v), state);
-            code.extend(fs);
-            dunder_recvs.push(given);
-        }
-        let mut dunder_recvs = dunder_recvs.into_iter();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
             let (own, held) = (own || f.edits, held || f.held2);
@@ -1304,8 +1302,8 @@ impl Analyzer {
                 _ => Value::new(),
             }
         };
-        let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default())).collect();
-        let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v).join(&dunder_recvs.next().unwrap_or_default()))).collect();
+        let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v)).collect();
+        let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v))).collect();
         Seen { args, kwargs, code, kept }
     }
 
