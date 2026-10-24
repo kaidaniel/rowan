@@ -540,18 +540,7 @@ impl Analyzer {
         for round in 0..4 {
             let wmark = self.gens.watch.len();
             body(self, state);
-            // (where the code returned: what it changed by its returns too)
-            let found = match state.exits.as_deref() {
-                Some(ex) => {
-                    let mut at = ex.copy();
-                    at.reachable = true;
-                    if state.reachable {
-                        at = at.join(&mut state.copy());
-                    }
-                    self.gen_interference(wmark, &at, round == 3)
-                }
-                None => self.gen_interference(wmark, state, round == 3),
-            };
+            let found = self.gen_interference(wmark, state, round == 3);
             if found.is_empty() || round == 3 {
                 if close {
                     self.close_watches(wmark, &pre, state);
@@ -1721,16 +1710,26 @@ impl Analyzer {
 
     /// A generator activation begins (its frame pushed): its object of yielded values, new;
     /// what the activation's site held before (a running activation's yields, put back after).
-    pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, state: &mut State) -> Option<YieldStates> {
+    pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, fi: &super::FuncInfo, state: &mut State) -> Option<YieldStates> {
         // (a new activation: not consumed yet, its own item states; a running one's
         // yields are put back after it)
         // (keyed as `yield_value` finds it: the site's object)
         let saved = self.gens.yield_states.remove(&ygid);
         // the yielded values of this activation (a generator expression's: none yet, those of
-        // an earlier activation at this site are not this one's), of the site's object: never
-        // a variant `alloc` would make, which `yield_value` would not find (one held by a name,
-        // or past the collector's walk: its items were lost); not renewed (made at its call)
-        let gid = ygid;
+        // an earlier activation at this site are not this one's): the site's object made again
+        // (strongly where nothing holds the earlier one: renewed, its facts dropped), and its
+        // items reset on it — not on a variant `alloc` makes where one is held (by a name, or
+        // past the collector's walk), which `yield_value` would not find: its items were lost
+        // (a recursive activation, the site's running one holding the object: on what `alloc`
+        // makes, the running one's items left alone)
+        let mut gid = ygid;
+        if saved.is_some() || !fi.node.is_genexp() {
+            let (foid, ctx) = (self.frame().func.unwrap_or(0), self.frame().ctx.clone());
+            let made = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
+            if self.gens.reads.iter().any(|r| r.0 == ygid) {
+                gid = made;
+            }
+        }
         state.drop_obj_ns(gid, Ns::Pos);
         state.drop_obj_ns(gid, Ns::Elem);
         self.heap.set_llen(gid, state, Some(0));

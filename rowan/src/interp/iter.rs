@@ -208,7 +208,8 @@ impl Analyzer {
     /// a live iterator's) between the generator's items (`Gens::havoc`)?
     fn consumer_changes(&self, v: &Value, state: &State) -> bool {
         let Some(hits) = self.gens.reads.last().and_then(|r| self.gens.havoc.get(&r.0)).filter(|h| !h.is_empty()) else { return false };
-        v.pts.iter().flat_map(|o| self.iter_sources(o, state)).any(|o| hits.iter().any(|h| h.0 == o))
+        // (a container's: an iterator object changed is where it stands, which its consumer moves)
+        v.pts.iter().flat_map(|o| self.iter_sources(o, state)).filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Dict | Kind::Set) && !self.heap.obj(*o).iterator).any(|o| hits.iter().any(|h| h.0 == o))
     }
 
     /// `o` and what it iterates over, at any depth: a live iterator's containers, a lazy

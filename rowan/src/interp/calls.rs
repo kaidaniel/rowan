@@ -955,7 +955,7 @@ impl Analyzer {
         let new_fr = self.callee_frame(foid, &fi, &ctx);
         let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
-        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, state)));
+        let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, &fi, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
         let saved_files = std::mem::take(&mut self.cx.call_files);
         // (a generator expression's run is no call site of its own: its calls are those of the
