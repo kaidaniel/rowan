@@ -66,7 +66,10 @@ impl Analyzer {
         let ordering = !matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
         // (containers compared item by item: what their items' dunders run, as library code does)
         if ordering && [a, b].iter().any(|v| v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set))) {
-            self.library_dunders(&[a.clone(), b.clone()], state, nd);
+            let held = self.container_instances(&[a.clone(), b.clone()], state);
+            if !held.is_empty() {
+                self.instance_dunders(held, &["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"], state, nd);
+            }
         }
         if ordering && crate::models::torch::is_tensor(a) {
             return crate::models::torch::t_compare(self, a, b, nd, state);
@@ -155,7 +158,7 @@ impl Analyzer {
         let r = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
             Some((r, rest)) if rest.empty() => r,
             _ => {
-                self.library_dunders(&[b.clone()], state, nd);
+                self.instance_dunders(b.pts.iter().collect(), &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
                 Value::data("bool")
             }
         };

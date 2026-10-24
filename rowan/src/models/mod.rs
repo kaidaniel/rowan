@@ -739,22 +739,46 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
 /// The builtins and container methods that run dunders of what they are given or hold that no
 /// model of theirs runs as CPython does (how many times, which: `sorted` compares items, `sum`
 /// adds them, `str([x])` runs `x.__repr__`, `d.get(x)` hashes x, `xs.count(x)` compares x,
-/// `list(x)` iterates x): those of the program's instances they reach, as library code runs
-/// them (`library_dunders`).
-const DUNDER_DRIVERS: &[&str] = &[
-    "builtins.sorted", "builtins.max", "builtins.min", "builtins.sum", "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset",
-    "builtins.dict", "builtins.reversed", "builtins.iter", "builtins.any", "builtins.all", "builtins.str", "builtins.repr", "builtins.print",
-    "builtins.format", "builtins.hash", "builtins.next", "builtins.enumerate", "builtins.zip", "copy.copy", "copy.deepcopy", "list.count",
-    "list.index", "list.remove", "list.sort", "list.__contains__", "tuple.count", "tuple.index", "dict.get", "dict.setdefault", "dict.pop",
-    "dict.__contains__", "dict.fromkeys", "dict.update", "set.add", "set.discard", "set.remove", "set.update", "set.__contains__",
-];
+/// `list(x)` iterates x): the dunders of their arguments themselves (`own`) and of the instances
+/// their containers hold, at any depth through containers (`items`).
+const COMPARE: &[&str] = &["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"];
+const ITERATE: &[&str] = &["__iter__", "__next__", "__len__", "__length_hint__", "__getitem__", "__reversed__"];
+const PRINT: &[&str] = &["__repr__", "__str__", "__format__"];
+const HASH: &[&str] = &["__hash__", "__eq__"];
+const ADD: &[&str] = &["__add__", "__radd__", "__iadd__"];
+const COPY: &[&str] = &["__copy__", "__deepcopy__", "__reduce__", "__reduce_ex__", "__getstate__", "__setstate__", "__getattr__", "__getattribute__", "__setattr__"];
 
-/// A call of a builtin or container method that runs dunders no model runs (`DUNDER_DRIVERS`):
-/// those of the program's instances its arguments and receiver reach.
+/// (the dunders of the arguments themselves, those of the instances their containers hold)
+fn driven(qual: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    Some(match qual.strip_prefix("builtins.").unwrap_or(qual) {
+        "sorted" | "max" | "min" | "list.sort" => (ITERATE, COMPARE),
+        "sum" => (ITERATE, ADD),
+        "list" | "tuple" | "reversed" | "iter" | "next" | "enumerate" | "zip" => (ITERATE, &[]),
+        "any" | "all" => (ITERATE, &["__bool__", "__len__"]),
+        "set" | "frozenset" | "dict" => (ITERATE, HASH),
+        "str" | "repr" | "print" | "format" => (&[], PRINT),
+        "hash" => (&[], HASH),
+        "copy.copy" | "copy.deepcopy" => (&[], COPY),
+        "list.count" | "list.index" | "list.remove" | "list.__contains__" | "tuple.count" | "tuple.index" => (&[], COMPARE),
+        "dict.get" | "dict.setdefault" | "dict.pop" | "dict.__contains__" | "dict.fromkeys" | "dict.update" | "set.add" | "set.discard" | "set.remove" | "set.update" | "set.__contains__" => (&[], HASH),
+        _ => return None,
+    })
+}
+
+/// A call of a builtin or container method that runs dunders no model runs (`driven`): those of
+/// the program's instances it is given (and its receiver), and those their containers hold.
 pub fn driven_dunders(an: &mut Analyzer, qual: &str, recv: Option<&Value>, args: &[Value], state: &mut State, node: &crate::frontend::Node) {
-    if DUNDER_DRIVERS.contains(&qual) {
-        let vals: Vec<Value> = recv.into_iter().chain(args.iter()).cloned().collect();
-        an.library_dunders(&vals, state, node);
+    let Some((own, items)) = driven(qual) else { return };
+    let vals: Vec<Value> = recv.into_iter().chain(args.iter()).cloned().collect();
+    let top: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).filter(|o| an.heap.kind(*o) == Kind::Instance).collect();
+    if !own.is_empty() && !top.is_empty() {
+        an.instance_dunders(top, own, state, node);
+    }
+    if !items.is_empty() {
+        let held = an.container_instances(&vals, state);
+        if !held.is_empty() {
+            an.instance_dunders(held, items, state, node);
+        }
     }
 }
 
