@@ -49,6 +49,10 @@ real code nobody tunes against. Put its `metrics` (proven %, known facts %, time
 runs) and `sound` mismatch count in your before / after table, but never choose work from its
 individual modules, sites, hovers or timings, nor change its manifest. Only an unsound claim
 its `sound` check finds may become work: shrink it into a golden case written in your own words.
+The scoreboard's headline metrics pool the *tracked* set (the eight + the cost set, tuned on
+freely); its *combined* headline adds the held-out corpus, and the gap between the two is the
+overfitting signal: report all three. **Rotation** is the owner's, about every 20 releases
+(AGENTS.md, Tests: `heldout.py rotate --draw`, then `--apply`); never rotate unasked.
 
 **Imprecision is a trade-off,** never "accepted": call a gap "known" or "known to be hard",
 name its cost, and list it under Remaining.

@@ -1171,6 +1171,19 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if obj.pts.iter().any(|o| !matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module)) {
             v = v.join(&Value::obj(crate::interp::any_object(&mut an.heap)));
         }
+        // (what it holds under names not known — `setattr(o, prefix + x, v)` —, or any
+        // attribute where unknown code may have added some; a value not known: any)
+        for o in obj.pts.iter() {
+            if let Some(sv) = st.slot_opt(o, Ns::Attr, intern::STAR) {
+                v = v.join(&sv);
+            }
+            if !st.row(o, Ns::Attr).closed() {
+                v = v.join(&Value::data("getattr"));
+            }
+        }
+        if !obj.kv.is_bot() {
+            v = v.join(&Value::data("getattr"));
+        }
     }
     names.sort();
     names.dedup();

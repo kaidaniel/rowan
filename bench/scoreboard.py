@@ -32,11 +32,22 @@ e.g. no such feature yet):
              sitepackages  today's bench/sitepackages.py (modes none, follow, only), releases
                        from FOLLOW_SINCE on (following installed packages began with PR #43)
   size       size      engine lines (rowan/src/**/*.rs outside models/) and model lines
+  costset    costset   the cost set (bench/costset.py, bench/costset/manifest.json: 23 dense library
+                       modules, tuned on), measured as heldout below, releases from COSTSET_SINCE
+                       on; with the eight it is the
+                       *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
   heldout    heldout   the held-out corpus (bench/heldout.py, bench/heldout/manifest.json: 31 real
-                       packages no iteration tunes against, 50 modules run as main files), measured
+                       packages no iteration tunes against, 52 modules run as main files), measured
                        like bench.P: with no deadline, cut at heldout.NODEADLINE_TIMEOUT_S, serially;
                        pooled proven / possibly %, known facts %, wall and RSS geomeans, finished,
                        cut, skipped calls; the manifest's sha256 (a changed corpus is another set)
+
+The headline metrics (proven %, possibly %, known facts %, wall and RSS geomeans, cuts) pool the
+tracked set (the eight + the cost set); the eight's own numbers stay beside them (`precision`,
+`speed`: comparable with the releases measured before the cost set). The *combined* headline
+pools tracked + held-out; the gap between the two (tracked minus held-out) is the overfitting
+signal. A rotation (bench/heldout.py rotate, the owner's) moves the held-out modules into the
+cost set's manifest: both manifests' hashes change, so the series start again there.
 
 Every rowan run goes through .guard/run (the harnesses' runs too: the harness runs under it).
 Non-timing families run up to `-j` releases at once (the guard's three slots); timing runs one
@@ -44,7 +55,7 @@ at a time, nothing else running.
 
 Usage (run from anywhere, under `uv run --no-project python`):
   python bench/scoreboard.py run [--tags v0.1.8,v0.1.9|--since v0.1.40] [--ref REF…]
-         [--families soundness,precision,speed,size,sitepackages,heldout] [--redo FAMILY,…] [-j 3]
+         [--families soundness,precision,speed,size,sitepackages,costset,heldout] [--redo FAMILY,…] [-j 3]
          [--cache DIR]
   python bench/scoreboard.py repeat --tags A,B [-n 3]   timing noise: the benchmarks again
   python bench/scoreboard.py report [--md OUT.md]        per-release deltas, top iterations,
@@ -85,7 +96,8 @@ CASE_MEMORY_MB = 3000  # likewise (several run at once under the guard's 16 GB f
 BENCH_TIMEOUT_S = 180
 PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
-FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "heldout"]
+COSTSET_SINCE = 80  # the cost set measured from v0.1.80 on (PR #89: older releases cost too much to measure)
+FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout"]
 LOCK = threading.RLock()
 
 
@@ -430,7 +442,9 @@ def measure_bench(binary: Path, name: str, logdir: Path) -> dict:
             r["wall_s"] = BENCH_TIMEOUT_S
     else:
         try:
-            r.update(facts_summary(json.loads(out.read_text())))
+            doc = json.loads(out.read_text())
+            r.update(facts_summary(doc))
+            r["cut"] = bool(doc.get("analysis", {}).get("cut"))
         except json.JSONDecodeError:
             r["facts_doc"] = "unreadable"
     out.unlink(missing_ok=True)
@@ -458,9 +472,20 @@ def measure_heldout(binary: Path, logdir: Path) -> dict:
     import heldout
 
     res = heldout.metrics(binary, "nodeadline", None, None, 1, logdir / "heldout")
-    keep = ("finished", "wall_s", "rss_mb", "cut", "skipped_calls", "work", "tiers", "facts", "why")
     return {"manifest_sha256": hashlib.sha256(heldout.MANIFEST.read_bytes()).hexdigest(), "pooled": res["pooled"], "by_kind": res["by_kind"],
-            "runs": {m: {k: v for k, v in r.items() if k in keep} for m, r in res["runs"].items()}}
+            "runs": {m: {k: v for k, v in r.items() if k in KEEP} for m, r in res["runs"].items()}}
+
+
+KEEP = ("finished", "wall_s", "rss_mb", "cut", "skipped_calls", "work", "tiers", "facts", "why")
+
+
+def measure_costset(binary: Path, logdir: Path) -> dict:
+    """The cost set with today's bench/costset.py and manifest, no deadline, serially."""
+    import costset
+
+    res = costset.metrics(binary, "nodeadline", None, None, 1, logdir / "costset")
+    return {"manifest_sha256": hashlib.sha256(costset.MANIFEST.read_bytes()).hexdigest(), "pooled": res["pooled"],
+            "runs": {m: {k: v for k, v in r.items() if k in KEEP} for m, r in res["runs"].items()}}
 
 
 # ---------------------------------------------------------------- run
@@ -476,9 +501,11 @@ def cmd_run(a) -> None:
     rels = releases(a.tags.split(",") if a.tags else None, a.since, a.ref or [])
     fams = a.families.split(",") if a.families else FAMILIES
     redo = set(FAMILIES if a.redo == "all" else (a.redo.split(",") if a.redo else []))
-    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "heldout": ["heldout"]}
+    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "costset": ["costset"], "heldout": ["heldout"]}
 
     def todo(e: dict, fam: str) -> bool:
+        if fam == "costset" and not since(e, COSTSET_SINCE):
+            return False
         return fam in fams and (fam in redo or any(failed(e.get(k)) for k in keys[fam]))
 
     mset = measure_set(cache)
@@ -535,6 +562,9 @@ def cmd_run(a) -> None:
         if todo(e, "sitepackages") and follows(rel):
             print(f"[{rel['tag']}] sitepackages", file=sys.stderr, flush=True)
             put(data, e, "sitepackages", measure_sitepackages(b, mset, logdir(rel) / "sitepackages.log"))
+        if todo(e, "costset"):
+            print(f"[{rel['tag']}] costset", file=sys.stderr, flush=True)
+            put(data, e, "costset", measure_costset(b, logdir(rel)))
         if todo(e, "heldout"):
             print(f"[{rel['tag']}] heldout", file=sys.stderr, flush=True)
             put(data, e, "heldout", measure_heldout(b, logdir(rel)))
@@ -543,7 +573,12 @@ def cmd_run(a) -> None:
 
 def follows(rel: dict) -> bool:
     """Whether the release can follow installed packages (an untagged commit: a recent one)."""
-    return not rel["tag"].startswith("v") or int(rel["tag"].rsplit(".", 1)[-1]) >= FOLLOW_SINCE
+    return since(rel, FOLLOW_SINCE)
+
+
+def since(rel: dict, n: int) -> bool:
+    """Is the release v0.1.N or later (an untagged commit: a recent one)?"""
+    return not rel["tag"].startswith("v") or int(rel["tag"].rsplit(".", 1)[-1]) >= n
 
 
 def cmd_repeat(a) -> None:
@@ -580,7 +615,13 @@ def indices(e: dict) -> dict:
                their main files' hover facts (pooled); `index`: their mean
     speed      geometric means over the eight programs of wall time (s; a cut run counts as its
                timeout) and peak memory (MB); how many finished
-    size       engine and model lines"""
+    size       engine and model lines
+    tracked    the eight + the cost set (31 runs), pooled (`pool`): proven / possibly / known facts %,
+               wall and RSS geomeans, finished, cuts (runs the memory bound or the timeout cut,
+               or whose analysis was cut); None until both are measured
+    heldout    the held-out corpus, likewise
+    combined   tracked + held-out pooled; `gap`: tracked minus held-out (shares: points; time
+               and memory: the ratio), the overfitting signal"""
     out = {}
     g, f = e.get("golden", {}), e.get("fuzz", {})
     gp = 100 * g["passed"] / g["total"] if g.get("total") else None
@@ -614,6 +655,17 @@ def indices(e: dict) -> dict:
     ho = (e.get("heldout") or {}).get("pooled")
     if ho:
         out["heldout"] = {k: ho.get(k) for k in ("proven_pct", "possibly_pct", "known_facts_pct", "wall_geomean_s", "rss_geomean_mb", "finished", "modules", "cut", "skipped_calls")}
+    tracked = tracked_runs(e)
+    held = {"heldout/" + m: r for m, r in ((e.get("heldout") or {}).get("runs") or {}).items()}
+    if tracked:
+        out["tracked"] = pool(tracked)
+    if held:
+        out["heldout"] = {**out.get("heldout", {}), **pool(held)}
+    if tracked and held:
+        t, h = out["tracked"], out["heldout"]
+        gap = {k: t[k] - h[k] if t[k] is not None and h[k] is not None else None for k in ("proven_pct", "possibly_pct", "known_facts_pct")}
+        gap.update({k: t[k] / h[k] if t[k] and h[k] else None for k in ("wall_geomean_s", "rss_geomean_mb")})
+        out["combined"] = {**pool({**tracked, **held}), "gap": gap}
     sp = e.get("sitepackages")
     if sp and "error" not in sp:
         fol = [m.get("follow", {}) for m in sp.values()]
@@ -622,6 +674,44 @@ def indices(e: dict) -> dict:
                                "finished": sum(1 for r in fol if r.get("finished")),
                                "follow_wall_s": sum(r.get("wall_s", 0) for r in fol)}
     return out
+
+
+def tracked_runs(e: dict) -> dict | None:
+    """The tracked set's runs (the eight's, the cost set's), or None while either is missing."""
+    bench, cs = e.get("bench") or {}, (e.get("costset") or {}).get("runs")
+    if len(bench) != len(PROGRAMS) or not cs:
+        return None
+    return {**{"eight/" + p: r for p, r in bench.items()}, **{"costset/" + m: r for m, r in cs.items()}}
+
+
+def pool(runs: dict) -> dict:
+    """Pooled indices over runs {name: result} (bench/heldout.py's `pooled`): verdict and fact
+    shares over all runs that finished, geometric means of wall time (a cut run: its timeout)
+    and peak memory (runs that finished), and the cuts."""
+    tiers, facts = Counter(), Counter()
+    for r in runs.values():
+        if r.get("finished"):
+            tiers.update(r.get("tiers", {}))
+            facts.update(r.get("facts", {}))
+    nt, nf = sum(tiers.values()), facts["unknown"] + facts["partial"] + facts["exact"]
+    fin = sum(1 for r in runs.values() if r.get("finished"))
+    return {"modules": len(runs), "finished": fin, "cuts": len(runs) - fin + sum(1 for r in runs.values() if r.get("finished") and r.get("cut")),
+            "proven_pct": 100 * tiers["proven"] / nt if nt else None, "possibly_pct": 100 * tiers["possibly"] / nt if nt else None,
+            "known_facts_pct": 100 * (facts["partial"] + facts["exact"]) / nf if nf else None, "verdicts": nt, "facts": nf,
+            "wall_geomean_s": geomean([r.get("wall_s") for r in runs.values()]),
+            "rss_geomean_mb": geomean([r.get("rss_mb") for r in runs.values() if r.get("finished")])}
+
+
+# the headline metrics: the tracked set's where both releases compared have it, else the eight's
+HEAD = {"proven_pct": ("precision", "proven_pct"), "possibly_pct": ("precision", "possibly_pct"), "known_facts_pct": ("precision", "known_facts_pct"),
+        "wall_geomean_s": ("speed", "wall_geomean_s"), "rss_geomean_mb": ("speed", "rss_geomean_mb")}
+
+
+def head(i: dict, key: str, tracked: bool) -> float | None:
+    if tracked:
+        return (i.get("tracked") or {}).get(key)
+    fam, k = HEAD[key]
+    return i[fam][k]
 
 
 def label(e: dict) -> str:
@@ -660,28 +750,45 @@ def cmd_report(a) -> None:
     w = lines.append
     nz = noise(data)
     w(f"Measured with {data.get('measure_ref', '?')[:10]}'s tests on {data.get('machine', '?')}; fuzz seeds {data.get('fuzz_seeds')} x {data.get('fuzz_n')} programs per kind.\n")
-    w("| release | engine / models lines | golden pass | fuzz unsound / checks (crashed) | budget=0 pass | proven % | known facts % | wall geomean | RSS geomean | finished | site-pkg gained / lost |")
-    w("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    w("Proven %, known facts %, wall and RSS geomeans, cuts and finished: the tracked set (the eight + the cost set, 31 runs, "
+      "pooled); `↳ eight`: the eight alone (the only numbers of releases measured before the cost set, marked †).\n")
+    w("| release | engine / models lines | golden pass | fuzz unsound / checks (crashed) | budget=0 pass | proven % | known facts % | wall geomean | RSS geomean | cuts | finished | site-pkg gained / lost |")
+    w("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     fmt = lambda x, d=1: "–" if x is None else f"{x:.{d}f}"
+
+    def headline_cells(t: dict, mark: str = "") -> str:
+        return (f"{fmt(t['proven_pct'])}{mark} | {fmt(t['known_facts_pct'])}{mark} | {fmt(t['wall_geomean_s'], 2)} s{mark} | "
+                f"{fmt(t['rss_geomean_mb'], 0)} MB{mark} | {fmt(t.get('cuts'), 0)} | {fmt(t['finished'], 0)}/{t['modules']}")
+
     for e, i in zip(rels, idx):
         g, f, b0 = e.get("golden", {}), e.get("fuzz", {}), e.get("budget0", {})
         sp = i.get("sitepackages")
+        eight = {**{k: i[fam][k2] for k, (fam, k2) in HEAD.items()}, "finished": i["speed"]["finished"], "modules": len(PROGRAMS),
+                 "cuts": sum(1 for r in (e.get("bench") or {}).values() if not r.get("finished") or r.get("cut")) if e.get("bench") else None}
+        main = headline_cells(i["tracked"]) if i.get("tracked") else headline_cells(eight, "†")
         w(f"| {label(e)} | {fmt(i['size']['engine_lines'], 0)} / {fmt(i['size']['model_lines'], 0)} | {g.get('passed', '–')}/{g.get('total', '–')} | "
-          f"{f.get('unsound', '–')} / {f.get('checks', '–')} ({f.get('crashed', '–')}) | {b0.get('passed', '–')} | {fmt(i['precision']['proven_pct'])} | "
-          f"{fmt(i['precision']['known_facts_pct'])} | {fmt(i['speed']['wall_geomean_s'], 2)} s | {fmt(i['speed']['rss_geomean_mb'], 0)} MB | "
-          f"{fmt(i['speed']['finished'], 0)}/8 | {f'{sp['gained']} / {sp['lost']}' if sp else '–'} |")
+          f"{f.get('unsound', '–')} / {f.get('checks', '–')} ({f.get('crashed', '–')}) | {b0.get('passed', '–')} | {main} | {f'{sp['gained']} / {sp['lost']}' if sp else '–'} |")
+        if i.get("tracked"):
+            w(f"| ↳ eight | | | | | {headline_cells(eight)} | |")
     # top iterations per family: the change of the family's headline against the release before
+    # (precision, speed, memory: on the tracked set where both releases have it, else the eight)
+    def prec(i, t):
+        parts = [i["precision"]["budget0_pct"], head(i, "proven_pct", t), head(i, "known_facts_pct", t)]
+        return sum(parts) / 3 if None not in parts else None
+
+    neglog = lambda x: -math.log(x) * 100 if x else None
     heads = {
-        "soundness (golden cases passing + fuzz unsound per 10k)": lambda i: (i["soundness"]["golden_pct"] or 0) - (i["soundness"]["unsound_per_10k"] or 0) / 100 if i["soundness"]["index"] is not None else None,
-        "precision (index: budget=0 %, proven %, known facts %)": lambda i: i["precision"]["index"],
-        "speed (wall-time geomean, lower is better; negated)": lambda i: -math.log(i["speed"]["wall_geomean_s"]) * 100 if i["speed"]["wall_geomean_s"] else None,
-        "memory (RSS geomean, lower is better; negated)": lambda i: -math.log(i["speed"]["rss_geomean_mb"]) * 100 if i["speed"]["rss_geomean_mb"] else None,
-        "engine size (lines, fewer is better; negated)": lambda i: -i["size"]["engine_lines"] if i["size"]["engine_lines"] else None,
+        "soundness (golden cases passing + fuzz unsound per 10k)": lambda i, t: (i["soundness"]["golden_pct"] or 0) - (i["soundness"]["unsound_per_10k"] or 0) / 100 if i["soundness"]["index"] is not None else None,
+        "precision (index: budget=0 %, proven %, known facts %)": prec,
+        "speed (wall-time geomean, lower is better; negated)": lambda i, t: neglog(head(i, "wall_geomean_s", t)),
+        "memory (RSS geomean, lower is better; negated)": lambda i, t: neglog(head(i, "rss_geomean_mb", t)),
+        "engine size (lines, fewer is better; negated)": lambda i, t: -i["size"]["engine_lines"] if i["size"]["engine_lines"] else None,
     }
     for name, h in heads.items():
         deltas = []
         for k in range(1, len(rels)):
-            x, y = h(idx[k - 1]), h(idx[k])
+            t = idx[k - 1].get("tracked") is not None and idx[k].get("tracked") is not None
+            x, y = h(idx[k - 1], t), h(idx[k], t)
             if x is not None and y is not None:
                 deltas.append((y - x, rels[k]))
         deltas = sorted((t for t in deltas if t[0] > 0), key=lambda t: -t[0])
@@ -690,18 +797,9 @@ def cmd_report(a) -> None:
         w("| --- | --- | --- |")
         for d, e in deltas[:10]:
             w(f"| {e['tag']} | {d:+.2f} | {'; '.join(f'#{p['n']} {p['title']}' for p in e.get('prs', []))} |")
-    held = [(e, i["heldout"]) for e, i in zip(rels, idx) if i.get("heldout")]
-    if held:
-        w("\n**Tuned-on (the eight) and held-out (bench/heldout.py), both with no deadline**\n")
-        w("| release | proven % eight / held-out | known facts % eight / held-out | wall geomean eight / held-out | RSS geomean eight / held-out | finished eight / held-out |")
-        w("| --- | --- | --- | --- | --- | --- |")
-        for e, h in held:
-            i = indices(e)
-            w(f"| {e['tag']} | {fmt(i['precision']['proven_pct'])} / {fmt(h['proven_pct'])} | {fmt(i['precision']['known_facts_pct'])} / {fmt(h['known_facts_pct'])} | "
-              f"{fmt(i['speed']['wall_geomean_s'], 2)} / {fmt(h['wall_geomean_s'], 2)} s | {fmt(i['speed']['rss_geomean_mb'], 0)} / {fmt(h['rss_geomean_mb'], 0)} MB | "
-              f"{fmt(i['speed']['finished'], 0)}/8 / {h['finished']}/{h['modules']} |")
+    w("\n" + combined_table(rels, idx, fmt))
     w(f"\nNoise (repeats): {json.dumps(nz)}")
-    w("\n" + flattening(rels, idx, heads))
+    w("\n" + flattening(rels, idx, {k: (lambda h: lambda i: h(i, False))(h) for k, h in heads.items()}))
     rows: list = []
     w("\n" + stop_check(rels, idx, nz, rows=rows))
     data["stop"] = {"criterion": f"3 consecutive releases with no held-out metric moving beyond noise and 0 unsound fresh-seed fuzz checks", "rows": rows, "noise": nz}
@@ -710,6 +808,29 @@ def cmd_report(a) -> None:
     if a.md:
         Path(a.md).write_text(text + "\n")
     print(text)
+
+
+def combined_table(rels: list[dict], idx: list[dict], fmt) -> str:
+    """The combined headline (tracked + held-out pooled) beside the two parts and their gap."""
+    out = ["**Combined headline: tracked (tuned-on: the eight + the cost set) and held-out pooled, all with no deadline; "
+           "the gap tuned-on minus held-out (time and memory: their ratio) is the overfitting signal**", "",
+           "| release | combined proven % | combined known facts % | combined wall geomean | combined RSS geomean | proven % tuned / held-out (gap) | "
+           "known facts % tuned / held-out (gap) | wall tuned / held-out (×) | RSS tuned / held-out (×) | cuts tuned / held-out |",
+           "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for e, i in zip(rels, idx):
+        c, t, h = i.get("combined"), i.get("tracked"), i.get("heldout")
+        if not h:
+            continue
+        if not c:
+            out.append(f"| {e['tag']} | – | – | – | – | – / {fmt(h['proven_pct'])} | – / {fmt(h['known_facts_pct'])} | – / {fmt(h['wall_geomean_s'], 2)} s | "
+                       f"– / {fmt(h['rss_geomean_mb'], 0)} MB | – / {h.get('cuts', '–')} |")
+            continue
+        g = c["gap"]
+        out.append(f"| {e['tag']} | {fmt(c['proven_pct'])} | {fmt(c['known_facts_pct'])} | {fmt(c['wall_geomean_s'], 2)} s | {fmt(c['rss_geomean_mb'], 0)} MB | "
+                   f"{fmt(t['proven_pct'])} / {fmt(h['proven_pct'])} ({fmt(g['proven_pct'], 1)}) | {fmt(t['known_facts_pct'])} / {fmt(h['known_facts_pct'])} ({fmt(g['known_facts_pct'], 1)}) | "
+                   f"{fmt(t['wall_geomean_s'], 2)} / {fmt(h['wall_geomean_s'], 2)} s ({fmt(g['wall_geomean_s'], 1)}×) | "
+                   f"{fmt(t['rss_geomean_mb'], 0)} / {fmt(h['rss_geomean_mb'], 0)} MB ({fmt(g['rss_geomean_mb'], 1)}×) | {t['cuts']} / {h['cuts']} |")
+    return "\n".join(out)
 
 
 def flattening(rels: list[dict], idx: list[dict], heads: dict) -> str:
@@ -730,13 +851,15 @@ def flattening(rels: list[dict], idx: list[dict], heads: dict) -> str:
 
 
 # held-out metrics (no iteration tunes against them) and what counts as moving
+# held-out metrics (no iteration tunes against them) and what counts as moving; proven %, known
+# facts %, time and memory on the tracked set where both releases compared have it, else the eight
 HELD_OUT = {
-    "fuzz unsound (fresh seeds)": (lambda i: i["soundness"]["fuzz_unsound"], 0),
-    "budget=0 golden passing": (lambda i: i["precision"]["budget0_passed"], 3),
-    "proven verdicts %": (lambda i: i["precision"]["proven_pct"], 0.2),
-    "known hover facts %": (lambda i: i["precision"]["known_facts_pct"], 0.5),
-    "wall-time geomean (s)": (lambda i: i["speed"]["wall_geomean_s"], None),
-    "RSS geomean (MB)": (lambda i: i["speed"]["rss_geomean_mb"], None),
+    "fuzz unsound (fresh seeds)": (lambda i, t: i["soundness"]["fuzz_unsound"], 0),
+    "budget=0 golden passing": (lambda i, t: i["precision"]["budget0_passed"], 3),
+    "proven verdicts %": (lambda i, t: head(i, "proven_pct", t), 0.2),
+    "known hover facts %": (lambda i, t: head(i, "known_facts_pct", t), 0.5),
+    "wall-time geomean (s)": (lambda i, t: head(i, "wall_geomean_s", t), None),
+    "RSS geomean (MB)": (lambda i, t: head(i, "rss_geomean_mb", t), None),
 }
 
 
@@ -750,7 +873,8 @@ def stop_check(rels: list[dict], idx: list[dict], nz: dict, k: int = 3, rows: li
     for j in range(1, len(rels)):
         cells, quiet = [], True
         for name, (f, thr) in HELD_OUT.items():
-            a, b = f(idx[j - 1]), f(idx[j])
+            t = idx[j - 1].get("tracked") is not None and idx[j].get("tracked") is not None
+            a, b = f(idx[j - 1], t), f(idx[j], t)
             if b is None or a is None:
                 cells.append("–")
                 quiet = False  # (not measured: not known to be quiet)

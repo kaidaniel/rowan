@@ -58,6 +58,22 @@ tuned-on side of the comparison.
 
 `sweep`: `metrics` at each knob ×½ and ×2: ROWAN_LIMITS budget and ms, and binaries built with
 other constants (`--bins`).
+
+`rotate` (the owner's, about every 20 releases; AGENTS.md, Tests):
+    uv run --no-project python bench/heldout.py rotate --draw [--candidates FILE|URL] [--snapshot DATE]
+            [-n 31] [--seed S] [--out PROPOSAL.json]
+    uv run --no-project python bench/heldout.py rotate --apply PROPOSAL.json
+`--draw` proposes a fresh corpus by #86's rules: candidates (names, one per line; default the
+top PyPI packages of the last 30 days) shuffled by the seed and taken in turn while they pass:
+pure Python (every wheel `none-any`, no C / Cython / Rust source in the sdist), no overlap (by
+distribution and import name) with the eight, the cost set, the site-packages scenarios, the
+golden suites' imports or the current corpus, the latest sdist uploaded before the snapshot date
+(sha256 kept), its two largest modules (tests, docs, examples left out) 200–8,000 lines
+together, its tests where the sdist has them (pytest and its runtime requirements). It writes a
+proposal and changes nothing: the owner reviews it (kinds, whys, test arguments). `--apply` then
+retires the current corpus into the cost set's manifest (tuned on from then on: source `pypi`,
+each module's sha256), installs the proposal as the manifest and resets sound_baseline.json (its
+kinds kept, no sites; then `sound --write-baseline` and classify).
 """
 from __future__ import annotations
 
@@ -74,7 +90,9 @@ import subprocess
 import sys
 import tarfile
 import time
+import random
 import urllib.request
+import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -703,9 +721,164 @@ def check_baseline(out: dict, a) -> int:
     return 1 if new else 0
 
 
+# ---------------------------------------------------------------- rotate
+TOP_PYPI = "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json"
+COMPILED = (".c", ".cc", ".cpp", ".cxx", ".pyx", ".pxd", ".rs", ".f90", ".go")
+SKIP_PARTS = {"tests", "test", "testing", "docs", "doc", "examples", "example", "benchmarks", "bench", "scripts", "tools", "build"}
+
+
+def norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def taken_names() -> set[str]:
+    """Distribution and import names of everything tracked or tested (normalised): the eight's
+    distributions, the cost set's packages and module names, the site-packages scenarios' pins,
+    every top-level import of the golden suites, the current held-out corpus."""
+    import prepare
+    import sitepackages
+
+    names = {n for n in ("rich", "click", "pip", "timm", "sktime")}
+    for v in vars(prepare).values():
+        if isinstance(v, list) and v and all(isinstance(x, tuple) and len(x) == 2 for x in v):
+            names |= {n for n, _ in v}
+    for spec in sitepackages.SCENARIOS.values():
+        names |= {re.split(r"[=<>\[]", x)[0] for x in spec.get("pins", [])}
+    cs = json.loads((HERE / "costset" / "manifest.json").read_text())
+    names |= {p["name"] for p in cs["packages"]} | {m["name"].split("_")[0] for m in cs["modules"]}
+    names |= {p["name"] for p in manifest()}
+    imp = re.compile(r"^\s*(?:import|from)\s+([A-Za-z_]\w*)", re.M)
+    for f in (ROOT / "tests").rglob("*.py"):
+        names |= set(imp.findall(f.read_text(errors="replace")))
+    return {norm(n) for n in names}
+
+
+def pypi_json(name: str) -> dict | None:
+    try:
+        return json.loads(urllib.request.urlopen(f"https://pypi.org/pypi/{name}/json", timeout=30).read())
+    except OSError:
+        return None
+
+
+def latest_sdist(meta: dict, snapshot: str) -> tuple[str, dict, list] | None:
+    """The newest release uploaded before the snapshot with an sdist (no pre-releases or yanked
+    files): (version, the sdist's file entry, all its files)."""
+    best = None
+    for ver, files in meta.get("releases", {}).items():
+        if not files or re.search(r"[a-zA-Z]", ver.replace("post", "")):
+            continue
+        sd = [f for f in files if f["packagetype"] == "sdist" and not f.get("yanked") and f["upload_time_iso_8601"][:10] < snapshot]
+        if sd and (best is None or sd[0]["upload_time_iso_8601"] > best[1]["upload_time_iso_8601"]):
+            best = (ver, sd[0], files)
+    return best
+
+
+def draw_one(name: str, snapshot: str, taken: set[str]) -> tuple[dict | None, str]:
+    """A manifest entry for the candidate, or None with the reason it fails."""
+    meta = pypi_json(name)
+    if not meta:
+        return None, "not on PyPI"
+    found = latest_sdist(meta, snapshot)
+    if not found:
+        return None, "no sdist before the snapshot"
+    ver, sd, files = found
+    if any(f["packagetype"] == "bdist_wheel" and not f["filename"].endswith("-none-any.whl") for f in files):
+        return None, "platform wheels (not pure Python)"
+    data = urllib.request.urlopen(sd["url"], timeout=120).read()
+    if hashlib.sha256(data).hexdigest() != sd["digests"]["sha256"]:
+        return None, "sha256 mismatch"
+    if sd["filename"].endswith(".zip"):
+        z = zipfile.ZipFile(io.BytesIO(data))
+        members = {n: z.read(n) for n in z.namelist() if n.endswith((".py",) + COMPILED)}
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data)) as t:
+            members = {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith((".py",) + COMPILED)}
+    rel = {n.split("/", 1)[1]: b for n, b in members.items() if "/" in n}
+    if any(n.endswith(COMPILED) for n in rel):
+        return None, "compiled sources in the sdist"
+    code = {n: b for n, b in rel.items() if n.endswith(".py") and not SKIP_PARTS & set(n.split("/")[:-1])
+            and not n.split("/")[-1].startswith(("test_", "conftest", "setup.py")) and n.split("/")[0] not in ("setup.py",)}
+    tops = {norm(n.split("/")[1] if n.startswith("src/") else n.split("/")[0].removesuffix(".py")) for n in code}
+    if norm(name) in taken or tops & taken:
+        return None, f"overlaps a tracked set or a golden case ({sorted((tops | {norm(name)}) & taken)})"
+    mods = sorted(code, key=lambda n: -code[n].count(b"\n"))[:2]
+    lines = sum(code[m].count(b"\n") for m in mods)
+    if not mods or not 200 <= lines <= 8000:
+        return None, f"its two largest modules have {lines} lines"
+    root = "src" if mods[0].startswith("src/") else "."
+    tdirs = sorted({n.split("/")[0] for n in rel if n.split("/")[0] in ("tests", "test")})
+    reqs = [r.split(";")[0].split("[")[0].strip() for r in (meta["info"].get("requires_dist") or []) if "extra ==" not in r]
+    return {"name": meta["info"]["name"], "version": ver, "kind": "unclassified", "why": "",
+            "sdist": sd["filename"], "url": sd["url"], "sha256": sd["digests"]["sha256"], "root": root,
+            "modules": mods, "tests": {"paths": tdirs, "deps": ["pytest", *[re.split(r"[<>=!~ (]", r)[0] for r in reqs if r]], "args": []} if tdirs else None}, f"{lines} lines"
+
+
+def cmd_rotate(a) -> None:
+    if a.apply:
+        return rotate_apply(Path(a.apply))
+    if not a.draw:
+        sys.exit("rotate: --draw or --apply PROPOSAL.json")
+    src = a.candidates or TOP_PYPI
+    if src.startswith("http"):
+        doc = json.loads(urllib.request.urlopen(src, timeout=60).read())
+        cands = [r["project"] for r in doc["rows"]]
+    else:
+        cands = [x.strip() for x in Path(src).read_text().splitlines() if x.strip() and not x.startswith("#")]
+    random.Random(a.seed).shuffle(cands)
+    taken, out = taken_names(), []
+    for name in cands:
+        if len(out) >= a.n:
+            break
+        try:
+            e, why = draw_one(name, a.snapshot, taken)
+        except (OSError, tarfile.TarError, zipfile.BadZipFile, KeyError) as ex:
+            e, why = None, f"failed: {ex}"
+        print(f"  {name}: {'taken, ' if e else ''}{why}", file=sys.stderr, flush=True)
+        if e:
+            out.append(e)
+            taken.add(norm(e["name"]))
+    doc = {"snapshot": a.snapshot, "drawn": {"seed": a.seed, "candidates": src}, "packages": out}
+    Path(a.out).write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
+    print(f"{len(out)} packages proposed in {a.out}: review kinds, whys and test arguments, then `rotate --apply {a.out}`")
+
+
+def rotate_apply(proposal: Path) -> None:
+    """The current corpus into the cost set's manifest, the proposal as the corpus, the baseline reset."""
+    new = json.loads(proposal.read_text())
+    cs_file = HERE / "costset" / "manifest.json"
+    cs = json.loads(cs_file.read_text())
+    old = json.loads(MANIFEST.read_text())
+    have = {p["name"] for p in cs["packages"]}
+    for p in old["packages"]:
+        d = fetch_one(p)
+        if p["name"] not in have:
+            cs["packages"].append({k: p[k] for k in ("name", "version", "url", "sha256")})
+        for m in p["modules"]:
+            cs["modules"].append({"name": f"{norm(p['name']).replace('-', '_')}_{Path(m).stem.strip('_')}", "source": "pypi", "kind": p["kind"],
+                                  "package": p["name"], "path": m, "sha256": hashlib.sha256((d / m).read_bytes()).hexdigest()})
+    cs.setdefault("retired", []).append({"snapshot": old.get("snapshot"), "packages": len(old["packages"]),
+                                         "note": "a held-out corpus retired into the tuned-on set by `heldout.py rotate --apply`"})
+    cs_file.write_text(json.dumps(cs, indent=1, ensure_ascii=False) + "\n")
+    MANIFEST.write_text(json.dumps(new, indent=1, ensure_ascii=False) + "\n")
+    base = json.loads(BASELINE.read_text())
+    base["sites"] = {}
+    base["_doc"] = base.get("_doc", "").split(" Classified in")[0] + f" Reset for the corpus of {new.get('snapshot')}: run `sound --write-baseline` and classify."
+    BASELINE.write_text(json.dumps(base, indent=1, ensure_ascii=False) + "\n")
+    print(f"retired {len(old['packages'])} packages into {cs_file.relative_to(ROOT)}; {len(new['packages'])} held out; "
+          f"next: `heldout.py fetch`, `heldout.py sound --write-baseline {BASELINE.relative_to(ROOT)}`, classify its sites, commit")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    rot = sub.add_parser("rotate")
+    rot.add_argument("--draw", action="store_true", help="propose a fresh corpus (changes nothing)")
+    rot.add_argument("--apply", help="install a reviewed proposal: the current corpus joins the cost set")
+    rot.add_argument("--candidates", help=f"names, one per line, or a top-packages JSON URL (default {TOP_PYPI})")
+    rot.add_argument("--snapshot", default=time.strftime("%Y-%m-%d"), help="the latest sdist uploaded before this date")
+    rot.add_argument("-n", type=int, default=31)
+    rot.add_argument("--seed", type=int, default=0)
+    rot.add_argument("--out", default=str(WORK / "proposal.json"))
     for name in ("fetch", "metrics", "sound", "sweep"):
         q = sub.add_parser(name)
         q.add_argument("--only")
@@ -726,7 +899,7 @@ def main() -> None:
             q.add_argument("--bins")
             q.add_argument("--variants", help="only these (current, budget=x0.5, …, the --bins names)")
     a = ap.parse_args()
-    {"fetch": cmd_fetch, "metrics": cmd_metrics, "sound": cmd_sound, "sweep": cmd_sweep}[a.cmd](a)
+    {"fetch": cmd_fetch, "metrics": cmd_metrics, "sound": cmd_sound, "sweep": cmd_sweep, "rotate": cmd_rotate}[a.cmd](a)
 
 
 if __name__ == "__main__":

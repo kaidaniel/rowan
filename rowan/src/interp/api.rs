@@ -301,13 +301,21 @@ impl Analyzer {
     /// The literal ends of the str a name argument `e` is made by (`template_affix`), directly
     /// or through a local of the running function only ever assigned templates: one pair each.
     pub fn template_affixes(&self, e: &'static ruff_python_ast::Expr) -> Option<Vec<(String, String)>> {
-        if let Some(a) = crate::syntax::template_affix(e) {
+        // (`"pre" + x`: str's own `+` unless x's class has a `__radd__` (`x + "post"`: an
+        // `__add__`); the program's classes are those defined so far, as its instances are;
+        // a library's keeps the text, AGENTS.md's Soundness)
+        let str_add = || {
+            let ks = ["__radd__", "__add__"].map(crate::intern::key_str_lit);
+            !self.program.user_classes.iter().any(|c| ks.iter().any(|k| self.heap.cls_slots.contains_key(&(*c, crate::domain::Ns::Attr, *k))))
+        };
+        let affix = |e: &ruff_python_ast::Expr| crate::syntax::template_affix(e).filter(|_| crate::syntax::concat_affix(e).is_none() || str_add());
+        if let Some(a) = affix(e) {
             return Some(vec![a]);
         }
         let ruff_python_ast::Expr::Name(n) = e else { return None };
         let fi = self.frame().func.and_then(|f| self.heap.func_info_opt(f))?;
         let super::FuncNode::Def(f) = fi.node else { return None };
-        crate::syntax::sole_assignments(f, n.id.as_str())?.into_iter().map(crate::syntax::template_affix).collect()
+        crate::syntax::sole_assignments(f, n.id.as_str())?.into_iter().map(affix).collect()
     }
 
     // ------------------------------------------------------------ exceptions
