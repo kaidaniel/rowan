@@ -607,8 +607,19 @@ impl Row {
         }
     }
 
-    /// The full internal form (sets, sources, mutators).
+    /// The internal form (sets, sources, mutators; at most `DETAILS_LISTED` of each of the
+    /// last two: a row may have thousands, and golden documents carry this per check).
     pub fn details(&self) -> String {
+        const DETAILS_LISTED: usize = 16;
+        let listed = |mut v: Vec<String>| {
+            v.sort();
+            let more = v.len().saturating_sub(DETAILS_LISTED);
+            v.truncate(DETAILS_LISTED);
+            if more > 0 {
+                v.push(format!("… {} more", more));
+            }
+            v.join(", ")
+        };
         let mut parts = vec![format!("present={}", keys_str(self.present.iter())), format!("definite={}", keys_str(self.definite.iter()))];
         if self.likely != self.definite {
             parts.push(format!("likely={}", keys_str(self.likely.iter())));
@@ -617,14 +628,10 @@ impl Row {
             parts.push(format!("absent={}", keys_str(self.absent.iter())));
         }
         if !self.sources.is_empty() {
-            let mut v: Vec<String> = self.sources.iter().map(|(s, l)| format!("{}{}", source_label(s), lens_str(l))).collect();
-            v.sort();
-            parts.push(format!("sources={{{}}}", v.join(", ")));
+            parts.push(format!("sources={{{}}}", listed(self.sources.iter().map(|(s, l)| format!("{}{}", source_label(s), lens_str(l))).collect())));
         }
         if !self.mutators.is_empty() {
-            let mut v: Vec<String> = self.mutators.iter().map(|m| m.to_string()).collect();
-            v.sort();
-            parts.push(format!("mutators={{{}}}", v.join(", ")));
+            parts.push(format!("mutators={{{}}}", listed(self.mutators.iter().map(|m| m.to_string()).collect())));
         }
         if self.top {
             parts.push("TOP".into());
