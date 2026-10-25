@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Analyzer, Args, ExcNames, FuncInfo, FuncNode, RaiseRec};
-use crate::domain::{KeyVal, ObjId, Value};
+use crate::domain::{join_values, KeyVal, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, StrId};
 use crate::state::{Footprint, State};
@@ -261,21 +261,28 @@ impl Analyzer {
         }
         // (the activation's raises of its last round, from here with what they changed)
         if let Some(rs) = self.recursion.raises.get(key).filter(|_| state.reachable) {
-            for (cls, rst, exc) in rs.clone() {
-                // (the heap at the raise; for a raise of anything — unknown code in the activation,
-                // whose raise states only grow the handlers' — the heap here, joined with what the
-                // raise state says of the objects this state has facts of: the objects only the
-                // rounds made, which nothing here reaches, are left out)
-                let mut here = if super::tries::is_any_exc(&cls) {
-                    let mut h = state.copy();
-                    let fp = rst.footprint(state);
-                    let has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
-                    let fp = Footprint { rows: fp.rows.into_iter().filter(|k| has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| has(*o)).collect() };
-                    h.join_heap_fp(&rst, &fp);
-                    h
-                } else {
-                    rst.copy()
-                };
+            // (raises of more than a few classes: one, of any class, from their states joined —
+            // a replay per class made the handlers' states joined that often)
+            // (raises of more than a few classes: one, of any class, from their states joined — a
+            // replay per class joins every handler's state that often)
+            let merged = rs.len() > 3;
+            let rs: Vec<RaiseRec> = if merged {
+                let st = State::join_all(rs.iter().map(|r| r.1.copy()).collect());
+                let exc = join_values(rs.iter().map(|r| r.2.clone()).collect::<Vec<_>>());
+                st.map(|st| vec![(Some(super::any_exc()), st, exc)]).unwrap_or_default()
+            } else {
+                rs.clone()
+            };
+            for (cls, rst, exc) in rs {
+                // (from this call's state, joined with what the raise state says of the objects
+                // this state has facts of: the objects only the activation's rounds made, which
+                // nothing here reaches, are left out — they only grew the handlers' states, which
+                // then differed at every call)
+                let mut here = state.copy();
+                let fp = rst.footprint(state);
+                let has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
+                let fp = Footprint { rows: fp.rows.into_iter().filter(|k| has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| has(*o)).collect() };
+                here.join_heap_fp(&rst, &fp);
                 here.env = state.env.clone();
                 here.unbound = state.unbound.clone();
                 here.path = state.path.clone();
