@@ -451,6 +451,7 @@ impl Analyzer {
                 if let Some(v) = crate::models::builtin_dunder(self, &qual, a, state, node) {
                     return v;
                 }
+                crate::models::driven_dunders(self, &qual, None, args, state, node);
                 let r = self.call_external(&qual, a, state, node, call_ast);
                 if call_ast.is_some() {
                     crate::models::may_type_error(self, &qual, None, args, kwargs, &r, state);
@@ -508,6 +509,7 @@ impl Analyzer {
                 *first = self.keyify(first);
             }
         }
+        crate::models::driven_dunders(self, &qual, Some(&recv), &args, state, node);
         let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
         let pure = if qual.starts_with("str.") { self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) } else { None };
         let r = match (pure, self.program.models.lookup(&qual)) {
@@ -978,6 +980,7 @@ impl Analyzer {
         let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
         self.recursion.begin(&key, (self_v.clone(), args.to_vec(), kwargs.clone()), pre_rc.clone(), born_mark);
+        self.recursion.set_depth(&key, self.cx.frames.len());
         if gen_id.is_none() {
             if let Some(fr) = self.cx.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(self.heap.mark(), pre_rc));

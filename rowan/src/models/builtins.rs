@@ -1430,6 +1430,12 @@ pub(super) fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> V
     Value::none()
 }
 
+/// `object.__delattr__(obj, name)`: `delattr` past the class's own `__delattr__`.
+pub(super) fn m_object_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    an.plain_setattr(|an| m_delattr(an, st, c));
+    Value::none()
+}
+
 /// `object.__init__(self)` (`super().__init__()` in a class whose bases are the program's):
 /// nothing; given more, as CPython decides by the class (unknown code).
 pub(super) fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1603,7 +1609,14 @@ pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 verdicts.push(true);
                 continue;
             }
-            match getattr_hook_outcome(an, st, o, k, &c.node) {
+            let outcome = getattr_hook_outcome(an, st, o, k, &c.node);
+            // (the hook runs: its effects, where it returns)
+            let mut ran = st.copy();
+            an.run_dunder(&Value::obj(o), &["__getattr__"], vec![Value::lit_str(&name)], &c.node, &mut ran);
+            if ran.reachable {
+                *st = st.join(&mut ran);
+            }
+            match outcome {
                 Some(b) => {
                     verdicts.push(b);
                     continue;

@@ -648,6 +648,26 @@ impl Analyzer {
     }
 
     /// A user class whose bases are all user classes (or `object`), transitively.
+    /// A class of the program's alone, with no library base anywhere above it but `object` (no
+    /// Enum, NamedTuple, pydantic model, dict: their protocols are their models'): its instances
+    /// have only the dunders its code defines.
+    pub fn plain_program_class(&self, cls: u32) -> bool {
+        let mut work = vec![cls];
+        let mut seen: Vec<u32> = Vec::new();
+        while let Some(c) = work.pop() {
+            if seen.contains(&c) {
+                continue;
+            }
+            seen.push(c);
+            let Some(ci) = self.heap.class_info_opt(c) else { return false };
+            if ci.open_base.get() || ci.lib.quals.iter().any(|q| q != "builtins.object") || ci.lib.is_enum || ci.lib.named_tuple || ci.lib.pydantic || ci.lib.typed_dict || ci.lib.dict_base || ci.lib.nn_module {
+                return false;
+            }
+            work.extend(ci.bases.iter().copied());
+        }
+        !self.m.enum_members.contains_key(&cls)
+    }
+
     pub fn hierarchy_closed(&self, cls: u32) -> bool {
         let mut work = vec![cls];
         let mut seen: Vec<u32> = Vec::new();
@@ -768,6 +788,11 @@ impl Analyzer {
             }
         }
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
+        // (a record beside a str, an unknown scalar or another container: the test may be about
+        // either, no record narrows)
+        if !recs.is_empty() && (!rv.kv.is_bot() || recs.len() != rv.pts.len()) {
+            return;
+        }
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));

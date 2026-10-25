@@ -103,6 +103,10 @@ impl Analyzer {
     /// element (`iter_sequence`, `iter_mapping`, `iter_view`, `iter_zip`, …), and the scalar
     /// part's (`iter_scalar`).
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
+        // (the program's instances whose class has neither `__iter__` nor `__getitem__`: TypeError)
+        let Some(v) = &self.without_dunders(v, &["__iter__", "__getitem__"], state) else {
+            return Iteration::new(None, Elem::One(Value::new()), false, false);
+        };
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         // (a loop reads the containers it is over at each step, through a live iterator too:
@@ -157,6 +161,14 @@ impl Analyzer {
                     acc.elems.push(join_values(ms));
                 }
                 Kind::Instance if self.heap.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => self.iter_user(oid, node, state, &mut acc),
+                // (the program's instance without `__iter__`: `__getitem__` from 0 until it
+                // raises, as library code runs its dunders)
+                Kind::Instance if self.heap.instance_class(oid).is_some_and(|c| self.plain_program_class(c)) => {
+                    self.instance_dunders(vec![oid], &["__getitem__", "__len__"], state, node);
+                    acc.items = None;
+                    acc.exhaustive = false;
+                    acc.elems.push(line_data.clone());
+                }
                 Kind::Unknown => self.iter_unknown(oid, node, state, &mut acc),
                 _ => {
                     acc.items = None;

@@ -280,6 +280,13 @@ impl Analyzer {
     /// `del obj.name`: on an instance whose class has a property of the name, its deleter runs
     /// (none: AttributeError); the others lose the attribute (`delete_item`).
     pub(super) fn delete_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State) {
+        // (an instance whose class defines `__delattr__`: it runs instead)
+        let hook = if self.mode.bypass_setattr { None } else { self.run_dunder(obj, &["__delattr__"], vec![Value::lit_str(name)], node, state) };
+        let obj = &match hook {
+            Some((_, rest)) if rest.empty() => return,
+            Some((_, rest)) => rest,
+            None => obj.clone(),
+        };
         let nk = key_str_lit(name);
         let prop = |an: &Analyzer, o: ObjId| -> Option<Option<ObjId>> {
             let cls = an.heap.instance_class(o).filter(|_| an.heap.kind(o) == Kind::Instance)?;
@@ -1316,11 +1323,12 @@ impl Analyzer {
             // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
             if !self.mode.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
                 let before = state.row(oid, Ns::Attr).mutators.clone();
+                let skipped = self.budget.skipped;
                 self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
                 // (a call of it that did not run, unknown code to its receiver: it takes the
                 // name to store, likely there after, as a skipped method's own stores are)
                 let row = state.row(oid, Ns::Attr);
-                if state.reachable && !row.present.contains(nk) && row.mutators != before {
+                if state.reachable && !row.present.contains(nk) && (row.mutators != before || self.budget.skipped != skipped) {
                     let mut d = row.store(nk, true).data();
                     d.definite = d.definite.remove(nk);
                     state.set_row(oid, Ns::Attr, Row::from_data(d));

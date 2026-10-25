@@ -12,8 +12,8 @@
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Analyzer, Args, FuncInfo, FuncNode};
-use crate::domain::{KeyVal, ObjId, Value};
+use super::{Analyzer, Args, ExcNames, FuncInfo, FuncNode, RaiseRec};
+use crate::domain::{join_values, KeyVal, ObjId, Value};
 use crate::frontend::Node;
 use crate::intern::{self, s, StrId};
 use crate::state::{Footprint, State};
@@ -47,6 +47,16 @@ pub struct Recursion {
     /// per running activation: the heap it started from, that heap grown by the heaps its
     /// recursive calls were made in (on older objects they reach), and its birth mark
     heap: FxHashMap<ActKey, (std::rc::Rc<State>, Option<State>, u64)>,
+    /// per recursive activation running a round (its frame depth): the raises leaving its
+    /// frame, joined per class
+    pub(in crate::interp) collecting: Vec<(ActKey, usize, Vec<(Option<ExcNames>, crate::state::Joins, Value)>)>,
+    /// a recursive activation's raises of its last round, with what each changed of its entry:
+    /// its recursive calls raise them
+    raises: FxHashMap<ActKey, Vec<RaiseRec>>,
+    /// recursive activations a recursive call of which ran inside a try of their own frames or
+    /// deeper (their raises matter there: collected), and each running activation's frame depth
+    wants_raises: FxHashMap<ActKey, Vec<(FxHashSet<String>, bool)>>,
+    depth_of: FxHashMap<ActKey, usize>,
 }
 
 impl Recursion {
@@ -78,6 +88,11 @@ impl Recursion {
         self.heap.insert(key.clone(), (pre, None, mark));
     }
 
+    /// The activation's frame depth is `d` (its frame pushed).
+    pub(in crate::interp) fn set_depth(&mut self, key: &ActKey, d: usize) {
+        self.depth_of.insert(key.clone(), d);
+    }
+
     /// The activation ends.
     pub(in crate::interp) fn end(&mut self, key: &ActKey) {
         self.active.remove(key);
@@ -89,6 +104,9 @@ impl Recursion {
         self.widened.remove(key);
         self.heap.remove(key);
         self.table.remove(key);
+        self.raises.remove(key);
+        self.wants_raises.remove(key);
+        self.depth_of.remove(key);
     }
 }
 
@@ -175,6 +193,19 @@ impl Analyzer {
     /// round).
     pub(super) fn recursive_call(&mut self, key: &ActKey, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State) -> Value {
         self.recursion.hit.insert(key.clone());
+        // (inside a try of the activation's frames: what the activation raises matters here)
+        if let Some(d) = self.recursion.depth_of.get(key).copied() {
+            // (what those tries' handlers catch, and whether a finally runs: the raises they see)
+            let seen: Vec<(FxHashSet<String>, bool)> = self.unwind.tries.iter().filter(|t| t.frames >= d).flat_map(|t| t.hclasses.iter().cloned().chain(t.runs.then(|| (std::iter::once("*".to_string()).collect(), false)))).collect();
+            if !seen.is_empty() {
+                let w = self.recursion.wants_raises.entry(key.clone()).or_default();
+                for h in seen {
+                    if !w.contains(&h) {
+                        w.push(h);
+                    }
+                }
+            }
+        }
         // widen the entry arguments with the ones of this recursive call
         if let Some((e_self, e_args, e_kwargs)) = self.recursion.entry.get(key).cloned() {
             let n_self = match (&e_self, &self_v) {
@@ -228,12 +259,75 @@ impl Analyzer {
                 }
             }
         }
+        // (the activation's raises of its last round, from here with what they changed)
+        if let Some(rs) = self.recursion.raises.get(key).filter(|_| state.reachable) {
+            // (raises of more than a few classes: one, of any class, from their states joined —
+            // a replay per class made the handlers' states joined that often)
+            // (raises of more than a few classes: one, of any class, from their states joined — a
+            // replay per class joins every handler's state that often)
+            let merged = rs.len() > 3;
+            let rs: Vec<RaiseRec> = if merged {
+                let st = State::join_all(rs.iter().map(|r| r.1.copy()).collect());
+                let exc = join_values(rs.iter().map(|r| r.2.clone()).collect::<Vec<_>>());
+                st.map(|st| vec![(Some(super::any_exc()), st, exc)]).unwrap_or_default()
+            } else {
+                rs.clone()
+            };
+            for (cls, rst, exc) in rs {
+                // (from this call's state, joined with what the raise state says of the objects
+                // this state has facts of: the objects only the activation's rounds made, which
+                // nothing here reaches, are left out — they only grew the handlers' states, which
+                // then differed at every call)
+                let mut here = state.copy();
+                let fp = rst.footprint(state);
+                let has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
+                let fp = Footprint { rows: fp.rows.into_iter().filter(|k| has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| has(*o)).collect() };
+                here.join_heap_fp(&rst, &fp);
+                here.env = state.env.clone();
+                here.unbound = state.unbound.clone();
+                here.path = state.path.clone();
+                self.unwind.cur_exc = (!exc.pts.is_empty()).then_some(exc);
+                self.unwind.cur_exc_cls = cls;
+                self.record_raise_state(&mut here);
+                self.unwind.cur_exc = None;
+                self.unwind.cur_exc_cls = None;
+            }
+        }
         if let Some((ret, exit_state, fp)) = self.recursion.table.get(key) {
             let ret = ret.clone();
             state.join_heap_fp(exit_state, fp);
             return ret;
         }
         Value::new()
+    }
+
+    /// A raise of class `cls` (exception `exc`) leaving the frames of recursive activations
+    /// running a round (no try of theirs or deeper sees it): kept for their recursive calls.
+    pub(in crate::interp) fn collect_rec_raise(&mut self, cls: &Option<ExcNames>, exc: &Value, state: &State) {
+        let depth = self.cx.frames.len();
+        for i in 0..self.recursion.collecting.len() {
+            let d = self.recursion.collecting[i].1;
+            if depth < d || self.unwind.tries.iter().any(|t| t.frames >= d && t.sees(cls)) {
+                continue;
+            }
+            // (one no try around the activation's recursive calls may see: nothing to replay)
+            let key = &self.recursion.collecting[i].0;
+            if !self.recursion.wants_raises.get(key).is_some_and(|hs| hs.iter().any(|hc| super::tries::handler_matches(hc, cls) != Some(false))) {
+                continue;
+            }
+            let recs = &mut self.recursion.collecting[i].2;
+            match recs.iter_mut().find(|r| r.0 == *cls) {
+                Some(r) => {
+                    r.1.add(state.copy());
+                    r.2 = r.2.join(exc);
+                }
+                None => {
+                    let mut j = crate::state::Joins::default();
+                    j.add(state.copy());
+                    recs.push((cls.clone(), j, exc.clone()));
+                }
+            }
+        }
     }
 
     /// A call's body run once from `st` (its parameters bound): a lambda's expression, a
@@ -271,7 +365,50 @@ impl Analyzer {
             if let Some(g) = gen_id {
                 self.gens.reads.push((g, false, Default::default(), self.cx.frames.len()));
             }
+            let collect = gen_id.is_none() && self.recursion.wants_raises.contains_key(key);
+            if collect {
+                self.recursion.collecting.push((key.clone(), self.cx.frames.len(), Vec::new()));
+            }
             self.run_body(fnode, gen_id, &mut st);
+            // (what this round raised; its recursive calls raised the last round's)
+            let raised: Option<Vec<RaiseRec>> = collect.then(|| {
+                let (_, _, recs) = self.recursion.collecting.pop().unwrap();
+                recs.into_iter().filter_map(|(c, j, e)| Some((c, j.finish()?, e))).collect()
+            });
+            // (joined into the earlier rounds' per class: they only grow, so they settle; a round
+            // that began collecting only now is not the last)
+            let mut raises_stable = collect || !self.recursion.wants_raises.contains_key(key);
+            // (a raise state settles where it changes no object older than the activation: what
+            // a round made anew, made again the next, is no change of the program's state)
+            let mark = self.recursion.heap.get(key).map(|h| h.2).unwrap_or(0);
+            let changes_old = |an: &Analyzer, a: &State, b: &State| {
+                let fp = a.footprint(b);
+                let old = |o: ObjId| an.heap.born_before(o, mark);
+                fp.rows.iter().any(|k| old(k.0)) || fp.slots.iter().any(|k| old(k.0)) || fp.elems.iter().any(|o| old(*o))
+            };
+            if let Some(now) = raised {
+                let mut acc: Vec<RaiseRec> = self.recursion.raises.get(key).cloned().unwrap_or_default();
+                for (c, mut st, e) in now {
+                    match acc.iter_mut().find(|r| r.0 == c) {
+                        Some(r) => {
+                            let j = r.1.join(&mut st);
+                            let x = r.2.join(&e);
+                            if changes_old(self, &j, &r.1) || x.kv != r.2.kv {
+                                raises_stable = false;
+                            }
+                            r.1 = j;
+                            r.2 = x;
+                        }
+                        None => {
+                            raises_stable = false;
+                            acc.push((c, st, e));
+                        }
+                    }
+                }
+                if !acc.is_empty() {
+                    self.recursion.raises.insert(key.clone(), acc);
+                }
+            }
             if gen_id.is_some() {
                 self.gens.last_reads = self.gens.reads.pop().map(|r| r.2);
             }
@@ -307,7 +444,7 @@ impl Analyzer {
             }
             if self.recursion.hit.contains(key) {
                 if let Some((pr, pst, _)) = self.recursion.table.get(key) {
-                    if *pr == ret && pst.same(&st) {
+                    if *pr == ret && pst.same(&st) && raises_stable {
                         st_final = Some(st);
                         break;
                     }

@@ -86,6 +86,26 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/call_protocol.py; about 30 s)
         run: uv run --no-project python tests/call_protocol.py --rowan 2000
 
+      - name: Recursion (bounded recursive function programs vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/rec_protocol.py; about 20 s)
+        run: uv run --no-project python tests/rec_protocol.py --rowan 1500
+
+      - name: Methods as callees (bounded method / property / __init__ programs vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/method_protocol.py; about 25 s)
+        run: uv run --no-project python tests/method_protocol.py --rowan 1500
+
+      - name: Closures and nonlocal (bounded closure programs vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/closure_protocol.py; about 20 s)
+        run: uv run --no-project python tests/closure_protocol.py --rowan 2000
+
+      - name: Narrowing and match (bounded test / pattern programs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py; about 20 s)
+        run: uv run --no-project python tests/narrow_protocol.py --rowan 5000
+
+      - name: The data model (bounded dunder / builtin programs vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/dunder_protocol.py; about 10 s)
+        run: uv run --no-project python tests/dunder_protocol.py --all
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

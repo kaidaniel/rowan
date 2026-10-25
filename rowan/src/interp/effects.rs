@@ -1105,6 +1105,56 @@ impl Analyzer {
         }
     }
 
+    /// The dunders named `names` of the instances `insts` (not of what they hold) whose code may
+    /// change something: one call none of which runs (`skipped_calls`), as library code runs them.
+    pub fn instance_dunders(&mut self, insts: Vec<ObjId>, names: &[&str], state: &mut State, node: &Node) {
+        let mut by_class: FxHashMap<ObjId, Vec<ObjId>> = FxHashMap::default();
+        for o in insts {
+            if let Some(c) = self.heap.instance_class(o).filter(|_| self.heap.kind(o) == Kind::Instance) {
+                let v = by_class.entry(c).or_default();
+                if !v.contains(&o) {
+                    v.push(o);
+                }
+            }
+        }
+        let mut classes: Vec<(ObjId, Vec<ObjId>)> = by_class.into_iter().collect();
+        classes.sort_unstable();
+        let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+        for (c, recvs) in classes {
+            // (hashing compares a key with others of an equal hash: none for a class hashing by
+            // identity)
+            let no_eq = names.contains(&"__hash__") && self.hashes_by_identity(c);
+            for f in self.changing_dunders(c, state).iter().copied().filter(|f| names.contains(&self.heap.func_info(*f).name.as_str()) && !(no_eq && self.heap.func_info(*f).name == "__eq__")) {
+                let r = Value::objs(recvs.iter().copied().collect());
+                match fns.iter_mut().find(|(g, _)| *g == f) {
+                    Some((_, Some(v))) => *v = v.join(&r),
+                    _ => fns.push((f, Some(r))),
+                }
+            }
+        }
+        if !fns.is_empty() {
+            self.skipped_calls(&fns, Args::pos(&[]), state, node, None);
+        }
+    }
+
+    /// The program's instances `vals` are or hold through builtin containers (lists, tuples,
+    /// dicts, sets, at any depth; not what the instances themselves hold), at most 256 objects.
+    pub fn container_instances(&self, vals: &[Value], state: &State) -> Vec<ObjId> {
+        let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        let (mut seen, mut out): (FxHashSet<ObjId>, Vec<ObjId>) = Default::default();
+        while let Some(o) = work.pop() {
+            if seen.len() >= 256 || !seen.insert(o) {
+                continue;
+            }
+            match self.heap.kind(o) {
+                Kind::Instance => out.push(o),
+                Kind::List | Kind::Tuple | Kind::Dict | Kind::Set => self.obj_edges(o, state, &mut work),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// The dunders of the instances `vals` reach (through at most 256 objects) whose code may
     /// change something, by function, with their receivers.
     pub(in crate::interp) fn given_dunders(&mut self, vals: &[Value], state: &State) -> Vec<(ObjId, Value)> {

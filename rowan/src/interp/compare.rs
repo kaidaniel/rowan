@@ -64,6 +64,13 @@ impl Analyzer {
             return lit(op == ast::CmpOp::IsNot);
         }
         let ordering = !matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
+        // (containers compared item by item: what their items' dunders run, as library code does)
+        if ordering && [a, b].iter().any(|v| v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set))) {
+            let held = self.container_instances(&[a.clone(), b.clone()], state);
+            if !held.is_empty() {
+                self.instance_dunders(held, &["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"], state, nd);
+            }
+        }
         if ordering && crate::models::torch::is_tensor(a) {
             return crate::models::torch::t_compare(self, a, b, nd, state);
         }
@@ -88,6 +95,21 @@ impl Analyzer {
                     return if first { self.compare_untyped(op, &rest, y, right, nd, state) } else { self.compare_untyped(op, y, &rest, right, nd, state) };
                 }
             }
+        }
+        // `x in c` of c an instance of the program's: its `__contains__`, else its iteration
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) {
+            if let Some(r) = self.in_instance(a, b, nd, state) {
+                return if op == ast::CmpOp::In { r } else { Value::data("bool") };
+            }
+        }
+        // `x in c` of an instance whose class has `__eq__`, c a container of the program's:
+        // `item == x` runs it (reflected) on some of the items, or none
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && self.in_runs_eq(a, b, nd, state) {
+            return Value::data("bool");
+        }
+        // `in` a literal that is no container (None, a number), or a str of a non-str: TypeError
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && b.kv.is_literal() && self.in_literal_raises(a, b, state) {
+            return Value::new();
         }
         if ordering {
             // library values (paths, Decimal, datetime); instances: their comparison methods
@@ -117,6 +139,150 @@ impl Analyzer {
             return Value::with_kv(both.filter(|o| self.heap.kind(o) == Kind::Frame), DATA);
         }
         Value::data("bool")
+    }
+
+    /// `a in b` where `b` holds the program's instances: their `__contains__` (its result's
+    /// truth: a bool not known), else what iterating them runs (`__iter__`, `__getitem__` until
+    /// it raises: any of their dunders, as library code runs them, `library_dunders`); None
+    /// where b holds none.
+    fn in_instance(&mut self, a: &Value, b: &Value, nd: &Node, state: &mut State) -> Option<Value> {
+        // (of classes of the program's alone: a library base's — an Enum Flag's `in` — is its
+        // model's)
+        let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c));
+        if !b.pts.iter().any(|o| user(self, o)) {
+            return None;
+        }
+        // (none of the three: not a container, TypeError)
+        let Some(b) = self.without_dunders(b, &["__contains__", "__iter__", "__getitem__"], state) else { return Some(Value::new()) };
+        let b = &b;
+        // (beside other objects, a container that may be any of them: what its dunders change,
+        // as library code runs them)
+        // (so too for instances whose attributes are not known — made by code that did not run:
+        // their `__contains__` would read them through `__getattr__`, a call that does not run, at
+        // every test)
+        let known = |an: &Analyzer, o: ObjId| state.has_row(o, Ns::Attr) && state.row(o, Ns::Attr).closed() && an.heap.obj(o).single;
+        if b.pts.iter().any(|o| self.heap.kind(o) != Kind::Instance || !known(self, o)) || !b.kv.is_bot() {
+            self.in_dunders(b.pts.iter().filter(|o| user(self, *o)).collect(), state, nd);
+            return if b.pts.iter().all(|o| user(self, o)) && b.kv.is_bot() { Some(Value::data("bool")) } else { None };
+        }
+        // (those without `__contains__`: iterated, by `__iter__` or `__getitem__`, items compared)
+        let (r, rest) = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
+            Some((r, rest)) => (r, rest),
+            None => (Value::new(), b.clone()),
+        };
+        let iterated: Vec<ObjId> = rest.pts.iter().filter(|o| user(self, *o)).collect();
+        let r = if iterated.is_empty() {
+            r
+        } else {
+            self.in_dunders(iterated, state, nd);
+            Value::data("bool")
+        };
+        Some(if r.pts.is_empty() && r.kv.is_literal() && !r.kv.is_bot() { r } else { Value::data("bool") })
+    }
+
+    /// What `x in o` runs of the instances `insts`, as library code runs them: `__contains__`
+    /// where their class defines it, else their iteration's dunders and the items' `__eq__`.
+    fn in_dunders(&mut self, insts: Vec<ObjId>, state: &mut State, nd: &Node) {
+        let (has, iterated): (Vec<ObjId>, Vec<ObjId>) = insts.into_iter().partition(|o| self.heap.instance_class(*o).is_some_and(|c| self.class_lookup(c, "__contains__").is_some()));
+        if !has.is_empty() {
+            self.instance_dunders(has, &["__contains__"], state, nd);
+        }
+        if !iterated.is_empty() {
+            self.instance_dunders(iterated, &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
+        }
+    }
+
+    /// Does class `c`'s `__hash__` (the program's) give its instance's identity: its body one
+    /// `return id(self)` or `return object.__hash__(self)`? Then two objects hash alike only where
+    /// they are the same object.
+    pub(in crate::interp) fn hashes_by_identity(&self, c: ObjId) -> bool {
+        let Some(owner) = self.class_lookup(c, "__hash__") else { return false };
+        let Some(f) = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__hash__"))).and_then(|v| v.single()).filter(|f| self.heap.kind(*f) == Kind::Function) else { return false };
+        let fi = self.heap.func_info(f);
+        let (Some(ps), [ast::Stmt::Return(r)]) = (fi.node.params(), fi.node.body()) else { return false };
+        let Some(me) = ps.posonlyargs.iter().chain(ps.args.iter()).next().map(|p| p.parameter.name.id.as_str()) else { return false };
+        let Some(ast::Expr::Call(call)) = r.value.as_deref() else { return false };
+        let one_me = matches!(&call.arguments.args[..], [ast::Expr::Name(n)] if n.id.as_str() == me) && call.arguments.keywords.is_empty();
+        let callee = crate::frontend::text(&*call.func);
+        one_me && (callee == "id" || callee == "object.__hash__")
+    }
+
+    /// `a in b` where `a` holds instances whose class defines `__eq__` and `b` containers that
+    /// may hold items: `item == a` runs it (reflected) item by item until one is equal — over
+    /// one list or tuple of known items in order; else as a call that does not run, any number
+    /// of times (`skipped_calls`). True where it may run.
+    fn in_runs_eq(&mut self, a: &Value, b: &Value, nd: &Node, state: &mut State) -> bool {
+        let eqs: Vec<ObjId> = a.pts.iter().filter_map(|o| self.cmp_dunder(o, "__eq__")).collect();
+        if eqs.is_empty() {
+            return false;
+        }
+        // (a set's or dict's lookup compares only keys of an equal hash that are not the very
+        // object: none, for a class that hashes by identity, `return id(self)`)
+        let by_id = a.pts.iter().all(|o| self.heap.instance_class(o).is_some_and(|c| self.hashes_by_identity(c)));
+        let cs: Vec<ObjId> = b.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple) || (matches!(self.heap.kind(*o), Kind::Set | Kind::Dict) && !by_id)).collect();
+        if cs.is_empty() || cs.iter().all(|o| self.heap.llen(*o, state) == Some(0)) {
+            return false;
+        }
+        let items = match (&cs[..], b.kv.is_bot()) {
+            ([o], true) if matches!(self.heap.kind(*o), Kind::List | Kind::Tuple) => self.known_positions(*o, state),
+            _ => None,
+        };
+        let Some(items) = items else {
+            let fns: Vec<(ObjId, Option<Value>)> = eqs.into_iter().map(|f| (f, Some(a.clone()))).collect();
+            self.skipped_calls(&fns, Args::pos(&[Value::data("item")]), state, nd, None);
+            return true;
+        };
+        // (each item compared on the paths where none before was equal)
+        let mut done = State::bottom();
+        for item in items {
+            if !state.reachable {
+                break;
+            }
+            let r = self.rich_compare(ast::CmpOp::Eq, &item, a, nd, state).unwrap_or_else(|| Value::data("bool"));
+            let ks = kv_literals(&r.kv);
+            let sure = r.pts.is_empty() && r.kv.is_literal() && !ks.is_empty() && ks.iter().all(|k| k == intern::key_bool(true));
+            let never = r.pts.is_empty() && r.kv.is_literal() && !ks.is_empty() && ks.iter().all(|k| k == intern::key_bool(false));
+            if !never {
+                done = if done.reachable { done.join(&mut state.copy()) } else { state.copy() };
+            }
+            if sure {
+                state.reachable = false;
+            }
+        }
+        if done.reachable {
+            *state = if state.reachable { state.join(&mut done) } else { done };
+        }
+        true
+    }
+
+    /// What `a in b` raises where `b` may be a literal (true: surely): a TypeError for each of
+    /// b's literals that is no container (None, a number, a bool), or a str when `a` is no str.
+    fn in_literal_raises(&mut self, a: &Value, b: &Value, state: &mut State) -> bool {
+        let left = kv_literals(&a.kv);
+        let left_known = a.pts.is_empty() && a.kv.is_literal() && !left.is_empty();
+        let left_strs = left.iter().filter(|k| intern::with_key(*k, |kk| matches!(kk, intern::Key::Str(_)))).count();
+        // per literal of b: Some(true) surely raises, Some(false) surely not, None: may
+        let outcomes: Vec<Option<bool>> = kv_literals(&b.kv)
+            .iter()
+            .map(|k| {
+                intern::with_key(k, |kk| match kk {
+                    intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Ellipsis | intern::Key::Dec(..) | intern::Key::Frac(..) | intern::Key::Chrono(..) => Some(true),
+                    intern::Key::Str(_) if left_known && left_strs == 0 => Some(true),
+                    intern::Key::Str(_) if left_known && left_strs == left.len() => Some(false),
+                    intern::Key::Tuple(_) | intern::Key::Frozen(_) => Some(false),
+                    _ => None,
+                })
+            })
+            .collect();
+        if outcomes.iter().all(|o| *o == Some(false)) {
+            return false;
+        }
+        if b.pts.is_empty() && outcomes.iter().all(|o| *o == Some(true)) {
+            self.raise_here("TypeError", state);
+            return true;
+        }
+        self.may_raise_here("TypeError", state);
+        false
     }
 
     /// What ordering `a` and `b` (`<` & co.) that no dunder or model ordered may raise (true:
@@ -746,7 +912,7 @@ fn literals_order(x: KeyId, y: KeyId) -> Option<bool> {
 
 /// Python's `==` on two literals (`1 == 1.0 == True`); Enum members and identity-hashed
 /// objects compare by identity (their keys), as the engine keys them.
-fn lit_eq(a: KeyId, b: KeyId) -> Option<bool> {
+pub(super) fn lit_eq(a: KeyId, b: KeyId) -> Option<bool> {
     let by_id = |k: KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Member(..) | intern::Key::Inv(..)));
     if a == b || by_id(a) || by_id(b) {
         return Some(a == b);
