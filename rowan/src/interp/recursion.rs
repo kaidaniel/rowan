@@ -262,14 +262,20 @@ impl Analyzer {
         // (the activation's raises of its last round, from here with what they changed)
         if let Some(rs) = self.recursion.raises.get(key).filter(|_| state.reachable) {
             for (cls, rst, exc) in rs.clone() {
-                // (from this call's state, joined with what the raise state says of the objects it
-                // has here; objects only the raise state has — made in the activation's rounds, not
-                // reachable from here — are left out: they would only grow the handlers' states)
-                let fp = rst.footprint(state);
-                let here_has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
-                let fp = Footprint { rows: fp.rows.into_iter().filter(|k| here_has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| here_has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| here_has(*o)).collect() };
-                let mut here = state.copy();
-                here.join_heap_fp(&rst, &fp);
+                // (the heap at the raise; for a raise of anything — unknown code in the activation,
+                // whose raise states only grow the handlers' — the heap here, joined with what the
+                // raise state says of the objects this state has facts of: the objects only the
+                // rounds made, which nothing here reaches, are left out)
+                let mut here = if super::tries::is_any_exc(&cls) {
+                    let mut h = state.copy();
+                    let fp = rst.footprint(state);
+                    let has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
+                    let fp = Footprint { rows: fp.rows.into_iter().filter(|k| has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| has(*o)).collect() };
+                    h.join_heap_fp(&rst, &fp);
+                    h
+                } else {
+                    rst.copy()
+                };
                 here.env = state.env.clone();
                 here.unbound = state.unbound.clone();
                 here.path = state.path.clone();
