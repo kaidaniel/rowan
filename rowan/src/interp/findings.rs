@@ -99,6 +99,7 @@ pub struct Fact {
 /// only once the round stands: most rounds are superseded by the next, and rendering every
 /// round's values was most of what hover facts cost. Its state is a copy of the one it was
 /// recorded in (O(1)); objects are never freed, so its ids still mean what they meant.
+#[derive(Clone)]
 pub(in crate::interp) struct PendingFact {
     key: FactKey,
     v: Value,
@@ -236,6 +237,32 @@ pub struct ValueInfo {
 }
 
 
+/// A point in the output recorded so far, to drop what comes after (`Findings::drop_since`):
+/// the verdicts, and the recordings kept for replay (`Findings::capture_begin`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::interp) struct Mark {
+    pub verdicts: usize,
+    /// the recording runs then, and the innermost one's recordings
+    depth: usize,
+    len: usize,
+}
+
+/// A recording, as one: a verdict's key, or a hover fact's with its value and where it goes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(in crate::interp) enum RecKey {
+    Verdict(VerdictKey),
+    Fact(FactKey, Option<CallSite>, bool, bool, u32, Value),
+}
+
+/// One recording of a run's output a later call it stands for replays (`Recursion::place_call`).
+#[derive(Clone)]
+pub(in crate::interp) enum Recording {
+    /// a verdict the run made (also one recorded already)
+    Verdict(VerdictKey, Verdict),
+    /// a hover fact the run recorded
+    Fact(PendingFact),
+}
+
 /// The findings collected so far (see the module doc).
 #[derive(Default)]
 pub struct Findings {
@@ -274,6 +301,11 @@ pub struct Findings {
     /// per loop running to a fixpoint (innermost last): the recordings its running round made,
     /// in order, rendered only if that round stands (`PendingFact`)
     pending: Vec<Vec<PendingFact>>,
+    /// per run whose output is recorded for replay (innermost last; an ending one's go to the
+    /// one around it too), its recordings, each once; and per loop running to a fixpoint (as
+    /// `fact_rounds`) where its running round's recordings begin
+    captures: Vec<IndexMap<RecKey, Recording>>,
+    replay_rounds: Vec<(usize, usize)>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -313,12 +345,20 @@ impl Findings {
     }
 
     /// A mark to drop the verdicts recorded after it (`drop_since`).
-    pub(in crate::interp) fn mark(&self) -> usize {
-        self.verdicts.len()
+    pub(in crate::interp) fn mark(&self) -> Mark {
+        Mark { verdicts: self.verdicts.len(), depth: self.captures.len(), len: self.captures.last().map(|c| c.len()).unwrap_or(0) }
     }
 
     /// Record the verdict `make` builds, unless one with the same key is recorded.
     pub(in crate::interp) fn add(&mut self, key: VerdictKey, make: impl FnOnce() -> Verdict) {
+        if let Some(top) = self.captures.last_mut() {
+            let v = make();
+            top.entry(RecKey::Verdict(key.clone())).or_insert_with(|| Recording::Verdict(key.clone(), v.clone()));
+            if self.keys.insert(key) {
+                self.verdicts.push(v);
+            }
+            return;
+        }
         if self.keys.contains(&key) {
             return;
         }
@@ -329,6 +369,7 @@ impl Findings {
     /// A loop's fixpoint starts: what its rounds record of hover facts can be put back.
     pub(in crate::interp) fn fact_rounds_begin(&mut self) {
         if self.facts_on {
+            self.replay_rounds.push((self.captures.len(), self.captures.last().map(|c| c.len()).unwrap_or(0)));
             self.fact_rounds.push(FxHashMap::default());
             self.pending.push(Vec::new());
         }
@@ -337,7 +378,13 @@ impl Findings {
     /// A round of the innermost loop is superseded by the next (its states are less than the
     /// loop's): the facts it recorded are put back as they were.
     pub(in crate::interp) fn fact_round_restart(&mut self) {
-        let Some(j) = self.fact_rounds.last_mut() else { return };
+        if self.fact_rounds.is_empty() {
+            return;
+        }
+        if let Some((d, l)) = self.replay_rounds.last().copied() {
+            self.truncate_captures(d, l);
+        }
+        let j = self.fact_rounds.last_mut().unwrap();
         if let Some(p) = self.pending.last_mut() {
             p.clear();
         }
@@ -357,6 +404,7 @@ impl Findings {
             return Vec::new();
         }
         let j = self.fact_rounds.pop().unwrap_or_default();
+        self.replay_rounds.pop();
         let mut p = self.pending.pop().unwrap_or_default();
         if let Some(outer) = self.fact_rounds.last_mut() {
             for (k, f) in j {
@@ -379,10 +427,49 @@ impl Findings {
     }
 
     /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
-    pub(in crate::interp) fn drop_since(&mut self, mark: usize) {
-        for v in self.verdicts.drain(mark..) {
+    pub(in crate::interp) fn drop_since(&mut self, mark: Mark) {
+        for v in self.verdicts.drain(mark.verdicts..) {
             self.keys.remove(&v.dedupe_key());
         }
+        self.truncate_captures(mark.depth, mark.len);
+    }
+
+    /// The recordings after the `len` first of the run recording at `depth` (if it is the
+    /// innermost) are superseded.
+    fn truncate_captures(&mut self, depth: usize, len: usize) {
+        if depth > 0 && self.captures.len() == depth {
+            if let Some(top) = self.captures.last_mut() {
+                top.truncate(len);
+            }
+        }
+    }
+
+    /// A run's output is recorded from here, for later calls it stands for (`capture_end`).
+    pub(in crate::interp) fn capture_begin(&mut self) -> Mark {
+        self.captures.push(IndexMap::new());
+        self.mark()
+    }
+
+    /// What the run begun at `start` recorded (but what a superseded round of it, or of a loop
+    /// in it, recorded); an enclosing recorded run keeps it too.
+    pub(in crate::interp) fn capture_end(&mut self, _start: Mark) -> Vec<Recording> {
+        let top = self.captures.pop().unwrap_or_default();
+        if let Some(outer) = self.captures.last_mut() {
+            for (k, r) in &top {
+                outer.entry(k.clone()).or_insert_with(|| r.clone());
+            }
+        }
+        top.into_values().collect()
+    }
+
+    /// A recording of the innermost recording run (once each).
+    fn capture(&mut self, r: &Recording) {
+        let Some(top) = self.captures.last_mut() else { return };
+        let k = match r {
+            Recording::Verdict(k, _) => RecKey::Verdict(k.clone()),
+            Recording::Fact(p) => RecKey::Fact(p.key, p.call, p.writing, p.entry, p.scope, p.v.clone()),
+        };
+        top.entry(k).or_insert_with(|| r.clone());
     }
 
     /// The report's notes, in order.
@@ -518,6 +605,9 @@ impl Analyzer {
         let key = (node.line, node.col, name);
         self.findings.touch_fact(key);
         let p = PendingFact { key, v: v.clone(), state: state.copy(), call, writing, entry: self.entry.run.is_some(), scope };
+        if !self.findings.captures.is_empty() {
+            self.findings.capture(&Recording::Fact(p.clone()));
+        }
         // (in a loop's fixpoint: made once its round stands, the fact there for a parameter's
         // own facts meanwhile; torch programs name dims by the running frame: at once)
         if !self.m.torch_on && !self.findings.pending.is_empty() {
@@ -526,6 +616,33 @@ impl Analyzer {
             return;
         }
         self.apply_fact(p);
+    }
+
+    /// The output a run recorded (`Findings::capture_end`), recorded again for a later call
+    /// the run stands for: its verdicts and hover facts as they were made.
+    pub(in crate::interp) fn replay_output(&mut self, recs: &[Recording]) {
+        for r in recs {
+            match r {
+                Recording::Verdict(k, v) => {
+                    if !self.findings.quiet {
+                        self.findings.add(k.clone(), || v.clone());
+                    }
+                }
+                Recording::Fact(p) => {
+                    if self.no_facts_here(p.call.is_none()) {
+                        continue;
+                    }
+                    self.findings.capture(r);
+                    self.findings.touch_fact(p.key);
+                    if !self.m.torch_on && !self.findings.pending.is_empty() {
+                        self.findings.facts.entry(p.key).or_default();
+                        self.findings.pending.last_mut().unwrap().push(p.clone());
+                    } else {
+                        self.apply_fact(p.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// A recording made (`PendingFact`): its value's text and legend into the fact's texts

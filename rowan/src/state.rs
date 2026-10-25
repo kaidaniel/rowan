@@ -716,6 +716,24 @@ impl State {
             }
     }
 
+    /// Did this state and `o` come out of runs that changed the same (`fp`, `ofp`: what each
+    /// changed) to the same facts — what a caller of either takes?
+    pub fn same_effect(&self, fp: &Footprint, o: &State, ofp: &Footprint) -> bool {
+        fn same_keys<T: std::hash::Hash + Eq>(a: &[T], b: &[T]) -> bool {
+            a.len() == b.len() && {
+                let s: rustc_hash::FxHashSet<&T> = a.iter().collect();
+                b.iter().all(|k| s.contains(k))
+            }
+        }
+        self.reachable == o.reachable
+            && same_keys(&fp.rows, &ofp.rows)
+            && same_keys(&fp.slots, &ofp.slots)
+            && same_keys(&fp.elems, &ofp.elems)
+            && fp.rows.iter().all(|k| self.rows.get(k) == o.rows.get(k))
+            && fp.slots.iter().all(|(oid, k)| self.slots.get(oid, k) == o.slots.get(oid, k) && self.lens.get(oid) == o.lens.get(oid))
+            && fp.elems.iter().all(|oid| self.elems.get(oid) == o.elems.get(oid) && self.lens.get(oid) == o.lens.get(oid))
+    }
+
     // -- accessors ---------------------------------------------------------
     /// The object's row on this path; none known: the empty closed row (the shared unknown
     /// object: anything).
@@ -962,6 +980,18 @@ impl State {
             attr: false,
             only_if: self.path_tests(src, term),
         };
+        let nv = match self.reqs.get(&src, &term) {
+            Some(cur) => cur.seq(&info),
+            None => info,
+        };
+        self.reqs.set(&src, term, nv);
+    }
+
+    /// A requirement another run recorded (`info`: on every path of it, or some), recorded on
+    /// this path too: needed under the tests both it and this path passed.
+    pub fn replay_req(&mut self, src: SourceId, term: KeyId, info: &ReqInfo) {
+        let here = self.path_tests(src, term);
+        let info = ReqInfo { only_if: info.only_if.intersection(&here), ..info.clone() };
         let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
             None => info,

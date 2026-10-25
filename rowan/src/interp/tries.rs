@@ -282,6 +282,9 @@ impl Analyzer {
         if self.record_close(&cls, state) {
             return true;
         }
+        if !self.recursion.place_deps_empty() {
+            self.note_place_raise(&cls);
+        }
         // (a raise leaving a recursive activation: its recursive calls raise it next round)
         if !self.recursion.collecting.is_empty() {
             self.collect_rec_raise(&cls, &exc, state);

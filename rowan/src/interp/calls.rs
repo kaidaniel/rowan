@@ -1001,7 +1001,25 @@ impl Analyzer {
             None => self.callee_site(node),
         };
         self.entry.analysed.insert(foid);
-        let key = self.activation_key(foid, &site, entry, self_v.as_ref(), a, state);
+        let mut key = self.activation_key(foid, &site, entry, self_v.as_ref(), a, state);
+        // (a place a running call came from: its place activation, `place_call`)
+        let (mut widened, mut warm) = (None, None);
+        let forced_run = forced.is_some();
+        if let Some(k) = self.place_key(foid, &site, &key, &a).filter(|_| !forced_run) {
+            match self.place_call(&k, &self_v, args, kwargs, state) {
+                super::recursion::PlaceCall::Answer(v) => return v,
+                super::recursion::PlaceCall::Skip => {
+                    let q = fi.qualname.clone();
+                    return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
+                }
+                super::recursion::PlaceCall::Run(w, g) => {
+                    widened = w;
+                    warm = g;
+                    key = k;
+                }
+            }
+        }
+        let place_run = key.1.starts_with('@');
         if self.recursion.is_active(&key) {
             return self.recursive_call(&key, &self_v, &args, &kwargs, state);
         }
@@ -1015,7 +1033,7 @@ impl Analyzer {
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
         if super::debug_enabled() {
-            eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
+            eprintln!("run {} at {} frames={} chain={:?} key={} places={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain, key.1, self.recursion.places_dbg());
         }
         // context for allocations inside the callee
         let ctx = match forced {
@@ -1024,7 +1042,12 @@ impl Analyzer {
         };
         // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
         let gen_id = fnode.is_generator().then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
-        let new_fr = self.callee_frame(foid, &fi, &ctx);
+        let mut new_fr = self.callee_frame(foid, &fi, &ctx);
+        // (a place activation's run stands for several calls: its allocations are not single)
+        if place_run {
+            new_fr.single = false;
+            new_fr.single_nl = false;
+        }
         let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
         let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, &fi, state)));
@@ -1036,11 +1059,23 @@ impl Analyzer {
             FuncNode::GenExp(_) => (saved_chain.clone(), saved_files.clone()),
             _ => chain_extend(&saved_chain, &saved_files, node.module, node.line),
         };
+        // (a place activation run again: from its last run's heap joined with this call's)
+        let (w_entry, w_heap) = match widened {
+            Some((e, g, gfp)) => (Some(e), Some((g, gfp))),
+            None => (None, None),
+        };
+        if let Some((g, gfp)) = &w_heap {
+            state.join_heap_fp(g, gfp);
+        }
         let pre_bind = state.copy();
         // (objects made from here on, by birth: a run again of code makes them anew)
         let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
-        self.recursion.begin(&key, (self_v.clone(), args.to_vec(), kwargs.clone()), pre_rc.clone(), born_mark);
+        let entry_args = w_entry.clone().unwrap_or_else(|| (self_v.clone(), args.to_vec(), kwargs.clone()));
+        self.recursion.begin(&key, entry_args, pre_rc.clone(), born_mark);
+        if let Some(w) = warm {
+            self.recursion.seed(&key, w);
+        }
         self.recursion.set_depth(&key, self.cx.frames.len());
         if gen_id.is_none() {
             if let Some(fr) = self.cx.frames.last_mut() {
@@ -1049,13 +1084,27 @@ impl Analyzer {
         }
         // (a `@contextmanager`'s with body, a consumer that stops early: run at its yields)
         let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len()) || (gen_id.is_some() && self.stop_hook_begins());
-        self.bind_params(&fi, &self_v, a, state, node);
+        match &w_entry {
+            Some((w_self, w_args, w_kw)) => self.bind_params(&fi, w_self, Args::new(w_args, w_kw, &star_args, &star_kwargs), state, node),
+            None => self.bind_params(&fi, &self_v, a, state, node),
+        }
         // (a run whole: where GeneratorExit raised at its yields leaves its body, `genclose.rs`)
         let bound = gen_id.is_some() && !gen_cm && self.bound_begin(fnode);
         if let Some(gid) = gen_id.filter(|_| bound) {
             self.closing_begin(gid, state);
         }
+        let place = (!entry && !forced_run && gen_id.is_none()).then(|| super::recursion::place_of(&site).to_string());
+        if let Some(p) = &place {
+            self.recursion.place_enter(p);
+        }
+        let cap = place_run.then(|| self.place_run_begin(&key));
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
+        if let Some(cap) = cap {
+            self.place_run_end(&key, cap, &ret, &st, &pre_bind);
+        }
+        if place.is_some() {
+            self.recursion.place_leave();
+        }
         let closes = if bound { self.gens.bounds.pop() } else { None };
         if let Some(gid) = gen_id {
             self.gen_activation_end(gid, gen_cm, &mut st, &pre_bind, born_mark, closes);

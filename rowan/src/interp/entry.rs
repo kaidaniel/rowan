@@ -99,7 +99,7 @@ pub struct Entries {
 struct ModuleEnd {
     state: State,
     facts: IndexMap<super::findings::FactKey, super::Fact>,
-    verdicts: usize,
+    verdicts: super::findings::Mark,
     cut: bool,
 }
 
@@ -233,7 +233,7 @@ impl Analyzer {
         self.after_any_code(&mut state);
         self.entry.demand_start = Some(state.copy());
         self.findings.final_state = Some(state);
-        self.findings.drop_since(if end.cut { 0 } else { end.verdicts });
+        self.findings.drop_since(if end.cut { Default::default() } else { end.verdicts });
         self.findings.facts = end.facts;
         self.findings.facts.retain(|_, f| {
             f.rows.clear();
@@ -299,7 +299,7 @@ impl Analyzer {
         self.entry.any_instances.clear();
         self.budget.fresh();
         // (the verdicts kept are this run's)
-        self.findings.drop_since(0);
+        self.findings.drop_since(Default::default());
         let fi = self.heap.func_info(oid);
         // (its own calls run whole; theirs, past the work a run on demand may do, are unknown)
         self.budget.hover = Some((self.hover_work(), 2));
@@ -428,7 +428,7 @@ impl Analyzer {
             return;
         };
         if debug_enabled() {
-            eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} run={:?} stmts={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark(), run, self.budget.statements);
+            eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} run={:?} stmts={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark().verdicts, run, self.budget.statements);
         }
         let mi = self.heap.module_info(fi.module);
         self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
