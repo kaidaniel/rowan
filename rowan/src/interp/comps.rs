@@ -106,6 +106,13 @@ impl Analyzer {
         let stands = |an: &Analyzer, o: &ObjId| an.closes_on_drop(*o) || an.gens.eff.contains_key(o) || an.raises_kept(*o);
         let once = self.stops_in(&itv).or_else(|| itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single && stands(self, o)));
         let cursor = once.map(|o| (o, self.cursor_of(o, state).unwrap_or(0)));
+        // (several generators, or one standing for several: each item at a step not known, so
+        // their effects up to some yield, joined, before any item)
+        if once.is_none() {
+            for o in itv.pts.iter().filter(|o| self.heap.obj(*o).iterator && stands(self, o)).collect::<Vec<_>>() {
+                self.set_cursor(o, None, state);
+            }
+        }
         if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own, cursor) {
             self.exhaust(&exhaust_after, state);
             return;
