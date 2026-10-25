@@ -1178,29 +1178,7 @@ impl Analyzer {
         // (arguments that do not fit the parameters raise TypeError at the call; a model's calls
         // pass what the library would)
         if !std::mem::take(&mut self.cx.called_by_model) {
-            // (`**d` of dicts whose keys are known: those names are given; else any may be)
-            let mut named = kwargs.clone();
-            let mut star_kw = false;
-            for sk in star_kwargs {
-                let known = sk.kv.is_bot() && !sk.pts.is_empty() && sk.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && { let r = state.row(o, Ns::Item); r.closed() && r.present == r.definite });
-                if !known || sk.pts.len() > 1 {
-                    star_kw = true;
-                    continue;
-                }
-                for o in sk.pts.iter() {
-                    for k in state.row(o, Ns::Item).present.iter() {
-                        match intern::key_as_str(k) {
-                            Some(n) => { named.insert(s(&n), Value::new()); }
-                            None => star_kw = true,
-                        }
-                    }
-                }
-            }
-            match args_fit(a, defaults, args.len(), !star_args.is_empty(), &named, star_kw) {
-                Some(false) => self.raise_here("TypeError", state),
-                None => self.may_raise_here("TypeError", state),
-                Some(true) => {}
-            }
+            self.arity_raises(a, defaults, args.len(), star_args, kwargs, star_kwargs, state);
         }
         for name in positional.iter().chain(kwonly.iter()) {
             if bound.contains_key(name) {
@@ -1242,6 +1220,35 @@ impl Analyzer {
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }
         bound
+    }
+
+    /// TypeError where a call's arguments (`n_pos` positional ones known, `star` items not
+    /// known, `kwargs`, `star_kwargs`) do not fit parameters `a` (`args_fit`): surely, or where
+    /// the unknown items or keys may not; `**d` of a dict of known keys gives those names.
+    #[allow(clippy::too_many_arguments)]
+    fn arity_raises(&mut self, a: &ast::Parameters, defaults: &IndexMap<StrId, Value>, n_pos: usize, star: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State) {
+        let mut named = kwargs.clone();
+        let mut star_kw = false;
+        for sk in star_kwargs {
+            let known = sk.kv.is_bot() && sk.pts.len() == 1 && sk.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && { let r = state.row(o, Ns::Item); r.closed() && r.present == r.definite });
+            if !known {
+                star_kw = true;
+                continue;
+            }
+            for k in sk.pts.iter().flat_map(|o| state.row(o, Ns::Item).present.iter().collect::<Vec<_>>()) {
+                match intern::key_as_str(k) {
+                    Some(n) => {
+                        named.insert(s(&n), Value::new());
+                    }
+                    None => star_kw = true,
+                }
+            }
+        }
+        match args_fit(a, defaults, n_pos, !star.is_empty(), &named, star_kw) {
+            Some(false) => self.raise_here("TypeError", state),
+            None => self.may_raise_here("TypeError", state),
+            Some(true) => {}
+        }
     }
 
     /// The defaults a call of `fi` (the running frame's function) takes: its own, unless its

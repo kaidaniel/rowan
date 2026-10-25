@@ -64,9 +64,7 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
             }
             // (a str, bytes or tuple literal is indexed by ints and slices only)
-            let text_key = |k: KeyId| !intern::key_may_index(k);
-            if obj.pts.is_empty() && !kv_literals(&obj.kv).is_empty() && key.pts.is_empty() && key.kv.is_literal() && kv_literals(&key.kv).iter().all(text_key) && !kv_literals(&key.kv).is_empty() {
-                self.raise_here("TypeError", state);
+            if obj.pts.is_empty() && !kv_literals(&obj.kv).is_empty() && self.no_index_raises(key, true, state) {
                 return Value::new();
             }
         }
@@ -368,18 +366,8 @@ impl Analyzer {
     /// elements), else any element (may raise IndexError). True: the read is done.
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
         let is_slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
-        // (a list or tuple is indexed by ints and slices: `xs["a"]`, `xs[None]` raise TypeError)
-        let bad = |k: KeyId| !intern::key_may_index(k);
-        if kind != Kind::Set && key.kv.is_literal() && kv_literals(&key.kv).iter().any(bad) {
-            if key.pts.is_empty() && kv_literals(&key.kv).iter().all(bad) {
-                if single_target {
-                    self.raise_here("TypeError", state);
-                } else {
-                    self.may_raise_here("TypeError", state);
-                }
-                return true;
-            }
-            self.may_raise_here("TypeError", state);
+        if kind != Kind::Set && self.no_index_raises(key, single_target, state) {
+            return true;
         }
         // known positions: a slice with known bounds (`xs[1:3]`, `xs[slice(0, n)]`), or one from
         // the start to a bound not known (`xs[:n]`: each position it has is xs's, its length one
@@ -1337,6 +1325,22 @@ impl Analyzer {
         }
         self.may_raise_here("TypeError", state);
         Some(rest)
+    }
+
+    /// A list or tuple is indexed by ints and slices: `xs["a"]`, `xs[None]` raise TypeError
+    /// (on every path when the read has this receiver alone). True: the key surely is none.
+    pub(super) fn no_index_raises(&mut self, key: &Value, single_target: bool, state: &mut State) -> bool {
+        let bad = |k: KeyId| !intern::key_may_index(k);
+        if !key.kv.is_literal() || !kv_literals(&key.kv).iter().any(bad) {
+            return false;
+        }
+        let surely = key.pts.is_empty() && kv_literals(&key.kv).iter().all(bad);
+        if surely && single_target {
+            self.raise_here("TypeError", state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+        surely
     }
 
     /// What of `obj` takes an item store or `del` by `key`: literals (a str, a tuple, a number,

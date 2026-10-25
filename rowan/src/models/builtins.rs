@@ -2173,7 +2173,11 @@ pub(super) fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub(super) fn m_super(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(foid) = an.frame().func else { return Value::data("super") };
     let fi = an.heap.func_info(foid);
-    let Some(cls) = fi.cls else { return Value::data("super") };
+    let Some(mut cls) = fi.cls else { return Value::data("super") };
+    // (`super(C, self)`: the classes after C in self's class's order)
+    if let Some(c0) = c.args.first().and_then(|a| a.single()).filter(|o| an.heap.kind(*o) == Kind::Class && c.args[0].kv.is_bot()) {
+        cls = c0;
+    }
     // the function's first parameter (`self`, or `cls` in a classmethod / __init_subclass__)
     let first = match fi.node {
         crate::interp::FuncNode::Def(f) => crate::scopes::all_params(&f.parameters).first().map(|p| p.name.id.to_string()).unwrap_or_else(|| "self".into()),

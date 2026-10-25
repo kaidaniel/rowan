@@ -103,17 +103,10 @@ impl Analyzer {
     /// element (`iter_sequence`, `iter_mapping`, `iter_view`, `iter_zip`, …), and the scalar
     /// part's (`iter_scalar`).
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
-        // (the program's instances whose class has neither `__iter__` nor `__getitem__`, and
-        // numbers and None: TypeError)
-        let v = self.iterable_part(v, state);
-        let Some(v) = self.without_dunders(&v, &["__iter__", "__getitem__"], state).filter(|v| !v.empty()) else {
+        let Some(v) = self.iterable_value(v, state) else {
             return Iteration::new(None, Elem::One(Value::new()), false, false);
         };
         let v = &v;
-        // (iterating an unknown: TypeError where it is no iterable)
-        if !self.unwind.tries.is_empty() && self.untyped_operand(v) {
-            self.may_raise_here("TypeError", state);
-        }
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         // (a loop reads the containers it is over at each step, through a live iterator too:
@@ -222,6 +215,18 @@ impl Analyzer {
             items = alt_items;
         }
         Iteration::new(items, Elem::One(elem), exh, unordered)
+    }
+
+    /// What of `v` Python can iterate: numbers, None and the program's instances whose class has
+    /// neither `__iter__` nor `__getitem__` raise TypeError, an unknown may (None: nothing is
+    /// left, the path ends).
+    fn iterable_value(&mut self, v: &Value, state: &mut State) -> Option<Value> {
+        let v = self.iterable_part(v, state);
+        let v = self.without_dunders(&v, &["__iter__", "__getitem__"], state).filter(|v| !v.empty())?;
+        if !self.unwind.tries.is_empty() && self.untyped_operand(&v) {
+            self.may_raise_here("TypeError", state);
+        }
+        Some(v)
     }
 
     /// Does the consumer of the running generator change what `v` is or reads (its containers,
