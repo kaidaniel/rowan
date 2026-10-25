@@ -648,8 +648,9 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
             let groups = (1..=ngroups).map(|g| part(g, "default")).collect::<Vec<_>>().join(", ");
             let group = if sure.iter().all(|s| *s) { "str(_GROUP)".to_string() } else { part(usize::MAX, "None") };
             let src = format!(
-                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return {}\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return int(_POS)\n\n    def end(self, g=0):\n        return int(_POS)\n\n    def span(self, g=0):\n        return (int(_POS), int(_POS))\n\n\ndef matched():\n    return Match()\n",
+                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return {}\n\n    def __getitem__(self, g):\n        return {}\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return int(_POS)\n\n    def end(self, g=0):\n        return int(_POS)\n\n    def span(self, g=0):\n        return (int(_POS), int(_POS))\n\n\ndef matched():\n    return Match()\n",
                 items,
+                group,
                 group,
                 groups,
                 if ngroups == 1 { "," } else { "" }

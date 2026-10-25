@@ -154,7 +154,10 @@ impl Analyzer {
         for item in &d.items {
             let val = self.eval(&item.value, state);
             match &item.key {
-                None => self.copy_into(oid, Ns::Item, &val, state, true, &intern::KeySet::new()),
+                None => {
+                    let val = self.mapping_part(&val, state);
+                    self.copy_into(oid, Ns::Item, &val, state, true, &intern::KeySet::new())
+                }
                 Some(k) => {
                     let kv = self.eval_key(k, state);
                     self.check_hashable(&kv, state);
@@ -342,6 +345,10 @@ impl Analyzer {
         let strs: Option<Vec<Vec<char>>> = kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
         if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
             let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+            // (`"ab"[None]`, `"ab"["k"]`: TypeError)
+            if bounds.is_none() && self.no_index_raises(&key, true, state) {
+                return Value::new();
+            }
             let out: Option<intern::KeySet> = match (bounds, index) {
                 (Some((lo, hi, st)), _) => strs.iter().map(|cs| py_slice(cs, lo, hi, st).map(|t| key_str_lit(&t))).collect(),
                 (None, Some(i)) => {
@@ -358,6 +365,10 @@ impl Analyzer {
                 (None, None) => {
                     if !matches!(&*sub.slice, ast::Expr::Slice(_)) {
                         self.may_raise_here("IndexError", state);
+                        // (a key not surely an int: `"ab"[[1]]` TypeError)
+                        if bounds.is_none() && !matches!(self.value_type(&key), Some("int" | "bool")) {
+                            self.may_raise_here("TypeError", state);
+                        }
                     }
                     None
                 }

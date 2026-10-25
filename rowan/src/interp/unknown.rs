@@ -345,6 +345,7 @@ impl Analyzer {
     /// the call, which may be one of the known objects it was given.
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
+        crate::models::csvio::stdout_may_write(self, state, node.line);
         let classes_followed = std::mem::take(&mut self.havoc.classes_followed);
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise

@@ -103,10 +103,10 @@ impl Analyzer {
     /// element (`iter_sequence`, `iter_mapping`, `iter_view`, `iter_zip`, …), and the scalar
     /// part's (`iter_scalar`).
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
-        // (the program's instances whose class has neither `__iter__` nor `__getitem__`: TypeError)
-        let Some(v) = &self.without_dunders(v, &["__iter__", "__getitem__"], state) else {
+        let Some(v) = self.iterable_value(v, state) else {
             return Iteration::new(None, Elem::One(Value::new()), false, false);
         };
+        let v = &v;
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         // (a loop reads the containers it is over at each step, through a live iterator too:
@@ -190,8 +190,9 @@ impl Analyzer {
             self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
         }
         if let Some(its) = &items {
-            // no items *and* no containers: nothing is known; empty containers iterate zero times
-            if its.is_empty() && v.pts.is_empty() {
+            // no items *and* no containers: nothing is known; empty containers and strings
+            // iterate zero times
+            if its.is_empty() && v.pts.is_empty() && !(v.kv.is_literal() && !v.kv.is_bot()) {
                 items = None;
             }
         }
@@ -214,6 +215,18 @@ impl Analyzer {
             items = alt_items;
         }
         Iteration::new(items, Elem::One(elem), exh, unordered)
+    }
+
+    /// What of `v` Python can iterate: numbers, None and the program's instances whose class has
+    /// neither `__iter__` nor `__getitem__` raise TypeError, an unknown may (None: nothing is
+    /// left, the path ends).
+    fn iterable_value(&mut self, v: &Value, state: &mut State) -> Option<Value> {
+        let v = self.iterable_part(v, state);
+        let v = self.without_dunders(&v, &["__iter__", "__getitem__"], state).filter(|v| !v.empty())?;
+        if !self.unwind.tries.is_empty() && self.untyped_operand(&v) {
+            self.may_raise_here("TypeError", state);
+        }
+        Some(v)
     }
 
     /// Does the consumer of the running generator change what `v` is or reads (its containers,
@@ -655,15 +668,29 @@ impl Analyzer {
             elems.push(Value::kv_only(KeyVal::lits(ks)));
         } else if v.kv.is_literal() {
             let ks = kv_literals(&v.kv);
-            // (one of several strings: its characters)
-            if ks.iter().all(intern::key_is_str) {
-                let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
-                elems.push(Value::kv_only(KeyVal::lits(chars)));
-            } else {
-                if ks.len() <= UNROLL_MAX {
-                    *items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
+            // the items of each literal: a str's characters, bytes' ints, a tuple's or frozenset's
+            // items (one literal alone: in order); an object's identity key, any
+            // (the key read first, interned after: interning while reading one borrows twice)
+            let parts: Vec<Option<Vec<KeyId>>> = ks.iter().map(|k| match intern::key_get(k) {
+                intern::Key::Str(t) => Some(t.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect()),
+                intern::Key::Bytes(b) => Some(b.iter().map(|x| intern::key_int(*x as i64)).collect()),
+                intern::Key::Tuple(xs) | intern::Key::Frozen(xs) => Some(xs),
+                _ => None,
+            }).collect();
+            if let [Some(one)] = &parts[..] {
+                if one.len() <= UNROLL_MAX && !intern::with_key(ks.iter().next().unwrap_or(intern::key_none()), |k| matches!(k, intern::Key::Frozen(_))) {
+                    *items = Some(one.iter().map(|k| Value::lit(*k)).collect());
                 }
-                elems.push(Value::kv_only(KeyVal::lits(ks)));
+            }
+            let mut all: KeySet = KeySet::new();
+            for p in parts.iter().flatten() {
+                all = all.union(&p.iter().copied().collect());
+            }
+            if parts.iter().any(|p| p.is_none()) {
+                elems.push(line_data.clone());
+            }
+            if !all.is_empty() {
+                elems.push(Value::kv_only(KeyVal::lits(all)));
             }
         } else if let Some(e) = self.m.torch_on.then(|| crate::models::torch::t_iter_elem(self, v, state)).flatten() {
             elems.push(e);

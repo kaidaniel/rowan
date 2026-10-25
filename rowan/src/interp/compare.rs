@@ -111,6 +111,10 @@ impl Analyzer {
         if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && b.kv.is_literal() && self.in_literal_raises(a, b, state) {
             return Value::new();
         }
+        // (`in` an unknown: TypeError where it is no container)
+        if !ordering && matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && !self.unwind.tries.is_empty() && self.untyped_operand(b) {
+            self.may_raise_here("TypeError", state);
+        }
         if ordering {
             // library values (paths, Decimal, datetime); instances: their comparison methods
             // (`__lt__`, reflected, @total_ordering); tuples item by item

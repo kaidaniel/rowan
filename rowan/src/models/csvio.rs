@@ -779,6 +779,14 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(vid)
 }
 
+/// Code rowan cannot see (an unknown call, a call past its budget) may print: where
+/// `redirect_stdout` sends stdout to a StringIO, its text is not known after it.
+pub fn stdout_may_write(an: &mut Analyzer, st: &mut State, line: u32) {
+    if let Some(f) = an.m.stdout_redirect.last().cloned() {
+        write_into(an, st, &f, &Text::Unknown, line, false);
+    }
+}
+
 /// `print(*args, sep=" ", end="\n", file=f)` into a StringIO: its text extended (without
 /// `file=`: where `redirect_stdout` sends it).
 pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {

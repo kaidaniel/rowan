@@ -487,6 +487,25 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, recv: Option<&Value>, args:
         an.check_hashable(a, state);
         return;
     }
+    // `format(v, spec)` with a spec v's type rejects: None takes none (TypeError), a str no
+    // number's (ValueError); a result not known may be either
+    if let ("builtins.format", [v, spec]) = (qual, args) {
+        let spec = spec.kv.as_lit().filter(|_| spec.pts.is_empty()).and_then(intern::key_as_str);
+        if spec.as_ref().is_some_and(|t| t.is_empty()) {
+            return;
+        }
+        let number_code = spec.as_ref().is_some_and(|t| t.ends_with(|c: char| "bcdoxXneEfFgG%".contains(c)));
+        match v.kv.as_lit().filter(|_| v.pts.is_empty()).map(intern::key_get) {
+            Some(intern::Key::None) => return an.raise_here("TypeError", state),
+            Some(intern::Key::Str(_)) if number_code => return an.raise_here("ValueError", state),
+            _ => {}
+        }
+        if !(r.pts.is_empty() && r.kv.is_literal()) {
+            an.may_raise_here("TypeError", state);
+            an.may_raise_here("ValueError", state);
+        }
+        return;
+    }
     if sure_type_error(an, qual, args, kwargs, state) {
         an.raise_here("TypeError", state);
         return;
@@ -715,6 +734,17 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
         let n = an.heap.llen(o, st)?;
         Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
     };
+    // (a builtin iterating an argument that is a number or None: `enumerate(3)`, `dict(None)`)
+    let iterated: &[Value] = match qual.strip_prefix("builtins.") {
+        Some("enumerate" | "reversed" | "dict" | "set" | "frozenset" | "list" | "tuple" | "sorted" | "sum" | "any" | "all") => &args[..args.len().min(1)],
+        Some("min" | "max") if args.len() == 1 => args,
+        Some("zip") => args,
+        Some("map" | "filter") => args.get(1..).unwrap_or_default(),
+        _ => &[],
+    };
+    if iterated.iter().any(|a| matches!(lit_kind(a), Some(0 | 3))) {
+        return true;
+    }
     let [a] = args else { return false };
     match qual {
         "builtins.len" => matches!(lit_kind(a), Some(0 | 3)),

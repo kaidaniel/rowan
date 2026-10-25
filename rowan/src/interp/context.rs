@@ -137,6 +137,9 @@ pub struct Context {
     /// model calls running (`run_model`), the outermost one's number, and the objects
     /// allocated in it
     pub model_depth: u32,
+    /// the call of the program's code starting is a model's (its arguments are the library's
+    /// to choose: no TypeError for ones that do not fit)
+    pub called_by_model: bool,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// instances whose `__init__` is running for their construction (stores into them are

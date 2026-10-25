@@ -102,7 +102,12 @@ impl Analyzer {
         for oid in v.pts.iter() {
             let o = self.heap.kind(oid);
             if o == Kind::Class {
-                return self.annotated_instance(oid, &format!("{}.{}", fi.qualname, pname), Some((fi, pname)), true, 0, state);
+                let inst = self.annotated_instance(oid, &format!("{}.{}", fi.qualname, pname), Some((fi, pname)), true, 0, state);
+                // (`Optional[C]`, `C | None`: or None)
+                return match annotation_members(ann).1 {
+                    true => Some(inst.unwrap_or_default().join(&Value::none())),
+                    false => inst,
+                };
             }
             if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
                 let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
@@ -130,6 +135,31 @@ impl Analyzer {
     /// else, each holding what its annotation allows (`field_value`), made once per path; another
     /// is made as its `__init__` makes it (None: no path of it completes).
     fn annotated_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
+        // (an instance of a subclass passes for one: those of the program's subclasses that
+        // override something of the class (a method, `__init__`, a class attribute), each made
+        // as the class's is, up to `SUBCLASS_INSTANCES`; past them an unknown instead, whose
+        // methods are unknown calls: a base of many would make them all at every parameter)
+        const SUBCLASS_INSTANCES: usize = 2;
+        let overrides = |an: &Analyzer, c: ObjId| {
+            an.heap.mro(c).into_iter().take_while(|m| *m != cls).any(|m| {
+                an.heap.class_info_opt(m).is_some_and(|ci| ci.node.body.iter().any(|st| defined_names(st).iter().any(|n| an.class_lookup(cls, n).is_some())))
+            })
+        };
+        let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c != cls && self.heap.mro(*c).contains(&cls) && overrides(self, *c)).collect();
+        let mut out = self.class_instance(cls, path, param, single, depth, state);
+        if subs.len() > SUBCLASS_INSTANCES {
+            return Some(out.unwrap_or_default().join(&Value::data(&format!("instance {}", path))));
+        }
+        for c in subs {
+            if let Some(v) = self.class_instance(c, path, param, single, depth, state) {
+                out = Some(out.unwrap_or_default().join(&v));
+            }
+        }
+        out
+    }
+
+    /// `annotated_instance` of `cls` itself.
+    fn class_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
         let ci = self.heap.class_info(cls);
         let Some((fields, extra, validated)) = self.declared_fields(cls, state) else {
             // (a part's, `list[B]`'s element: made once per path, as one with declared fields —
@@ -520,4 +550,17 @@ fn annotation_members(ann: &'static ast::Expr) -> (Vec<&'static ast::Expr>, bool
         }
     }
     (out, none)
+}
+
+/// The names a statement of a class body binds: a `def`'s, an assignment's targets.
+fn defined_names(st: &ast::Stmt) -> Vec<&str> {
+    match st {
+        ast::Stmt::FunctionDef(f) => vec![f.name.as_str()],
+        ast::Stmt::Assign(a) => a.targets.iter().filter_map(|t| if let ast::Expr::Name(n) = t { Some(n.id.as_str()) } else { None }).collect(),
+        ast::Stmt::AnnAssign(a) if a.value.is_some() => match &*a.target {
+            ast::Expr::Name(n) => vec![n.id.as_str()],
+            _ => vec![],
+        },
+        _ => vec![],
+    }
 }

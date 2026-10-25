@@ -265,7 +265,8 @@ def report(tally: Tally, what: str) -> str:
 def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: tuple = (None,)) -> None:
     """The command line every enumerator shares: CPython on every program, rowan on a sample
     (`--rowan N`, default `quick`) or on all (`--all`), under each of `limit_sets` (ROWAN_LIMITS;
-    `--limits` names one); exit 1 when rowan's claims miss a run.
+    `--limits` names one; `programs(limits)`, when it takes them, makes the programs for each);
+    exit 1 when rowan's claims miss a run.
     Programs whose description names one of `gaps` (known misses, listed in AGENTS.md) are
     checked and counted apart, and fail the run only with `--strict`."""
     ap = argparse.ArgumentParser()
@@ -279,11 +280,16 @@ def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: 
     progs = list(programs())
     print(f"{len(progs)} programs, {len(INPUTS)} inputs each")
     rng = random.Random(a.seed)
-    pick = progs if a.all else [progs[i] for i in sorted(rng.sample(range(len(progs)), min(a.rowan, len(progs))))]
+    idx = sorted(rng.sample(range(len(progs)), min(a.rowan, len(progs))))
+    pick = progs if a.all else [progs[i] for i in idx]
     gap = lambda p: any(g in p.desc.split() for g in gaps)
     failed = False
     for limits in ([a.limits] if a.limits else limit_sets):
         at = f" (ROWAN_LIMITS={limits})" if limits else ""
+        if programs.__code__.co_argcount:
+            # (programs that depend on the limits: the same ones, observed differently)
+            every = list(programs(limits))
+            pick = every if a.all else [every[i] for i in idx]
         t, tg = Tally(), Tally()
         check([p for p in pick if not gap(p)], names, t, verbose=a.v, limits=limits, label=at.strip())
         print(report(t, "rowan" + at))

@@ -807,6 +807,7 @@ impl Analyzer {
     pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, a: Args, state: &mut State, node: &Node) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         self.budget.skipped += 1;
+        crate::models::csvio::stdout_may_write(self, state, node.line);
         self.force_given_genexps(&a, state);
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what

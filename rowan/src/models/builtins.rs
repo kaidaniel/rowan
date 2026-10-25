@@ -6,6 +6,15 @@
 use super::*;
 
 pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (pairs from a number, None or a str: TypeError / ValueError)
+    if let Some(src) = c.args.first() {
+        match crate::models::containers::pairs_part(an, st, src) {
+            None => return Value::new(),
+            Some(v) if v.empty() => return m_dict(an, st, &Call { args: c.args[1..].to_vec(), ..c.clone() }),
+            Some(v) if v != *src => return m_dict(an, st, &Call { args: [vec![v], c.args[1..].to_vec()].concat(), ..c.clone() }),
+            _ => {}
+        }
+    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
     if let Some(src) = c.args.first() {
         // a parameter: a mapping or pairs, decided per call site
@@ -824,12 +833,14 @@ pub(super) fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_max = c.qual.ends_with("max");
     // known items (or several arguments) whose keys are known literals: the first extreme one
     let cands: Option<Vec<Value>> = if c.args.len() == 1 { an.iterate(&c.args[0], &c.node, st).items } else { Some(c.args.clone()) };
+    // (one argument that may have no items: ValueError without a default)
+    let may_be_empty = c.args.len() == 1 && !matches!(&cands, Some(its) if !its.is_empty()) && !surely_nonempty(an, &c.args[0], st);
     if c.args.len() == 1 {
         an.exhaust(&c.args[0], st);
     }
     let default = c.kw("default");
     // a known-empty iterable: the default, else ValueError
-    if c.args.len() == 1 && matches!(&cands, Some(its) if its.is_empty()) && !c.args[0].pts.is_empty() {
+    if c.args.len() == 1 && matches!(&cands, Some(its) if its.is_empty()) && !c.args[0].empty() {
         return match default {
             Some(d) => d,
             None => {
@@ -927,10 +938,27 @@ pub(super) fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // any number of items: one of them, or the default when there are none
         return match default {
             Some(d) => elem.join(&d),
-            None => elem,
+            None => {
+                if may_be_empty {
+                    an.may_raise_here("ValueError", st);
+                }
+                elem
+            }
         };
     }
     join_values(c.args.clone())
+}
+
+/// Has `v` surely an item: each of its containers a list, tuple or set of a known length (or
+/// lengths, or a known prefix) of at least one, each literal a non-empty str?
+fn surely_nonempty(an: &Analyzer, v: &Value, st: &State) -> bool {
+    let objs = v.pts.iter().all(|o| {
+        matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set)
+            && !an.heap.obj(o).iterator
+            && (an.heap.llen(o, st).is_some_and(|n| n > 0) || an.heap.len_alts(o, st).is_some_and(|ns| ns.iter().all(|n| *n > 0)) || an.heap.prefix(o, st).is_some_and(|n| n > 0))
+    });
+    let lits = v.kv.is_bot() || (v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().all(|k| intern::key_as_str(k).is_some_and(|t| !t.is_empty())));
+    !v.empty() && objs && lits
 }
 
 pub(super) fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -2145,7 +2173,11 @@ pub(super) fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub(super) fn m_super(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(foid) = an.frame().func else { return Value::data("super") };
     let fi = an.heap.func_info(foid);
-    let Some(cls) = fi.cls else { return Value::data("super") };
+    let Some(mut cls) = fi.cls else { return Value::data("super") };
+    // (`super(C, self)`: the classes after C in self's class's order)
+    if let Some(c0) = c.args.first().and_then(|a| a.single()).filter(|o| an.heap.kind(*o) == Kind::Class && c.args[0].kv.is_bot()) {
+        cls = c0;
+    }
     // the function's first parameter (`self`, or `cls` in a classmethod / __init_subclass__)
     let first = match fi.node {
         crate::interp::FuncNode::Def(f) => crate::scopes::all_params(&f.parameters).first().map(|p| p.name.id.to_string()).unwrap_or_else(|| "self".into()),

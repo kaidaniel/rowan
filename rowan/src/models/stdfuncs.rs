@@ -130,7 +130,9 @@ fn comparisons_run(an: &mut Analyzer, st: &mut State, container: &Value, item: O
 /// `comparisons_run`, and with `arith` the arithmetic methods too (`statistics.mean` adds and
 /// divides the items).
 fn dunders_run(an: &mut Analyzer, st: &mut State, container: &Value, item: Option<&Value>, arith: bool, node: &crate::frontend::Node) {
-    let it = an.iterate(container, node, st);
+    // (its objects' items: its literals hold no instances, and an argument that is no iterable
+    // is the model's to reject)
+    let it = an.iterate(&Value::with_kv(container.pts.clone(), crate::domain::BOT), node, st);
     let elems = an.elem_value(&it.elem, node, "el");
     let all = item.map_or_else(|| elems.clone(), |x| x.join(&elems));
     let names: &[&str] = if arith { &["__lt__", "__gt__", "__le__", "__ge__", "__add__", "__radd__", "__sub__", "__truediv__"] } else { &["__lt__", "__gt__", "__le__", "__ge__"] };
@@ -160,7 +162,11 @@ pub fn m_statistics(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
-    comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
+    // (`nlargest(n, iterable)`: the items are the second argument's)
+    match name.as_str() {
+        "nlargest" | "nsmallest" => comparisons_run(an, st, c.args.get(1).unwrap_or(&Value::new()), None, &c.node),
+        _ => comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node),
+    }
     let heap = c.args.first().cloned().unwrap_or_default();
     let h = heap.single().filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).single);
     let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| { let it_ = an.iterate(v, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") };
@@ -333,7 +339,11 @@ fn plain_list(an: &mut Analyzer, v: Value) -> Value {
 pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     if c.kw("key").is_none() {
-        comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
+        // (`nlargest(n, iterable)`: the items are the second argument's)
+    match name.as_str() {
+        "nlargest" | "nsmallest" => comparisons_run(an, st, c.args.get(1).unwrap_or(&Value::new()), None, &c.node),
+        _ => comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node),
+    }
     }
     let a = c.args.first().cloned().unwrap_or_default();
     let x = c.args.get(1).cloned().unwrap_or_default();
