@@ -157,9 +157,13 @@ impl Analyzer {
         let b = &b;
         // (beside other objects, a container that may be any of them: what its dunders change,
         // as library code runs them)
-        if b.pts.iter().any(|o| self.heap.kind(o) != Kind::Instance) || !b.kv.is_bot() {
-            self.instance_dunders(b.pts.iter().filter(|o| user(self, *o)).collect(), &["__contains__", "__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
-            return None;
+        // (so too for instances whose attributes are not known — made by code that did not run:
+        // their `__contains__` would read them through `__getattr__`, a call that does not run, at
+        // every test)
+        let known = |an: &Analyzer, o: ObjId| state.has_row(o, Ns::Attr) && state.row(o, Ns::Attr).closed() && an.heap.obj(o).single;
+        if b.pts.iter().any(|o| self.heap.kind(o) != Kind::Instance || !known(self, o)) || !b.kv.is_bot() {
+            self.in_dunders(b.pts.iter().filter(|o| user(self, *o)).collect(), state, nd);
+            return if b.pts.iter().all(|o| user(self, o)) && b.kv.is_bot() { Some(Value::data("bool")) } else { None };
         }
         // (those without `__contains__`: iterated, by `__iter__` or `__getitem__`, items compared)
         let (r, rest) = match self.run_dunder(b, &["__contains__"], vec![a.clone()], nd, state) {
@@ -170,10 +174,22 @@ impl Analyzer {
         let r = if iterated.is_empty() {
             r
         } else {
-            self.instance_dunders(iterated, &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
+            self.in_dunders(iterated, state, nd);
             Value::data("bool")
         };
         Some(if r.pts.is_empty() && r.kv.is_literal() && !r.kv.is_bot() { r } else { Value::data("bool") })
+    }
+
+    /// What `x in o` runs of the instances `insts`, as library code runs them: `__contains__`
+    /// where their class defines it, else their iteration's dunders and the items' `__eq__`.
+    fn in_dunders(&mut self, insts: Vec<ObjId>, state: &mut State, nd: &Node) {
+        let (has, iterated): (Vec<ObjId>, Vec<ObjId>) = insts.into_iter().partition(|o| self.heap.instance_class(*o).is_some_and(|c| self.class_lookup(c, "__contains__").is_some()));
+        if !has.is_empty() {
+            self.instance_dunders(has, &["__contains__"], state, nd);
+        }
+        if !iterated.is_empty() {
+            self.instance_dunders(iterated, &["__iter__", "__next__", "__getitem__", "__eq__"], state, nd);
+        }
     }
 
     /// Does class `c`'s `__hash__` (the program's) give its instance's identity: its body one

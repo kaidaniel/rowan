@@ -262,9 +262,14 @@ impl Analyzer {
         // (the activation's raises of its last round, from here with what they changed)
         if let Some(rs) = self.recursion.raises.get(key).filter(|_| state.reachable) {
             for (cls, rst, exc) in rs.clone() {
-                // (the heap at the raise, which the activation's entry, widened by its recursive
-                // calls' heaps, covers; this frame's names)
-                let mut here = rst.copy();
+                // (from this call's state, joined with what the raise state says of the objects it
+                // has here; objects only the raise state has — made in the activation's rounds, not
+                // reachable from here — are left out: they would only grow the handlers' states)
+                let fp = rst.footprint(state);
+                let here_has = |o: ObjId| state.has_row(o, crate::domain::Ns::Attr) || state.has_row(o, crate::domain::Ns::Item) || state.lens.get(&o).is_some() || state.elems.get(&o).is_some();
+                let fp = Footprint { rows: fp.rows.into_iter().filter(|k| here_has(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| here_has(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| here_has(*o)).collect() };
+                let mut here = state.copy();
+                here.join_heap_fp(&rst, &fp);
                 here.env = state.env.clone();
                 here.unbound = state.unbound.clone();
                 here.path = state.path.clone();
@@ -357,14 +362,38 @@ impl Analyzer {
                 let (_, _, recs) = self.recursion.collecting.pop().unwrap();
                 recs.into_iter().filter_map(|(c, j, e)| Some((c, j.finish()?, e))).collect()
             });
-            // (a round that began collecting only now is not the last)
-            let raises_stable = (collect || !self.recursion.wants_raises.contains_key(key)) && raised.as_ref().is_none_or(|now| {
-                let last = self.recursion.raises.get(key).map(|v| v.as_slice()).unwrap_or(&[]);
-                now.len() == last.len() && now.iter().all(|(c, s, e)| last.iter().any(|(c2, s2, e2)| c == c2 && e == e2 && s.same(s2)))
-            });
-            if let Some(r) = raised {
-                if !r.is_empty() || self.recursion.raises.contains_key(key) {
-                    self.recursion.raises.insert(key.clone(), r);
+            // (joined into the earlier rounds' per class: they only grow, so they settle; a round
+            // that began collecting only now is not the last)
+            let mut raises_stable = collect || !self.recursion.wants_raises.contains_key(key);
+            // (a raise state settles where it changes no object older than the activation: what
+            // a round made anew, made again the next, is no change of the program's state)
+            let mark = self.recursion.heap.get(key).map(|h| h.2).unwrap_or(0);
+            let changes_old = |an: &Analyzer, a: &State, b: &State| {
+                let fp = a.footprint(b);
+                let old = |o: ObjId| an.heap.born_before(o, mark);
+                fp.rows.iter().any(|k| old(k.0)) || fp.slots.iter().any(|k| old(k.0)) || fp.elems.iter().any(|o| old(*o))
+            };
+            if let Some(now) = raised {
+                let mut acc: Vec<RaiseRec> = self.recursion.raises.get(key).cloned().unwrap_or_default();
+                for (c, mut st, e) in now {
+                    match acc.iter_mut().find(|r| r.0 == c) {
+                        Some(r) => {
+                            let j = r.1.join(&mut st);
+                            let x = r.2.join(&e);
+                            if changes_old(self, &j, &r.1) || x.kv != r.2.kv {
+                                raises_stable = false;
+                            }
+                            r.1 = j;
+                            r.2 = x;
+                        }
+                        None => {
+                            raises_stable = false;
+                            acc.push((c, st, e));
+                        }
+                    }
+                }
+                if !acc.is_empty() {
+                    self.recursion.raises.insert(key.clone(), acc);
                 }
             }
             if gen_id.is_some() {

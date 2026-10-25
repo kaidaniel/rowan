@@ -220,6 +220,9 @@ pub struct LazyGen {
 /// The generators made and run so far, and the `@contextmanager` bodies running.
 #[derive(Default)]
 pub struct Gens {
+    /// the sources of the live iterators being refilled (`sync_live`): a refill iterates its
+    /// sources, which may make and iterate more of them, over the same sources again
+    pub refilling: Vec<ObjId>,
     /// per watched generator, the consumer's states where it asked for a later item
     /// (`note_resume`), joined per segment: a watch starts one, and its run sees those from its
     /// own on (a generator run again and again — a merged one, forced at each consumer — has a
@@ -1302,7 +1305,20 @@ impl Analyzer {
             let old = (state.slot(o, Ns::Elem, STAR), state.elems.get(&o));
             // (used up on some of the paths joined here: there it gives nothing more)
             let maybe_done = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}done")).is_some_and(|d| kv_literals(&d.kv).contains(intern::key_bool(true)));
-            crate::models::builtins::refill_live(self, state, o, &call, &srcs);
+            // (refills nested past a few: what it gives, not known)
+            // (a refill inside a refill of the same sources — a user `__iter__` that iterates what
+            // it is the iterator of —: what it gives, not known)
+            if srcs.pts.iter().any(|x| self.gens.refilling.contains(&x)) {
+                state.drop_obj_ns(o, Ns::Pos);
+                self.heap.set_llen(o, state, None);
+                state.set_slot(o, Ns::Elem, STAR, Value::data("live"), true);
+                state.elems.insert(o, DATA);
+            } else {
+                let n = self.gens.refilling.len();
+                self.gens.refilling.extend(srcs.pts.iter());
+                crate::models::builtins::refill_live(self, state, o, &call, &srcs);
+                self.gens.refilling.truncate(n);
+            }
             if maybe_done {
                 state.drop_obj_ns(o, Ns::Pos);
                 self.heap.set_llen(o, state, None);
