@@ -606,6 +606,25 @@ impl State {
             let s: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
             o.elems.diff_keys(&self.elems).into_iter().filter(|k| s.contains(k)).collect()
         };
+        self.join_heap_diff(o, fp, rows, slots, elems);
+    }
+
+    /// `join_heap_fp` on the objects `keep` accepts, wherever `o` differs from this state (one
+    /// diff: the footprint is that diff).
+    pub fn join_heap_where(&mut self, o: &State, keep: impl Fn(ObjId) -> bool) {
+        if !o.reachable {
+            return;
+        }
+        let rows: Vec<(ObjId, Ns)> = o.rows.diff_keys(&self.rows).into_iter().filter(|k| keep(k.0)).collect();
+        let slots: Vec<(ObjId, SlotKey)> = o.slots.diff_keys(&self.slots).into_iter().filter(|k| keep(k.0)).collect();
+        let elems: Vec<ObjId> = o.elems.diff_keys(&self.elems).into_iter().filter(|k| keep(*k)).collect();
+        let fp = Footprint { rows: Vec::new(), slots: slots.clone(), elems: elems.clone() };
+        self.join_heap_diff(o, &fp, rows, slots, elems);
+    }
+
+    /// The join of `o`'s facts on the keys where they differ from this state's (`rows`,
+    /// `slots`, `elems`), and of the lengths of the objects `fp`'s slots and elements touch.
+    fn join_heap_diff(&mut self, o: &State, fp: &Footprint, rows: Vec<(ObjId, Ns)>, slots: Vec<(ObjId, SlotKey)>, elems: Vec<ObjId>) {
         FP_VISITS.with(|c| c.set(c.get() + rows.len() + slots.len() + elems.len()));
         for k in &rows {
             let Some(v) = o.rows.get(k) else { continue };
@@ -675,9 +694,13 @@ impl State {
 
     /// Do the two states say the same (a fixpoint's test)? Pointer-equal subtrees are skipped.
     pub fn same(&self, o: &State) -> bool {
+        self.env == o.env && self.narrowed == o.narrowed && self.same_but_names(o)
+    }
+
+    /// `same` but for the running frame's names (`env`, `narrowed`): at a function's end, what
+    /// its caller takes from it.
+    pub fn same_but_names(&self, o: &State) -> bool {
         self.reachable == o.reachable
-            && self.env == o.env
-            && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
             && (Arc::ptr_eq(&self.lasts, &o.lasts) || self.lasts == o.lasts)

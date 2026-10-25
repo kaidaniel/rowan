@@ -1344,11 +1344,7 @@ impl Analyzer {
             }
             match (own, held) {
                 (true, _) => v.clone(),
-                (false, true) => {
-                    let mut parts = Vec::new();
-                    v.pts.iter().for_each(|o| an.obj_edges(o, state, &mut parts));
-                    Value::objs(parts.into_iter().collect())
-                }
+                (false, true) => Value::objs(an.edges_set(v.pts.iter(), state)),
                 _ => Value::new(),
             }
         };

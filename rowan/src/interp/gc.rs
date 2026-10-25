@@ -81,6 +81,29 @@ impl Analyzer {
     pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
         // (the slot table in place: a walk visits the whole reachable heap)
         state.slots.each(&o, &mut |_, v| v.push_objs(work));
+        self.edges_but_slots(o, state, work);
+    }
+
+    /// The objects `o`'s slots in `state` and the rest of its edges (`obj_edges`) refer to, as
+    /// one set: the slots' sets united as sets (`IdSet::union_all`: values shared by many slots
+    /// cost their size once, not a sort of them all).
+    pub fn edges_set(&self, objs: impl Iterator<Item = ObjId>, state: &State) -> crate::domain::ObjSet {
+        let (mut sets, mut rest) = (Vec::new(), Vec::new());
+        for o in objs {
+            state.slots.each(&o, &mut |_, v| {
+                sets.push(v.pts.clone());
+                if let KeyVal::KeysOf(ko) = &v.kv {
+                    sets.push(ko.objs.clone());
+                }
+            });
+            self.edges_but_slots(o, state, &mut rest);
+        }
+        sets.push(crate::domain::ObjSet::from_vec(rest));
+        crate::domain::ObjSet::union_all(&sets.iter().collect::<Vec<_>>(), |o| o as usize, |i| i as ObjId)
+    }
+
+    /// `obj_edges` but its slots.
+    fn edges_but_slots(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
         if let Some(KeyVal::KeysOf(ko)) = state.elems.get_ref(&o) {
             work.extend(ko.objs.iter());
         }
