@@ -110,6 +110,14 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/anycall_protocol.py; about 30 s)
         run: uv run --no-project python tests/anycall_protocol.py --rowan 3000
 
+      - name: The str model and formatting (bounded str methods, %, format specs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/str_protocol.py; about 15 s)
+        run: uv run --no-project python tests/str_protocol.py --all
+
+      - name: Library models (bounded json, re, datetime, decimal, csv calls vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/lib_protocol.py; about 5 s)
+        run: uv run --no-project python tests/lib_protocol.py --all
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

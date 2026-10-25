@@ -745,6 +745,11 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
     if iterated.iter().any(|a| matches!(lit_kind(a), Some(0 | 3))) {
         return true;
     }
+    // (`min(a, b)`: arguments of kinds that do not compare, or None)
+    if matches!(qual, "builtins.min" | "builtins.max") && args.len() >= 2 && kwargs.is_empty() {
+        let ks: Vec<Option<u8>> = args.iter().map(lit_kind).collect();
+        return ks.contains(&Some(3)) || ks.iter().flatten().any(|k| ks.iter().flatten().any(|j| j != k));
+    }
     let [a] = args else { return false };
     match qual {
         "builtins.len" => matches!(lit_kind(a), Some(0 | 3)),

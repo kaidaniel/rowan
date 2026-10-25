@@ -733,13 +733,14 @@ impl Analyzer {
             self.may_raise_here("ValueError", state);
             return false;
         }
-        let outcomes: Vec<Option<(&'static str, bool)>> = texts.iter().map(|t| self.percent_outcome(t, b, state)).collect();
-        let mut classes: Vec<&'static str> = outcomes.iter().flatten().map(|o| o.0).collect();
+        let outcomes: Vec<Option<(Vec<&'static str>, bool)>> = texts.iter().map(|t| self.percent_outcome(t, b, state)).collect();
+        let mut classes: Vec<&'static str> = outcomes.iter().flatten().flat_map(|o| o.0.iter().copied()).collect();
+        classes.sort_unstable();
         classes.dedup();
         for c in &classes {
             self.may_raise_here(c, state);
         }
-        let sure = outcomes.iter().all(|o| o.is_some_and(|o| o.1));
+        let sure = outcomes.iter().all(|o| o.as_ref().is_some_and(|o| o.1));
         if sure {
             state.reachable = false;
         }
@@ -747,88 +748,107 @@ impl Analyzer {
     }
 
     /// What formatting `text % b` may raise: its class and whether surely (None: nothing).
-    fn percent_outcome(&self, text: &str, b: &Value, state: &State) -> Option<(&'static str, bool)> {
+    fn percent_outcome(&self, text: &str, b: &Value, state: &State) -> Option<(Vec<&'static str>, bool)> {
         let Some(convs) = percent_conversions(text) else {
             // (`%(name)s` of a dict: its fields are reads of it, `binop_percent`'s; `*` widths,
             // an incomplete format)
             let dict = !b.pts.is_empty() && b.kv.is_bot() && b.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict);
-            return (!(dict && text.contains("%(") && !text.contains('*'))).then_some(("TypeError", false));
+            return (!(dict && text.contains("%(") && !text.contains('*'))).then_some((vec!["TypeError"], false));
         };
         if convs.iter().any(|(_, c)| !"diouxXeEfFgGcrsa".contains(*c)) {
-            return Some(("ValueError", true));
+            return Some((vec!["ValueError"], true));
         }
         let n = convs.len();
         let tuple_lit = kv_literals(&b.kv).iter().any(|k| intern::with_key(k, |k| matches!(k, intern::Key::Tuple(_))));
         let tuples = b.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Tuple).count();
         let args: Vec<Value> = match b.single().filter(|_| tuples == 1 && b.kv.is_bot()) {
             Some(t) => {
-                let Some(len) = self.heap.llen(t, state) else { return Some(("TypeError", false)) };
+                let Some(len) = self.heap.llen(t, state) else { return Some((vec!["TypeError"], false)) };
                 if len != n {
-                    return Some(("TypeError", true));
+                    return Some((vec!["TypeError"], true));
                 }
                 (0..len).map(|i| state.slot(t, Ns::Pos, key_int(i as i64))).collect()
             }
             // (one of several tuples, or a value that may be one)
-            None if tuples > 0 || tuple_lit || (b.pts.is_empty() && matches!(b.kv, KeyVal::Data(..)) && self.value_type(b).is_none()) => return Some(("TypeError", false)),
+            None if tuples > 0 || tuple_lit || (b.pts.is_empty() && matches!(b.kv, KeyVal::Data(..)) && self.value_type(b).is_none()) => return Some((vec!["TypeError"], false)),
             None => {
                 // (b alone: a mapping — a dict, a list, an instance — may fill no conversion)
                 let mapping = b.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Instance | Kind::Namespace));
                 if n != 1 {
-                    return (!(n == 0 && mapping && b.kv.is_bot())).then_some(("TypeError", n >= 2 || !mapping && b.pts.is_empty()));
+                    return (!(n == 0 && mapping && b.kv.is_bot())).then_some((vec!["TypeError"], n >= 2 || !mapping && b.pts.is_empty()));
                 }
                 vec![b.clone()]
             }
         };
-        // each argument against its conversion: surely if one surely fails
-        let mut out = None;
+        // each argument against its conversion: surely if one surely fails (the arguments
+        // before it convert first: theirs may come first)
+        let mut out: Vec<&'static str> = Vec::new();
         for ((_, c), v) in convs.iter().zip(&args) {
             match self.percent_arg_fails(*c, v) {
-                Some(true) => return Some(("TypeError", true)),
-                Some(false) => out = Some(("TypeError", false)),
+                Some((sure, cls)) => {
+                    out.extend(cls);
+                    if sure {
+                        return Some((out, true));
+                    }
+                }
                 None => {}
             }
         }
-        out
+        (!out.is_empty()).then_some((out, false))
     }
 
-    /// Whether conversion `c` fails on `v` (true: surely; None: it does not): numeric ones take
-    /// numbers (`%x`, `%o`: ints), `%c` an int or one character; `%s`, `%r`, `%a` anything.
-    fn percent_arg_fails(&self, c: char, v: &Value) -> Option<bool> {
+    /// Whether conversion `c` fails on `v` (true: surely; None: it does not), and the classes
+    /// it may raise: numeric ones take numbers (`%x`, `%o`: ints; `%d` of a float not known:
+    /// OverflowError for an infinity, ValueError for a NaN), `%c` an int or one character (an
+    /// int past 0x10FFFF or below 0: OverflowError); `%s`, `%r`, `%a` anything.
+    fn percent_arg_fails(&self, c: char, v: &Value) -> Option<(bool, Vec<&'static str>)> {
         if matches!(c, 's' | 'r' | 'a') {
             return None;
         }
         let int_only = matches!(c, 'x' | 'X' | 'o' | 'c');
-        // (each part: Some(true) fails, Some(false) may, None takes it)
-        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match self.heap.obj(o).ty {
-            Some("int" | "bool") => (c == 'c').then_some(false),
-            Some("float") => Some(int_only),
-            Some("str") if c == 'c' => Some(false),
-            Some(_) => Some(true),
-            None if matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Set | Kind::Tuple) => Some(true),
-            None => Some(false),
+        const T: &[&str] = &["TypeError"];
+        // (each part: Some((true, classes)) fails, Some((false, classes)) may, None takes it)
+        let ty = |t: Option<&str>| -> Option<(bool, &'static [&'static str])> {
+            match t {
+                Some("int" | "bool") => (c == 'c').then_some((false, &["OverflowError"])),
+                Some("float") if int_only => Some((true, T)),
+                Some("float") => matches!(c, 'd' | 'i' | 'u').then_some((false, &["OverflowError", "ValueError"])),
+                Some("str") if c == 'c' => Some((false, T)),
+                Some(_) => Some((true, T)),
+                None => Some((false, &["TypeError", "OverflowError", "ValueError"])),
+            }
+        };
+        let mut parts: Vec<Option<(bool, &'static [&'static str])>> = v.pts.iter().map(|o| match self.heap.obj(o).ty {
+            None if matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Set | Kind::Tuple) => Some((true, T)),
+            t => ty(t),
         }).collect();
         match &v.kv {
             KeyVal::Bot => {}
-            kv if kv.is_literal() => parts.extend(kv_literals(kv).iter().map(|k| intern::with_key(k, |k| match k {
-                intern::Key::Int(i) if c == 'c' => (!(0..=0x10FFFF).contains(i)).then_some(true),
-                intern::Key::Str(s) if c == 'c' => (s.chars().count() != 1).then_some(true),
-                intern::Key::Int(_) | intern::Key::Bool(_) => None,
-                intern::Key::Float(_) => int_only.then_some(true),
-                intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::None => Some(true),
-                _ => Some(false),
+            kv if kv.is_literal() => parts.extend(kv_literals(kv).iter().map(|k| intern::with_key(k, |k| -> Option<(bool, &'static [&'static str])> {
+                match k {
+                    intern::Key::Int(i) if c == 'c' => (!(0..=0x10FFFF).contains(i)).then_some((true, &["OverflowError"] as &'static [&'static str])),
+                    intern::Key::Str(s) if c == 'c' => (s.chars().count() != 1).then_some((true, T)),
+                    intern::Key::Int(_) | intern::Key::Bool(_) => None,
+                    intern::Key::Float(bits) if !int_only => {
+                        const V: &[&str] = &["ValueError"];
+                        const O: &[&str] = &["OverflowError"];
+                        let f = f64::from_bits(*bits);
+                        (!f.is_finite() && matches!(c, 'd' | 'i' | 'u')).then_some((true, if f.is_nan() { V } else { O }))
+                    }
+                    intern::Key::Float(_) => Some((true, T)),
+                    intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::None => Some((true, T)),
+                    _ => Some((false, T)),
+                }
             }))),
-            _ => parts.push(match self.value_type(v) {
-                Some("int" | "bool") => (c == 'c').then_some(false),
-                Some("float") => Some(int_only),
-                Some("str") if c == 'c' => Some(false),
-                Some(_) => Some(true),
-                None => Some(false),
-            }),
+            _ => parts.push(ty(self.value_type(v))),
         }
-        if !parts.is_empty() && parts.iter().all(|p| *p == Some(true)) {
-            return Some(true);
+        let mut classes: Vec<&'static str> = parts.iter().flatten().flat_map(|p| p.1.iter().copied()).collect();
+        classes.sort_unstable();
+        classes.dedup();
+        if classes.is_empty() {
+            return None;
         }
-        parts.iter().any(|p| p.is_some()).then_some(false)
+        Some((!parts.is_empty() && parts.iter().all(|p| p.is_some_and(|p| p.0)), classes))
     }
 
     /// The arguments `text % b` formats, in order (b's items when it is a tuple of known

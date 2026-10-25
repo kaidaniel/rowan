@@ -668,7 +668,9 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return csv_list(an, vals, &c.node, st, "csvrows", true);
         }
     }
-    // unknown rows: lists of str
+    // unknown rows: lists of str (a text not known, or options not modelled: `strict`, a field
+    // past the size limit, may raise csv.Error)
+    an.flag_may_raise(st);
     let e = Value::data(&crate::domain::typed_label("str", &format!("csv field@L{}", c.line)));
     let row = csv_list(an, vec![], &c.node, st, "csvrow", false);
     if let Some(o) = row.single() {
@@ -747,7 +749,8 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     // rows of unknown count: the header's fields when a DictWriter wrote it, the field names
-    // given (plus restkey for longer rows), else open
+    // given (plus restkey for longer rows), else open (and csv.Error, as `reader_new`'s)
+    an.flag_may_raise(st);
     let row = match (&text, &given) {
         (Text::Hdr(hd, fs), None) if Some(*hd) == delim && plain => Row::closed_with(intern::KeySet::from_iter(fs.iter().map(|x| key_str_lit(x)))),
         (_, Some(g)) => {

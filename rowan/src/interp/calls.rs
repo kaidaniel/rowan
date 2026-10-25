@@ -489,6 +489,52 @@ impl Analyzer {
         }
     }
 
+    /// A library call's `*xs` and `**kw`: those whose items or keys are known become positional
+    /// and keyword arguments, the only ones most models read (`*xs` only after every other
+    /// positional argument; not for the models that read them themselves, `STAR_MODELS`).
+    /// False: a `**kw` of keys not known stays, given to a model of the standard library's
+    /// modules that reads only the keywords written (`KEYWORDS_ONLY`): what it does with them
+    /// is not known. (Other models read `**` from the call's text, pandas' `agg(**spec)`.)
+    fn spread_stars(&mut self, call: &mut Call, state: &State) -> bool {
+        const STAR_MODELS: &[&str] = &["builtins.dict", "builtins.zip", "dict.update", "str.format", "str.format_map", "types.SimpleNamespace", "argparse.Namespace"];
+        const KEYWORDS_ONLY: &[&str] = &["builtins.", "str.", "bytes.", "json.", "csv.", "re.", "datetime.", "decimal.", "io.", "math.", "stdobj."];
+        if STAR_MODELS.contains(&call.qual.as_str()) || call.qual.starts_with("view.") || call.qual.starts_with("parser.") || call.qual.starts_with("cfgparser.") {
+            return true;
+        }
+        let in_order = call.call_ast.is_none_or(|c| !c.arguments.args.iter().skip_while(|a| !matches!(a, ast::Expr::Starred(_))).any(|a| !matches!(a, ast::Expr::Starred(_))));
+        let items = |v: &Value| -> Option<Vec<Value>> {
+            if !v.kv.is_bot() {
+                return None;
+            }
+            let o = v.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple) && !self.heap.obj(*o).iterator)?;
+            let n = self.heap.llen(o, state)?;
+            Some((0..n).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+        };
+        if in_order && !call.star_args.is_empty() {
+            if let Some(all) = call.star_args.iter().map(items).collect::<Option<Vec<Vec<Value>>>>() {
+                call.args.extend(all.into_iter().flatten());
+                call.star_args.clear();
+            }
+        }
+        let pairs = |v: &Value| -> Option<Vec<(StrId, Value)>> {
+            let o = v.single().filter(|o| v.kv.is_bot() && self.heap.kind(*o) == Kind::Dict)?;
+            let row = state.row(o, Ns::Item);
+            if !row.closed() || row.present != row.definite {
+                return None;
+            }
+            row.definite.iter().map(|k| intern::key_as_str(k).map(|n| (s(&n), state.slot(o, Ns::Item, k)))).collect()
+        };
+        let mut rest = Vec::new();
+        for sk in std::mem::take(&mut call.star_kwargs) {
+            match pairs(&sk) {
+                Some(ps) => call.kwargs.extend(ps),
+                None => rest.push(sk),
+            }
+        }
+        call.star_kwargs = rest;
+        call.star_kwargs.is_empty() || !KEYWORDS_ONLY.iter().any(|p| call.qual.starts_with(p))
+    }
+
     /// A call of a library method value (`dict.get` bound to its receiver): its model (a str
     /// method on known text: exactly), else unknown code; over several groupby objects, once each.
     fn call_method_object(&mut self, oid: u32, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
@@ -513,9 +559,11 @@ impl Analyzer {
             }
         }
         crate::models::driven_dunders(self, &qual, Some(&recv), &args, state, node);
-        let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-        let pure = if qual.starts_with("str.") { self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) } else { None };
-        let r = match (pure, self.program.models.lookup(&qual)) {
+        let mut call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+        let spread = self.spread_stars(&mut call, state);
+        let kwargs = &call.kwargs.clone();
+        let pure = if qual.starts_with("str.") && spread { self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) } else { None };
+        let r = match (pure, self.program.models.lookup(&qual).filter(|_| spread)) {
             (Some(v), _) => v,
             (None, Some(m)) => self.run_model(m, state, &call),
             (None, None) => return self.unknown_call(&qual, Some(&recv), Args::new(&call.args, kwargs, star_args, star_kwargs), state, node),
@@ -541,7 +589,11 @@ impl Analyzer {
     pub fn call_external(&mut self, qual: &str, a: Args, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let Args { pos: args, kw: kwargs, star: star_args, star_kw: star_kwargs } = a;
         let qual = qual.to_string();
-        let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+        let mut call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+        if !self.spread_stars(&mut call, state) {
+            return self.unknown_call(&qual, None, a, state, node);
+        }
+        let (args, kwargs) = (&call.args.clone()[..], &call.kwargs.clone());
         if let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) {
             return self.as_type(v, crate::models::builtins::result_type(self, &qual, args), false);
         }

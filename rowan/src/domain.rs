@@ -1300,7 +1300,7 @@ pub const TEXT_MAX: usize = 1 << 16;
 /// A str function applied to the scalar: literals computed, keys of objects through one more
 /// lens step; past `TEXT_MAX` a str not known.
 pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
-    if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX) {
+    if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX || !step.exact(k)) {
         return KeyVal::data(&typed_label("str", ""));
     }
     match kv {
@@ -1314,7 +1314,7 @@ pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
         // (the texts it may be, mapped too)
         KeyVal::Data(l, _) => {
             let h = kv.hint();
-            KeyVal::Data(*l, if h.iter().any(|k| !intern::key_is_str(k) || step.out_len(k) > TEXT_MAX) { KeySet::EMPTY } else { h.map(|k| step.apply(k)) })
+            KeyVal::Data(*l, if h.iter().any(|k| !intern::key_is_str(k) || step.out_len(k) > TEXT_MAX || !step.exact(k)) { KeySet::EMPTY } else { h.map(|k| step.apply(k)) })
         }
         _ => kv.clone(),
     }

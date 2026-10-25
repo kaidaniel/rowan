@@ -882,16 +882,8 @@ pub fn method(k: KeyId, name: &str, args: &[KeyId], kwargs: &[(&str, KeyId)]) ->
         (DATE | DATETIME, "weekday") => Some(key_int(weekday(p.ord))),
         (DATE | DATETIME, "isoweekday") => Some(key_int(weekday(p.ord) + 1)),
         (DATE | DATETIME, "toordinal") => Some(key_int(p.ord)),
-        (DATE | DATETIME, "isocalendar") => {
-            // ISO year / week / weekday
-            let wd = weekday(p.ord);
-            let thursday = p.ord - wd + 3;
-            let (iy, _, _) = ord_to_ymd(thursday);
-            let week1_thu = ymd_to_ord(iy, 1, 4)?;
-            let week1_mon = week1_thu - weekday(week1_thu);
-            let week = (p.ord - week1_mon) / 7 + 1;
-            Some(intern::key_tuple(vec![key_int(iy), key_int(week), key_int(wd + 1)]))
-        }
+        // (`isocalendar`: an `IsoCalendarDate`, a named tuple, whose repr and attributes are
+        // not a tuple's: not computed)
         (DATETIME, "date") => Some(chrono_key(DATE, p.ord, NAIVE)),
         (DATETIME, "time") => Some(chrono_key(TIME, v.rem_euclid(US_DAY), NAIVE)),
         (DATETIME, "timetz") => Some(chrono_key(TIME, v.rem_euclid(US_DAY), tz)),
@@ -1050,7 +1042,7 @@ mod tests {
         assert_eq!(str_of(fromisoformat(DATETIME, "2024-03-01T09:00:00.5+02:00").unwrap()).unwrap(), "2024-03-01 09:00:00.500000+02:00");
         assert_eq!(repr_of(fromisoformat(DATETIME, "2024-01-02T03:04").unwrap()).unwrap(), "datetime.datetime(2024, 1, 2, 3, 4)");
         assert_eq!(str_of(strptime("05/06/2023 14:30", "%d/%m/%Y %H:%M").unwrap()).unwrap(), "2023-06-05 14:30:00");
-        assert_eq!(method(d2, "isocalendar", &[], &[]), Some(intern::key_tuple(vec![key_int(2024), key_int(9), key_int(5)])));
+        assert_eq!(method(d2, "isocalendar", &[], &[]), None);
         assert_eq!(ord_to_ymd(ymd_to_ord(2000, 12, 31).unwrap()), (2000, 12, 31));
         assert_eq!(ord_to_ymd(ymd_to_ord(1900, 3, 1).unwrap()), (1900, 3, 1));
         assert!(construct("date", &[key_int(2023), key_int(2), key_int(29)], &[]).unwrap().is_err());

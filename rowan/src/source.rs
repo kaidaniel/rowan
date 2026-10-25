@@ -88,6 +88,17 @@ impl RenameFn {
         })
     }
 
+    /// Does `apply` compute CPython's text for `k`? `title` (title case, which cased characters
+    /// are) and `strip` (`str.isspace`: also `\x1c`–`\x1f`) only of ASCII text.
+    pub fn exact(&self, k: KeyId) -> bool {
+        let Some(s) = key_as_str(k) else { return true };
+        match self.fn_ {
+            FnKind::Title => s.is_ascii(),
+            FnKind::Strip => s.chars().all(|c| c.is_ascii() && !('\x1c'..='\x1f').contains(&c)),
+            _ => true,
+        }
+    }
+
     /// About how long `apply`'s text is (in bytes) for `k`, without computing it.
     pub fn out_len(&self, k: KeyId) -> usize {
         let Some(s) = key_as_str(k) else { return 0 };
