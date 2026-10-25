@@ -736,6 +736,16 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         "__next__" | "send" if recv.pts.iter().all(|o| an.heap.obj(o).iterator) => m_next(an, st, &Call { args: vec![recv], ..c.clone() }),
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
+            // (`sort` compares the items: ones of kinds that do not compare may raise TypeError)
+            if name == "sort" && c.kw("key").is_none() {
+                let items: Vec<Value> = recv.pts.iter().flat_map(|o| match an.known_positions(o, st) {
+                    Some(ps) => ps,
+                    None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
+                }).collect();
+                if crate::models::builtins::incomparable(&items) {
+                    an.may_raise_here("TypeError", st);
+                }
+            }
             // `clear` on one list, whatever its length: empty
             if name == "clear" {
                 if let Some(oid) = recv.single().filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).single && !crate::state::is_merged(*o)) {

@@ -59,6 +59,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
                             for item in items {
                                 let parts = an.unpack(&item, 2, st, &c.node);
+                                an.check_hashable(&parts[0], st);
                                 an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                             }
                             continue;
@@ -94,13 +95,19 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Zip | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
                         let it = an.iterate(&Value::obj(x), &c.node, st);
                         match (&it.elem, &it.items) {
+                            // (each item a pair: ValueError for another length; its key hashed)
                             (_, Some(items)) => {
                                 for item in items {
+                                    an.check_unpack_len(item, 2, st);
                                     let parts = an.unpack(item, 2, st, &c.node);
+                                    an.check_hashable(&parts[0], st);
                                     an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                                 }
                             }
-                            (Elem::Pair(k, v), None) => an.store_key(oid, Ns::Item, &k, v, false, &c.node, st),
+                            (Elem::Pair(k, v), None) => {
+                                an.check_hashable_if(k, false, st);
+                                an.store_key(oid, Ns::Item, &k, v, false, &c.node, st)
+                            }
                             _ => {
                                 let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
                                 st.set_row(oid, Ns::Item, r);
@@ -160,7 +167,33 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
+/// Items `sort` / `sorted` may find that do not compare with each other: literals of two
+/// kinds that do not (numbers, strs, bytes, the others), or None among two or more.
+pub(super) fn incomparable(items: &[Value]) -> bool {
+    let kind = |k: KeyId| intern::with_key(k, |k| match k {
+        intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
+        intern::Key::Str(_) => 1,
+        intern::Key::Bytes(_) => 2,
+        intern::Key::None => 3,
+        _ => 4,
+    });
+    let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds.len() > 1 || (kinds.contains(&3) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())))
+}
+
 pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (`sorted` compares the items, as `list.sort`)
+    if let (true, Some(a)) = (c.qual == "builtins.sorted" && c.kw("key").is_none(), c.args.first()) {
+        let items: Vec<Value> = a.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
+            Some(ps) => ps,
+            None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
+        }).collect();
+        if incomparable(&items) {
+            an.may_raise_here("TypeError", st);
+        }
+    }
     if an.m.torch_on && matches!(c.qual.as_str(), "builtins.tuple" | "builtins.list") {
         if let Some(a) = c.args.first() {
             if crate::models::torch::size_shape(a).is_some() {

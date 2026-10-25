@@ -118,6 +118,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/lib_protocol.py; about 5 s)
         run: uv run --no-project python tests/lib_protocol.py --all
 
+      - name: Container models (bounded list, dict, set, tuple operations vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/container_protocol.py; about 5 s)
+        run: uv run --no-project python tests/container_protocol.py --all
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick
