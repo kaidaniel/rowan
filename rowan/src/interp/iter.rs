@@ -103,10 +103,17 @@ impl Analyzer {
     /// element (`iter_sequence`, `iter_mapping`, `iter_view`, `iter_zip`, …), and the scalar
     /// part's (`iter_scalar`).
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
-        // (the program's instances whose class has neither `__iter__` nor `__getitem__`: TypeError)
-        let Some(v) = &self.without_dunders(v, &["__iter__", "__getitem__"], state) else {
+        // (the program's instances whose class has neither `__iter__` nor `__getitem__`, and
+        // numbers and None: TypeError)
+        let v = self.iterable_part(v, state);
+        let Some(v) = self.without_dunders(&v, &["__iter__", "__getitem__"], state).filter(|v| !v.empty()) else {
             return Iteration::new(None, Elem::One(Value::new()), false, false);
         };
+        let v = &v;
+        // (iterating an unknown: TypeError where it is no iterable)
+        if !self.unwind.tries.is_empty() && self.untyped_operand(v) {
+            self.may_raise_here("TypeError", state);
+        }
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         // (a loop reads the containers it is over at each step, through a live iterator too:
@@ -190,8 +197,9 @@ impl Analyzer {
             self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
         }
         if let Some(its) = &items {
-            // no items *and* no containers: nothing is known; empty containers iterate zero times
-            if its.is_empty() && v.pts.is_empty() {
+            // no items *and* no containers: nothing is known; empty containers and strings
+            // iterate zero times
+            if its.is_empty() && v.pts.is_empty() && !(v.kv.is_literal() && !v.kv.is_bot()) {
                 items = None;
             }
         }

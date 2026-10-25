@@ -106,6 +106,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/dunder_protocol.py; about 10 s)
         run: uv run --no-project python tests/dunder_protocol.py --all
 
+      - name: Runs for any call (bounded operations on parameters vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/anycall_protocol.py; about 30 s)
+        run: uv run --no-project python tests/anycall_protocol.py --rowan 3000
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

@@ -102,7 +102,12 @@ impl Analyzer {
         for oid in v.pts.iter() {
             let o = self.heap.kind(oid);
             if o == Kind::Class {
-                return self.annotated_instance(oid, &format!("{}.{}", fi.qualname, pname), Some((fi, pname)), true, 0, state);
+                let inst = self.annotated_instance(oid, &format!("{}.{}", fi.qualname, pname), Some((fi, pname)), true, 0, state);
+                // (`Optional[C]`, `C | None`: or None)
+                return match annotation_members(ann).1 {
+                    true => Some(inst.unwrap_or_default().join(&Value::none())),
+                    false => inst,
+                };
             }
             if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
                 let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
@@ -130,6 +135,24 @@ impl Analyzer {
     /// else, each holding what its annotation allows (`field_value`), made once per path; another
     /// is made as its `__init__` makes it (None: no path of it completes).
     fn annotated_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
+        // (an instance of a subclass passes for one: each of the program's subclasses, up to
+        // `SUBCLASS_INSTANCES`; past them, also an unknown, whose methods are unknown calls)
+        const SUBCLASS_INSTANCES: usize = 8;
+        let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c != cls && self.heap.mro(*c).contains(&cls)).collect();
+        let mut out = self.class_instance(cls, path, param, single, depth, state);
+        for c in subs.iter().take(SUBCLASS_INSTANCES) {
+            if let Some(v) = self.class_instance(*c, path, param, single, depth, state) {
+                out = Some(out.unwrap_or_default().join(&v));
+            }
+        }
+        if subs.len() > SUBCLASS_INSTANCES {
+            out = Some(out.unwrap_or_default().join(&Value::data(&format!("instance {}", path))));
+        }
+        out
+    }
+
+    /// `annotated_instance` of `cls` itself.
+    fn class_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
         let ci = self.heap.class_info(cls);
         let Some((fields, extra, validated)) = self.declared_fields(cls, state) else {
             // (a part's, `list[B]`'s element: made once per path, as one with declared fields —

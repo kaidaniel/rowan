@@ -63,6 +63,12 @@ impl Analyzer {
             if !obj.pts.is_empty() && kv_literals(&obj.kv).contains(intern::key_none()) {
                 self.may_raise_here("TypeError", state);
             }
+            // (a str, bytes or tuple literal is indexed by ints and slices only)
+            let text_key = |k: KeyId| !intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+            if obj.pts.is_empty() && !kv_literals(&obj.kv).is_empty() && key.pts.is_empty() && key.kv.is_literal() && kv_literals(&key.kv).iter().all(text_key) && !kv_literals(&key.kv).is_empty() {
+                self.raise_here("TypeError", state);
+                return Value::new();
+            }
         }
         if report {
             self.unknown_scalar_may_raise(obj, state);
@@ -98,6 +104,16 @@ impl Analyzer {
     /// sequence's position, an unknown's placeholder, … joined; a requirement one of several
     /// receivers records is only sometimes needed.
     pub(super) fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        // (a list or tuple indexed by a container: TypeError)
+        let seq = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::List | Kind::Tuple) && !an.heap.obj(o).iterator;
+        let container = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set);
+        if ns == Ns::Item && report && obj.pts.iter().any(|o| seq(self, o)) && key.pts.iter().any(|o| container(self, o)) {
+            if obj.kv.is_bot() && obj.pts.iter().all(|o| seq(self, o)) && key.kv.is_bot() && key.pts.iter().all(|o| container(self, o)) {
+                self.raise_here("TypeError", state);
+                return Value::new();
+            }
+            self.may_raise_here("TypeError", state);
+        }
         // (objects in the key: an unknown key — of a list or tuple, a position not known; frames
         // and Series are indexed by their own rules: a column list, a mask)
         let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Dict | Kind::Unknown | Kind::List | Kind::Tuple)) && !obj.pts.is_empty() {
@@ -352,6 +368,19 @@ impl Analyzer {
     /// elements), else any element (may raise IndexError). True: the read is done.
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
         let is_slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
+        // (a list or tuple is indexed by ints and slices: `xs["a"]`, `xs[None]` raise TypeError)
+        let bad = |k: KeyId| !intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+        if kind != Kind::Set && key.kv.is_literal() && kv_literals(&key.kv).iter().any(bad) {
+            if key.pts.is_empty() && kv_literals(&key.kv).iter().all(bad) {
+                if single_target {
+                    self.raise_here("TypeError", state);
+                } else {
+                    self.may_raise_here("TypeError", state);
+                }
+                return true;
+            }
+            self.may_raise_here("TypeError", state);
+        }
         // known positions: a slice with known bounds (`xs[1:3]`, `xs[slice(0, n)]`), or one from
         // the start to a bound not known (`xs[:n]`: each position it has is xs's, its length one
         // of 0..=len(xs))
@@ -480,7 +509,16 @@ impl Analyzer {
             }
             if let Some(ci) = self.heap.class_info_opt(cls) {
                 if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base.get() {
-                    parts.push(line_data.clone());
+                    // (a class of the program's own with no `__getitem__`: not subscriptable)
+                    if self.plain_program_class(cls) {
+                        if single_target {
+                            self.raise_here("TypeError", state);
+                        } else {
+                            self.may_raise_here("TypeError", state);
+                        }
+                    } else {
+                        parts.push(line_data.clone());
+                    }
                     return true;
                 }
             }

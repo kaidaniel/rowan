@@ -649,6 +649,23 @@ impl Analyzer {
         out
     }
 
+    /// What of `v` Python can unpack with `**` (a dict display's, a call's): literals, lists,
+    /// tuples and sets are no mappings and raise TypeError; with nothing else, the path ends here.
+    pub fn mapping_part(&mut self, v: &Value, state: &mut State) -> Value {
+        let seq = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set);
+        let lits = v.kv.is_literal() && !kv_literals(&v.kv).is_empty();
+        if !lits && !v.pts.iter().any(|o| seq(self, o)) {
+            return v.clone();
+        }
+        let out = Value::with_kv(v.pts.filter(|o| !seq(self, o)), if lits { BOT } else { v.kv.clone() });
+        if out.empty() {
+            self.raise_here("TypeError", state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+        out
+    }
+
     /// Unpacking into `n` names raises ValueError for a sequence of another known length (a
     /// list, tuple or generator's items, a known string): on every path when each part does,
     /// on some when a part's length is not known.

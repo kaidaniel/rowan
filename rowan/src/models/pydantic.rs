@@ -1218,12 +1218,19 @@ fn pyd_catching(an: &mut Analyzer, f: ObjId, self_v: Value, args: Vec<Value>, st
     an.enter_try(rustc_hash::FxHashSet::from_iter(PYD_CAUGHT.iter().map(|x| x.to_string())), &mut pre);
     // (run with the validated values: `v.strip()` of a str field is a str method there)
     let out = an.call_user(f, Some(self_v), Args::pos(&args), state, node, false);
-    // an exception of another class (a KeyError, one of code rowan cannot see) is no
-    // validation error: it escapes to the enclosing try / call
+    // an exception of another class (a KeyError) is no validation error: it escapes to the
+    // enclosing try / call; one of any class (code rowan cannot see) may be either
     let validation = |c: &Option<crate::interp::ExcNames>| c.as_ref().is_some_and(|(n, _)| n.iter().any(|x| PYD_CAUGHT.contains(&x.as_str())));
-    let (recs, escaping): (Vec<_>, Vec<_>) = an.leave_try().recs.into_iter().partition(|r| validation(&r.0));
-    for r in escaping {
-        an.reraise_rec(r);
+    let mut recs = Vec::new();
+    for r in an.leave_try().recs {
+        if crate::interp::is_any_exc(&r.0) {
+            recs.push((r.0.clone(), r.1.copy(), r.2.clone()));
+            an.reraise_rec(r);
+        } else if validation(&r.0) {
+            recs.push(r);
+        } else {
+            an.reraise_rec(r);
+        }
     }
     let raised_at = crate::interp::join_raise_recs(&recs);
     let Some(mut r) = raised_at else { return (out, false, false) };

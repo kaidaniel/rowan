@@ -840,6 +840,7 @@ fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, no
     an.enter_try(caught_names.clone(), &mut pre);
     an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
     an.m.fa_out_resp.push(Vec::new());
+    let skipped0 = an.calls_not_run();
     fa_route_deps(an, route, Some(req), state, node);
     let gens = fa_yield_deps(an, func, state);
     let ret = fa_run_handler(an, func, gens, Some(req.clone()), false, state, node);
@@ -850,22 +851,32 @@ fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, no
     let recs = out_try.recs;
     // (the raises are kept one by one: their states joined)
     let mut raised_at: Option<State> = crate::interp::join_raise_recs(&recs);
+    // (an exception of any class answered: any status)
+    let mut any_answered = false;
     // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
     // re-raised by the TestClient at the call: they go on to the enclosing try
     if !recs.is_empty() {
+        // (a raise of any class where the program's code did not run — a call past its budget
+        // or the deadline, which may raise an HTTPException — may be answered or re-raised;
+        // library code raises no HTTPException)
+        let skipped = an.calls_not_run() > skipped0;
+        let any = |c: &Option<crate::interp::ExcNames>| skipped && crate::interp::is_any_exc(c);
         let answered = |c: &Option<crate::interp::ExcNames>| match c {
-            Some((names, _)) => names.iter().any(|n| caught_names.contains(n)),
+            Some((names, _)) => any(c) || names.iter().any(|n| caught_names.contains(n)),
             None => true,
         };
-        if recs.iter().any(|(c, _, _)| !answered(c)) {
+        if recs.iter().any(|(c, _, _)| !answered(c) || any(c)) {
             let mut keep_st: Option<State> = None;
             let mut keep_v = Value::new();
             for (c, st, ev) in recs {
                 if answered(&c) {
                     let mut s2 = st.copy();
                     keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
-                    keep_v = keep_v.join(&ev);
-                } else {
+                    // (an exception of any class: any error response)
+                    any_answered |= any(&c);
+                    keep_v = keep_v.join(&if any(&c) { Value::data("exception") } else { ev.clone() });
+                }
+                if !answered(&c) || any(&c) {
                     an.reraise_rec((c, st, ev));
                 }
             }
@@ -972,9 +983,12 @@ fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, no
                 }
             }
             let _ = verr;
-            // (a validation error: 422)
+            // (a validation error: 422; an exception of any class: any status)
             if other {
                 status = status.join(&Value::lit(intern::key_int(422)));
+            }
+            if any_answered {
+                status = status.join(&Value::data("status_code"));
             }
             if other || detail.empty() {
                 detail = detail.join(&Value::data("detail"));

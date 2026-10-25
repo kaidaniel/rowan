@@ -54,7 +54,10 @@ impl Analyzer {
             }
             for kw in c.arguments.keywords.iter() {
                 match &kw.arg {
-                    None => star_kwargs.push(self.eval(&kw.value, state)),
+                    None => {
+                        let v = self.eval(&kw.value, state);
+                        star_kwargs.push(self.mapping_part(&v, state));
+                    }
                     Some(name) => {
                         let v = self.eval(&kw.value, state);
                         kwargs.insert(s(name.id.as_str()), v);
@@ -891,6 +894,7 @@ impl Analyzer {
         }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.cx.model_depth, 0);
+        self.cx.called_by_model = saved_md > 0;
         // (the receiver, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.budget.hard_cut;
         let recv = self_v.clone();
@@ -1166,6 +1170,33 @@ impl Analyzer {
         let used_kw: Vec<StrId> = bound.keys().copied().filter(|k| kwargs.contains_key(k)).collect();
         let live = self.live_defaults(fi, &positional, &kwonly, state);
         let defaults = live.as_ref().unwrap_or(&fi.defaults);
+        // (arguments that do not fit the parameters raise TypeError at the call; a model's calls
+        // pass what the library would)
+        if !std::mem::take(&mut self.cx.called_by_model) {
+            // (`**d` of dicts whose keys are known: those names are given; else any may be)
+            let mut named = kwargs.clone();
+            let mut star_kw = false;
+            for sk in star_kwargs {
+                let known = sk.kv.is_bot() && !sk.pts.is_empty() && sk.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && { let r = state.row(o, Ns::Item); r.closed() && r.present == r.definite });
+                if !known || sk.pts.len() > 1 {
+                    star_kw = true;
+                    continue;
+                }
+                for o in sk.pts.iter() {
+                    for k in state.row(o, Ns::Item).present.iter() {
+                        match intern::key_as_str(k) {
+                            Some(n) => { named.insert(s(&n), Value::new()); }
+                            None => star_kw = true,
+                        }
+                    }
+                }
+            }
+            match args_fit(a, defaults, args.len(), !star_args.is_empty(), &named, star_kw) {
+                Some(false) => self.raise_here("TypeError", state),
+                None => self.may_raise_here("TypeError", state),
+                Some(true) => {}
+            }
+        }
         for name in positional.iter().chain(kwonly.iter()) {
             if bound.contains_key(name) {
                 continue;
@@ -1327,4 +1358,35 @@ struct Caller {
     path: std::sync::Arc<Vec<(StrId, StrId)>>,
     ret: Option<Value>,
     exits: Option<std::sync::Arc<State>>,
+}
+
+/// Do a call's arguments fit parameters `a` (`defaults`: those that have one; `n_pos` known
+/// positional arguments, `self` among them; `star`: `*xs` of items not known; `kwargs` by name;
+/// `star_kw`: `**d`)? Some(false) where Python surely raises TypeError (too many positional
+/// arguments, a name no parameter has, one given twice, a required one missing), None where it
+/// may (the unknown items or keys may not fit).
+fn args_fit(a: &ast::Parameters, defaults: &IndexMap<StrId, Value>, n_pos: usize, star: bool, kwargs: &IndexMap<StrId, Value>, star_kw: bool) -> Option<bool> {
+    let name = |p: &ast::ParameterWithDefault| s(p.parameter.name.id.as_str());
+    let positional: Vec<StrId> = a.posonlyargs.iter().chain(a.args.iter()).map(name).collect();
+    let by_name: Vec<StrId> = a.args.iter().chain(a.kwonlyargs.iter()).map(name).collect();
+    if a.vararg.is_none() && n_pos > positional.len() {
+        return Some(false);
+    }
+    for k in kwargs.keys() {
+        // (given twice, positionally and by name; a name no parameter takes, unless `**kw` does)
+        if positional.iter().take(n_pos).any(|p| p == k) && by_name.contains(k) {
+            return Some(false);
+        }
+        if !by_name.contains(k) && a.kwarg.is_none() {
+            return Some(false);
+        }
+    }
+    let missing = positional.iter().enumerate().any(|(i, p)| i >= n_pos && !kwargs.contains_key(p) && !defaults.contains_key(p))
+        || a.kwonlyargs.iter().map(name).any(|p| !kwargs.contains_key(&p) && !defaults.contains_key(&p));
+    let unsure = (star && (a.vararg.is_none() || missing)) || (star_kw && (a.kwarg.is_none() || missing));
+    match (missing, unsure) {
+        (true, false) => Some(false),
+        (_, true) => None,
+        (false, false) => Some(true),
+    }
 }

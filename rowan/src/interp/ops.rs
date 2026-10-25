@@ -222,8 +222,9 @@ impl Analyzer {
             _ => None,
         };
         // (None, a str, a builtin container: no `-`, `+`, `~` — TypeError)
+        let invert = u.op == ast::UnaryOp::Invert;
         if u.op != ast::UnaryOp::Not && self.builtin_operand(&v) {
-            let bad = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::None | intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::Tuple(_)));
+            let bad = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::None | intern::Key::Str(_) | intern::Key::Bytes(_) | intern::Key::Tuple(_)) || (invert && matches!(k, intern::Key::Float(_))));
             let lits = kv_literals(&v.kv);
             let (some, all) = (!v.pts.is_empty() || lits.iter().any(bad), lits.iter().all(bad));
             if some && all {
@@ -233,6 +234,22 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
             }
         }
+        // (an unknown's operator is code rowan cannot see)
+        if u.op != ast::UnaryOp::Not && !self.unwind.tries.is_empty() && self.untyped_operand(&v) && !crate::models::pandas::is_seriesish(self, &v) {
+            self.flag_may_raise(state);
+        }
+        // (the program's instances whose class lacks the operator's dunder: TypeError)
+        let dunder = match u.op {
+            ast::UnaryOp::USub => "__neg__",
+            ast::UnaryOp::UAdd => "__pos__",
+            _ => "__invert__",
+        };
+        let v = if u.op == ast::UnaryOp::Not { v } else {
+            match self.without_dunders(&v, &[dunder], state) {
+                Some(v) => v,
+                None => return Value::new(),
+            }
+        };
         let r = self.unary_untyped(u, v, node, state);
         let r = self.as_type(r, ty, false);
         if u.op == ast::UnaryOp::Not {
@@ -277,6 +294,13 @@ impl Analyzer {
             _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.m.series), DATA),
             _ => Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA),
         }
+    }
+
+    /// Is `v` partly of no type known here: an unknown or library object (not one of a builtin
+    /// scalar type), an unknown scalar of no type? Its operators are code rowan cannot see.
+    pub(in crate::interp) fn untyped_operand(&self, v: &Value) -> bool {
+        let untyped_label = matches!(&v.kv, KeyVal::Data(l, _) if crate::domain::label_base(&intern::str_get(*l)).is_none());
+        untyped_label || v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External) && self.heap.obj(o).ty.is_none())
     }
 
     /// Is `v` literals and builtin containers only (no unknown, no instance whose methods an
@@ -1106,7 +1130,12 @@ impl Analyzer {
             ast::ConversionFlag::Str => self.run_dunder(&v, &["__str__", "__repr__"], vec![], &nd, state),
             _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
         };
+        // (a spec the value's type rejects: `f"{None:d}"` TypeError, `f"{'a':d}"` ValueError)
+        let spec_given = matches!(&spec_text, Some(None)) || matches!(&spec_text, Some(Some(t)) if !t.is_empty());
         if let Some((t, rest)) = ran {
+            if spec_given {
+                self.may_raise_here("TypeError", state);
+            }
             // (no text known — a dunder of code rowan cannot see — is any text)
             let whole = rest.pts.is_empty() && rest.kv.is_bot() && (conversion == ast::ConversionFlag::None || spec_text.is_none()) && !t.empty();
             return if whole { Part::Hole(t) } else { Part::Opaque };
@@ -1129,13 +1158,35 @@ impl Analyzer {
                 }
             }
         };
+        // (None takes no spec, a str no number's: TypeError, ValueError)
+        if let (Some(Some(t)), Some(k)) = (&spec_text, v.kv.as_lit().filter(|_| v.pts.is_empty() && spec_given)) {
+            let number_code = t.ends_with(|c: char| "bcdoxXneEfFgG%".contains(c));
+            match intern::key_get(k) {
+                intern::Key::None => self.raise_here("TypeError", state),
+                intern::Key::Str(_) if number_code => self.raise_here("ValueError", state),
+                _ => {}
+            }
+            if !state.reachable {
+                return Part::Opaque;
+            }
+        }
         match spec_text {
             // a spec applied to a known value
             Some(Some(t)) => match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| format_spec_literal(k, &t)) {
                 Some(s) => Part::Lit(s),
-                None => Part::Opaque,
+                None => {
+                    if spec_given {
+                        self.may_raise_here("TypeError", state);
+                        self.may_raise_here("ValueError", state);
+                    }
+                    Part::Opaque
+                }
             },
-            Some(None) => Part::Opaque,
+            Some(None) => {
+                self.may_raise_here("TypeError", state);
+                self.may_raise_here("ValueError", state);
+                Part::Opaque
+            }
             None => Part::Hole(v),
         }
     }

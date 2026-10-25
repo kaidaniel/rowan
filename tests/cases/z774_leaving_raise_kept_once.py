@@ -3,9 +3,9 @@ items. Raises no handler catches (only a finally sees them: ValueError, KeyError
 OSError here) are one state for all their classes, copied per class when the try ends; each
 copy then costed a footprint (the 40 records the generator changes) and a join of its own,
 four times the work of one. Their footprint is taken once per state: about one footprint per
-raise state and consumer (12 consumers × 40 records, ~2.4k visits; was 6.5k), with a margin."""
+raise state and consumer (12 consumers × 40 records, ~2.4k visits; was 6.5k), with a margin; iterating DATA (which may be no list) raises TypeError too, one more state per consumer: 4.0k joins."""
 #@visits <= 3500
-#@joins <= 3000
+#@joins <= 4500
 import json
 import sys
 

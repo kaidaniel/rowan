@@ -156,6 +156,12 @@ impl Analyzer {
         &self.program.user_classes
     }
 
+    /// How many calls of the program's code have not run so far (past their budget; one more
+    /// once the deadline cut the analysis).
+    pub fn calls_not_run(&self) -> usize {
+        self.budget.skipped + usize::from(self.budget.hard_cut)
+    }
+
     /// The main module's object.
     pub fn main_module(&self) -> ObjId {
         self.program.main_module
