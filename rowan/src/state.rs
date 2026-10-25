@@ -1405,3 +1405,7 @@ mod tests {
         assert_eq!(ks, vec!["'chain'", "'ns'", "'objs'"]);
     }
 }
+
+#[cfg(test)]
+#[path = "laws/state.rs"]
+mod laws_state;
