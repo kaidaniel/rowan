@@ -1218,6 +1218,29 @@ impl Analyzer {
         if split.is_some() {
             return;
         }
+        // (an unknown may be what takes no attribute: None, a number, a builtin container)
+        if !self.unwind.tries.is_empty() && self.untyped_operand(obj) {
+            self.may_raise_here("AttributeError", state);
+        }
+        // (a list, tuple, set, plain dict or one-shot iterator has no attribute dict:
+        // AttributeError)
+        let no_dict = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
+            Kind::List | Kind::Tuple | Kind::Set => true,
+            // (an unknown of a builtin type, as annotated: `x: int`, `x: list`)
+            Kind::Unknown => an.heap.obj(o).ty.is_some(),
+            Kind::Dict => an.heap.obj(o).label.starts_with("dict@") || an.heap.obj(o).label.starts_with("**"),
+            _ => false,
+        };
+        let typed_scalar = matches!(&obj.kv, KeyVal::Data(l, _) if crate::domain::label_base(&intern::str_get(*l)).is_some());
+        if typed_scalar || obj.pts.iter().any(|o| no_dict(self, o)) {
+            let rest = Value::with_kv(obj.pts.filter(|o| !no_dict(self, o)), if typed_scalar { crate::domain::BOT } else { obj.kv.clone() });
+            if rest.empty() {
+                self.raise_here("AttributeError", state);
+                return;
+            }
+            self.may_raise_here("AttributeError", state);
+            return self.store_attr(&rest, name, v, node, state);
+        }
         if !state.narrowed.is_empty() {
             let needle = format!(".{}", name);
             state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));

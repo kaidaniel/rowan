@@ -64,7 +64,7 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
             }
             // (a str, bytes or tuple literal is indexed by ints and slices only)
-            let text_key = |k: KeyId| !intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+            let text_key = |k: KeyId| !intern::key_may_index(k);
             if obj.pts.is_empty() && !kv_literals(&obj.kv).is_empty() && key.pts.is_empty() && key.kv.is_literal() && kv_literals(&key.kv).iter().all(text_key) && !kv_literals(&key.kv).is_empty() {
                 self.raise_here("TypeError", state);
                 return Value::new();
@@ -369,7 +369,7 @@ impl Analyzer {
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
         let is_slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
         // (a list or tuple is indexed by ints and slices: `xs["a"]`, `xs[None]` raise TypeError)
-        let bad = |k: KeyId| !intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+        let bad = |k: KeyId| !intern::key_may_index(k);
         if kind != Kind::Set && key.kv.is_literal() && kv_literals(&key.kv).iter().any(bad) {
             if key.pts.is_empty() && kv_literals(&key.kv).iter().all(bad) {
                 if single_target {
@@ -982,7 +982,7 @@ impl Analyzer {
     /// list's position, a frame's column, a record's key (`store_key`), strong into a single
     /// object.
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
-        let Some(obj) = (if ns == Ns::Item { self.without_dunder(obj, "__setitem__", state) } else { Some(obj.clone()) }) else { return };
+        let Some(obj) = (if ns == Ns::Item { self.without_dunder(obj, "__setitem__", state).and_then(|o| self.item_write_part(&o, key, state)) } else { Some(obj.clone()) }) else { return };
         let obj = &obj;
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__setitem__"), state, &mut |an, o, st| {
@@ -1000,6 +1000,10 @@ impl Analyzer {
         // be anything: one that takes no item store, TypeError)
         if ns == Ns::Item && (obj.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown || (self.heap.is_record(o) && !state.row(o, Ns::Item).sources.is_empty())) || !(obj.kv.is_literal() || obj.kv.is_bot())) {
             self.may_raise_here("TypeError", state);
+        }
+        // (an unknown's `__setitem__` is code rowan cannot see: a list's IndexError, anything)
+        if ns == Ns::Item && !self.unwind.tries.is_empty() && self.untyped_operand(obj) {
+            self.flag_may_raise(state);
         }
         let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
@@ -1266,7 +1270,7 @@ impl Analyzer {
     /// `del obj[key]`: a `__delitem__` of the program per receiver, else per object its verdict
     /// (a missing key raises) and the key removed (strongly from a single object).
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
-        let Some(obj) = (if ns == Ns::Item { self.without_dunder(obj, "__delitem__", state) } else { Some(obj.clone()) }) else { return };
+        let Some(obj) = (if ns == Ns::Item && report { self.without_dunder(obj, "__delitem__", state).and_then(|o| self.item_write_part(&o, key, state)) } else if ns == Ns::Item { self.without_dunder(obj, "__delitem__", state) } else { Some(obj.clone()) }) else { return };
         let obj = &obj;
         if ns == Ns::Item {
             let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__delitem__"), state, &mut |an, o, st| {
@@ -1328,6 +1332,37 @@ impl Analyzer {
         }
         let rest = Value::with_kv(obj.pts.filter(|o| !lacking(self, o)), obj.kv.clone());
         if rest.pts.is_empty() && rest.kv.is_bot() {
+            self.raise_here("TypeError", state);
+            return None;
+        }
+        self.may_raise_here("TypeError", state);
+        Some(rest)
+    }
+
+    /// What of `obj` takes an item store or `del` by `key`: literals (a str, a tuple, a number,
+    /// None), tuples, sets and one-shot iterators take none, a list or tuple no key but an int
+    /// or a slice: TypeError, on every path when nothing else is left (None: the path ends).
+    fn item_write_part(&mut self, obj: &Value, key: &Value, state: &mut State) -> Option<Value> {
+        let int_key = |k: KeyId| intern::key_may_index(k);
+        let slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
+        let bad_list_key = !slice && key.pts.is_empty() && key.kv.is_literal() && !kv_literals(&key.kv).iter().any(int_key);
+        let some_bad_key = !slice && ((key.kv.is_literal() && kv_literals(&key.kv).iter().any(|k| !int_key(k))) || key.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set)));
+        let refuses = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
+            Kind::Tuple | Kind::Set => true,
+            Kind::List => an.heap.obj(o).iterator || bad_list_key,
+            _ => false,
+        };
+        // (values: an object's identity key stands for the object, which may take one)
+        let (lits, kept) = value_literals(&obj.kv);
+        let refused = lits || obj.pts.iter().any(|o| refuses(self, o));
+        if some_bad_key && obj.pts.iter().any(|o| self.heap.kind(o) == Kind::List) {
+            self.may_raise_here("TypeError", state);
+        }
+        if !refused {
+            return Some(obj.clone());
+        }
+        let rest = Value::with_kv(obj.pts.filter(|o| !refuses(self, o)), kept);
+        if rest.empty() {
             self.raise_here("TypeError", state);
             return None;
         }
@@ -1551,4 +1586,16 @@ fn weak_store(state: &mut State, oid: ObjId, ns: Ns, k: KeyId, v: &Value) {
 /// holds is in its slots.
 fn own_map(row: &Row) -> bool {
     !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| source_fills_star(src))
+}
+
+/// Whether scalar part `kv` has literals that are values (a str, a number, None, a tuple: not an
+/// object's identity or a symbolic key), and the part without them.
+pub(in crate::interp) fn value_literals(kv: &KeyVal) -> (bool, KeyVal) {
+    if !kv.is_literal() {
+        return (false, kv.clone());
+    }
+    let ks = kv_literals(kv);
+    let others: KeySet = ks.iter().filter(|k| !intern::key_is_value(*k)).collect();
+    let some = others.len() < ks.len();
+    (some, if others.is_empty() { crate::domain::BOT } else { KeyVal::lits(others) })
 }

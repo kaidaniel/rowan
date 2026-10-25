@@ -6,6 +6,15 @@
 use super::*;
 
 pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (pairs from a number, None or a str: TypeError / ValueError)
+    if let Some(src) = c.args.first() {
+        match crate::models::containers::pairs_part(an, st, src) {
+            None => return Value::new(),
+            Some(v) if v.empty() => return m_dict(an, st, &Call { args: c.args[1..].to_vec(), ..c.clone() }),
+            Some(v) if v != *src => return m_dict(an, st, &Call { args: [vec![v], c.args[1..].to_vec()].concat(), ..c.clone() }),
+            _ => {}
+        }
+    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
     if let Some(src) = c.args.first() {
         // a parameter: a mapping or pairs, decided per call site

@@ -777,7 +777,7 @@ impl Analyzer {
     }
 
     /// An instance of `cls_oid` whose attributes are unknown (`instance C`).
-    fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
+    pub(in crate::interp) fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
         self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
     }
 

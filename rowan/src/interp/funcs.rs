@@ -248,6 +248,13 @@ impl Analyzer {
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
             self.findings.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
             fi.inspect(|fi| fi.opaque.set(true));
+            // (a class it may have given its own `__init__` or attributes, `@attr.frozen`: its
+            // instances may have any)
+            for c in fv.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Class) {
+                if let Some(ci) = self.heap.class_info_opt(c) {
+                    ci.open_base.set(true);
+                }
+            }
         }
         fv
     }
@@ -608,6 +615,25 @@ impl Analyzer {
         self.sync_live(v, state, true);
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
+        // (fewer items than the targets beside the star: ValueError)
+        let need = si + after;
+        if need > 0 {
+            let lens: Option<Vec<usize>> = if v.pts.is_empty() && v.kv.is_literal() {
+                kv_literals(&v.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().count())).collect()
+            } else if v.kv.is_bot() {
+                v.pts.iter().map(|o| self.positions_left(o, state).map(|(_, l)| l)).collect()
+            } else {
+                None
+            };
+            match lens {
+                Some(ls) if !ls.is_empty() && ls.iter().all(|l| *l < need) => {
+                    self.raise_here("ValueError", state);
+                    return;
+                }
+                Some(ls) if ls.iter().all(|l| *l >= need) => {}
+                _ => self.may_raise_here("ValueError", state),
+            }
+        }
         let known = v.single().and_then(|o| self.positions_left(o, state).filter(|(_, l)| *l >= si + after).map(|(c, l)| (o, c, l)));
         let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, c0, len)) = known {
             let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int((c0 + i) as i64));
@@ -652,12 +678,17 @@ impl Analyzer {
     /// What of `v` Python can unpack with `**` (a dict display's, a call's): literals, lists,
     /// tuples and sets are no mappings and raise TypeError; with nothing else, the path ends here.
     pub fn mapping_part(&mut self, v: &Value, state: &mut State) -> Value {
-        let seq = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set);
-        let lits = v.kv.is_literal() && !kv_literals(&v.kv).is_empty();
+        let seq = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
+            Kind::List | Kind::Tuple | Kind::Set => true,
+            // (an instance of a class of the program's own without `keys`)
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c) && an.class_lookup(c, "keys").is_none()),
+            _ => false,
+        };
+        let (lits, kept) = super::items::value_literals(&v.kv);
         if !lits && !v.pts.iter().any(|o| seq(self, o)) {
             return v.clone();
         }
-        let out = Value::with_kv(v.pts.filter(|o| !seq(self, o)), if lits { BOT } else { v.kv.clone() });
+        let out = Value::with_kv(v.pts.filter(|o| !seq(self, o)), kept);
         if out.empty() {
             self.raise_here("TypeError", state);
         } else {

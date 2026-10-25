@@ -298,7 +298,7 @@ impl Analyzer {
 
     /// Is `v` partly of no type known here: an unknown or library object (not one of a builtin
     /// scalar type), an unknown scalar of no type? Its operators are code rowan cannot see.
-    pub(in crate::interp) fn untyped_operand(&self, v: &Value) -> bool {
+    pub fn untyped_operand(&self, v: &Value) -> bool {
         let untyped_label = matches!(&v.kv, KeyVal::Data(l, _) if crate::domain::label_base(&intern::str_get(*l)).is_none());
         untyped_label || v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External) && self.heap.obj(o).ty.is_none())
     }

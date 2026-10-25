@@ -186,6 +186,22 @@ pub fn with_key<R>(id: KeyId, f: impl FnOnce(&Key) -> R) -> R {
     INTERN.with(|i| f(i.borrow().keys.get(id.0)))
 }
 
+/// Is the key a value Python has as it is (a str, a number, None, a tuple, …), not an object's
+/// identity or an Enum member (`Member`), nor a key known only through a function (`Inv`)?
+pub fn key_is_value(id: KeyId) -> bool {
+    with_key(id, |k| !matches!(k, Key::Member(..) | Key::Inv(..)))
+}
+
+/// Can the key index a sequence: an int, a bool, an int-valued Enum member, or one not known
+/// (an object's identity, which may have `__index__`; an `Inv`)?
+pub fn key_may_index(id: KeyId) -> bool {
+    with_key(id, |k| match k {
+        Key::Int(_) | Key::Bool(_) | Key::Inv(..) => true,
+        Key::Member(_, v) => v.is_none_or(|v| with_key(v, |x| matches!(x, Key::Int(_) | Key::Bool(_)))),
+        _ => false,
+    })
+}
+
 pub fn key_is_str(id: KeyId) -> bool {
     with_key(id, |k| matches!(k, Key::Str(_)))
 }

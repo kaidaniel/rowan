@@ -487,6 +487,25 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, recv: Option<&Value>, args:
         an.check_hashable(a, state);
         return;
     }
+    // `format(v, spec)` with a spec v's type rejects: None takes none (TypeError), a str no
+    // number's (ValueError); a result not known may be either
+    if let ("builtins.format", [v, spec]) = (qual, args) {
+        let spec = spec.kv.as_lit().filter(|_| spec.pts.is_empty()).and_then(intern::key_as_str);
+        if spec.as_ref().is_some_and(|t| t.is_empty()) {
+            return;
+        }
+        let number_code = spec.as_ref().is_some_and(|t| t.ends_with(|c: char| "bcdoxXneEfFgG%".contains(c)));
+        match v.kv.as_lit().filter(|_| v.pts.is_empty()).map(intern::key_get) {
+            Some(intern::Key::None) => return an.raise_here("TypeError", state),
+            Some(intern::Key::Str(_)) if number_code => return an.raise_here("ValueError", state),
+            _ => {}
+        }
+        if !(r.pts.is_empty() && r.kv.is_literal()) {
+            an.may_raise_here("TypeError", state);
+            an.may_raise_here("ValueError", state);
+        }
+        return;
+    }
     if sure_type_error(an, qual, args, kwargs, state) {
         an.raise_here("TypeError", state);
         return;

@@ -60,6 +60,57 @@ OPS = {
     "pct": "'%d' % (x,)",
     "isnone": "x is None",
     "eqnone": "x == None",
+    # changes and methods
+    # (statements, then the expression)
+    "store0": "x[0] = 9\nx[0]",
+    "storek": "x['k'] = 9\nx['k']",
+    "delk": "del x['k']\nlen(x)",
+    "setattr": "x.v = 2\nx.v",
+    "iadd": "x += y\nx",
+    "unpack2": "a, b = x\nb",
+    "starred": "a, *b = x\nb",
+    "forbreak": "for a in x:\n    break\nlen(x)",
+    "append": "x.append(1)",
+    "pop": "x.pop()",
+    "keys": "list(x.keys())",
+    "split": "x.split()",
+    "join": "','.join(x)",
+    "count": "x.count(1)",
+    "index": "x.index(1)",
+    "copy": "x.copy()",
+    "update": "x.update(y)",
+    "items": "list(x.items())",
+    "lenattr": "len(x.v)",
+    "bool": "bool(x)",
+    "round": "round(x)",
+    "divmod": "divmod(x, 2)",
+    "chr": "chr(x)",
+    "ord": "ord(x)",
+    "dictof": "dict(x)",
+    "setof": "set(x)",
+    "tupleof": "tuple(x)",
+    "reversed": "list(reversed(x))",
+    "enum": "list(enumerate(x))",
+    "zip": "list(zip(x, y))",
+    "isinst": "isinstance(x, (int, str))",
+    "getattr": "getattr(x, 'v')",
+    "getattr2": "getattr(x, 'v', 5)",
+    "hasattr": "hasattr(x, 'm')",
+    "starstar": "dict(**x)",
+    "fmts": "'{}'.format(x)",
+    "fmt2": "format(x, 'd')",
+    "ljust": "'a'.ljust(x)",
+    "repeat": "'ab' * x",
+    "listrep": "[0] * x",
+    "range": "list(range(x))",
+    "slice2": "x[y:]",
+    "minus": "x - 1",
+    "floordiv": "x // y",
+    "lshift": "x << y",
+    "band": "x & y",
+    "ge": "x >= y",
+    "is": "x is y",
+    "contains_y": "x in (y,)",
     # two operands
     "add": "x + y",
     "sub": "x - y",
@@ -76,7 +127,7 @@ OPS = {
     "or": "x or y",
     "concat": "'p' + x",
 }
-TWO = {"add", "sub", "mul", "div", "mod", "pow", "lt", "eq", "in", "ni", "sub_item", "and", "or"}
+TWO = {"iadd", "add", "sub", "mul", "div", "mod", "pow", "lt", "eq", "in", "ni", "sub_item", "and", "or", "update", "zip", "slice2", "floordiv", "lshift", "band", "ge", "is", "contains_y"}
 
 CATCH = ["TypeError", "AttributeError", "LookupError", "ValueError", "ZeroDivisionError", "Exception"]
 
@@ -101,7 +152,8 @@ def header() -> list:
 def program(op: str, catch: str, ann: str | None, xs: tuple, y: str, inside: bool) -> Prog:
     xa = f": {ANNS[ann][0]}" if ann else ""
     lines = [*header(), "def p{N}():", "    pass", "",
-             f"def q{{N}}(x{xa}, y):", "    global O", "    try:", f"        r = {OPS[op]}", "        O = r" if inside else "        pass",
+             f"def q{{N}}(x{xa}, y):", "    global O", "    try:", *("        " + ln for ln in OPS[op].split("\n")[:-1]),
+             f"        r = {OPS[op].split(chr(10))[-1]}", "        O = r" if inside else "        pass",
              f"    except {catch}:", "        O = 'caught'" if inside else "        pass", "        return 'caught'",
              "    except BaseException:", "        return 'other'", "    return r", ""]
     yy = y if op in TWO else "0"

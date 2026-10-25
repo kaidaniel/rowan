@@ -346,7 +346,7 @@ impl Analyzer {
         if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
             let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
             // (`"ab"[None]`, `"ab"["k"]`: TypeError)
-            let no_index = |k: intern::KeyId| !intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+            let no_index = |k: intern::KeyId| !intern::key_may_index(k);
             if bounds.is_none() && key.pts.is_empty() && key.kv.is_literal() && !kv_literals(&key.kv).is_empty() && kv_literals(&key.kv).iter().all(no_index) {
                 self.raise_here("TypeError", state);
                 return Value::new();

@@ -106,7 +106,51 @@ pub(super) fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32,
     true
 }
 
+/// What of `src` a dict can take its pairs from (`dict(src)`, `d.update(src)`): a number or
+/// None raises TypeError, a non-empty str ValueError (its items are no pairs), an empty one
+/// gives none; None where nothing else is left (the path ends).
+pub(super) fn pairs_part(an: &mut Analyzer, st: &mut State, src: &Value) -> Option<Value> {
+    // (an unknown, of no type known: a mapping or pairs, or what gives neither)
+    if an.untyped_operand(src) && !src.pts.iter().any(|o| an.heap.obj(o).ty == Some("dict")) {
+        an.may_raise_here("TypeError", st);
+        an.may_raise_here("ValueError", st);
+    }
+    if !src.kv.is_literal() {
+        return Some(src.clone());
+    }
+    // (an object's identity key, a tuple of pairs, a frozenset: taken as they are)
+    let ks = crate::domain::kv_literals(&src.kv);
+    let kept: KeySet = ks.iter().filter(|k| intern::with_key(*k, |k| matches!(k, intern::Key::Member(..) | intern::Key::Inv(..) | intern::Key::Tuple(_) | intern::Key::Frozen(_)))).collect();
+    let empty = ks.iter().any(|k| intern::with_key(k, |k| matches!(k, intern::Key::Str(t) if t.is_empty()) || matches!(k, intern::Key::Bytes(b) if b.is_empty())));
+    let rejected: Vec<KeyId> = ks.iter().filter(|k| !kept.contains(*k) && !intern::with_key(*k, |k| matches!(k, intern::Key::Str(t) if t.is_empty()) || matches!(k, intern::Key::Bytes(b) if b.is_empty()))).collect();
+    if rejected.is_empty() {
+        // (only empty texts: no pairs)
+        return Some(if src.pts.is_empty() && kept.is_empty() { Value::new() } else { src.clone() });
+    }
+    if rejected.iter().any(|k| !intern::key_is_str(*k)) {
+        an.may_raise_here("TypeError", st);
+    }
+    if rejected.iter().any(|k| intern::key_is_str(*k)) {
+        an.may_raise_here("ValueError", st);
+    }
+    if src.pts.is_empty() && !empty && kept.is_empty() {
+        st.reachable = false;
+        return None;
+    }
+    Some(Value::with_kv(src.pts.clone(), if kept.is_empty() { crate::domain::BOT } else { KeyVal::lits(kept) }))
+}
+
 pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (pairs from a number, None or a str: TypeError / ValueError)
+    if let Some(src) = c.args.first() {
+        match pairs_part(an, st, src) {
+            None => return Value::new(),
+            // (`d.update("")`: no pairs)
+            Some(v) if v.empty() && c.kwargs.is_empty() => return Value::none(),
+            Some(v) if v != *src => return m_update(an, st, &Call { args: vec![v], ..c.clone() }),
+            _ => {}
+        }
+    }
     // a parameter's mapping (or keywords): decided per call site
     let recs = dict_recv(an, c);
     let strong = recs.len() == 1 && an.heap.obj(recs[0]).single;

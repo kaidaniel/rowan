@@ -744,6 +744,11 @@ impl Analyzer {
                     self.call_user(f, Some(Value::obj(inst)), a, state, node, false);
                 }
             }
+            // (an `__init__` that is no function of the program — one stored on the class
+            // that rowan cannot see, `cls.__init__ = eval(…)` — is an unknown call on the instance)
+            if !fv.kv.is_bot() || fv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Unknown | Kind::External | Kind::Partial | Kind::Instance)) {
+                self.unknown_call("__init__", Some(&Value::obj(inst)), a, state, node);
+            }
             self.cx.fresh_init.remove(&inst);
         } else if self.builtin_exc_base(cls) {
             crate::models::dataclasses::exception_init(self, cls, inst, args, node, state);
