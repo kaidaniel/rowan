@@ -989,9 +989,12 @@ impl Analyzer {
         if ns == Ns::Item && (obj.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown || (self.heap.is_record(o) && !state.row(o, Ns::Item).sources.is_empty())) || !(obj.kv.is_literal() || obj.kv.is_bot())) {
             self.may_raise_here("TypeError", state);
         }
-        // (an unknown's `__setitem__` is code rowan cannot see: a list's IndexError, anything)
+        // (an unknown's `__setitem__` is code rowan cannot see: a list's IndexError, anything;
+        // one annotated `list` may be too short)
         if ns == Ns::Item && !self.unwind.tries.is_empty() && self.untyped_operand(obj) {
             self.flag_may_raise(state);
+        } else if ns == Ns::Item && obj.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown && self.heap.obj(o).ty == Some("list")) {
+            self.may_raise_here("IndexError", state);
         }
         let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;

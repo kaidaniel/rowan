@@ -57,12 +57,21 @@ def walk(a):
         return "error"
 
 
+def put(x: list):
+    try:
+        x[0] = 9
+        return "ok"
+    except IndexError:
+        return "short"
+
+
 #@limits budget=0
 p1 = h(Foo())
 p2 = run(Base())
 p3 = has("k", {"k": 1})
 p4 = neg(1)
 p5 = walk([1])
+p6 = put([1])
 r1 = h(None)
 #@value r1: includes={"none"}
 r2 = run(B())
@@ -74,3 +83,5 @@ r4 = neg(None)
 #@value r4: includes={"error"}
 r5 = walk(None)
 #@value r5: includes={"error"}
+r6 = put([])
+#@value r6: includes={"short"}
