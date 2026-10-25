@@ -136,10 +136,9 @@ impl Analyzer {
     /// is made as its `__init__` makes it (None: no path of it completes).
     fn annotated_instance(&mut self, cls: ObjId, path: &str, param: Option<(&FuncInfo, &str)>, single: bool, depth: u32, state: &mut State) -> Option<Value> {
         // (an instance of a subclass passes for one: those of the program's subclasses that
-        // override something of the class (a method, `__init__`, a class attribute), up to
-        // `SUBCLASS_INSTANCES`: one with declared fields as they say, another with any
-        // attributes (its `__init__` not run: a base of many would run them all at every
-        // parameter); past them an unknown instead, whose methods are unknown calls)
+        // override something of the class (a method, `__init__`, a class attribute), each made
+        // as the class's is, up to `SUBCLASS_INSTANCES`; past them an unknown instead, whose
+        // methods are unknown calls: a base of many would make them all at every parameter)
         const SUBCLASS_INSTANCES: usize = 2;
         let overrides = |an: &Analyzer, c: ObjId| {
             an.heap.mro(c).into_iter().take_while(|m| *m != cls).any(|m| {
@@ -152,14 +151,7 @@ impl Analyzer {
             return Some(out.unwrap_or_default().join(&Value::data(&format!("instance {}", path))));
         }
         for c in subs {
-            let v = match self.declared_fields(c, state) {
-                Some(_) => self.class_instance(c, path, param, single, depth, state),
-                None => {
-                    let ci = self.heap.class_info(c);
-                    Some(Value::obj(self.open_instance(c, &ci, state, &format!("entry:{}", path))))
-                }
-            };
-            if let Some(v) = v {
+            if let Some(v) = self.class_instance(c, path, param, single, depth, state) {
                 out = Some(out.unwrap_or_default().join(&v));
             }
         }
