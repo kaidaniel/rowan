@@ -161,4 +161,4 @@ The folder READMEs are maps of the code, file by file, with a reading order: `ro
 
 ## Known problems and next steps
 
-Open items and ideas ruled out are in the pull requests' descriptions (Remaining, Ideas not pursued). Parked branches: `parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe`, `parked/suggested-changes` (the retired list of open items).
+Open items and ideas ruled out are in the pull requests' descriptions (Remaining, Ideas not pursued). Parked branches: `parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe`, `parked/place-activations` (recursion through a call place: sound, slower on the cost set; #96), `parked/suggested-changes` (the retired list of open items).
