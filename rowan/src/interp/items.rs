@@ -1235,21 +1235,56 @@ impl Analyzer {
 
     /// `del obj[key]` (and `obj.__delitem__(key)`): on a list, later positions move down.
     pub fn delete_subscript(&mut self, obj: &Value, key: &Value, node: &Node, state: &mut State) {
+        // (a list's index out of its range raises IndexError; a slice never does)
+        let slice = matches!(&key.kv, KeyVal::Data(s, _) if intern::str_get(*s).starts_with("slice"));
         for o in obj.pts.iter() {
             if self.heap.kind(o) != Kind::List {
                 continue;
             }
             let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+            // (a slice of known bounds and step 1: the positions it covers, as CPython clamps them)
+            let bounds = match &key.kv {
+                KeyVal::Data(l, _) => intern::str_get(*l).strip_prefix("slice[").and_then(|r| r.split(']').next()).and_then(|b| {
+                    let p: Vec<&str> = b.split(':').collect();
+                    let num = |x: &str| if x.is_empty() { Some(None) } else { x.parse::<i64>().ok().map(Some) };
+                    match p.as_slice() {
+                        [lo, hi, st] if matches!(*st, "" | "1") => Some((num(lo)?, num(hi)?)),
+                        _ => None,
+                    }
+                }),
+                _ => None,
+            };
             match (self.known_positions(o, state), idx) {
+                (Some(mut ps), None) if obj.pts.len() == 1 && bounds.is_some() => {
+                    let (lo, hi) = bounds.unwrap();
+                    let n = ps.len() as i64;
+                    let at = |b: Option<i64>, d: i64| b.map(|b| if b < 0 { (n + b).max(0) } else { b.min(n) }).unwrap_or(d) as usize;
+                    let (a, b) = (at(lo, 0), at(hi, n));
+                    if a < b {
+                        ps.drain(a..b);
+                    }
+                    self.set_positions(o, ps, state);
+                }
                 (Some(mut ps), Some(i)) if obj.pts.len() == 1 => {
                     let len = ps.len() as i64;
                     let at = if i < 0 { len + i } else { i };
                     if 0 <= at && at < len {
                         ps.remove(at as usize);
                         self.set_positions(o, ps, state);
+                    } else if obj.kv.is_bot() && self.heap.obj(o).single {
+                        self.raise_here("IndexError", state);
+                        return;
+                    } else {
+                        self.may_raise_here("IndexError", state);
                     }
                 }
                 _ => {
+                    // (a key that may be an int; a str's is TypeError, `item_write_part`'s)
+                    let int_like = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Bool(_)));
+                    let may_int = !key.pts.is_empty() || if key.kv.is_literal() { kv_literals(&key.kv).iter().any(int_like) } else { !matches!(self.value_type(key), Some("str" | "float" | "bytes")) };
+                    if !slice && may_int {
+                        self.may_raise_here("IndexError", state);
+                    }
                     self.heap.set_llen(o, state, None);
                     state.drop_obj_ns(o, Ns::Pos);
                 }

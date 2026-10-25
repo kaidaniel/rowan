@@ -848,16 +848,14 @@ impl<'s> Ctx<'s> {
     }
 }
 
-/// `re.escape(s)`.
+/// `re.escape(s)`: CPython's special characters only (3.7 and later).
 pub fn escape(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
-        if c.is_alphanumeric() || c == '_' || !c.is_ascii() {
-            out.push(c);
-        } else {
+        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(c) {
             out.push('\\');
-            out.push(c);
         }
+        out.push(c);
     }
     out
 }

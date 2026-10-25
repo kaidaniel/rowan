@@ -209,9 +209,20 @@ pub struct RowCheck {
     pub quiet: bool,
 }
 
+impl RowCheck {
+    /// Its hash and the fields equality compares (`Findings::add_row_check`).
+    fn digest(&self) -> (u64, String) {
+        use std::hash::{Hash, Hasher};
+        let tensor = self.tensor.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        let mut h = rustc_hash::FxHasher::default();
+        (&self.file, self.line, &self.name, &self.row, &self.value, &tensor, self.general, self.quiet).hash(&mut h);
+        (h.finish(), tensor)
+    }
+}
+
 /// A name's value as the golden harness checks it (`#@value NAME: exactly= | unknown |
 /// includes=`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ValueInfo {
     /// its literals
     pub lits: Vec<KeyId>,
@@ -242,6 +253,10 @@ pub struct Findings {
     /// has seen; the check also asks whether reading k would surely fail there
     pub row_absent_probes: Vec<(String, u32, String, KeyId)>,
     pub row_checks: Vec<RowCheck>,
+    /// the checks recorded, by hash (`RowCheck::digest`): a line a loop or many runs pass
+    /// records each different observation once (a module's checks repeated a thousandfold
+    /// made golden documents of hundreds of MB)
+    row_check_seen: FxHashMap<u64, Vec<usize>>,
     /// golden rows: the joined value of (line, name, call chain, entry run) so far
     pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
     /// collect `facts` (the `--facts` mode)
@@ -273,6 +288,19 @@ pub struct Findings {
 }
 
 impl Findings {
+    /// Records a golden check, unless the same observation was recorded already (the harness
+    /// joins a line's observations: a repeat adds nothing).
+    pub fn add_row_check(&mut self, rc: RowCheck) {
+        let (h, tensor) = rc.digest();
+        let same = |o: &RowCheck| o.line == rc.line && o.general == rc.general && o.quiet == rc.quiet && o.name == rc.name && o.file == rc.file && o.row == rc.row && o.value == rc.value && o.tensor.as_ref().map(|t| t.to_string()).unwrap_or_default() == tensor;
+        let idx = self.row_check_seen.entry(h).or_default();
+        if idx.iter().any(|&i| same(&self.row_checks[i])) {
+            return;
+        }
+        idx.push(self.row_checks.len());
+        self.row_checks.push(rc);
+    }
+
     /// Are values for any call asked for (hover facts, `#@general` checks)? Functions whose run
     /// with verdicts is not one for any call then get a run for any call of their own.
     pub(in crate::interp) fn wants_general(&self) -> bool {
@@ -731,7 +759,7 @@ impl Analyzer {
             } else {
                 None
             };
-            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, value, tensor, general, quiet: self.findings.quiet });
+            self.findings.add_row_check(RowCheck { file: file.clone(), line: ln, name, row, value, tensor, general, quiet: self.findings.quiet });
         }
     }
 }

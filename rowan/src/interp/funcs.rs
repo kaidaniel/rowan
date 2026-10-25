@@ -700,7 +700,7 @@ impl Analyzer {
     /// Unpacking into `n` names raises ValueError for a sequence of another known length (a
     /// list, tuple or generator's items, a known string): on every path when each part does,
     /// on some when a part's length is not known.
-    fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
+    pub(crate) fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.positions_left(o, state)) {

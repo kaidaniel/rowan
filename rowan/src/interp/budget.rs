@@ -46,6 +46,24 @@ fn resident_mb() -> Option<usize> {
     }
 }
 
+/// Is the process past `MEMORY_MB` now? A thread looks every 10 ms (asking at every statement
+/// cost too much, and one statement may allocate gigabytes: a loop round, a walk of unknown
+/// code). None looks where `resident_mb` is not known.
+fn memory_watch() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static OVER: AtomicBool = AtomicBool::new(false);
+    static WATCH: std::sync::Once = std::sync::Once::new();
+    WATCH.call_once(|| {
+        if resident_mb().is_some() {
+            let _ = std::thread::Builder::new().name("rowan-memory".into()).spawn(|| loop {
+                OVER.store(resident_mb().is_some_and(|mb| mb > MEMORY_MB), Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            });
+        }
+    });
+    OVER.load(Ordering::Relaxed)
+}
+
 /// When the analysis started (the deadline counts from it).
 #[derive(Clone, Copy)]
 pub struct Clock(std::time::Instant);
@@ -81,9 +99,8 @@ pub struct Budget {
     started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
-    /// past `MEMORY_MB`, as past the deadline (`over_memory`), and how often it was asked
+    /// past `MEMORY_MB`, as past the deadline (`over_memory`)
     pub memory_cut: std::cell::Cell<bool>,
-    memory_checks: std::cell::Cell<u32>,
     /// set from outside (`rowan serve`: the file changed, the request timed out): the
     /// analysis is stale, its deadline has passed
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -224,16 +241,11 @@ impl Budget {
         self.started.elapsed().as_millis().saturating_sub(self.library_ms()) as usize > self.deadline_ms.unwrap_or_else(|| limit("ms", DEADLINE_MS)) || self.cancelled() || self.over_memory()
     }
 
-    /// The process holds more than `MEMORY_MB` (looked at every 64th question; once past it,
-    /// for the rest of the analysis): the deadline's safety net for memory, which grows with
-    /// the time an analysis runs.
+    /// The process holds more than `MEMORY_MB` (`memory_watch`; once past it, for the rest of
+    /// the analysis): the deadline's safety net for memory, which grows with the time an
+    /// analysis runs.
     fn over_memory(&self) -> bool {
-        if self.memory_cut.get() {
-            return true;
-        }
-        let n = self.memory_checks.get().wrapping_add(1);
-        self.memory_checks.set(n);
-        if n % 64 == 0 && resident_mb().is_some_and(|mb| mb > MEMORY_MB) {
+        if !self.memory_cut.get() && memory_watch() {
             self.memory_cut.set(true);
         }
         self.memory_cut.get()

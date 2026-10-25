@@ -59,6 +59,7 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
                             for item in items {
                                 let parts = an.unpack(&item, 2, st, &c.node);
+                                an.check_hashable(&parts[0], st);
                                 an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                             }
                             continue;
@@ -94,13 +95,19 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Zip | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
                         let it = an.iterate(&Value::obj(x), &c.node, st);
                         match (&it.elem, &it.items) {
+                            // (each item a pair: ValueError for another length; its key hashed)
                             (_, Some(items)) => {
                                 for item in items {
+                                    an.check_unpack_len(item, 2, st);
                                     let parts = an.unpack(item, 2, st, &c.node);
+                                    an.check_hashable(&parts[0], st);
                                     an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
                                 }
                             }
-                            (Elem::Pair(k, v), None) => an.store_key(oid, Ns::Item, &k, v, false, &c.node, st),
+                            (Elem::Pair(k, v), None) => {
+                                an.check_hashable_if(k, false, st);
+                                an.store_key(oid, Ns::Item, &k, v, false, &c.node, st)
+                            }
                             _ => {
                                 let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
                                 st.set_row(oid, Ns::Item, r);
@@ -160,7 +167,33 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
+/// Items `sort` / `sorted` may find that do not compare with each other: literals of two
+/// kinds that do not (numbers, strs, bytes, the others), or None among two or more.
+pub(super) fn incomparable(items: &[Value]) -> bool {
+    let kind = |k: KeyId| intern::with_key(k, |k| match k {
+        intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
+        intern::Key::Str(_) => 1,
+        intern::Key::Bytes(_) => 2,
+        intern::Key::None => 3,
+        _ => 4,
+    });
+    let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds.len() > 1 || (kinds.contains(&3) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())))
+}
+
 pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (`sorted` compares the items, as `list.sort`)
+    if let (true, Some(a)) = (c.qual == "builtins.sorted" && c.kw("key").is_none(), c.args.first()) {
+        let items: Vec<Value> = a.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
+            Some(ps) => ps,
+            None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
+        }).collect();
+        if incomparable(&items) {
+            an.may_raise_here("TypeError", st);
+        }
+    }
     if an.m.torch_on && matches!(c.qual.as_str(), "builtins.tuple" | "builtins.list") {
         if let Some(a) = c.args.first() {
             if crate::models::torch::size_shape(a).is_some() {
@@ -851,6 +884,22 @@ pub(super) fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(items) = cands.filter(|its| !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX) {
         let keyf = c.kw("key").filter(|k| !k.pts.is_empty());
+        // (literals of kinds that do not compare: `min('a', 1)`, None, tuples whose items may not)
+        if keyf.is_none() && items.len() >= 2 {
+            let kind = |k: KeyId| intern::with_key(k, |k| match k {
+                intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
+                intern::Key::Str(_) => 1,
+                intern::Key::Bytes(_) => 2,
+                intern::Key::None => 3,
+                _ => 4,
+            });
+            let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            if kinds.len() > 1 || kinds.iter().any(|k| *k >= 3) {
+                an.may_raise_here("TypeError", st);
+            }
+        }
         let mut keys: Vec<Option<KeyId>> = Vec::new();
         let mut kvals: Vec<Value> = Vec::new();
         for (i, item) in items.iter().enumerate() {
@@ -2143,14 +2192,17 @@ pub(super) fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             intern::Key::Int(i) => Some(Ok(if is_float { intern::Key::Float((*i as f64).to_bits()) } else { intern::Key::Int(*i) })),
             intern::Key::Bool(b) => Some(Ok(intern::Key::Int(*b as i64))),
             intern::Key::Float(f) => Some(Ok(if is_float { intern::Key::Float(*f) } else { intern::Key::Int(f64::from_bits(*f).trunc() as i64) })),
-            intern::Key::Str(s) => {
-                let t = s.trim().replace('_', "");
-                if is_float {
-                    Some(t.parse::<f64>().map(|f| intern::Key::Float(f.to_bits())).map_err(|_| ()))
-                } else {
-                    Some(t.parse::<i64>().map(intern::Key::Int).map_err(|_| ()))
+            // (CPython's parse, `pyvalues`; not computed there: an ASCII text without a digit
+            // surely fails, any other — non-ASCII digits, misplaced underscores, an int past
+            // i64 — is not known)
+            intern::Key::Str(s) => match crate::models::pyvalues::builtin(if is_float { "float" } else { "int" }, &[k], &[]) {
+                Some(r) => Some(Ok(intern::key_get(r))),
+                None => {
+                    let body = s.trim_matches(|c: char| c.is_ascii_whitespace() || ('\x1c'..='\x1f').contains(&c)).trim_start_matches(['+', '-']).to_ascii_lowercase();
+                    let special = is_float && matches!(body.as_str(), "inf" | "infinity" | "nan");
+                    (s.is_ascii() && !s.chars().any(|c| c.is_ascii_digit()) && !special).then_some(Err(()))
                 }
-            }
+            },
             _ => None,
         })
     };
@@ -2390,6 +2442,7 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
     let name = last(&c.qual);
     let kv = c.recv.as_ref().map(|r| r.kv.clone()).unwrap_or(DATA);
     match name {
+        "partition" | "rpartition" | "split" | "rsplit" if empty_separator(an, st, c) => Value::new(),
         // (`strip(chars)`, `lstrip()`, `rstrip()` are not `strip()`: a str not known)
         "upper" | "lower" | "title" | "strip" if c.args.is_empty() && c.kwargs.is_empty() => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         // positions / counts of a known substring in a known string
@@ -2421,6 +2474,10 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
             let arg_s = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str);
             let arg_i = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_int);
             let f = |s: &str| -> Option<String> {
+                // (title case and case folding are CPython's tables: of ASCII text only)
+                if matches!(name, "capitalize" | "casefold" | "swapcase") && !s.is_ascii() {
+                    return None;
+                }
                 Some(match name {
                     "capitalize" => {
                         let mut cs = s.chars();
@@ -2613,6 +2670,29 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
         }
         _ => Value::data(&format!("L{}", c.line)),
     }
+}
+
+/// `split` / `partition` with a separator that may be empty raise ValueError (true: surely;
+/// the path ends).
+fn empty_separator(an: &mut Analyzer, st: &mut State, c: &Call) -> bool {
+    let sep = c.args.first().or_else(|| c.kwargs.get(&s("sep")));
+    let Some(sep) = sep.filter(|v| v.pts.is_empty()) else { return false };
+    let empty = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Str(t) if t.is_empty()) || matches!(k, intern::Key::Bytes(b) if b.is_empty()));
+    let (some, all) = if sep.kv.is_literal() {
+        let ks = crate::domain::kv_literals(&sep.kv);
+        let r = (ks.iter().any(empty), !ks.is_empty() && ks.iter().all(empty));
+        r
+    } else {
+        (!sep.kv.is_bot(), false)
+    };
+    if all {
+        an.raise_here("ValueError", st);
+        return true;
+    }
+    if some {
+        an.may_raise_here("ValueError", st);
+    }
+    false
 }
 
 /// A part of the receiver of a split or partition rowan does not compute: a text of its type
