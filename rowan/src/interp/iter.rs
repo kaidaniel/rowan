@@ -663,15 +663,29 @@ impl Analyzer {
             elems.push(Value::kv_only(KeyVal::lits(ks)));
         } else if v.kv.is_literal() {
             let ks = kv_literals(&v.kv);
-            // (one of several strings: its characters)
-            if ks.iter().all(intern::key_is_str) {
-                let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
-                elems.push(Value::kv_only(KeyVal::lits(chars)));
-            } else {
-                if ks.len() <= UNROLL_MAX {
-                    *items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
+            // the items of each literal: a str's characters, bytes' ints, a tuple's or frozenset's
+            // items (one literal alone: in order); an object's identity key, any
+            // (the key read first, interned after: interning while reading one borrows twice)
+            let parts: Vec<Option<Vec<KeyId>>> = ks.iter().map(|k| match intern::key_get(k) {
+                intern::Key::Str(t) => Some(t.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect()),
+                intern::Key::Bytes(b) => Some(b.iter().map(|x| intern::key_int(*x as i64)).collect()),
+                intern::Key::Tuple(xs) | intern::Key::Frozen(xs) => Some(xs),
+                _ => None,
+            }).collect();
+            if let [Some(one)] = &parts[..] {
+                if one.len() <= UNROLL_MAX && !intern::with_key(ks.iter().next().unwrap_or(intern::key_none()), |k| matches!(k, intern::Key::Frozen(_))) {
+                    *items = Some(one.iter().map(|k| Value::lit(*k)).collect());
                 }
-                elems.push(Value::kv_only(KeyVal::lits(ks)));
+            }
+            let mut all: KeySet = KeySet::new();
+            for p in parts.iter().flatten() {
+                all = all.union(&p.iter().copied().collect());
+            }
+            if parts.iter().any(|p| p.is_none()) {
+                elems.push(line_data.clone());
+            }
+            if !all.is_empty() {
+                elems.push(Value::kv_only(KeyVal::lits(all)));
             }
         } else if let Some(e) = self.m.torch_on.then(|| crate::models::torch::t_iter_elem(self, v, state)).flatten() {
             elems.push(e);
