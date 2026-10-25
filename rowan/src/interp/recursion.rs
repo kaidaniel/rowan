@@ -438,7 +438,10 @@ impl Analyzer {
             }
             if self.recursion.hit.contains(key) {
                 if let Some((pr, pst, _)) = self.recursion.table.get(key) {
-                    if *pr == ret && pst.same(&st) && raises_stable {
+                    // (the frame's own names are not what its recursive calls take from it: a
+                    // round that changed only them is the fixpoint; a generator's are resumed)
+                    let same = if gen_id.is_some() { pst.same(&st) } else { pst.same_but_names(&st) };
+                    if *pr == ret && same && raises_stable {
                         st_final = Some(st);
                         break;
                     }

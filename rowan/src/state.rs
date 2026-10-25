@@ -694,9 +694,13 @@ impl State {
 
     /// Do the two states say the same (a fixpoint's test)? Pointer-equal subtrees are skipped.
     pub fn same(&self, o: &State) -> bool {
+        self.env == o.env && self.narrowed == o.narrowed && self.same_but_names(o)
+    }
+
+    /// `same` but for the running frame's names (`env`, `narrowed`): at a function's end, what
+    /// its caller takes from it.
+    pub fn same_but_names(&self, o: &State) -> bool {
         self.reachable == o.reachable
-            && self.env == o.env
-            && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
             && (Arc::ptr_eq(&self.lasts, &o.lasts) || self.lasts == o.lasts)
