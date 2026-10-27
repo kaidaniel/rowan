@@ -426,8 +426,9 @@ impl Analyzer {
             // (beside objects — an unknown, an instance with its `__eq__` — b may equal anything)
             if !ks.is_empty() && !by_value && rv.pts.is_empty() {
                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
-            } else if by_value && rv.pts.is_empty() && lv0.pts.is_empty() && lv0.kv.is_literal() && (eq || ks.len() == 1) {
-                // known numbers on both sides: those equal (or not) by value stay
+            } else if by_value && rv.kv.is_literal() && rv.pts.is_empty() && lv0.pts.is_empty() && lv0.kv.is_literal() && (eq || ks.len() == 1) {
+                // known numbers on both sides (not an unknown on the right, which may equal
+                // any of them): those equal (or not) by value stay
                 let lits = kv_literals(&lv0.kv);
                 let Some(keep) = lits.iter().map(|l| Some((l, ks.iter().map(|k| value_eq(l, k)).collect::<Option<Vec<bool>>>()?.contains(&true) == eq))).collect::<Option<Vec<_>>>() else { return };
                 let keep = KeySet::from_iter(keep.into_iter().filter(|(_, k)| *k).map(|(l, _)| l));
@@ -604,7 +605,15 @@ impl Analyzer {
                 let closed = self.hierarchy_closed(ic) && row.closed() && ["__getattr__", "__getattribute__"].iter().all(|h| self.class_lookup(ic, h).is_none());
                 return (closed && ms.iter().any(lacks)).then_some(false);
             }
-            return if k == Kind::Instance { Some(self.heap.instance_class(o).is_some_and(|ic| ic == cls || self.is_subclass(ic, cls))) } else { Some(false) };
+            if k != Kind::Instance {
+                return Some(false);
+            }
+            let Some(ic) = self.heap.instance_class(o) else { return Some(false) };
+            if ic == cls || self.is_subclass(ic, cls) {
+                return Some(true);
+            }
+            // (one standing for its subclasses' instances too: of a subclass, or not)
+            return (!(self.heap.obj(o).any_sub && self.is_subclass(cls, ic))).then_some(false);
         }
         let full = self.heap.external_qual(cls);
         let b = full.rsplit('.').next().unwrap_or("");
