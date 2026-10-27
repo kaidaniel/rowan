@@ -170,8 +170,8 @@ impl Analyzer {
                 Kind::External => self.external_attr(oid, name, state),
                 Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
-                Kind::Instance if name == "__class__" => match self.heap.instance_class(oid) {
-                    Some(c) => Value::obj(c),
+                Kind::Instance if name == "__class__" => match self.classes_of_instance(oid) {
+                    Some(cs) => Value::objs(crate::domain::ObjSet::from_vec(cs)),
                     None => Value::data(&format!("L{}", node.line)),
                 },
                 Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
@@ -1325,12 +1325,17 @@ impl Analyzer {
                     self.call_user(setter, Some(Value::obj(oid)), Args::pos(&[v.clone()]), state, node, false);
                     return true;
                 }
-                // a property without a setter: the assignment raises
+                // a property without a setter: the assignment raises (one the class attribute
+                // may be, beside what else it may hold: may raise)
                 if kind == Kind::Instance {
                     let cv = self.class_slot(defc, nk, state);
-                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
+                    let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get();
+                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| is_prop(self, f)) {
                         self.raise_here("AttributeError", state);
                         return true;
+                    }
+                    if cv.pts.iter().any(|f| is_prop(self, f)) {
+                        self.may_raise_here("AttributeError", state);
                     }
                 }
                 // a data descriptor (an object whose class has `__set__`) takes the store
