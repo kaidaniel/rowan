@@ -486,6 +486,10 @@ impl Analyzer {
     /// ChainMap's, a cookie jar's methods, else `dict`'s.
     fn dict_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
         self.sync_chainmaps(&Value::obj(oid), state);
+        // (a ChainMap's changes go to its first map: read through it again later)
+        if let Some(first) = self.m.chainmaps.get(&oid).and_then(|ms| ms.first()).cloned().filter(|_| matches!(name, "update" | "setdefault" | "pop" | "popitem" | "clear" | "__setitem__" | "__delitem__")) {
+            return self.load_attr(&first, name, node, state, false);
+        }
         if crate::models::pandas::is_series_obj(self, oid) {
             crate::models::pandas::series_getattr(self, oid, name, node, state)
         } else if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) {

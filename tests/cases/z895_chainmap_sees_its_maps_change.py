@@ -27,3 +27,9 @@ cm0, b0 = pairs[0]
 b0["q"] = 7
 q = cm0["q"]
 #@value q: includes={7}
+
+# (`update` on a ChainMap changes its first map: read back through the ChainMap)
+cm2 = ChainMap({})
+cm2.update({"k": 3})
+k = cm2["k"]  #@ ok k
+#@value k: exactly={3}
