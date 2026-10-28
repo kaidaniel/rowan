@@ -24,7 +24,7 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `budget` | `budget.rs` | statements spent per function code, the deadline, the work counters |
 | `recursion` | `recursion.rs` | the running activations and recursion's fixpoints |
 | `entry` | `entry.rs` | entry runs (functions run with open parameters), runs on demand |
-| `gens` | `gens.rs` | generators run at their consumers, per-yield states, `@contextmanager` bodies |
+| `gens` | `gens.rs` | generators run at their consumers, per-yield states, `@contextmanager` bodies; coroutines run where awaited, tasks |
 | `unwind` | `tries.rs` | raises in flight, running `try`s and their recorded raise states, loops' breaks |
 | `cx` | `context.rs` | the frames, callers' names, the call chain, branch depth, model calls running |
 | `mode` | `context.rs` | modes an evaluation sets for the code it calls (guarded reads, narrowing traces, …) |

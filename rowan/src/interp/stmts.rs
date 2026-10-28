@@ -207,7 +207,10 @@ impl Analyzer {
         let (enter, exit) = if w.is_async { ("__aenter__", "__aexit__") } else { ("__enter__", "__exit__") };
         let Some(v) = self.without_dunder(&v, enter, state).and_then(|v| self.without_dunder(&v, exit, state)) else { return };
         let n = frontend::node(&item.context_expr);
-        let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
+        let mut entered = self.call_method_if_defined(&v, enter, &n, state);
+        if w.is_async {
+            entered = entered.map(|e| self.await_value(&e, state));
+        }
         if entered.is_none() {
             entered = crate::models::csvio::enter_value(self, state, &v);
         }
@@ -222,10 +225,10 @@ impl Analyzer {
         let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
         let n_redirects = redirects.len();
         self.m.stdout_redirect.extend(redirects);
-        let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
+        let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, exit));
         let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line, maybe: true }] } else { vec![] };
         let rest = (i + 1 < w.items.len()).then_some((w, i + 1));
-        self.stmt_try_parts_rest(&w.body, rest, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+        self.stmt_try_parts_rest(&w.body, rest, handlers, &[], std::rc::Rc::new(Finally::Exit(managers, exit)), state);
         for _ in 0..n_redirects {
             self.m.stdout_redirect.pop();
         }

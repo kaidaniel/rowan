@@ -783,6 +783,11 @@ impl<K: PKey, IK: IKey, V: MapValue> TwoLevel<K, IK, V> {
         TwoLevel { m: self.m.join(&o.m, f) }
     }
 
+    /// `join`, but an entry on one side only is what `side` makes of it (None: dropped).
+    pub fn join_sides(&self, o: &Self, f: &mut dyn FnMut(&V, &V) -> V, side: &mut dyn FnMut(&K, &IK, &V) -> Option<V>) -> Self {
+        TwoLevel { m: self.m.join_sides(&o.m, f, &mut |k, v| side(&k.0, &k.1, v)) }
+    }
+
     /// Join where inner entries present on one side only are transformed by `one_side`.
     pub fn join_with(&self, o: &Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V) -> Self {
         self.join_with_keep(o, both, one_side, &|_| false)

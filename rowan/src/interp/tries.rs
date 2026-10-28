@@ -150,14 +150,15 @@ impl Handler {
 /// managers' `__exit__`.
 pub enum Finally {
     Block(&'static [ast::Stmt]),
-    Exit(Vec<(Value, Node)>),
+    /// the managers, and the name of their exit method (`__exit__`, `__aexit__`)
+    Exit(Vec<(Value, Node)>, &'static str),
 }
 
 impl Finally {
     pub(in crate::interp) fn is_empty(&self) -> bool {
         match self {
             Finally::Block(b) => b.is_empty(),
-            Finally::Exit(m) => m.is_empty(),
+            Finally::Exit(m, _) => m.is_empty(),
         }
     }
 
@@ -165,7 +166,7 @@ impl Finally {
     pub(in crate::interp) fn swallows(&self) -> bool {
         match self {
             Finally::Block(b) => contains_return(b) || contains_jump(b),
-            Finally::Exit(_) => false,
+            Finally::Exit(..) => false,
         }
     }
 }
@@ -488,12 +489,12 @@ impl Analyzer {
 
     /// May the manager's class's `__exit__` return a true value (a `return` of anything but
     /// `None` / `False`)? Then it may swallow the body's exception.
-    pub(super) fn exit_swallows(&mut self, v: &Value, _state: &mut State) -> bool {
+    pub(super) fn exit_swallows(&mut self, v: &Value, exit: &str) -> bool {
         for oid in v.pts.iter() {
             if self.heap.kind(oid) != Kind::Instance {
                 continue;
             }
-            if self.own_methods(oid, "__exit__").unwrap_or_default().into_iter().any(|f| crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
+            if self.own_methods(oid, exit).unwrap_or_default().into_iter().any(|f| crate::syntax::may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
         }
@@ -507,7 +508,7 @@ impl Analyzer {
         let inert = |v: &Value| v.kv.is_bot() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::Namespace && matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if INERT.contains(&q.as_str())));
         match fin {
             Finally::Block(b) => !b.is_empty(),
-            Finally::Exit(managers) => !managers.iter().all(|(v, _)| inert(v)),
+            Finally::Exit(managers, _) => !managers.iter().all(|(v, _)| inert(v)),
         }
     }
 
@@ -521,13 +522,16 @@ impl Analyzer {
         }
         match &**fin {
             Finally::Block(body) => self.exec_block(body, st),
-            Finally::Exit(managers) => {
+            Finally::Exit(managers, exit) => {
                 for (v, n) in managers.iter().rev() {
                     if !st.reachable {
                         break;
                     }
                     let a = if exc { Value::data("exc") } else { Value::none() };
-                    self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
+                    let r = self.call_method_with(v, exit, vec![a.clone(), a.clone(), a], n, st);
+                    if let Some(r) = r.filter(|_| *exit == "__aexit__") {
+                        self.await_value(&r, st);
+                    }
                     // an ExitStack: its callbacks, last registered first; closing(x): x.close()
                     crate::models::csvio::exitstack_close(self, st, v, n, !exc);
                     crate::models::csvio::closing_exit(self, st, v, n);

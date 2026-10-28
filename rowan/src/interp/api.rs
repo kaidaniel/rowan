@@ -123,6 +123,22 @@ impl Call {
 }
 
 impl Analyzer {
+    /// Is attribute `name` of instance `o` a property or a descriptor of its class (reading it runs
+    /// a getter)?
+    pub fn attr_has_getter(&self, o: ObjId, name: &str) -> bool {
+        let Some(dc) = self.user_class_of(o).and_then(|c| self.class_lookup(c, name)) else { return false };
+        self.heap.class_attr(dc, name).pts.iter().any(|f| (self.heap.kind(f) == crate::state::Kind::Function && self.heap.func_info(f).is_property.get()) || self.is_descriptor(f, "__get__"))
+    }
+
+    /// `f` runs as a framework runs the program's code (a FastAPI handler's entry run): what it
+    /// calls of the program's coroutines runs there, as awaited.
+    pub fn as_framework<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.cx.eager_coroutines += 1;
+        let r = f(self);
+        self.cx.eager_coroutines -= 1;
+        r
+    }
+
     /// `d.get(k)`'s read of the item: a defaultdict's factory and a Counter's 0 do not answer
     /// a key it lacks (`load_item` otherwise).
     pub fn load_item_for_get(&mut self, obj: &Value, key: &Value, node: &Node, state: &mut State) -> Value {

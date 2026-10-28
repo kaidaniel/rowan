@@ -98,8 +98,11 @@ impl Analyzer {
         // (`next`'s generator raises where it is asked for the item it fails to give, `genraise.rs`)
         let next = fv.single().is_some_and(|o| matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "builtins.next"));
         // (so does one a lazy iterator takes items of, where that is asked for them)
+        // (asyncio's models await the coroutines they are given, a task's at a later `await`:
+        // `Analyzer::await_value`)
+        let task = fv.single().filter(|o| self.heap.kind(*o) == Kind::External).is_some_and(|o| self.heap.external_qual(o).starts_with("asyncio."));
         let lazy = fv.single().filter(|o| self.heap.kind(*o) == Kind::External).is_some_and(|o| matches!(self.heap.external_qual(o).as_str(), "builtins.zip" | "builtins.map" | "builtins.filter" | "builtins.enumerate"));
-        for (i, a) in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user).enumerate() {
+        for (i, a) in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user && !task).enumerate() {
             if (next && i == 0) || lazy {
                 self.force_gen_deferring(a, state, false);
             } else {
@@ -796,7 +799,7 @@ impl Analyzer {
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
             let fv = self.heap.class_attr(init, "__init__");
-            self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
+            self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), seen: self.heap.mark(), rep: Vec::new(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), a, state, node, false);
@@ -944,19 +947,21 @@ impl Analyzer {
             self.findings.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.skipped_call(foid, &q, self_v.as_ref(), a, state, node);
         }
-        // a generator's body runs when it is consumed (`force_gen`), not here
+        // a generator's body runs when it is consumed (`force_gen`), a coroutine's where it is
+        // awaited (`await_value`), not here
         let lazy = !entry
             && self.gens.force_at.is_none()
             && self.cx.model_depth == 0
             && star_args.is_empty()
             && star_kwargs.is_empty()
             && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.cx.frames.len())
-            && self.heap.func_info(foid).node.is_generator();
+            && (self.heap.func_info(foid).node.is_generator() || (self.cx.eager_coroutines == 0 && self.heap.func_info(foid).node.is_coroutine()));
         if lazy {
             return self.make_lazy_gen(foid, self_v, args.to_vec(), kwargs.clone(), state, node);
         }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.cx.model_depth, 0);
+        let saved_eager = std::mem::replace(&mut self.cx.eager_coroutines, 0);
         self.cx.called_by_model = saved_md > 0;
         // (the receiver, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.budget.hard_cut;
@@ -976,6 +981,7 @@ impl Analyzer {
         }
         state.name_keys = if NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
+        self.cx.eager_coroutines = saved_eager;
         if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));

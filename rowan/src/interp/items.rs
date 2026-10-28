@@ -54,6 +54,7 @@ impl Analyzer {
         if let Some(r) = self.split_mixed(&[obj], state, &mut |an, vs, st| an.load_item(&vs[0], ns, key, node, st, report)) {
             return r;
         }
+        self.sync_chainmaps(obj, state);
         // (None, a number: not subscriptable; None beside objects: may be)
         if ns == Ns::Item && report && obj.kv.is_literal() {
             if obj.pts.is_empty() && !obj.kv.may_have_items() && !kv_literals(&obj.kv).is_empty() {
@@ -1219,6 +1220,17 @@ impl Analyzer {
     }
 
     /// A ChainMap's merged keys and values, rebuilt from its maps (the first one wins).
+    /// The ChainMaps among `v`'s objects look through their maps as they are now (a map
+    /// changed since the ChainMap was made or last written shows through it).
+    pub fn sync_chainmaps(&mut self, v: &Value, state: &mut State) {
+        if self.m.chainmaps.is_empty() {
+            return;
+        }
+        for o in v.pts.iter().filter(|o| self.m.chainmaps.contains_key(o)).collect::<Vec<_>>() {
+            self.refresh_chainmap(o, state);
+        }
+    }
+
     pub(in crate::interp) fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
         let maps = self.m.chainmaps.get(&oid).cloned().unwrap_or_default();
         state.set_row(oid, Ns::Item, Row::new());

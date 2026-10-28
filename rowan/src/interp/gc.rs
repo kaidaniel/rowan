@@ -232,13 +232,15 @@ impl Analyzer {
         }
         // (the managers of the with statements running: their `__exit__` runs on the way out)
         for (_, fin, _) in &self.unwind.finally_stack {
-            if let crate::interp::Finally::Exit(ms) = &**fin {
+            if let crate::interp::Finally::Exit(ms, _) = &**fin {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
         for (_, env, _, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
+        // (tasks not awaited yet: they run at a later `await`)
+        work.extend(self.gens.tasks.iter().copied());
         for h in &self.gens.stop_hooks {
             h.result.iter().for_each(|v| v.push_objs(work));
         }
@@ -361,6 +363,8 @@ impl Analyzer {
         for o in self.heap.payloads_since(mark) {
             self.obj_edges(o, &empty, &mut work);
         }
+        // (what the side tables hold: a `vars()` dict's instance, a ChainMap's maps)
+        self.side_edges(None, &mut work);
         work.into_iter().filter(|o| rs.contains(o)).collect()
     }
 
@@ -550,17 +554,41 @@ impl Analyzer {
                 }
             }
         }
+        // (objects given a payload since the last look: holders of the target through it; what
+        // an older one, which the walk does not expand, holds now of what was made since: `rep`)
+        for o in self.heap.payloads_since(b.seen) {
+            if self.heap.obj(o).payload.is_none() {
+                continue;
+            }
+            let mut held = Vec::new();
+            self.edges_but_slots(o, state, &mut held);
+            if o != target && held.contains(&target) {
+                b.holders.push(o);
+            }
+            if self.heap.born_before(o, b.mark) {
+                b.rep.extend(held.into_iter().filter(|x| *x == target || !self.heap.born_before(*x, b.mark)));
+            }
+        }
+        b.seen = self.heap.mark();
         b.roots.sort_unstable();
         b.roots.dedup();
         b.at = state.copy();
         b.looks += 1;
         // (the roots without what the analyzer holds first: those are many, so a construction
         // looked at many times is taken as held from then on)
+        let all = (!b.rep.is_empty()).then(|| roots.clone());
         let mut work: Vec<ObjId> = roots.into_iter().chain(b.roots.iter().copied()).collect();
         b.held = b.looks > Self::DROP_LOOKS || self.reaches_young(&b, target, &mut work, state);
         if !b.held {
             self.gc_pinned(&mut work, Some(envs), None);
             b.held = self.reaches_young(&b, target, &mut work, state);
+        }
+        // (an older object given a payload since that leads to it: is that one held? a walk
+        // through every object, bounded)
+        if let Some(mut work) = all.filter(|_| !b.held && self.reaches_young(&b, target, &mut b.rep.clone(), state)) {
+            self.gc_pinned(&mut work, Some(envs), None);
+            let found = self.find_among(work, &[target], Self::DROP_WALK / 4, true, &mut |o, w| self.obj_edges(o, state, w));
+            b.held = found.is_err() || found.is_ok_and(|f| !f.is_empty());
         }
         if !b.held {
             state.forget_obj(target);
@@ -621,7 +649,7 @@ impl Analyzer {
 }
 
 /// `v` with the recent objects of `map` renamed to their summary objects (None: none in it).
-fn rename_value(v: &Value, map: &FxHashMap<ObjId, ObjId>) -> Option<Value> {
+pub(crate) fn rename_value(v: &Value, map: &FxHashMap<ObjId, ObjId>) -> Option<Value> {
     let hit_pts = v.pts.iter().any(|o| map.contains_key(&o));
     let hit_kv = matches!(&v.kv, KeyVal::KeysOf(ko) if ko.objs.iter().any(|o| map.contains_key(&o)));
     if !hit_pts && !hit_kv {
@@ -708,3 +736,7 @@ fn fold_recent_facts(back: &mut State, map: &FxHashMap<ObjId, ObjId>, keep_pos: 
 #[cfg(test)]
 #[path = "../laws/gc.rs"]
 mod laws_gc;
+
+#[cfg(test)]
+#[path = "../laws/collect.rs"]
+mod laws_collect;

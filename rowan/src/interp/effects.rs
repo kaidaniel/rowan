@@ -1268,6 +1268,18 @@ impl Analyzer {
             && cl.removed_values.is_empty()
     }
 
+    /// Does `f`'s own code write nothing other code shares: no `global` / `nonlocal` name, nothing
+    /// in what it is given (its receiver neither)? Coroutines of such code run together as one
+    /// after the other (`Analyzer::gather_tasks`; what code they call writes is not looked at).
+    pub(in crate::interp) fn writes_nothing_shared(&mut self, f: ObjId) -> bool {
+        let fi = self.heap.func_info(f);
+        let u = self.code_uses(&fi);
+        let quiet = |f: &Flags| !(f.changes || f.called || f.methods || f.rebinds || f.edits);
+        let recv_quiet = u.recv.as_ref().is_none_or(|r| !r.escapes && r.stores.is_empty() && r.deletes.is_empty() && r.stores_like.is_empty() && r.deletes_like.is_empty() && r.calls.is_empty());
+        let declares = crate::syntax::walk_stmts(fi.node.body()).iter().any(|s| matches!(s, ast::Stmt::Global(_) | ast::Stmt::Nonlocal(_)));
+        recv_quiet && !declares && u.params.iter().all(|(_, f)| quiet(f))
+    }
+
     /// One call of several of the program's functions (with their receivers, if bound) none of
     /// which runs (on demand, past the work its run may do): an unknown call given the arguments
     /// and every receiver whole, that may also change what all their code reaches. It covers

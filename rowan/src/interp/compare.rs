@@ -507,6 +507,7 @@ impl Analyzer {
     /// `a in b` / `a not in b` decided: a record's keys, a container's known members or elements,
     /// a text's substrings.
     fn compare_in(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, lits: &KeySet, state: &mut State) -> Option<bool> {
+        self.sync_chainmaps(b, state);
         let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
         // members of a Flag: bits; else a member is its key
         // (and a tuple of known values: its key)

@@ -71,12 +71,33 @@ pub fn is_generator(body: &'static [ast::Stmt]) -> bool {
     g
 }
 
+/// Does an `async def` body suspend: an `await`, an `async for` or `async with` (not those of
+/// functions it defines)?
+pub fn suspends(body: &[ast::Stmt]) -> bool {
+    let comp = |gs: &[ast::Comprehension]| gs.iter().any(|g| g.is_async);
+    let aio = |e: &ast::Expr| match e {
+        ast::Expr::Await(_) => true,
+        ast::Expr::ListComp(c) => comp(&c.generators),
+        ast::Expr::SetComp(c) => comp(&c.generators),
+        ast::Expr::DictComp(c) => comp(&c.generators),
+        ast::Expr::Generator(c) => comp(&c.generators),
+        _ => false,
+    };
+    finds(body, &aio, &|s| matches!(s, ast::Stmt::For(f) if f.is_async) || matches!(s, ast::Stmt::With(w) if w.is_async))
+}
+
 /// `is_generator` uncached.
 fn yields(body: &[ast::Stmt]) -> bool {
-    struct V(bool);
-    impl<'a> SourceOrderVisitor<'a> for V {
+    finds(body, &|e| matches!(e, ast::Expr::Yield(_) | ast::Expr::YieldFrom(_)), &|_| false)
+}
+
+/// Does `body` hold an expression `e` or a statement `s` accepts (not in the functions and classes
+/// it defines, nor the lambdas)?
+fn finds(body: &[ast::Stmt], e: &dyn Fn(&ast::Expr) -> bool, s: &dyn Fn(&ast::Stmt) -> bool) -> bool {
+    struct V<'f>(bool, &'f dyn Fn(&ast::Expr) -> bool, &'f dyn Fn(&ast::Stmt) -> bool);
+    impl<'a, 'f> SourceOrderVisitor<'a> for V<'f> {
         fn visit_expr(&mut self, e: &'a ast::Expr) {
-            if matches!(e, ast::Expr::Yield(_) | ast::Expr::YieldFrom(_)) {
+            if (self.1)(e) {
                 self.0 = true;
             }
             // (a lambda owns its yields)
@@ -85,13 +106,14 @@ fn yields(body: &[ast::Stmt]) -> bool {
             }
         }
         fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            self.0 |= (self.2)(st);
             // (nested functions and classes own their yields)
             if !self.0 && !matches!(st, ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_)) {
                 source_order::walk_stmt(self, st);
             }
         }
     }
-    let mut v = V(false);
+    let mut v = V(false, e, s);
     for st in body {
         v.visit_stmt(st);
         if v.0 {

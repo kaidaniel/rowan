@@ -107,6 +107,7 @@ impl Analyzer {
             return Iteration::new(None, Elem::One(Value::new()), false, false);
         };
         let v = &v;
+        self.sync_chainmaps(v, state);
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         // (a loop reads the containers it is over at each step, through a live iterator too:

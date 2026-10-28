@@ -108,7 +108,10 @@ impl Analyzer {
                 Value::data(&format!("tstring@L{}", nd.line))
             }
             ast::Expr::Starred(st) => self.eval(&st.value, state),
-            ast::Expr::Await(a) => self.eval(&a.value, state),
+            ast::Expr::Await(a) => {
+                let v = self.eval(&a.value, state);
+                self.await_value(&v, state)
+            }
             ast::Expr::Yield(y) => self.expr_yield(y, state),
             ast::Expr::YieldFrom(y) => self.expr_yield_from(y, state),
             ast::Expr::Slice(_) => self.eval_key(node, state),

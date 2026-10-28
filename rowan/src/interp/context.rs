@@ -140,6 +140,9 @@ pub struct Context {
     /// the call of the program's code starting is a model's (its arguments are the library's
     /// to choose: no TypeError for ones that do not fit)
     pub called_by_model: bool,
+    /// a model's own code calls the program's functions (a framework's entry run): a coroutine runs
+    /// there, as awaited, not made to run later
+    pub eager_coroutines: u32,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// instances whose `__init__` is running for their construction (stores into them are
@@ -209,6 +212,10 @@ pub struct Modes {
 /// whether a raise found it held.
 pub struct Building {
     pub mark: u64,
+    /// the heap at the last look: objects given a payload since are looked at in the next
+    pub seen: super::heap::HeapMark,
+    /// what objects made before it began were given since in payloads (the target, younger objects)
+    pub rep: Vec<ObjId>,
     pub at: State,
     pub roots: Vec<ObjId>,
     pub holders: Vec<ObjId>,

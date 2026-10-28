@@ -154,6 +154,14 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/pathlib_protocol.py; about 3 s)
         run: uv run --no-project python tests/pathlib_protocol.py --all
 
+      - name: Coroutines, tasks, async generators, async with / for (bounded programs vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/async_protocol.py; about 6 s)
+        run: uv run --no-project python tests/async_protocol.py --all
+
+      - name: Descriptors (data, non-data, __set_name__, cached_property, slots vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/descriptor_protocol.py; about 9 s)
+        run: uv run --no-project python tests/descriptor_protocol.py --all
+
       - name: Narrowing, pairs (two tests on one value vs CPython)
         # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
         run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
