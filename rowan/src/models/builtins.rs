@@ -2656,11 +2656,21 @@ pub(super) fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) ->
                         let mut parts = sk.splitn(2, "{}");
                         let pre = parts.next().unwrap_or("").to_string();
                         let post = parts.next().unwrap_or("").to_string();
+                        // (the argument as `str()` gives it: each literal's text; an unknown of
+                        // another type a str's)
                         let mut out = c.args[0].kv.clone();
-                        if let Some(ok) = out.as_lit() {
-                            if !intern::key_is_str(ok) {
-                                out = KeyVal::Lit(key_str_lit(&intern::key_py_str(ok)));
+                        let scalar = |k: intern::KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Str(_) | intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Bytes(_)));
+                        if out.is_literal() {
+                            let ks = crate::domain::kv_literals(&out);
+                            if !ks.iter().all(scalar) {
+                                return Value::data(&crate::domain::typed_label("str", &format!("L{}", c.line)));
                             }
+                            out = KeyVal::lits(ks.iter().map(|k| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) }).collect());
+                        } else if let KeyVal::Data(l, h) = &out {
+                            // (the literals it may be, as their texts)
+                            let h2: intern::KeySet = if h.iter().all(scalar) { h.iter().map(|k| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) }).collect() } else { intern::KeySet::EMPTY };
+                            let l2 = if crate::domain::label_type(&intern::str_get(*l)).is_some_and(|t| t != "str") { intern::s(&crate::domain::typed_label("str", &format!("L{}", c.line))) } else { *l };
+                            out = crate::domain::KeyVal::Data(l2, h2);
                         }
                         if !pre.is_empty() {
                             out = an.rename_kv(&out, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));

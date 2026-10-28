@@ -1404,7 +1404,7 @@ impl Analyzer {
     /// `obj` without the instances of the program's classes alone that lack every one of the
     /// dunders `names`: a TypeError there (`without_dunder`).
     pub(in crate::interp) fn without_dunders(&mut self, obj: &Value, names: &[&str], state: &mut State) -> Option<Value> {
-        let lacking = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c) && names.iter().all(|n| an.class_lookup(c, n).is_none()));
+        let lacking = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| (an.plain_program_class(c) || an.plain_enum_class(c)) && names.iter().all(|n| an.class_lookup(c, n).is_none()));
         if !obj.pts.iter().any(|o| lacking(self, o)) {
             return Some(obj.clone());
         }
@@ -1415,6 +1415,13 @@ impl Analyzer {
         }
         self.may_raise_here("TypeError", state);
         Some(rest)
+    }
+
+    /// Is `cls` an Enum of the program's on `enum.Enum` alone (no `int` / `str` mixin, no
+    /// `Flag`)? Its members have none of the operator and container dunders but those its own
+    /// code defines.
+    pub(in crate::interp) fn plain_enum_class(&self, cls: ObjId) -> bool {
+        self.heap.class_info_opt(cls).is_some_and(|ci| ci.lib.is_enum) && self.heap.mro(cls).iter().all(|c| self.heap.class_info_opt(*c).is_none_or(|x| !x.open_base.get() && x.lib.quals.iter().all(|q| matches!(q.as_str(), "builtins.object" | "enum.Enum"))))
     }
 
     /// A list or tuple is indexed by ints and slices: `xs["a"]`, `xs[None]` raise TypeError

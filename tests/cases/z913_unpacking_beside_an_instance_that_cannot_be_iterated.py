@@ -1,7 +1,7 @@
 """Unpacking a value that may be an instance of the program's class without `__iter__` /
 `__getitem__` raises TypeError on that instance's path only: the other values beside it (an
 unknown, a list, a str for any call) are unpacked and the code after goes on. Subscripting an
-Enum member raises TypeError (an Enum's members are no containers); an instance of a class with
+Enum member raises TypeError (an Enum's members are no containers), as does `-member`; an instance of a class with
 another library base may raise anything there. (Before, the TypeError of the one instance ended
 every path: the lines after the unpacking were taken for unreachable for any call; and an Enum
 member's subscript raised nothing.)
@@ -54,8 +54,18 @@ def member_item(c: Color):
     return v
 
 
+def member_neg(c: Color):
+    try:
+        v = -c
+    except TypeError:
+        v = "no negation"
+    #@general v: exactly={'no negation'}
+    return v
+
+
 mixed("[1, 2]", False)
 mixed("", True)
 annotated("ab")
 annotated(Ob())
 member_item(Color.RED)
+member_neg(Color.BLUE)
