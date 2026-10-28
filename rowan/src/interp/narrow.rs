@@ -763,6 +763,19 @@ impl Analyzer {
     /// `__contains__` that is `return x in y`, its `y`).
     fn narrow_member_values(&mut self, left: &'static ast::Expr, lv: &Value, rec_expr: &'static ast::Expr, rv: &Value, member: bool, state: &mut State) {
         let (lv, rv) = (lv.clone(), rv.clone());
+        // `"x" in obj.__dict__`: the instance's own attributes, its attribute row (instances of
+        // the program's plain classes: nothing else fills their dict)
+        let own_dict = |an: &Analyzer, v: ObjId| match &an.heap.obj(v).payload {
+            super::Payload::View(super::ViewKind::Attrs, i) => i.single().filter(|i| an.heap.kind(*i) == Kind::Instance && an.heap.instance_class(*i).is_some_and(|c| an.plain_program_class(c))),
+            _ => None,
+        };
+        if rv.kv.is_bot() && !rv.pts.is_empty() && rv.pts.iter().all(|v| self.heap.kind(v) == Kind::View) {
+            let insts: Option<Vec<ObjId>> = rv.pts.iter().map(|v| own_dict(self, v)).collect();
+            if let (Some(insts), Some(k)) = (insts, lv.kv.as_lit().filter(|k| lv.pts.is_empty() && intern::key_as_str(*k).is_some())) {
+                self.narrow_record(&Value::objs(ObjSet::from_vec(insts)), Ns::Attr, k, member, state);
+                return;
+            }
+        }
         // user classes defining `__contains__` as `return <x> in <y>`: narrow <y> instead
         let insts: Vec<u32> = rv.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance).collect();
         if !insts.is_empty() && rv.pts.len() == 1 {

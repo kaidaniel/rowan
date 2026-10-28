@@ -174,6 +174,11 @@ impl Analyzer {
                     Some(cs) => Value::objs(crate::domain::ObjSet::from_vec(cs)),
                     None => Value::data(&format!("L{}", node.line)),
                 },
+                // (`__slots__` on every class of the MRO: no instance dict)
+                Kind::Instance if name == "__dict__" && self.heap.instance_class(oid).and_then(|c| self.slots_of(c)).is_some() => {
+                    self.raise_here("AttributeError", state);
+                    continue;
+                }
                 Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
                     let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
                     self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));

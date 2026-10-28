@@ -12,7 +12,8 @@ Soundness: `isinstance`; `classes.rs`, `attrs.rs`):
   `__init__`, a property in the subclass over the base's class attribute;
 - a receiver (`RECV`): `AN()`, `BN()`, one or the other by `c1`;
 - one operation (`OPS`): attribute reads (`v`, `a`, `b`, `tag`, through `type(o)`, `getattr`
-  with a default, `hasattr`, `__dict__`, `__name__`, `vars`), `f()` once or three times, a store
+  with a default, `hasattr`, `__dict__`, `__name__`, `vars`, a read guarded by `'x' in o.__dict__`
+  or `not in`), `f()` once or three times, a store
   then a read (on the instance, by `setattr`, on the class; then through `type(o)`), `del` then
   a read (on the instance, on the class), `isinstance`, the classmethod, the unbound method,
   two-argument `super`, a method only one shape has, two constructions then the counter;
@@ -98,6 +99,9 @@ OPS = {
     "vars": ["O = len(vars(o))"],
     "hasv": ["O = hasattr(o, 'v')"],
     "g": ["O = o.g()"],
+    "indict": ["O = o.v if 'v' in o.__dict__ else -1"],
+    "notindict": ["O = o.v if 'v' not in o.__dict__ else -1"],
+    "dictb": ["O = o.b if 'b' in o.__dict__ else -2"],
 }
 
 
