@@ -609,10 +609,15 @@ pub(super) fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value 
     }
 }
 
+/// An undecided `isinstance`: True or False.
+fn either_bool() -> Value {
+    Value::kv_only(KeyVal::lits(KeySet::from_iter([intern::key_bool(false), intern::key_bool(true)])))
+}
+
 /// `isinstance(x, C)`: decided when every object of `x` has a known kind / class; a
 /// placeholder records an event so the call site decides.
 pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
+    let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return either_bool() };
     // isinstance(x, torch.Tensor): decided for tensors and for containers / literals
     if an.m.torch_on {
         if let Some(q) = cv.single().filter(|o| an.heap.kind(*o) == Kind::External).map(|o| an.heap.external_qual(o)) {
@@ -629,11 +634,11 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                 if not_tensor {
                     return Value::lit(intern::key_bool(false));
                 }
-                return Value::data("bool");
+                return either_bool();
             }
         }
     }
-    let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
+    let Some(classes) = an.isinstance_classes(cv, st) else { return either_bool() };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     let mut verdicts: Vec<bool> = Vec::new();
     // (an unknown beside objects: of the program's classes it is no instance — unknown values
@@ -645,11 +650,11 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
             (true, _) => verdicts.push(false),
             (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => match typed_isinstance(an, t, &classes) {
                 Some(b) => verdicts.push(b),
-                None => return Value::data("bool"),
+                None => return either_bool(),
             },
             // (a library class's: decided by the objects, as for the program's classes)
             _ if classes.iter().all(|c| an.heap.kind(*c) != Kind::External || !an.heap.external_qual(*c).starts_with("builtins.")) => verdicts.push(false),
-            _ => return Value::data("bool"),
+            _ => return either_bool(),
         }
     }
     // a typed unknown alone (`str(?)`, `None | int(?)`): by its type
@@ -658,7 +663,7 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
             for (_, kind) in parts {
                 match typed_isinstance(an, kind, &classes) {
                     Some(b) => verdicts.push(b),
-                    None => return Value::data("bool"),
+                    None => return either_bool(),
                 }
             }
         }
@@ -667,19 +672,19 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     if (v.pts.is_empty() && typed_parts(&v.kv).is_none()) || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
         if !v.kv.is_literal() || lits.is_empty() {
-            return Value::data("bool");
+            return either_bool();
         }
         for k in lits.iter() {
             match kind_isinstance(an, lit_kind_name(k), &classes) {
                 Some(b) => verdicts.push(b),
-                None => return Value::data("bool"),
+                None => return either_bool(),
             }
         }
     }
     for o in v.pts.iter() {
         match an.instance_of(o, &classes, st) {
             Some(b) => verdicts.push(b),
-            None => return Value::data("bool"),
+            None => return either_bool(),
         }
     }
     if verdicts.iter().all(|b| *b) {
@@ -687,7 +692,7 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     } else if verdicts.iter().all(|b| !*b) {
         Value::lit(intern::key_bool(false))
     } else {
-        Value::data("bool")
+        either_bool()
     }
 }
 
