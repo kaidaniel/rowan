@@ -116,9 +116,15 @@ impl Analyzer {
         for oid in v.pts.iter() {
             let o = self.heap.kind(oid);
             if o == Kind::Class {
+                let none = annotation_members(ann).1;
+                // (an Enum's value is one of its members)
+                if let Some(ms) = self.m.enum_members.get(&oid) {
+                    let v = Value::objs(crate::domain::ObjSet::from_vec(ms.iter().map(|(_, m)| *m).collect()));
+                    return Some(if none { v.join(&Value::none()) } else { v });
+                }
                 let inst = self.annotated_instance(oid, &format!("{}.{}", fi.qualname, pname), Some((fi, pname)), true, 0, state);
                 // (`Optional[C]`, `C | None`: or None)
-                return match annotation_members(ann).1 {
+                return match none {
                     true => Some(inst.unwrap_or_default().join(&Value::none())),
                     false => inst,
                 };
@@ -254,6 +260,7 @@ impl Analyzer {
                 o
             }
         };
+        self.heap.obj_mut(inst).arg = true;
         for f in names.iter() {
             let name = intern::key_py_str(f);
             let ann = fields.iter().find(|(n, _)| *n == name).and_then(|(_, a)| *a);

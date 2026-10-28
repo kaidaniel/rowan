@@ -783,7 +783,9 @@ impl Analyzer {
 
     /// An instance of `cls_oid` whose attributes are unknown (`instance C`).
     fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
-        self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
+        let o = self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx);
+        self.heap.obj_mut(o).arg = true;
+        o
     }
 
     /// An instance of `cls_oid` made for entry runs with `row` as its attributes' row.
@@ -841,6 +843,8 @@ impl Analyzer {
 
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
         let inst = self.new_instance(cls_oid, ci, state, ctx);
+        // (what a caller passes: maybe an instance the program made, or another argument)
+        self.heap.obj_mut(inst).arg = true;
         let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
             let inits = self.heap.class_attr(init_cls, "__init__");

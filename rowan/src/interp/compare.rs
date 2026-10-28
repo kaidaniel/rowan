@@ -453,6 +453,11 @@ impl Analyzer {
         if opaque(self, &a) || opaque(self, &b) {
             return None;
         }
+        // (an argument for any call may be an object of its kind and class made elsewhere, or
+        // another argument)
+        if a.pts.iter().any(|x| b.pts.iter().any(|y| x != y && self.may_be_same(x, y))) {
+            return None;
+        }
         let same = if a.pts.intersection(&b.pts).is_empty() {
             false
         } else if a.pts.len() == 1 && a.pts == b.pts && self.heap.obj(a.pts.first().unwrap()).single {
@@ -461,6 +466,20 @@ impl Analyzer {
             return None;
         };
         Some(if op == ast::CmpOp::Is { same } else { !same })
+    }
+
+    /// May distinct abstract objects `x` and `y` be one runtime object: one of them an argument
+    /// for any call (`Obj::arg`), the other of its kind and, for instances, of its class, a
+    /// subclass or a base?
+    fn may_be_same(&self, x: ObjId, y: ObjId) -> bool {
+        let (ox, oy) = (self.heap.obj(x), self.heap.obj(y));
+        if !(ox.arg || oy.arg) || ox.kind != oy.kind {
+            return false;
+        }
+        match (self.heap.instance_class(x), self.heap.instance_class(y)) {
+            (Some(cx), Some(cy)) => self.heap.mro(cx).contains(&cy) || self.heap.mro(cy).contains(&cx),
+            _ => true,
+        }
     }
 
     /// `a in it` of a one-shot iterator: it takes items until one equals `a` (or to its end).
@@ -773,7 +792,7 @@ impl Analyzer {
             let no_eq =|an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.heap.instance_class(o).map(|c| !an.heap.class_info(c).open_base.get() && an.heap.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
             if let (Some(x), Some(y)) = (ai, bi) {
                 if no_eq(self, ai) && no_eq(self, bi) {
-                    let same = if x == y && self.heap.obj(x).single { Some(true) } else if x != y { Some(false) } else { None };
+                    let same = if x == y && self.heap.obj(x).single { Some(true) } else if x != y && !self.may_be_same(x, y) { Some(false) } else { None };
                     return Some(lit(same.map(|s| if op == ast::CmpOp::Eq { s } else { !s })));
                 }
             }

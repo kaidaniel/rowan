@@ -339,6 +339,10 @@ pub struct Obj {
     /// the run did not make (`annotated_instance`): its class is any of them (`type(x)`,
     /// `isinstance(x, Sub)`), what it holds is the class's own
     pub any_sub: bool,
+    /// an instance a run for any call (an entry run) takes for what a caller passes — a
+    /// receiver, an annotated parameter or field: it may be any instance of its class, one the
+    /// program made too, and the object another argument is (identity decides nothing of it)
+    pub arg: bool,
 }
 
 
@@ -422,7 +426,7 @@ pub struct Heap {
 
 impl Default for Heap {
     fn default() -> Heap {
-        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false };
+        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false, arg: false };
         Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
@@ -565,6 +569,7 @@ impl Heap {
             ty: None,
             opaque: false,
             any_sub: false,
+            arg: false,
         });
         self.serial += 1;
         self.defs += usize::from(matches!(kind, Kind::Function | Kind::Class | Kind::Module));
