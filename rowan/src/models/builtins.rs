@@ -647,6 +647,8 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         let user = classes.iter().all(|c| an.heap.kind(*c) == Kind::Class);
         let ty = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l)));
         match (user, ty) {
+            // (one standing for instances of a class's subclasses, as annotated: it may be one)
+            _ if crate::interp::annotations::is_subclass_stand_in(&v.kv) => return either_bool(),
             (true, _) => verdicts.push(false),
             (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => match typed_isinstance(an, t, &classes) {
                 Some(b) => verdicts.push(b),

@@ -677,6 +677,13 @@ impl Analyzer {
         !self.m.enum_members.contains_key(&cls)
     }
 
+    /// Does `x in o` ask instance `o` itself — its class a plain one of the program's, or one
+    /// whose code defines `__contains__`, `__iter__` or `__getitem__` — rather than keys it holds
+    /// as a dict does?
+    fn in_by_dunders(&self, o: ObjId) -> bool {
+        self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).is_some_and(|c| self.plain_program_class(c) || ["__contains__", "__iter__", "__getitem__"].iter().any(|n| self.class_lookup(c, n).is_some()))
+    }
+
     pub fn hierarchy_closed(&self, cls: u32) -> bool {
         let mut work = vec![cls];
         let mut seen: Vec<u32> = Vec::new();
@@ -814,6 +821,12 @@ impl Analyzer {
                     return;
                 }
             }
+        }
+        // (an instance whose `in` runs its own dunders — of a plain class of the program's, or one
+        // defining them: the test says nothing of keys it holds as a dict would; beside other
+        // receivers its `__contains__` narrows none of them)
+        if rv.pts.iter().any(|o| self.in_by_dunders(o)) {
+            return;
         }
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record(*o)).collect();
         // (a record beside a str, an unknown scalar or another container: the test may be about

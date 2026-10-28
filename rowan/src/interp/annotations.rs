@@ -155,7 +155,7 @@ impl Analyzer {
             }
         }
         if subs.len() > SUBCLASS_INSTANCES {
-            return Some(out.unwrap_or_default().join(&Value::data(&format!("instance {}", path))));
+            return Some(out.unwrap_or_default().join(&Value::data(&format!("{}{}", SUBCLASS_STAND_IN, path))));
         }
         for c in subs {
             if let Some(v) = self.class_instance(c, path, param, single, depth, state) {
@@ -448,6 +448,16 @@ impl Analyzer {
         }
         out
     }
+}
+
+/// The label of the unknown standing for an instance of one of a class's many overriding
+/// subclasses (`annotated_instance`), before the parameter's path.
+const SUBCLASS_STAND_IN: &str = "instance ";
+
+/// Is `kv` that unknown: an instance of the program's classes it may be (`isinstance` of it
+/// undecided), unlike other unknowns?
+pub fn is_subclass_stand_in(kv: &KeyVal) -> bool {
+    kv.data_site().is_some_and(|l| intern::str_get(l).starts_with(SUBCLASS_STAND_IN))
 }
 
 /// The builtin type an annotation names (`int`, `"str"`, `list[int]`, `Optional[str]`, `int |

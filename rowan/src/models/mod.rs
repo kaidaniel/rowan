@@ -297,23 +297,31 @@ impl Registry {
                 }
             }
         }
-        // (functions of those modules that change what they are given are unknown calls)
-        const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
-        if MUTATING.contains(&qual) || operator_in_place(qual) || qual.starts_with("array.") {
-            return None;
-        }
-        for prefix in ALLOWLIST_PREFIXES {
-            if qual.starts_with(prefix) || qual.starts_with(&format!("builtins.{}", prefix)) {
-                return Some(noeffect);
-            }
-        }
-        // (the builtins that change nothing they are given and run none of the program's code;
-        // any other without a model of its own is an unknown call)
-        match qual.strip_prefix("builtins.") {
-            Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "property" | "bytearray" | "memoryview") => Some(noeffect),
-            _ => None,
-        }
+        allowlisted(qual).then_some(noeffect as Model)
     }
+
+    /// Does the model of `qual` read a `*xs` of items not known itself (the others read only
+    /// the arguments written: `int(*xs)` would be `int()`)? `noeffect`'s by their names, and
+    /// those that look at `Call::star_args`.
+    pub fn reads_stars(&self, qual: &str) -> bool {
+        const READS_STARS: &[&str] = &[
+            "builtins.print", "builtins.object.__init__", "builtins.exec", "builtins.eval", "operator.", "asyncio.gather", "functools.update_wrapper", "os.path.", "posixpath.", "pathlib.",
+            "datetime.", "partial.", "dcinit.", "torch.", "tensor.", "tensorq.", "nnmodule.", "numpy.", "np.",
+        ];
+        READS_STARS.iter().any(|p| qual.starts_with(p)) || (!self.table.contains_key(qual) && allowlisted(qual))
+    }
+}
+
+/// A library function `noeffect` stands for (no model of its own): by its module
+/// (`ALLOWLIST_PREFIXES`), or a builtin that changes nothing it is given and runs none of the
+/// program's code; not one that changes its arguments (an unknown call).
+fn allowlisted(qual: &str) -> bool {
+    const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
+    if MUTATING.contains(&qual) || operator_in_place(qual) || qual.starts_with("array.") {
+        return false;
+    }
+    ALLOWLIST_PREFIXES.iter().any(|p| qual.starts_with(p) || qual.strip_prefix("builtins.").is_some_and(|q| q.starts_with(p)))
+        || matches!(qual.strip_prefix("builtins."), Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "property" | "bytearray" | "memoryview"))
 }
 
 /// `operator.iadd` & co.: `a op= b`, which changes a list, dict, set or instance in place
