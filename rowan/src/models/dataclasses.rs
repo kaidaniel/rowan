@@ -57,6 +57,12 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
             }
         }
     }
+    // (a sequence of unknown length beside other positional arguments: where in the order
+    // each one stands is not known, so any field may get any of them; its length may not fit)
+    if let Some(rest) = star_rest.take() {
+        an.may_raise_here("TypeError", state);
+        star_rest = Some(join_values(std::mem::take(&mut args_full).into_iter().chain(std::iter::once(rest)).collect::<Vec<_>>()));
+    }
     let args: &[Value] = &args_full;
     {
         let specs = dc_specs(an, cls);
@@ -128,6 +134,11 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
             if v.is_none() && star_kwargs.is_empty() {
                 if !ci.lib.typed_dict {
                     an.verdict(node, fk, &Classification::with_note(Tier::Missing, "is a dataclass field that was not given"), inst, ns, None, None);
+                    // (a missing argument of the generated `__init__`: TypeError)
+                    if !validated {
+                        an.raise_here("TypeError", state);
+                        return;
+                    }
                 }
                 continue;
             }

@@ -1054,7 +1054,7 @@ impl Analyzer {
             }
         }
         // the methods every NamedTuple has
-        if matches!(name, "_asdict" | "_replace" | "_fields") {
+        if matches!(name, "_asdict" | "_replace" | "_fields" | "index" | "count") {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, name).is_none() && crate::models::dataclasses::is_named_tuple_class(self, cls) {
                     if name == "_fields" {

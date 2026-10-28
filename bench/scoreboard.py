@@ -39,7 +39,7 @@ e.g. no such feature yet):
   protocols  protocols today's protocol enumerators (PROTOCOLS: tests/try_protocol.py, gen_, with_,
                        iter_, call_, rec_, method_, closure_, narrow_, dunder_, anycall_, str_,
                        lib_, container_, loop_, class_protocol.py, the pair modes (`--pairs`) of narrow_,
-                       dunder_, class_, container_, call_protocol.py, at their CI bounds) run with the release's binary: per
+                       dunder_, class_, container_, call_protocol.py; collections_protocol.py, at their CI bounds) run with the release's binary: per
                        enumerator the points checked and those where rowan's claims miss a CPython run;
                        the enumerators' sha256 (changed enumerators are another series)
   heldsound  heldsound bench/heldout.py sound (the held-out corpus's own tests against rowan's claims,
@@ -125,7 +125,8 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "dunder-pairs": ["tests/dunder_protocol.py", "--pairs", "--rowan", "2500"],
              "class-pairs": ["tests/class_protocol.py", "--pairs", "--rowan", "2500"],
              "container-pairs": ["tests/container_protocol.py", "--pairs", "--rowan", "4000"],
-             "call-pairs": ["tests/call_protocol.py", "--pairs", "--rowan", "1500"]}
+             "call-pairs": ["tests/call_protocol.py", "--pairs", "--rowan", "1500"],
+             "collections": ["tests/collections_protocol.py", "--all"]}
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 

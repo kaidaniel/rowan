@@ -199,7 +199,7 @@ impl Analyzer {
         let (report, guarded, single_target, line_data) = (rd.report, rd.guarded, rd.single_target, &rd.line_data);
         let kind = self.heap.kind(oid);
         // (a defaultdict / Counter key read: `models::counter::default_on_read`)
-        let counter_restore = if kind == Kind::Dict && ns == Ns::Item && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
+        let counter_restore = if kind == Kind::Dict && ns == Ns::Item && !self.mode.plain_get && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
             crate::models::counter::default_on_read(self, oid, key, node, single_target, state)
         } else {
             None
@@ -1478,8 +1478,10 @@ impl Analyzer {
                 raise = Some((true, key.clone()));
             }
         }
-        // (not reported: a model's removal, `pop` with a default, raises on its own terms)
-        if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
+        // (not reported: a model's removal, `pop` with a default, raises on its own terms; a
+        // Counter's `del` of a key it lacks does nothing)
+        let counter = ns == Ns::Item && self.m.counters.contains(&oid);
+        if let Some((surely, kv)) = raise.filter(|_| report && !counter && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
             state.set_row(oid, ns, row.clone());
             let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
             if !self.unwind.tries.is_empty() {

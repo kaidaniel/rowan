@@ -28,7 +28,7 @@ pub(super) fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    let out = an.load_item(&recv, Ns::Item, key, &c.node, st, false);
+    let out = an.load_item_for_get(&recv, key, &c.node, st);
     // the default is only possible when the key may be absent on some target
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
