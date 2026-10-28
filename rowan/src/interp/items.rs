@@ -1457,13 +1457,20 @@ impl Analyzer {
         // (an instance attribute's `del` raises AttributeError the same way, a class attribute
         // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
         let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
-        let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
+        let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none());
         // (a key not known: it may be none of the record's keys; an empty dict has none)
         let empty = strong && kind == Kind::Dict && ns == Ns::Item && { let r0 = state.row(oid, ns); r0.closed() && r0.present.is_empty() };
         if !key.kv.is_literal() || (empty && !key.pts.is_empty()) {
             raise = Some((empty, key.clone()));
         }
-        let raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
+        let mut raise = raise.map(|(surely, kv)| (surely && !cls.is_some_and(|c| kv.kv.as_lit().is_some_and(|k| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state)))), kv));
+        // (`__slots__` on every class of the MRO: a name not among them, a class attribute's
+        // too, is not the instance's to delete)
+        if let Some(allowed) = cls.and_then(|c| self.slots_of(c)) {
+            if is_lit && key.kv.as_lit().and_then(intern::key_as_str).is_some_and(|n| !allowed.iter().any(|a| **a == *n)) {
+                raise = Some((true, key.clone()));
+            }
+        }
         // (not reported: a model's removal, `pop` with a default, raises on its own terms)
         if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
             state.set_row(oid, ns, row.clone());

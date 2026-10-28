@@ -170,8 +170,8 @@ impl Analyzer {
                 Kind::External => self.external_attr(oid, name, state),
                 Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
-                Kind::Instance if name == "__class__" => match self.heap.instance_class(oid) {
-                    Some(c) => Value::obj(c),
+                Kind::Instance if name == "__class__" => match self.classes_of_instance(oid) {
+                    Some(cs) => Value::objs(crate::domain::ObjSet::from_vec(cs)),
                     None => Value::data(&format!("L{}", node.line)),
                 },
                 Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
@@ -190,7 +190,7 @@ impl Analyzer {
                     let n = self.heap.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
                     Value::lit(key_str_lit(&n))
                 }
-                Kind::Class => self.class_attr(oid, name, node, state, guarded),
+                Kind::Class => self.class_attr(oid, name, node, state, guarded, report),
                 Kind::Dict => self.dict_attr(oid, name, node, state),
                 Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => self.deque_attr(oid, name),
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
@@ -288,6 +288,33 @@ impl Analyzer {
             None => obj.clone(),
         };
         let nk = key_str_lit(name);
+        // (a class's own attribute: gone on this path, `cls_late`; one it does not hold itself,
+        // a base's or none, raises)
+        let classes: Vec<ObjId> = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Class).collect();
+        if !classes.is_empty() {
+            let strong = obj.pts.len() == 1;
+            for c in classes {
+                let (defs, sure) = self.class_lookup_on_path(c, name, state);
+                if defs.first() != Some(&c) {
+                    self.raise_here("AttributeError", state);
+                    return;
+                }
+                if !sure || defs.len() > 1 {
+                    self.may_raise_here("AttributeError", state);
+                }
+                self.heap.cls_late.insert((c, nk));
+                let r = state.row(c, Ns::Attr).delete(nk, strong);
+                state.set_row(c, Ns::Attr, r);
+                if strong {
+                    state.pop_slot(c, Ns::Attr, nk);
+                }
+            }
+            let rest = Value::with_kv(obj.pts.filter(|o| self.heap.kind(o) != Kind::Class), obj.kv.clone());
+            if rest.empty() {
+                return;
+            }
+            return self.delete_attr(&rest, name, node, state);
+        }
         let prop = |an: &Analyzer, o: ObjId| -> Option<Option<ObjId>> {
             let cls = an.heap.instance_class(o).filter(|_| an.heap.kind(o) == Kind::Instance)?;
             let defc = an.class_lookup(cls, name)?;
@@ -617,8 +644,20 @@ impl Analyzer {
     /// An attribute of a class object: a class attribute (a classmethod bound to this class), an Enum
     /// member, a pydantic model's attribute or method, a dataclass `__init__`, else a method of the
     /// class object.
-    fn class_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
+    fn class_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, guarded: bool, report: bool) -> Value {
         if self.class_lookup(oid, name).is_some() {
+            // (one no class of the MRO holds on this path — deleted, or stored on other paths
+            // only — raises; held on some paths: may; not a read with a default, `getattr`)
+            let (defs, sure) = self.class_lookup_on_path(oid, name, state);
+            if defs.is_empty() {
+                if report {
+                    self.raise_here("AttributeError", state);
+                }
+                return Value::new();
+            }
+            if !sure && report {
+                self.may_raise_here("AttributeError", state);
+            }
             // a classmethod reached through a class binds that class (not the
             // class that defines it): `Sub.make()` constructs `Sub`
             let v = self.class_attr_value(oid, name, state);
@@ -1325,12 +1364,17 @@ impl Analyzer {
                     self.call_user(setter, Some(Value::obj(oid)), Args::pos(&[v.clone()]), state, node, false);
                     return true;
                 }
-                // a property without a setter: the assignment raises
+                // a property without a setter: the assignment raises (one the class attribute
+                // may be, beside what else it may hold: may raise)
                 if kind == Kind::Instance {
                     let cv = self.class_slot(defc, nk, state);
-                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
+                    let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get();
+                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| is_prop(self, f)) {
                         self.raise_here("AttributeError", state);
                         return true;
+                    }
+                    if cv.pts.iter().any(|f| is_prop(self, f)) {
+                        self.may_raise_here("AttributeError", state);
                     }
                 }
                 // a data descriptor (an object whose class has `__set__`) takes the store

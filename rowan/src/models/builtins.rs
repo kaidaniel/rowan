@@ -2023,7 +2023,7 @@ pub(super) fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if c.args.len() == 1 {
         let a = &c.args[0];
-        let classes: Option<Vec<u32>> = if a.pts.is_empty() { None } else { a.pts.iter().map(|o| if an.heap.kind(o) == Kind::Instance { an.heap.instance_class(o) } else { None }).collect() };
+        let classes: Option<Vec<u32>> = if a.pts.is_empty() { None } else { a.pts.iter().map(|o| if an.heap.kind(o) == Kind::Instance { an.classes_of_instance(o) } else { None }).collect::<Option<Vec<Vec<u32>>>>().map(|cs| cs.concat()) };
         if let Some(cs) = classes {
             return join_values(cs.into_iter().map(Value::obj).collect::<Vec<Value>>());
         }

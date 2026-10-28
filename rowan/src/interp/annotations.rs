@@ -147,6 +147,13 @@ impl Analyzer {
         };
         let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c != cls && self.heap.mro(*c).contains(&cls) && overrides(self, *c)).collect();
         let mut out = self.class_instance(cls, path, param, single, depth, state);
+        // (an instance of a subclass that overrides nothing is the class's but for its class:
+        // the class's instance stands for those too, `Obj::any_sub`)
+        if self.program.user_classes.iter().any(|c| *c != cls && !subs.contains(c) && self.heap.mro(*c).contains(&cls)) {
+            for o in out.iter().flat_map(|v| v.pts.iter()).filter(|o| self.heap.instance_class(*o) == Some(cls)).collect::<Vec<_>>() {
+                self.heap.obj_mut(o).any_sub = true;
+            }
+        }
         if subs.len() > SUBCLASS_INSTANCES {
             return Some(out.unwrap_or_default().join(&Value::data(&format!("instance {}", path))));
         }
@@ -156,6 +163,20 @@ impl Analyzer {
             }
         }
         out
+    }
+
+    /// The classes instance `o` may be of: its class, and, for one standing for its subclasses'
+    /// instances too (`Obj::any_sub`), the program's subclasses (None past `ANY_SUB_CLASSES` of
+    /// them: not known).
+    pub fn classes_of_instance(&self, o: ObjId) -> Option<Vec<ObjId>> {
+        const ANY_SUB_CLASSES: usize = 8;
+        let cls = self.heap.instance_class(o)?;
+        if !self.heap.obj(o).any_sub {
+            return Some(vec![cls]);
+        }
+        let mut out = vec![cls];
+        out.extend(self.program.user_classes.iter().copied().filter(|c| *c != cls && self.heap.mro(*c).contains(&cls)));
+        (out.len() <= ANY_SUB_CLASSES).then_some(out)
     }
 
     /// `annotated_instance` of `cls` itself.
