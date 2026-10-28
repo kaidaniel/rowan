@@ -513,7 +513,6 @@ impl Heap {
             let o = &mut self.objects[oid as usize];
             o.single = o.single && single;
             if !payload.is_none() {
-                // (a payload holding a recent object: a rename of recent objects looks at it)
                 let mut objs: Vec<ObjId> = Vec::new();
                 match &payload {
                     Payload::Method(_, v) | Payload::Bound(_, v) | Payload::Super(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(&mut objs),
@@ -527,7 +526,9 @@ impl Heap {
                     }
                     _ => {}
                 }
-                let holds = objs.iter().any(|x| self.objects.get(*x as usize).is_some_and(|x| x.site.ends_with("#recent") || x.site.ends_with("#call")));
+                // (one holding objects: the collector after a mark expands it, a rename of
+                // recent objects looks at it)
+                let holds = !objs.is_empty();
                 let o = &mut self.objects[oid as usize];
                 o.payload = payload;
                 if holds && self.repaid.last() != Some(&(self.serial, oid)) {
@@ -781,6 +782,12 @@ impl Heap {
             }
         }
         c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
+    }
+
+    /// The objects made before the allocation serial `mark` and given a payload holding objects
+    /// since (`alloc_raw` of an existing object).
+    pub fn repaid_since(&self, mark: u64) -> impl Iterator<Item = ObjId> + '_ {
+        self.repaid.iter().rev().take_while(move |(s, _)| *s >= mark).map(|(_, o)| *o).filter(move |o| self.born_before(*o, mark))
     }
 
     /// The objects made or given a payload since `mark`.

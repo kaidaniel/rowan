@@ -479,6 +479,10 @@ impl Analyzer {
             }
         }
         self.gc_pinned(&mut buf, unwind, Some(mark));
+        // (an older object given a new payload since: what it holds now, through no slot)
+        for o in self.heap.repaid_since(mark).collect::<Vec<_>>() {
+            self.edges_but_slots(o, state, &mut buf);
+        }
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         // (a loop's item is not found again by a path: garbage when nothing holds it)
@@ -697,3 +701,7 @@ fn fold_recent_facts(back: &mut State, map: &FxHashMap<ObjId, ObjId>, keep_pos: 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../laws/gc.rs"]
+mod laws_gc;
