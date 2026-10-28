@@ -756,7 +756,26 @@ impl Analyzer {
     fn narrow_membership(&mut self, left: &'static ast::Expr, right: &'static ast::Expr, member: bool, state: &mut State) {
         let rec_expr = membership_record(right);
         let (Some(lv), Some(rv)) = (self.traced(left), self.traced(rec_expr)) else { return };
-        self.narrow_member_values(left, &lv, rec_expr, &rv, member, state);
+        if !self.narrow_own_dict(&lv, &rv, member, state) {
+            self.narrow_member_values(left, &lv, rec_expr, &rv, member, state);
+        }
+    }
+
+    /// `"x" in obj.__dict__` (`member`) or not: the instance's own attributes, its attribute row
+    /// (instances of the program's plain classes: nothing else fills their dict). False: `rv`
+    /// is no such dict.
+    fn narrow_own_dict(&mut self, lv: &Value, rv: &Value, member: bool, state: &mut State) -> bool {
+        let own_dict = |an: &Analyzer, v: ObjId| match &an.heap.obj(v).payload {
+            super::Payload::View(super::ViewKind::Attrs, i) if an.heap.kind(v) == Kind::View => i.single().filter(|i| an.heap.kind(*i) == Kind::Instance && an.heap.instance_class(*i).is_some_and(|c| an.plain_program_class(c))),
+            _ => None,
+        };
+        if !rv.kv.is_bot() || rv.pts.is_empty() {
+            return false;
+        }
+        let insts: Option<Vec<ObjId>> = rv.pts.iter().map(|v| own_dict(self, v)).collect();
+        let (Some(insts), Some(k)) = (insts, lv.kv.as_lit().filter(|k| lv.pts.is_empty() && intern::key_as_str(*k).is_some())) else { return false };
+        self.narrow_record(&Value::objs(ObjSet::from_vec(insts)), Ns::Attr, k, member, state);
+        true
     }
 
     /// `left in rec` (`member`) or not: narrows the record's keys and `left`'s literals (through a

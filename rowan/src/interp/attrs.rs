@@ -102,6 +102,18 @@ impl Analyzer {
         Some(out)
     }
 
+    /// `obj.__dict__`: a view of its attributes (None: an AttributeError, `__slots__` on every
+    /// class of an instance's MRO).
+    fn own_dict(&mut self, oid: ObjId, state: &mut State) -> Option<Value> {
+        if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).and_then(|c| self.slots_of(c)).is_some() {
+            self.raise_here("AttributeError", state);
+            return None;
+        }
+        let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
+        self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
+        Some(Value::obj(vid))
+    }
+
     /// The class of an instance, when it is a user class.
     pub(super) fn user_class_of(&self, o: u32) -> Option<u32> {
         let c = self.heap.instance_class(o)?;
@@ -174,11 +186,10 @@ impl Analyzer {
                     Some(cs) => Value::objs(crate::domain::ObjSet::from_vec(cs)),
                     None => Value::data(&format!("L{}", node.line)),
                 },
-                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => {
-                    let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
-                    self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
-                    Value::obj(vid)
-                }
+                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => match self.own_dict(oid, state) {
+                    Some(v) => v,
+                    None => continue,
+                },
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, raises, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.heap.class_info_opt(oid).is_some() => {
