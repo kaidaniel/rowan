@@ -92,6 +92,16 @@ pub struct Entries {
     /// when values for any call are asked for: the heap at the last call module code made, and
     /// joined over them (`note_call`)
     calls_heap: Option<(State, State)>,
+    /// the container annotations `*args: T` / `**kw: T` stand for (`tuple[T, ...]`, `dict[str,
+    /// T]`), parsed once per text
+    star_annotations: FxHashMap<String, Option<&'static ast::Expr>>,
+}
+
+impl Entries {
+    /// The annotation `text` parses to (once per text: parsed annotations are kept for good).
+    fn star_annotation(&mut self, text: &str) -> Option<&'static ast::Expr> {
+        *self.star_annotations.entry(text.to_string()).or_insert_with(|| frontend::parse_expression(text))
+    }
 }
 
 /// The analysis as the main module's run left it, before the entry runs: its state, the hover
@@ -658,8 +668,18 @@ impl Analyzer {
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
         for a in params {
             if [&fparams.vararg, &fparams.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
-                // a caller may pass any arguments here
-                let v = Value::obj(self.param_source(fi, a, st));
+                // a caller may pass any arguments here (`*args: int`: ints; `**kw: str`: str
+                // values under str keys)
+                let o = self.param_source(fi, a, st);
+                let star = fparams.vararg.as_deref().is_some_and(|v| std::ptr::eq(v, a));
+                if let Some(ann) = a.annotation.as_deref().filter(|_| !self.entry.torch_modules.contains(&fi.module)) {
+                    let text = frontend::text(ann);
+                    let whole = if star { format!("tuple[{}, ...]", text) } else { format!("dict[str, {}]", text) };
+                    if let Some(e) = (!text.is_empty()).then(|| self.entry.star_annotation(&whole)).flatten() {
+                        self.as_annotated(o, e, fi.module);
+                    }
+                }
+                let v = Value::obj(o);
                 if fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false) {
                     star_args.push(v);
                 } else {
@@ -738,7 +758,15 @@ impl Analyzer {
         }
         // (with a default, only a torch annotation is taken: an instance for a defaulted
         // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
-        let ann = a.annotation.as_deref();
+        // (an alias the module binds stands for what it names)
+        let ann = a.annotation.as_deref().map(|x| self.resolved_annotation(x, fi.module));
+        // (a union of several members, a `Literal`: member by member)
+        if let Some(v) = ann.filter(|_| !self.entry.torch_modules.contains(&fi.module)).and_then(|x| self.param_from_members(x, fi, a, d.is_some(), st)) {
+            return match d {
+                Some(d) => d.join(&v),
+                None => v,
+            };
+        }
         let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
             None => {

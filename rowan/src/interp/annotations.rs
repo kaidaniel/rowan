@@ -442,7 +442,7 @@ impl Analyzer {
     fn field_value(&mut self, ann: &'static ast::Expr, module: ObjId, validated: bool, path: &str, single: bool, depth: u32, state: &mut State) -> Value {
         const MAX_NEST: u32 = 2;
         let unknown = || Value::data(&format!("field {}", path.rsplit('.').next().unwrap_or(path)));
-        let (members, none) = annotation_members(ann);
+        let (members, none) = self.members_in(ann, module, 0);
         let alone = members.len() == 1 && !none;
         // an unknown of builtin type `t`: a scalar alone is a typed unknown (`str(?)`); one of
         // several members, or a container (its parts as annotated `c` says), an unknown object
@@ -493,6 +493,195 @@ impl Analyzer {
             out = out.join(&v);
         }
         out
+    }
+
+    /// What a name an annotation uses stands for when the module binds it once, at its top
+    /// level, to a type (`Mode = Literal["r", "w"]`, `Json: TypeAlias = dict[str, Any]`, `type
+    /// Pair = tuple[int, int]`): that expression; None for anything else.
+    pub(in crate::interp) fn alias_of(&self, name: &str, module: ObjId) -> Option<&'static ast::Expr> {
+        fn walk(b: &'static [ast::Stmt], name: &str, n: &mut usize, found: &mut Option<&'static ast::Expr>) {
+            let named = |e: &ast::Expr| matches!(e, ast::Expr::Name(x) if x.id.as_str() == name);
+            for st in b {
+                match st {
+                    ast::Stmt::Assign(a) => {
+                        if a.targets.iter().any(|t| named(t)) {
+                            *n += 1;
+                            *found = (a.targets.len() == 1).then_some(&*a.value);
+                        } else if a.targets.iter().any(|t| matches!(t, ast::Expr::Tuple(_) | ast::Expr::List(_))) {
+                            // (unpacked: counted when it may bind the name)
+                            *n += usize::from(crate::interp::annotations::binds_in(&a.targets, name));
+                        }
+                    }
+                    ast::Stmt::AnnAssign(a) if named(&a.target) => {
+                        *n += 1;
+                        *found = a.value.as_deref();
+                    }
+                    ast::Stmt::AugAssign(a) if named(&a.target) => *n += 2,
+                    ast::Stmt::TypeAlias(a) if named(&a.name) => {
+                        *n += 1;
+                        *found = Some(&*a.value);
+                    }
+                    ast::Stmt::FunctionDef(f) if f.name.as_str() == name => *n += 2,
+                    ast::Stmt::ClassDef(c) if c.name.as_str() == name => *n += 2,
+                    ast::Stmt::Import(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str().split('.').next() == Some(name), |x| x.as_str() == name)) => *n += 2,
+                    ast::Stmt::ImportFrom(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str() == name || a.name.as_str() == "*", |x| x.as_str() == name)) => *n += 2,
+                    ast::Stmt::For(f) => {
+                        *n += usize::from(crate::interp::annotations::binds_in(std::slice::from_ref(&*f.target), name)) * 2;
+                        walk(&f.body, name, n, found);
+                        walk(&f.orelse, name, n, found);
+                    }
+                    ast::Stmt::If(i) => {
+                        walk(&i.body, name, n, found);
+                        i.elif_else_clauses.iter().for_each(|c| walk(&c.body, name, n, found));
+                    }
+                    ast::Stmt::Try(x) => {
+                        walk(&x.body, name, n, found);
+                        x.handlers.iter().for_each(|h| match h {
+                            ast::ExceptHandler::ExceptHandler(h) => walk(&h.body, name, n, found),
+                        });
+                        walk(&x.orelse, name, n, found);
+                        walk(&x.finalbody, name, n, found);
+                    }
+                    ast::Stmt::With(w) => walk(&w.body, name, n, found),
+                    ast::Stmt::While(w) => {
+                        walk(&w.body, name, n, found);
+                        walk(&w.orelse, name, n, found);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let tree = self.heap.module_info(module).tree;
+        let (mut n, mut found) = (0, None);
+        walk(&tree.body, name, &mut n, &mut found);
+        let v = found.filter(|_| n == 1)?;
+        matches!(v, ast::Expr::Subscript(_) | ast::Expr::BinOp(_) | ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::StringLiteral(_)).then_some(v)
+    }
+
+    /// `annotation_members`, with the aliases the module binds (`alias_of`) standing for what
+    /// they name.
+    pub(in crate::interp) fn members_in(&self, ann: &'static ast::Expr, module: ObjId, depth: u32) -> (Vec<&'static ast::Expr>, bool) {
+        let (ms, mut none) = annotation_members(ann);
+        let mut out = Vec::new();
+        for m in ms {
+            match m {
+                ast::Expr::Name(n) if depth < 4 => match self.alias_of(n.id.as_str(), module) {
+                    Some(a) => {
+                        let (sub, n2) = self.members_in(a, module, depth + 1);
+                        none |= n2;
+                        out.extend(sub);
+                    }
+                    None => out.push(m),
+                },
+                _ => out.push(m),
+            }
+        }
+        (out, none)
+    }
+
+    /// An annotation that is an alias the module binds (`Mode`, `"Mode"`): what it names, alias
+    /// by alias; else the annotation.
+    pub(in crate::interp) fn resolved_annotation(&self, ann: &'static ast::Expr, module: ObjId) -> &'static ast::Expr {
+        let mut a = ann;
+        for _ in 0..4 {
+            let name = match a {
+                ast::Expr::Name(n) => n.id.as_str(),
+                ast::Expr::StringLiteral(sl) => match frontend::parse_expression(sl.value.to_str()) {
+                    Some(e @ ast::Expr::Name(_)) => {
+                        a = e;
+                        continue;
+                    }
+                    _ => return a,
+                },
+                _ => return a,
+            };
+            match self.alias_of(name, module) {
+                Some(x) => a = x,
+                None => return a,
+            }
+        }
+        a
+    }
+
+    /// The value parameter `a` of `fi` takes in a run for any call when its annotation is a
+    /// union of several members or a `Literal`: each member as it allows, as a field's
+    /// (`field_value`): None; a `Literal`'s values; a builtin type's unknown (the parameter's
+    /// own unknown for the first, `as_annotated`; one of its own for each other); an Enum's
+    /// members; an instance of the program's class (not for a parameter with a default:
+    /// `open_param`); anything else (a library's class, `Callable`, `Any`) the parameter's
+    /// unknown, of no type. None for a single member: `param_from_annotation`, `as_annotated`.
+    pub(in crate::interp) fn param_from_members(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, a: &ast::Parameter, defaulted: bool, state: &mut State) -> Option<Value> {
+        let module = fi.module;
+        let (members, none) = self.members_in(ann, module, 0);
+        let literal = |m: &ast::Expr| matches!(m, ast::Expr::Subscript(s) if dotted_last(&s.value) == "Literal");
+        if members.is_empty() || (members.len() == 1 && !literal(members[0])) {
+            return None;
+        }
+        let pname = a.name.id.as_str();
+        let path = format!("{}.{}", fi.qualname, pname);
+        let mut out = if none { Value::none() } else { Value::new() };
+        let mut untyped = false;
+        let mut builtins: Vec<(usize, &'static ast::Expr, &'static str)> = Vec::new();
+        for (k, m) in members.into_iter().enumerate() {
+            if let ast::Expr::Subscript(sub) = m {
+                if dotted_last(&sub.value) == "Literal" {
+                    let elts: Vec<&'static ast::Expr> = match &*sub.slice {
+                        ast::Expr::Tuple(t) => t.elts.iter().collect(),
+                        e => vec![e],
+                    };
+                    let vals: Vec<Option<Value>> = elts.into_iter().map(|e| self.in_module(module, "ann", "<annotation>", |an| an.eval_annotation(e, state))).collect();
+                    match vals.into_iter().collect::<Option<Vec<Value>>>() {
+                        Some(vs) if vs.iter().all(|v| v.pts.is_empty() && v.kv.is_literal()) => out = vs.into_iter().fold(out, |o, v| o.join(&v)),
+                        _ => untyped = true,
+                    }
+                    continue;
+                }
+            }
+            if let Some((t, _)) = builtin_annotation(m) {
+                builtins.push((k, m, t));
+                continue;
+            }
+            let cv = self.in_module(module, "ann", "<annotation>", |an| {
+                let v = an.eval_annotation(m, state)?;
+                Some(match m {
+                    ast::Expr::Name(n) if !v.pts.iter().any(|o| an.heap.kind(o) == Kind::Class) => an.type_only_name(n.id.as_str(), state).unwrap_or(v),
+                    _ => v,
+                })
+            });
+            let cls = cv.and_then(|v| v.single()).filter(|c| self.heap.kind(*c) == Kind::Class && self.heap.class_info_opt(*c).is_some());
+            match cls {
+                Some(c) if self.m.enum_members.contains_key(&c) => out = out.join(&Value::objs(crate::domain::ObjSet::from_vec(self.m.enum_members[&c].iter().map(|(_, o)| *o).collect()))),
+                Some(c) if !defaulted => match self.annotated_instance(c, &path, Some((fi, pname)), true, 0, state) {
+                    Some(v) => out = out.join(&v),
+                    None => untyped = true,
+                },
+                _ => untyped = true,
+            }
+        }
+        let o = self.param_source(fi, a, state);
+        if untyped {
+            // (anything: the builtin types' values among it)
+            return Some(out.join(&Value::obj(o)));
+        }
+        for (i, (k, m, t)) in builtins.into_iter().enumerate() {
+            let v = match i {
+                0 => self.as_annotated(o, m, module),
+                _ => {
+                    // (another of the argument's types: an unknown of its own, unnamed, that
+                    // the argument is too)
+                    let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
+                    let x = self.heap.alloc_raw(Kind::Unknown, &format!("param:{}:{}", path, k), "", true, &format!("param {}", pname), Payload::None);
+                    for n in [Ns::Item, Ns::Attr] {
+                        if !state.has_row(x, n) {
+                            state.set_row(x, n, Row::with_source(src));
+                        }
+                    }
+                    self.as_annotated(x, m, module)
+                }
+            };
+            out = out.join(&v);
+        }
+        Some(out)
     }
 }
 
@@ -640,4 +829,15 @@ fn defined_names(st: &ast::Stmt) -> Vec<&str> {
         },
         _ => vec![],
     }
+}
+
+/// Does an assignment target (or one of several) bind `name`, unpacked too?
+pub(in crate::interp) fn binds_in(targets: &[ast::Expr], name: &str) -> bool {
+    targets.iter().any(|t| match t {
+        ast::Expr::Name(n) => n.id.as_str() == name,
+        ast::Expr::Tuple(x) => binds_in(&x.elts, name),
+        ast::Expr::List(x) => binds_in(&x.elts, name),
+        ast::Expr::Starred(x) => binds_in(std::slice::from_ref(&*x.value), name),
+        _ => false,
+    })
 }
