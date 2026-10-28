@@ -420,6 +420,10 @@ pub struct Heap {
     /// per class and attribute name: the annotation its instances' attribute is declared with
     /// (`Analyzer::attr_annotation`), found once
     #[allow(clippy::type_complexity)]
+    pub aliases: std::cell::RefCell<FxHashMap<(ObjId, crate::intern::StrId), Option<(&'static ruff_python_ast::Expr, ObjId)>>>,
+    /// per class and attribute name: (see `attr_anns`); per module and name above: the alias it
+    /// binds (`Analyzer::alias_of`), found once
+    #[allow(clippy::type_complexity)]
     pub attr_anns: std::cell::RefCell<FxHashMap<(ObjId, crate::intern::StrId), Option<(&'static ruff_python_ast::Expr, ObjId)>>>,
     /// a placeholder read as an attribute of these objects (`o.m` of an unknown `o`): called,
     /// it may be a method bound to one of them, which it is given (`call_one`)
@@ -431,7 +435,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false, arg: false };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_anns: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_anns: Default::default(), aliases: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
 

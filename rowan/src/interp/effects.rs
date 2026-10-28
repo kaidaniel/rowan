@@ -885,7 +885,9 @@ impl Analyzer {
         // (what the code run with the receiver stores, where its text says: `AttrStores`)
         let mut put_by: FxHashMap<StrId, AttrStores> = FxHashMap::default();
         let mut computed = false;
-        for f in effs.iter().flat_map(|(_, e)| e.code.iter().copied()).collect::<FxHashSet<ObjId>>() {
+        // (only where it stores something by name)
+        let stores_any = !must.is_empty() || effs.iter().any(|(_, e)| !e.stores.is_empty());
+        for f in effs.iter().filter(|_| stores_any).flat_map(|(_, e)| e.code.iter().copied()).collect::<FxHashSet<ObjId>>() {
             let Some(fi) = self.heap.func_info_opt(f) else { continue };
             let u = self.code_uses(&fi);
             computed |= u.computed_stores;

@@ -546,75 +546,22 @@ impl Analyzer {
     /// (`from .types import Mode`): that expression and the module it is written in; None for
     /// anything else.
     pub(in crate::interp) fn alias_of(&self, name: &str, module: ObjId, depth: u32) -> Option<(&'static ast::Expr, ObjId)> {
-        #[derive(Clone, Copy)]
-        enum Found {
-            Expr(Option<&'static ast::Expr>),
-            From(&'static ast::StmtImportFrom, &'static str),
-        }
-        fn walk(b: &'static [ast::Stmt], name: &str, n: &mut usize, found: &mut Option<Found>) {
-            let named = |e: &ast::Expr| matches!(e, ast::Expr::Name(x) if x.id.as_str() == name);
-            for st in b {
-                match st {
-                    ast::Stmt::Assign(a) => {
-                        if a.targets.iter().any(|t| named(t)) {
-                            *n += 1;
-                            *found = Some(Found::Expr((a.targets.len() == 1).then_some(&*a.value)));
-                        } else if a.targets.iter().any(|t| matches!(t, ast::Expr::Tuple(_) | ast::Expr::List(_))) {
-                            // (unpacked: counted when it may bind the name)
-                            *n += usize::from(crate::interp::annotations::binds_in(&a.targets, name));
-                        }
-                    }
-                    ast::Stmt::AnnAssign(a) if named(&a.target) => {
-                        *n += 1;
-                        *found = Some(Found::Expr(a.value.as_deref()));
-                    }
-                    ast::Stmt::AugAssign(a) if named(&a.target) => *n += 2,
-                    ast::Stmt::TypeAlias(a) if named(&a.name) => {
-                        *n += 1;
-                        *found = Some(Found::Expr(Some(&*a.value)));
-                    }
-                    ast::Stmt::FunctionDef(f) if f.name.as_str() == name => *n += 2,
-                    ast::Stmt::ClassDef(c) if c.name.as_str() == name => *n += 2,
-                    ast::Stmt::Import(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str().split('.').next() == Some(name), |x| x.as_str() == name)) => *n += 2,
-                    ast::Stmt::ImportFrom(i) if i.names.iter().any(|a| a.name.as_str() == "*") => *n += 2,
-                    ast::Stmt::ImportFrom(i) => {
-                        if let Some(a) = i.names.iter().find(|a| a.asname.as_ref().map_or(a.name.as_str() == name, |x| x.as_str() == name)) {
-                            *n += 1;
-                            *found = Some(Found::From(i, a.name.as_str()));
-                        }
-                    }
-                    ast::Stmt::For(f) => {
-                        *n += usize::from(crate::interp::annotations::binds_in(std::slice::from_ref(&*f.target), name)) * 2;
-                        walk(&f.body, name, n, found);
-                        walk(&f.orelse, name, n, found);
-                    }
-                    ast::Stmt::If(i) => {
-                        walk(&i.body, name, n, found);
-                        i.elif_else_clauses.iter().for_each(|c| walk(&c.body, name, n, found));
-                    }
-                    ast::Stmt::Try(x) => {
-                        walk(&x.body, name, n, found);
-                        x.handlers.iter().for_each(|h| match h {
-                            ast::ExceptHandler::ExceptHandler(h) => walk(&h.body, name, n, found),
-                        });
-                        walk(&x.orelse, name, n, found);
-                        walk(&x.finalbody, name, n, found);
-                    }
-                    ast::Stmt::With(w) => walk(&w.body, name, n, found),
-                    ast::Stmt::While(w) => {
-                        walk(&w.body, name, n, found);
-                        walk(&w.orelse, name, n, found);
-                    }
-                    _ => {}
-                }
-            }
-        }
         if depth > 4 {
             return None;
         }
+        let key = (module, intern::s(name));
+        if let Some(a) = self.heap.aliases.borrow().get(&key) {
+            return *a;
+        }
+        let found = self.alias_uncached(name, module, depth);
+        self.heap.aliases.borrow_mut().insert(key, found);
+        found
+    }
+
+    fn alias_uncached(&self, name: &str, module: ObjId, depth: u32) -> Option<(&'static ast::Expr, ObjId)> {
         let info = self.heap.module_info(module);
         let (mut n, mut found) = (0, None);
-        walk(&info.tree.body, name, &mut n, &mut found);
+        walk_binds(&info.tree.body, name, &mut n, &mut found);
         match found.filter(|_| n == 1)? {
             Found::Expr(v) => {
                 let v = v?;
@@ -919,4 +866,70 @@ pub(in crate::interp) fn binds_in(targets: &[ast::Expr], name: &str) -> bool {
         ast::Expr::Starred(x) => binds_in(std::slice::from_ref(&*x.value), name),
         _ => false,
     })
+}
+
+#[derive(Clone, Copy)]
+/// How a module binds a name (`alias_of`): to an expression, or by `from M import name`.
+enum Found {
+    Expr(Option<&'static ast::Expr>),
+    From(&'static ast::StmtImportFrom, &'static str),
+}
+/// The top-level bindings of `name` in `b` (into `if`, `try`, `with`, loops): how many, the last.
+fn walk_binds(b: &'static [ast::Stmt], name: &str, n: &mut usize, found: &mut Option<Found>) {
+    let named = |e: &ast::Expr| matches!(e, ast::Expr::Name(x) if x.id.as_str() == name);
+    for st in b {
+        match st {
+            ast::Stmt::Assign(a) => {
+                if a.targets.iter().any(|t| named(t)) {
+                    *n += 1;
+                    *found = Some(Found::Expr((a.targets.len() == 1).then_some(&*a.value)));
+                } else if a.targets.iter().any(|t| matches!(t, ast::Expr::Tuple(_) | ast::Expr::List(_))) {
+                    // (unpacked: counted when it may bind the name)
+                    *n += usize::from(crate::interp::annotations::binds_in(&a.targets, name));
+                }
+            }
+            ast::Stmt::AnnAssign(a) if named(&a.target) => {
+                *n += 1;
+                *found = Some(Found::Expr(a.value.as_deref()));
+            }
+            ast::Stmt::AugAssign(a) if named(&a.target) => *n += 2,
+            ast::Stmt::TypeAlias(a) if named(&a.name) => {
+                *n += 1;
+                *found = Some(Found::Expr(Some(&*a.value)));
+            }
+            ast::Stmt::FunctionDef(f) if f.name.as_str() == name => *n += 2,
+            ast::Stmt::ClassDef(c) if c.name.as_str() == name => *n += 2,
+            ast::Stmt::Import(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str().split('.').next() == Some(name), |x| x.as_str() == name)) => *n += 2,
+            ast::Stmt::ImportFrom(i) if i.names.iter().any(|a| a.name.as_str() == "*") => *n += 2,
+            ast::Stmt::ImportFrom(i) => {
+                if let Some(a) = i.names.iter().find(|a| a.asname.as_ref().map_or(a.name.as_str() == name, |x| x.as_str() == name)) {
+                    *n += 1;
+                    *found = Some(Found::From(i, a.name.as_str()));
+                }
+            }
+            ast::Stmt::For(f) => {
+                *n += usize::from(crate::interp::annotations::binds_in(std::slice::from_ref(&*f.target), name)) * 2;
+                walk_binds(&f.body, name, n, found);
+                walk_binds(&f.orelse, name, n, found);
+            }
+            ast::Stmt::If(i) => {
+                walk_binds(&i.body, name, n, found);
+                i.elif_else_clauses.iter().for_each(|c| walk_binds(&c.body, name, n, found));
+            }
+            ast::Stmt::Try(x) => {
+                walk_binds(&x.body, name, n, found);
+                x.handlers.iter().for_each(|h| match h {
+                    ast::ExceptHandler::ExceptHandler(h) => walk_binds(&h.body, name, n, found),
+                });
+                walk_binds(&x.orelse, name, n, found);
+                walk_binds(&x.finalbody, name, n, found);
+            }
+            ast::Stmt::With(w) => walk_binds(&w.body, name, n, found),
+            ast::Stmt::While(w) => {
+                walk_binds(&w.body, name, n, found);
+                walk_binds(&w.orelse, name, n, found);
+            }
+            _ => {}
+        }
+    }
 }
