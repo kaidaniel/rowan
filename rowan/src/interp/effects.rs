@@ -292,7 +292,7 @@ impl Analyzer {
     }
 
     /// The names a function's code reads beyond its locals (computed once per `def`).
-    fn code_uses(&mut self, fi: &FuncInfo) -> std::rc::Rc<CodeUses> {
+    pub(super) fn code_uses(&mut self, fi: &FuncInfo) -> std::rc::Rc<CodeUses> {
         let addr = fi.node.addr();
         if let Some(u) = self.effects.code_uses.get(&addr) {
             return u.clone();

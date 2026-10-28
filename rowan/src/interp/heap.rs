@@ -383,6 +383,9 @@ pub struct Heap {
     /// class attributes the program stores after the class is made (`Cls.x = 1`): those a
     /// path may lack (`class_lookup_on_path`)
     pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
+    /// the names any class body bound to a property (not a cached one): what a read of an
+    /// instance's own value checks its class for on the path (a data descriptor takes it)
+    pub prop_names: rustc_hash::FxHashSet<KeyId>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
     /// a property's deleter by (class, name) (`@name.deleter`): `del obj.name` runs it
@@ -412,7 +415,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
 

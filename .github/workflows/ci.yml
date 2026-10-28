@@ -130,6 +130,26 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/class_protocol.py; about 10 s)
         run: uv run --no-project python tests/class_protocol.py --all
 
+      - name: Narrowing, pairs (two tests on one value vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
+        run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
+
+      - name: The data model, pairs (two operations on the same instances vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/dunder_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/dunder_protocol.py --pairs --rowan 2500
+
+      - name: Classes, pairs (a change then an operation vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/class_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/class_protocol.py --pairs --rowan 2500
+
+      - name: Container models, pairs (a mutation then an operation vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/container_protocol.py --pairs; about 15 s)
+        run: uv run --no-project python tests/container_protocol.py --pairs --rowan 4000
+
+      - name: Calls, pairs (two callees on shared values vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/call_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/call_protocol.py --pairs --rowan 1500
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

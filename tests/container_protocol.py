@@ -12,7 +12,10 @@
 Observation points: the result (a scalar, else its `repr`) or the class it raised, then the
 receiver's `repr` after the operation.
 
-    uv run --no-project python tests/container_protocol.py [--rowan N | --all] [--seed S] [-v]
+`--pairs`: one of `FIRST` (an operation that changes the receiver) then any operation of its
+type on it, each in its own `try`, both observed.
+
+    uv run --no-project python tests/container_protocol.py [--pairs] [--rowan N | --all] [--seed S] [-v]
 """
 from __future__ import annotations
 
@@ -100,10 +103,13 @@ TAIL = [
 ]
 
 
-def program(value: str, expr: str, desc: str) -> Prog:
+def attempt(expr: str) -> list:
     *stmts, last = expr.split("\n")
-    lines = ["import json", "def p{N}():", "    global O", f"    c = {value}", "    try:", *(f"        {x}" for x in stmts), f"        r = {last}"]
-    lines += ["    " + ln for ln in TAIL]
+    return ["    try:", *(f"        {x}" for x in stmts), f"        r = {last}", *("    " + ln for ln in TAIL)]
+
+
+def program(value: str, expr: str, desc: str, first: str | None = None) -> Prog:
+    lines = ["import json", "def p{N}():", "    global O", f"    c = {value}", *(attempt(first) if first else []), *attempt(expr)]
     return Prog(lines, desc=desc)
 
 
@@ -113,5 +119,20 @@ def programs():
             yield program(rv, ov, f"{kind} {rk} {ok}")
 
 
+# the first operation of a pair: those that change the receiver
+FIRST = {
+    "list": ["append", "extend", "insert", "pop", "pop0", "remove", "sort", "reverse", "clear", "iadd", "set_item", "set_slice", "del_item"],
+    "dict": ["pop", "pop_missing", "popitem", "setdefault_new", "update", "update_kw", "clear", "ior", "set_item", "del_item"],
+    "set": ["add", "discard", "remove", "pop", "update", "isub", "clear"],
+    "tuple": ["set_item"],
+}
+
+
+def pair_programs():
+    for kind in RECEIVERS:
+        for (rk, rv), first, (ok, ov) in itertools.product(RECEIVERS[kind].items(), FIRST[kind], OPS[kind].items()):
+            yield program(rv, ov, f"{kind} {rk} {first}+{ok}", OPS[kind][first])
+
+
 if __name__ == "__main__":
-    cli(programs, NAMES)
+    cli(programs, NAMES, pairs=pair_programs)

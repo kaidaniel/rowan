@@ -162,7 +162,11 @@ pub(super) fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             } else if !src.pts.is_empty() {
                 let it = an.iterate(src, &c.node, st);
                 match (&it.elem, &it.items) {
-                    (Elem::Pair(k, v), _) => an.store_key(oid, Ns::Item, &k, v, false, &c.node, st),
+                    (Elem::Pair(k, v), _) => {
+                        // (each key is hashed: a list among them raises, if there is one)
+                        an.check_hashable_if(k, false, st);
+                        an.store_key(oid, Ns::Item, k, v, false, &c.node, st)
+                    }
                     (_, Some(items)) => {
                         for item in items {
                             let parts = an.unpack(item, 2, st, &c.node);
@@ -738,11 +742,7 @@ pub(super) fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
             // (`sort` compares the items: ones of kinds that do not compare may raise TypeError)
             if name == "sort" && c.kw("key").is_none() {
-                let items: Vec<Value> = recv.pts.iter().flat_map(|o| match an.known_positions(o, st) {
-                    Some(ps) => ps,
-                    None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
-                }).collect();
-                if crate::models::builtins::incomparable(&items) {
+                if crate::models::builtins::incomparable(an, &crate::models::builtins::order_items(an, &recv, st)) {
                     an.may_raise_here("TypeError", st);
                 }
             }

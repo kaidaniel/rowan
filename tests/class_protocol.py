@@ -20,7 +20,10 @@ Soundness: `isinstance`; `classes.rs`, `attrs.rs`):
   any call, called with each receiver.
 Observation points: the result (`O = r` after the `try`), then the classes' own `v` (by
 `getattr` with a default: an observation line must not raise).
-    uv run --no-project python tests/class_protocol.py [--rowan N | --all] [--seed S] [--limits L] [-v]
+
+`--pairs`: one of `FIRST` (an operation that changes the instance or the classes) then any
+operation or a read on a new instance (`LATER`), each in its own `try`.
+    uv run --no-project python tests/class_protocol.py [--pairs] [--rowan N | --all] [--seed S] [--limits L] [-v]
 """
 from __future__ import annotations
 
@@ -105,20 +108,33 @@ def body(op) -> list:
             "except TypeError:", "    r = 'type'", "O = r"]
 
 
-def program(shape, recv, op) -> Prog:
+def program(shape, recv, op, first=None) -> Prog:
     base, sub = SHAPES[shape]
-    lines = [*base, *sub, "", "def p{N}():", "    global O, OA, OB", f"    o = {RECV[recv]}", *("    " + ln for ln in body(op)),
+    ops = [*(body(first) if first else []), *body(op)]
+    lines = [*base, *sub, "", "def p{N}():", "    global O, OA, OB", f"    o = {RECV[recv]}", *("    " + ln for ln in ops),
              "    OA = getattr(A{N}, 'v', -1)", "    OB = getattr(B{N}, 'v', -1)", "",
-             "def q{N}(o: A{N}):", "    global O, OA, OB", *("    " + ln for ln in body(op)), "    OA = getattr(A{N}, 'v', -1)", "    OB = getattr(B{N}, 'v', -1)", ""]
+             "def q{N}(o: A{N}):", "    global O, OA, OB", *("    " + ln for ln in ops), "    OA = getattr(A{N}, 'v', -1)", "    OB = getattr(B{N}, 'v', -1)", ""]
     calls = [RECV["A"], RECV["B"]] if recv == "either" else [RECV[recv]]
     end = [f"run(lambda: q{{N}}({c}))" for c in calls]
-    return Prog(lines, end=end + ["O = O"], desc=f"{shape} {recv} {op}")
+    return Prog(lines, end=end + ["O = O"], desc=f"{shape} {recv} {first + '+' if first else ''}{op}")
 
 
 def programs():
     for shape, recv, op in itertools.product(SHAPES, RECV, OPS):
-        yield program(shape, recv, op)
+        if op not in LATER:
+            yield program(shape, recv, op)
+
+
+FIRST = ["store", "del", "clsstore", "setattr", "delcls", "f", "twice", "make", "storetype"]
+# reads on new instances after the first operation (only as the second)
+LATER = {"newa": ["O = A{N}().v"], "newb": ["O = B{N}().v"], "newtype": ["O = type(o)().a"]}
+OPS.update(LATER)
+
+
+def pair_programs():
+    for shape, recv, first, op in itertools.product(SHAPES, RECV, FIRST, OPS):
+        yield program(shape, recv, op, first)
 
 
 if __name__ == "__main__":
-    cli(programs, NAMES, limit_sets=(None, "budget=0"))
+    cli(programs, NAMES, limit_sets=(None, "budget=0"), pairs=pair_programs)

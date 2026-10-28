@@ -995,7 +995,9 @@ impl Analyzer {
                 }
             }
             Some(nk) => {
-                // equal to one of the literals: an unknown value is that literal now
+                // equal to one of the literals: an unknown value is that literal now (any of
+                // `keys`, not only those among its literals)
+                let nk = if restrict && !maybe_eq.is_empty() { KeyVal::lits(keys.clone()) } else { nk };
                 let pts = if restrict { cur.pts.filter(|o| self.heap.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
                 if nk != cur.kv || pts != cur.pts {
                     self.rebind_name(name, Value::with_kv(pts, nk), state);

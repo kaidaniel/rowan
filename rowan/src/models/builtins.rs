@@ -64,6 +64,9 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             }
                             continue;
                         }
+                        // (each key is hashed: a list among them raises, if there is one)
+                        let kel = an.elem_of(&ks, &c.node, st);
+                        an.check_hashable_if(&kel, false, st);
                         let lits = an.lit_keys(&ks, st);
                         let vel = an.elem_of(&vs, &c.node, st);
                         // values that are one of several sequences of known lengths: the keys
@@ -167,9 +170,18 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
-/// Items `sort` / `sorted` may find that do not compare with each other: literals of two
-/// kinds that do not (numbers, strs, bytes, the others), or None among two or more.
-pub(super) fn incomparable(items: &[Value]) -> bool {
+/// Items `sort` / `sorted` / `min` / `max` may find that do not compare with each other:
+/// literals or containers of two kinds that do not (numbers, strs, bytes, lists, tuples, sets),
+/// or among two or more, one of a kind that orders with nothing (None, a dict, other literals).
+/// Instances and unknowns are left to their own `__lt__`.
+pub(super) fn incomparable(an: &Analyzer, items: &[Value]) -> bool {
+    order_kinds(an, items).0
+}
+
+/// `incomparable`, and whether surely so: every item of one kind alone (a literal kind or a
+/// container's), two kinds among them — the first item of another kind meets one of the
+/// first's (`min`, `max`, `sorted` compare every item).
+fn order_kinds(an: &Analyzer, items: &[Value]) -> (bool, bool) {
     let kind = |k: KeyId| intern::with_key(k, |k| match k {
         intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
         intern::Key::Str(_) => 1,
@@ -177,20 +189,38 @@ pub(super) fn incomparable(items: &[Value]) -> bool {
         intern::Key::None => 3,
         _ => 4,
     });
-    let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
+    let obj_kind = |o: ObjId| match an.heap.kind(o) {
+        Kind::List if !an.heap.obj(o).iterator => Some(5u8),
+        Kind::Tuple => Some(6),
+        Kind::Dict => Some(7),
+        Kind::Set => Some(8),
+        _ => None,
+    };
+    let of = |v: &Value| -> Vec<u8> { crate::domain::kv_literals(&v.kv).iter().map(kind).chain(v.pts.iter().filter_map(obj_kind)).collect() };
+    let mut kinds: Vec<u8> = items.iter().flat_map(of).collect();
     kinds.sort_unstable();
     kinds.dedup();
-    kinds.len() > 1 || (kinds.contains(&3) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())))
+    let may = kinds.len() > 1 || (kinds.iter().any(|k| matches!(k, 3 | 4 | 7)) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())));
+    let one_kind = |v: &Value| (v.kv.is_literal() || v.kv.is_bot()) && v.pts.iter().all(|o| obj_kind(o).is_some()) && { let mut ks = of(v); ks.sort_unstable(); ks.dedup(); ks.len() == 1 };
+    (may, may && kinds.len() > 1 && items.iter().all(one_kind))
+}
+
+/// The items of the containers in `v` as `incomparable` looks at them: their positions where
+/// known, else their elements twice (two of them).
+pub(super) fn order_items(an: &Analyzer, v: &Value, st: &State) -> Vec<Value> {
+    v.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
+        Some(ps) => ps,
+        None => {
+            let e = Value::with_kv(st.slot(o, Ns::Elem, crate::intern::STAR).pts, st.elems.get(&o).unwrap_or(DATA));
+            vec![e.clone(), e]
+        }
+    }).collect()
 }
 
 pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (`sorted` compares the items, as `list.sort`)
     if let (true, Some(a)) = (c.qual == "builtins.sorted" && c.kw("key").is_none(), c.args.first()) {
-        let items: Vec<Value> = a.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
-            Some(ps) => ps,
-            None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
-        }).collect();
-        if incomparable(&items) {
+        if incomparable(an, &order_items(an, a, st)) {
             an.may_raise_here("TypeError", st);
         }
     }
@@ -882,23 +912,21 @@ pub(super) fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         };
     }
+    // (items not known one by one: the containers' elements may not compare)
+    let known = matches!(&cands, Some(its) if !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX);
+    if !known && c.args.len() == 1 && c.kw("key").is_none() && incomparable(an, &order_items(an, &c.args[0], st)) {
+        an.may_raise_here("TypeError", st);
+    }
     if let Some(items) = cands.filter(|its| !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX) {
         let keyf = c.kw("key").filter(|k| !k.pts.is_empty());
         // (literals of kinds that do not compare: `min('a', 1)`, None, tuples whose items may not)
-        if keyf.is_none() && items.len() >= 2 {
-            let kind = |k: KeyId| intern::with_key(k, |k| match k {
-                intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
-                intern::Key::Str(_) => 1,
-                intern::Key::Bytes(_) => 2,
-                intern::Key::None => 3,
-                _ => 4,
-            });
-            let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
-            kinds.sort_unstable();
-            kinds.dedup();
-            if kinds.len() > 1 || kinds.iter().any(|k| *k >= 3) {
-                an.may_raise_here("TypeError", st);
+        match (keyf.is_none() && items.len() >= 2).then(|| order_kinds(an, &items)) {
+            Some((_, true)) => {
+                an.raise_here("TypeError", st);
+                return Value::new();
             }
+            Some((true, _)) => an.may_raise_here("TypeError", st),
+            _ => {}
         }
         let mut keys: Vec<Option<KeyId>> = Vec::new();
         let mut kvals: Vec<Value> = Vec::new();

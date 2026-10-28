@@ -1433,6 +1433,13 @@ impl Analyzer {
         let key = &ckey;
         let mut row = state.row(oid, ns);
         let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
+        // (an object rowan cannot see the class of may be a list: `del x[0]` shifts its later
+        // items down, so no index is surely gone and none keeps its value)
+        let shifts = kind == Kind::Unknown && ns == Ns::Item && kv_literals(&key.kv).iter().any(|k| intern::key_as_int(k).is_some());
+        if shifts {
+            state.slots.drop_where(&oid, |(n, k)| *n == Ns::Item && intern::key_as_int(*k).is_some());
+        }
+        let strong = strong && !shifts;
         let mut raise: Option<(bool, Value)> = None;
         for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
             let cls = classify(&row, k);

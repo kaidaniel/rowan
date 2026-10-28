@@ -19,7 +19,11 @@ Each batch runs under every limit set (`LIMITS`): the default, `budget=0` (calls
 large programs fall back to) and `budget=6` (the first runs, later ones skipped). Rowan's claims
 must cover CPython's runs in all of them.
 
-    uv run --no-project python tests/call_protocol.py [--rowan N | --all] [--seed S] [--limits L] [-v]
+`--pairs`: two callees `fN` and `gN`, each with one effect of `PAIRED` (plain or under `c1`) and
+a result, called one after the other on the same values (`CALLS2`: in sequence, `g` given `f`'s
+result, both in a loop, in one `try`, through a wrapper calling both).
+
+    uv run --no-project python tests/call_protocol.py [--pairs] [--rowan N | --all] [--seed S] [--limits L] [-v]
 """
 from __future__ import annotations
 
@@ -107,14 +111,23 @@ CALLS = {
 }
 
 
-def callee(effects, cond, result):
+def callee(effects, cond, result, name="f"):
     body = [ln for e in effects for ln in EFFECTS[e]]
     if cond == "c1":
         body = ["if c1:", *("    " + ln for ln in body)]
-    return ["def f{N}(a, d, o, acc=[]):", "    global G, A", *("    " + ln for ln in body + RESULTS[result])]
+    return [f"def {name}{{N}}(a, d, o, acc=[]):", "    global G, A", *("    " + ln for ln in body + RESULTS[result])]
 
 
-def program(effects, cond, result, call) -> Prog:
+CALLS2 = {
+    "seq": ["r = f{N}(xs, dd, ob)", "r = g{N}(xs, dd, ob)"],
+    "result": ["r = f{N}(xs, dd, ob)", "r = g{N}(r if isinstance(r, list) else xs, dd, ob)"],
+    "loop": ["for i in range(2):", "    r = f{N}(xs, dd, ob)", "    r = g{N}(xs, dd, ob)"],
+    "try": ["r = 0", "try:", "    r = f{N}(xs, dd, ob)", "    r = g{N}(xs, dd, ob)", "except Exception:", "    O = r", "    r = 4"],
+    "wrap": ["r = wb{N}(xs, dd, ob)"],
+}
+
+
+def program(effects, cond, result, call, second=None) -> Prog:
     lines = [
         "import functools",
         "K{N} = []",
@@ -179,6 +192,7 @@ def program(effects, cond, result, call) -> Prog:
         "",
         *callee(effects, cond, result),
         "",
+        *(callee(*second, name="g") + ["", "def wb{N}(a, d, o):", "    f{N}(a, d, o)", "    return g{N}(a, d, o)", ""] if second else []),
         "def w{N}(a, d, o):",
         "    return f{N}(a, d, o)",
         "",
@@ -187,7 +201,7 @@ def program(effects, cond, result, call) -> Prog:
         "    xs = [0]",
         "    dd = {'x': 0}",
         "    ob = B{N}()",
-        *("    " + ln for ln in CALLS[call]),
+        *("    " + ln for ln in (CALLS2 if second else CALLS)[call]),
         "    if isinstance(r, list):",
         "        r.append(8)",
         "    if isinstance(r, dict):",
@@ -218,7 +232,8 @@ def program(effects, cond, result, call) -> Prog:
         "    n = r if isinstance(r, int) else len(r) if isinstance(r, (list, dict)) else -2",
         "    O = n",
     ]
-    return Prog(lines, end=["O = G", "O = O"], desc=f"{'+'.join(effects)} {cond} {result} {call}")
+    desc = f"{'+'.join(effects)} {cond} {result}" + (f" then {'+'.join(second[0])} {second[1]} {second[2]}" if second else "")
+    return Prog(lines, end=["O = G", "O = O"], desc=f"{desc} {call}")
 
 
 def programs():
@@ -228,7 +243,13 @@ def programs():
             yield program(effects, cond, result, call)
 
 
+def pair_programs():
+    for e1, e2 in itertools.product(PAIRED, repeat=2):
+        for (c1, r1), (c2, r2), call in itertools.product([("plain", "arg"), ("c1", "none")], [("plain", "elem"), ("c1", "fn")], CALLS2):
+            yield program((e1,), c1, r1, call, ((e2,), c2, r2))
+
+
 LIMITS = (None, "budget=0", "budget=6")
 
 if __name__ == "__main__":
-    cli(programs, NAMES, limit_sets=LIMITS)
+    cli(programs, NAMES, limit_sets=LIMITS, pairs=pair_programs)
