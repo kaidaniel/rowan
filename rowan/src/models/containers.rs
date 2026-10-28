@@ -861,8 +861,12 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let row = st.row(o, Ns::Attr);
                 if row.present.contains(k) {
                     out = out.join(&st.slot(o, Ns::Attr, k));
+                } else if !row.closed() && !row.absent.contains(k) {
+                    // (an open row may hold it: what its inputs or unknown code put there)
+                    out = out.join(&an.path_placeholder_value(o, Ns::Attr, k, &row, st));
                 }
-                if !row.definite.contains(k) {
+                // (a `__slots__` member's value is no entry of the dict)
+                if !row.definite.contains(k) || an.slot_member_key(o, &Value::lit(k)) {
                     out = out.join(&dflt);
                 }
             }

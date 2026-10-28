@@ -262,13 +262,11 @@ def report(tally: Tally, what: str) -> str:
             f"({len(set(tally.bad_programs))} programs), {tally.exact} exact; rowan failed on {tally.crashed} batches; {tally.seconds:.1f} s")
 
 
-def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: tuple = (None,), pairs=None) -> None:
+def cli(programs, names: list, quick: int = 2000, limit_sets: tuple = (None,), pairs=None) -> None:
     """The command line every enumerator shares: CPython on every program, rowan on a sample
     (`--rowan N`, default `quick`) or on all (`--all`), under each of `limit_sets` (ROWAN_LIMITS;
     `--limits` names one; `programs(limits)`, when it takes them, makes the programs for each);
     exit 1 when rowan's claims miss a run.
-    Programs whose description names one of `gaps` (known misses, listed in AGENTS.md) are
-    checked and counted apart, and fail the run only with `--strict`.
     `pairs` (a second generator: two operations in sequence on shared values) is the grammar
     `--pairs` selects instead of `programs`. `--shard K/N` checks every N-th program from K
     (local runs of a whole grammar, N at once)."""
@@ -277,7 +275,6 @@ def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: 
     ap.add_argument("--all", action="store_true", help="rowan on every program")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--limits", help="ROWAN_LIMITS for rowan's runs")
-    ap.add_argument("--strict", action="store_true", help="the known gaps fail the run too")
     ap.add_argument("-v", action="store_true")
     if pairs:
         ap.add_argument("--pairs", action="store_true", help="two operations in sequence on shared values")
@@ -294,7 +291,6 @@ def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: 
         idx = [i for i in idx if i % n == k] if not a.all else list(range(k, len(progs), n))
         a.all = False
     pick = progs if a.all else [progs[i] for i in idx]
-    gap = lambda p: any(g in p.desc.split() for g in gaps)
     failed = False
     for limits in ([a.limits] if a.limits else limit_sets):
         at = f" (ROWAN_LIMITS={limits})" if limits else ""
@@ -302,11 +298,8 @@ def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: 
             # (programs that depend on the limits: the same ones, observed differently)
             every = list(programs(limits))
             pick = every if a.all else [every[i] for i in idx]
-        t, tg = Tally(), Tally()
-        check([p for p in pick if not gap(p)], names, t, verbose=a.v, limits=limits, label=at.strip())
+        t = Tally()
+        check(pick, names, t, verbose=a.v, limits=limits, label=at.strip())
         print(report(t, "rowan" + at))
-        if gaps:
-            check([p for p in pick if gap(p)], names, tg, show=0, limits=limits, label=at.strip())
-            print(report(tg, f"rowan on the known gaps ({', '.join(gaps)}){at}"))
-        failed |= bool(t.missed or t.crashed or (a.strict and (tg.missed or tg.crashed)))
+        failed |= bool(t.missed or t.crashed)
     sys.exit(1 if failed else 0)

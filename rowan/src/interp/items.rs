@@ -231,7 +231,11 @@ impl Analyzer {
             }
             Kind::View => {
                 if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
-                    // `obj.__dict__[k]`: an attribute load
+                    // `obj.__dict__[k]`: an attribute load (under a `__slots__` member's
+                    // name the member's value is no entry of the dict: maybe a KeyError)
+                    if inst.pts.iter().any(|i| self.slot_member_key(i, key)) {
+                        self.may_raise_here("KeyError", state);
+                    }
                     let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
                     let v = self.force(v, state);
                     parts.push(v);
@@ -820,6 +824,13 @@ impl Analyzer {
     /// through the input's part (`row["user"]["id"]`); `PATH_DEPTH` keys deep, then an unknown.
     /// In a read on many objects (`wide_read`) one weak placeholder per key; a part annotated
     /// with a class of the program is an instance of it.
+    /// Is `key` (may it be) a `__slots__` member's name on instance `o` (`slot_member`)?
+    pub(crate) fn slot_member_key(&self, o: ObjId, key: &Value) -> bool {
+        let Some(c) = self.heap.instance_class(o).filter(|_| self.heap.kind(o) == Kind::Instance) else { return false };
+        let name = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str);
+        self.slot_member(c, name.as_deref())
+    }
+
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
@@ -1030,7 +1041,9 @@ impl Analyzer {
                     if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
                         let insts: Vec<u32> = inst.pts.iter().collect();
                         for i in &insts {
-                            let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single;
+                            // (under a `__slots__` member's name the entry is the dict's, which
+                            // the member hides from reads of the attribute: kept weakly, as both)
+                            let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single && !self.slot_member_key(*i, &key);
                             self.store_key(*i, Ns::Attr, &key, v, s1, node, state);
                         }
                     }

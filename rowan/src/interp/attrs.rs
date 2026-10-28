@@ -73,33 +73,19 @@ impl Analyzer {
                 }
                 return None;
             };
-            let mut found = false;
-            for st in ci.node.body.iter() {
-                let ast::Stmt::Assign(a) = st else { continue };
-                if !matches!(&a.targets[..], [ast::Expr::Name(n)] if n.id.as_str() == "__slots__") {
-                    continue;
-                }
-                let elts: Vec<&ast::Expr> = match &*a.value {
-                    ast::Expr::Tuple(t) => t.elts.iter().collect(),
-                    ast::Expr::List(l) => l.elts.iter().collect(),
-                    e @ ast::Expr::StringLiteral(_) => vec![e],
-                    _ => return None,
-                };
-                for e in elts {
-                    let ast::Expr::StringLiteral(s0) = e else { return None };
-                    let nm = s0.value.to_str().to_string();
-                    if nm == "__dict__" {
-                        return None;
-                    }
-                    out.push(nm);
-                }
-                found = true;
-            }
-            if !found {
+            let names = declared_slots(ci.node).ok()??;
+            if names.iter().any(|n| n == "__dict__") {
                 return None;
             }
+            out.extend(names);
         }
         Some(out)
+    }
+
+    /// Is `name` (may it be; None: any name) a `__slots__` member of a class of `cls`'s MRO: a
+    /// data descriptor that takes reads and stores of the name over the instance's `__dict__`?
+    pub(in crate::interp) fn slot_member(&self, cls: u32, name: Option<&str>) -> bool {
+        self.heap.mro(cls).iter().filter_map(|c| self.heap.class_info_opt(*c)).any(|ci| declared_slots(ci.node).map_or(true, |ns| ns.is_some_and(|ns| name.is_none_or(|name| ns.iter().any(|n| n == name)))))
     }
 
     /// `obj.__dict__`: a view of its attributes (None: an AttributeError, `__slots__` on every
@@ -999,8 +985,10 @@ impl Analyzer {
                     return v.join(&cv);
                 }
                 class_v = (plain && !defs.is_empty()).then_some(cv.clone());
-                // (a descriptor's: what `__get__` gives, on the paths without the own value)
-                if let (Some(c), true) = (cls_of, !defs.is_empty() && cv.pts.iter().any(|f| self.is_descriptor(f, "__get__"))) {
+                // (a method, a descriptor's or a cached property's: what reading it through the
+                // instance gives — bound, `__get__`'s, the getter's —, on the paths without the
+                // own value)
+                if let (Some(c), true) = (cls_of, !defs.is_empty() && !plain) {
                     let mut through = state.copy();
                     let got = self.bound_outs(&cv, oid, c, name, node, &mut through);
                     *state = state.join(&mut through);
@@ -1528,4 +1516,28 @@ fn lit_type(k: KeyId) -> Option<&'static str> {
         intern::Key::None => Some("NoneType"),
         _ => None,
     })
+}
+
+/// The names a class statement's `__slots__` declares: None without one, Err where they are not
+/// literal.
+fn declared_slots(c: &ast::StmtClassDef) -> Result<Option<Vec<String>>, ()> {
+    let mut out: Option<Vec<String>> = None;
+    for st in c.body.iter() {
+        let ast::Stmt::Assign(a) = st else { continue };
+        if !matches!(&a.targets[..], [ast::Expr::Name(n)] if n.id.as_str() == "__slots__") {
+            continue;
+        }
+        let elts: Vec<&ast::Expr> = match &*a.value {
+            ast::Expr::Tuple(t) => t.elts.iter().collect(),
+            ast::Expr::List(l) => l.elts.iter().collect(),
+            e @ ast::Expr::StringLiteral(_) => vec![e],
+            _ => return Err(()),
+        };
+        let names = out.get_or_insert_with(Vec::new);
+        for e in elts {
+            let ast::Expr::StringLiteral(s0) = e else { return Err(()) };
+            names.push(s0.value.to_str().to_string());
+        }
+    }
+    Ok(out)
 }
