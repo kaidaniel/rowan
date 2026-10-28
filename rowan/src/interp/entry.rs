@@ -917,14 +917,26 @@ impl Analyzer {
         let (set, deleted) = self.attrs_set_by_methods(cls_oid, state);
         if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
+            let uses = self.program_uses();
             let mut row = state.row(inst, Ns::Attr);
-            // (a name the class itself defines — a property, a class-level default — reads
-            // through the class anyway)
+            // (a name whose class attribute is a data descriptor — a property — takes the store
+            // itself; over a class-level default the instance's own value is read)
             let had = row.present.clone();
-            let by_class = |an: &Analyzer, k: KeyId| intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some());
-            for k in set.into_iter().filter(|k| !had.contains(*k) && !by_class(self, *k)) {
+            let descriptor = |an: &Analyzer, k: KeyId| {
+                an.heap.prop_names.contains(&k)
+                    || intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some_and(|c| an.heap.class_attr(c, &n).pts.iter().any(|f| an.is_descriptor(f, "__set__"))))
+            };
+            for k in set.into_iter().filter(|k| !had.contains(*k) && !descriptor(self, *k)) {
                 row = row.store(k, false);
-                state.set_slot(inst, Ns::Attr, k, any.clone(), false);
+                let put = match intern::key_as_str(k) {
+                    Some(n) => {
+                        // (it held the class-level default before)
+                        let before: Vec<Value> = self.class_lookup(cls_oid, &n).map(|c| self.heap.class_attr(c, &n)).into_iter().collect();
+                        super::effects::stored_value(uses.values.get(&s(&n)), uses.computed, &before, &any)
+                    }
+                    None => any.clone(),
+                };
+                state.set_slot(inst, Ns::Attr, k, put, false);
             }
             for k in deleted {
                 row = row.delete(k, false);

@@ -663,7 +663,7 @@ impl Analyzer {
             // (anything: the builtin types' values among it)
             return Some(out.join(&Value::obj(o)));
         }
-        for (i, (k, m, t)) in builtins.into_iter().enumerate() {
+        for (i, (k, m, _)) in builtins.into_iter().enumerate() {
             let v = match i {
                 0 => self.as_annotated(o, m, module),
                 _ => {

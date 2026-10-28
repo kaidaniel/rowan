@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
+use super::flows::{AttrStores, Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, FuncNode, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -50,7 +50,7 @@ pub struct EffectsCache {
     closures_size: usize,
     /// on demand: what the program's functions may do to attributes by name, and the names
     /// they store (`program_uses`)
-    program: Option<std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)>>,
+    program: Option<std::rc::Rc<ProgramUses>>,
     /// while the program's code is followed whole (`after_any_code`): per function code
     /// (`FuncNode::addr`) whose callers are all the program's code by name, what they may do
     /// with its result (`caller_returns`); a function not here gives its result away
@@ -358,7 +358,7 @@ impl Analyzer {
         let site = s("program@");
         let any = Value::obj(crate::interp::any_object(&mut self.heap));
         let uses = self.program_uses();
-        let (by_name, stored) = (&uses.0, &uses.1);
+        let (by_name, stored) = (&uses.by_name, &uses.stored);
         let mut work: Vec<ObjId> = vec![inst];
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         let (mut walk, mut edited, mut removed): (Vec<Value>, Vec<ObjId>, Vec<(ObjId, Removes)>) = Default::default();
@@ -375,7 +375,12 @@ impl Analyzer {
             for (k, v) in state.obj_slots(inst, Ns::Attr) {
                 let Some(name) = intern::key_as_str(k).map(|n| s(&n)) else { continue };
                 if stored.contains(&name) {
-                    state.set_slot(inst, Ns::Attr, k, v.join(&any), false);
+                    let mut before = vec![v.clone()];
+                    if let Some(c) = self.heap.instance_class(inst).and_then(|c| self.class_lookup(c, &str_get(name))) {
+                        before.push(self.heap.class_attr(c, &str_get(name)));
+                    }
+                    let put = stored_value(uses.values.get(&name), uses.computed, &before, &any);
+                    state.set_slot(inst, Ns::Attr, k, v.join(&put), false);
                 }
                 let Some(f) = by_name.get(&name).copied() else { continue };
                 let (own, held) = self.flag_effect(&f, &v, state);
@@ -420,12 +425,14 @@ impl Analyzer {
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
-    /// attribute names they store (computed once; an `__init__`'s on its own receiver aside).
-    fn program_uses(&mut self) -> std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)> {
+    /// attribute names they store (computed once; an `__init__`'s on its own receiver aside),
+    /// with what their stores put there.
+    pub(in crate::interp) fn program_uses(&mut self) -> std::rc::Rc<ProgramUses> {
         if let Some(u) = &self.effects.program {
             return u.clone();
         }
         let (mut by_name, mut stored): (FxHashMap<StrId, Flags>, FxHashSet<StrId>) = Default::default();
+        let (mut values, mut computed): (FxHashMap<StrId, AttrStores>, bool) = Default::default();
         let mut seen: FxHashSet<usize> = FxHashSet::default();
         for o in 1..self.heap.len() as ObjId {
             let Payload::Func(fi) = &self.heap.obj(o).payload else { continue };
@@ -442,8 +449,12 @@ impl Analyzer {
                 by_name.entry(*a).or_default().join(f);
             }
             stored.extend(if init { uses.class_stores.iter() } else { uses.stored.iter() }.copied());
+            for (a, v) in &uses.attr_values {
+                values.entry(*a).or_default().join(v);
+            }
+            computed |= uses.computed_stores;
         }
-        let u = std::rc::Rc::new((by_name, stored));
+        let u = std::rc::Rc::new(ProgramUses { by_name, stored, values, computed });
         self.effects.program = Some(u.clone());
         u
     }
@@ -867,6 +878,25 @@ impl Analyzer {
         // operators, loops, `with`, not here)
         let r = if dunder_recvs.pts.is_empty() { self.summarized(foid, r, node, state) } else { r };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
+        // (what the code run with the receiver stores, where its text says: `AttrStores`)
+        let mut put_by: FxHashMap<StrId, AttrStores> = FxHashMap::default();
+        let mut computed = false;
+        for f in effs.iter().flat_map(|(_, e)| e.code.iter().copied()).collect::<FxHashSet<ObjId>>() {
+            let Some(fi) = self.heap.func_info_opt(f) else { continue };
+            let u = self.code_uses(&fi);
+            computed |= u.computed_stores;
+            for (a, v) in &u.attr_values {
+                put_by.entry(*a).or_default().join(v);
+            }
+        }
+        let put = |an: &Analyzer, o: ObjId, k: KeyId, state: &State, any: &Value| {
+            let name = s(&intern::key_as_str(k).unwrap_or_default());
+            let mut before = vec![state.slot(o, Ns::Attr, k)];
+            if let Some(c) = an.heap.instance_class(o).and_then(|c| an.class_lookup(c, &str_get(name))) {
+                before.push(an.heap.class_attr(c, &str_get(name)));
+            }
+            stored_value(put_by.get(&name), computed, &before, any)
+        };
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {
                 let walk = self.havoc.new_walk();
@@ -875,7 +905,7 @@ impl Analyzer {
                 let any = Value::obj(crate::interp::any_object(&mut self.heap));
                 let mut row = state.row(o, Ns::Attr);
                 for k in stores {
-                    let v = state.slot(o, Ns::Attr, k).join(&any);
+                    let v = state.slot(o, Ns::Attr, k).join(&put(self, o, k, state, &any));
                     state.set_slot(o, Ns::Attr, k, v, false);
                     row = row.store(k, false);
                 }
@@ -900,7 +930,8 @@ impl Analyzer {
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
             let mut row = state.row(o, Ns::Attr);
             for &k in &must {
-                state.set_slot(o, Ns::Attr, k, any.clone(), true);
+                let v = put(self, o, k, state, &any);
+                state.set_slot(o, Ns::Attr, k, v, true);
                 row = row.store(k, true);
             }
             if !by_names {
@@ -2076,5 +2107,59 @@ impl MustWalk<'_> {
             }
             _ => Some(acc),
         }
+    }
+}
+
+/// What the program's own functions may do to attributes by name (`program_uses`): to the values
+/// read under them, the names they store, what those stores put there (`AttrStores`), and
+/// whether some store's name or way is not in the text (`setattr` of a computed name,
+/// `__dict__`).
+pub(in crate::interp) struct ProgramUses {
+    by_name: FxHashMap<StrId, Flags>,
+    stored: FxHashSet<StrId>,
+    pub values: FxHashMap<StrId, AttrStores>,
+    pub computed: bool,
+}
+
+/// What stores whose text says `a` (`AttrStores`) leave in an attribute that held one of `before`
+/// (its value then, a class-level default): the literals and the one builtin type their text
+/// says, `+= 1` keeping an int an int where every value it may apply to is one; `any` (the
+/// shared unknown) where a store's value is not said (`a` None or `any`), the types are several,
+/// or attributes may be stored by names or ways the text does not say (`computed`).
+pub(in crate::interp) fn stored_value(a: Option<&AttrStores>, computed: bool, before: &[Value], any: &Value) -> Value {
+    let Some(a) = a.filter(|a| !a.any && !computed) else { return any.clone() };
+    let lit_type = |k: KeyId| intern::with_key(k, |kk| match kk {
+        intern::Key::Int(_) => Some("int"),
+        intern::Key::Bool(_) => Some("bool"),
+        intern::Key::Str(_) => Some("str"),
+        intern::Key::Float(_) => Some("float"),
+        intern::Key::None => Some("none"),
+        _ => None,
+    });
+    let mut types: Vec<&'static str> = a.types.clone();
+    for t in a.aug.iter().copied() {
+        // (`+= 1` keeps an int an int, a bool too; a None raises there)
+        let fits = |x: &str| x == t || x == "none" || (t == "int" && x == "bool");
+        let lits_fit = |ks: &KeySet| ks.iter().all(|k| lit_type(k).is_some_and(fits));
+        let before_fits = before.iter().all(|v| {
+            v.pts.is_empty()
+                && match &v.kv {
+                    crate::domain::KeyVal::Data(l, h) => crate::domain::label_type(&str_get(*l)).is_some_and(fits) && lits_fit(h),
+                    kv if kv.is_literal() || kv.is_bot() => lits_fit(&crate::domain::kv_literals(kv)),
+                    _ => false,
+                }
+        });
+        if !lits_fit(&a.lits) || !a.types.iter().all(|x| fits(x)) || !before_fits {
+            return any.clone();
+        }
+        if !types.contains(&t) {
+            types.push(t);
+        }
+    }
+    let lits = a.lits.iter().fold(Value::new(), |v, k| v.join(&Value::lit(k)));
+    match types[..] {
+        [] => lits,
+        [t] => lits.join(&Value::data(&crate::domain::typed_label(t, ""))),
+        _ => any.clone(),
     }
 }

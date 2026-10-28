@@ -348,6 +348,58 @@ pub struct CodeUses {
     /// the attribute names it calls on what is not a name it does not bind (`x.f(…)` of a
     /// local x, `a.b.f(…)`): what such a call returns is not followed (`Origin::Result`)
     pub untracked: FxHashSet<StrId>,
+    /// per attribute name it assigns: what its stores put there, where the text says
+    /// (`AttrStores`)
+    pub attr_values: FxHashMap<StrId, AttrStores>,
+    /// it may store attributes by names or ways the text does not say (`setattr` of a name not
+    /// written out, `__setattr__`, `__dict__`, `vars()`)
+    pub computed_stores: bool,
+}
+
+/// What the stores of an attribute name put there, where the text says (`x.a = 0`, `x.a = "on"
+/// if c else "off"`, `x.a += 1`, `setattr(x, "a", f"{n}")`): literals and values of builtin
+/// types; `any` for a store of anything else (a parameter, a call's result, a loop's target).
+#[derive(Default, Clone, Debug)]
+pub struct AttrStores {
+    pub lits: crate::intern::KeySet,
+    /// the builtin types of the values of the stores no literal is known of (`str` of an f-string)
+    pub types: Vec<&'static str>,
+    /// augmented stores (`+= 1`): the value stays of this type where it is of it (else they raise)
+    pub aug: Vec<&'static str>,
+    pub any: bool,
+}
+
+impl AttrStores {
+    fn any() -> AttrStores {
+        AttrStores { any: true, ..Default::default() }
+    }
+
+    fn of_type(t: &'static str) -> AttrStores {
+        AttrStores { types: vec![t], ..Default::default() }
+    }
+
+    pub fn join(&mut self, o: &AttrStores) {
+        self.lits = self.lits.union(&o.lits);
+        for t in &o.types {
+            if !self.types.contains(t) {
+                self.types.push(t);
+            }
+        }
+        for t in &o.aug {
+            if !self.aug.contains(t) {
+                self.aug.push(t);
+            }
+        }
+        self.any |= o.any;
+    }
+}
+
+/// The value assignment target `x.a` is given, as `AttrStores` says it: `Set(e)` of `= e`,
+/// `Aug(op, e)` of `op= e`.
+#[derive(Clone, Copy)]
+enum Rhs {
+    Set(&'static Expr),
+    Aug(ast::Operator, &'static Expr),
 }
 
 /// How a method's own code uses its receiver (its first parameter, and the locals bound to it):
@@ -454,6 +506,8 @@ pub struct Flow<'a> {
     recv: RecvUse,
     named: FxHashMap<StrId, Option<Like>>,
     depth: u32,
+    /// the value an attribute target being bound gets (`Rhs`), None for one not said
+    rhs: Option<Rhs>,
     pub out: CodeUses,
 }
 
@@ -461,7 +515,7 @@ impl<'a> Flow<'a> {
     /// A scan of code whose own names `locals` picks (and those bound around it `shadows`), `me`
     /// its receiver's name, in package `pkg`.
     pub fn new(locals: &'a dyn Fn(&str) -> bool, shadows: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
-        Flow { locals, shadows, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
+        Flow { locals, shadows, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, rhs: None, out: CodeUses::default() }
     }
 
     /// For a generator expression's code: its first iterable `it` stands for its parameter `.0`.
@@ -942,6 +996,13 @@ impl<'a> Flow<'a> {
         // (a container's parts are kept in it, unless only read: `x in (a, b)`; what an
         // expression passes on stands where it does)
         let part = if pos == Pos::Read { Pos::Read } else { Pos::Change };
+        // (attributes stored by ways the text does not name: `__setattr__`, `__dict__`, `vars()`)
+        match e {
+            Expr::Attribute(a) if matches!(a.attr.as_str(), "__dict__" | "__setattr__") => self.out.computed_stores = true,
+            // (as a value: `partial(setattr, o, "a")`, `map(vars, xs)`)
+            Expr::Name(n) if matches!(n.id.as_str(), "vars" | "setattr") && self.builtin(n.id.as_str()) => self.out.computed_stores = true,
+            _ => {}
+        }
         match e {
             Expr::Name(n) => {
                 if !self.local(n.id.as_str()) {
@@ -1206,6 +1267,8 @@ impl<'a> Flow<'a> {
                     c.arguments.args.iter().skip(1).for_each(|x| self.expr(x, Pos::Read));
                     return;
                 }
+                // (`vars(o)` is `o.__dict__`: stores through it are by names not said)
+                self.out.computed_stores |= f == "vars";
                 match f {
                     "setattr" | "delattr" | "getattr" | "hasattr" => self.attr_builtin(f, c),
                     // (`locals()` / `vars()`: every local's value)
@@ -1280,6 +1343,12 @@ impl<'a> Flow<'a> {
                     if let Some(n) = lit {
                         if f == "setattr" { &mut self.out.stored } else { &mut self.out.deleted }.insert(n);
                         self.class_store(x, n);
+                        if f == "setattr" {
+                            let v = args.get(2).map_or_else(AttrStores::any, |e| self.store_of(e));
+                            self.out.attr_values.entry(n).or_default().join(&v);
+                        }
+                    } else if f == "setattr" {
+                        self.out.computed_stores = true;
                     }
                     if !self.recv_base(x) {
                         self.expr(x, Pos::Read);
@@ -1353,6 +1422,14 @@ impl<'a> Flow<'a> {
                 let n = s(a.attr.as_str());
                 self.out.reads.insert(n);
                 if deleting { &mut self.out.deleted } else { &mut self.out.stored }.insert(n);
+                if !deleting {
+                    let v = match self.rhs {
+                        Some(Rhs::Set(e)) => self.store_of(e),
+                        Some(Rhs::Aug(op, e)) => aug_of(op, e),
+                        None => AttrStores::any(),
+                    };
+                    self.out.attr_values.entry(n).or_default().join(&v);
+                }
                 self.class_store(&a.value, n);
                 // (the object changes; `m.x = …` of a name: a module's global rebound, or the
                 // object m changes)
@@ -1375,10 +1452,70 @@ impl<'a> Flow<'a> {
                 self.expr(&x.value, Pos::Read);
                 self.expr(&x.slice, Pos::Read);
             }
-            Expr::Tuple(x) => x.elts.iter().for_each(|y| self.target_as(y, deleting)),
-            Expr::List(x) => x.elts.iter().for_each(|y| self.target_as(y, deleting)),
-            Expr::Starred(x) => self.target_as(&x.value, deleting),
+            // (unpacked: what each part gets is not said)
+            Expr::Tuple(x) => {
+                let rhs = self.rhs.take();
+                x.elts.iter().for_each(|y| self.target_as(y, deleting));
+                self.rhs = rhs;
+            }
+            Expr::List(x) => {
+                let rhs = self.rhs.take();
+                x.elts.iter().for_each(|y| self.target_as(y, deleting));
+                self.rhs = rhs;
+            }
+            Expr::Starred(x) => {
+                let rhs = self.rhs.take();
+                self.target_as(&x.value, deleting);
+                self.rhs = rhs;
+            }
             e => self.expr(e, Pos::Change),
+        }
+    }
+
+    /// What `= e` puts into an attribute, as far as the text says (`AttrStores`): a literal, either
+    /// of a conditional's or an `or`'s values, a bool of `not` / `is` / `in`, a str of an f-string or
+    /// of `%` on a literal, the type a builtin of the name gives (`len`: an int); else anything.
+    fn store_of(&self, e: &Expr) -> AttrStores {
+        let lit = |k: KeyId| AttrStores { lits: crate::intern::KeySet::one(k), ..Default::default() };
+        match e {
+            Expr::StringLiteral(x) => lit(crate::intern::key_str_lit(x.value.to_str())),
+            Expr::NumberLiteral(n) => match &n.value {
+                ast::Number::Int(i) => i.as_i64().map_or_else(|| AttrStores::of_type("int"), |i| lit(crate::intern::key_int(i))),
+                ast::Number::Float(f) => lit(crate::intern::key_float(*f)),
+                _ => AttrStores::any(),
+            },
+            Expr::BooleanLiteral(b) => lit(crate::intern::key_bool(b.value)),
+            Expr::NoneLiteral(_) => lit(crate::intern::key_none()),
+            Expr::BytesLiteral(_) => AttrStores::of_type("bytes"),
+            Expr::FString(_) => AttrStores::of_type("str"),
+            Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => AttrStores::of_type("bool"),
+            Expr::UnaryOp(u) if u.op == ast::UnaryOp::USub => match &*u.operand {
+                Expr::NumberLiteral(ast::ExprNumberLiteral { value: ast::Number::Int(i), .. }) => i.as_i64().map_or_else(|| AttrStores::of_type("int"), |i| lit(crate::intern::key_int(-i))),
+                _ => AttrStores::any(),
+            },
+            Expr::Compare(c) if c.ops.iter().all(|o| matches!(o, ast::CmpOp::Is | ast::CmpOp::IsNot | ast::CmpOp::In | ast::CmpOp::NotIn)) => AttrStores::of_type("bool"),
+            Expr::BinOp(b) if b.op == ast::Operator::Mod && matches!(&*b.left, Expr::StringLiteral(_) | Expr::FString(_)) => AttrStores::of_type("str"),
+            Expr::If(x) => {
+                let mut v = self.store_of(&x.body);
+                v.join(&self.store_of(&x.orelse));
+                v
+            }
+            Expr::BoolOp(x) => {
+                let mut v = AttrStores::default();
+                x.values.iter().for_each(|y| v.join(&self.store_of(y)));
+                v
+            }
+            Expr::Call(c) => match &*c.func {
+                Expr::Name(f) if self.builtin(f.id.as_str()) => match f.id.as_str() {
+                    "str" | "repr" | "ascii" | "chr" | "format" | "hex" | "oct" | "bin" => AttrStores::of_type("str"),
+                    "len" | "int" | "ord" | "hash" | "id" => AttrStores::of_type("int"),
+                    "bool" | "isinstance" | "issubclass" | "callable" | "hasattr" => AttrStores::of_type("bool"),
+                    "float" => AttrStores::of_type("float"),
+                    _ => AttrStores::any(),
+                },
+                _ => AttrStores::any(),
+            },
+            _ => AttrStores::any(),
         }
     }
 
@@ -1400,19 +1537,25 @@ impl<'a> Flow<'a> {
                 // (bound to locals only: where it goes is where they go)
                 let local = a.targets.iter().all(|t| self.all_local(t));
                 self.expr(&a.value, if local { Pos::Bind } else { Pos::Change });
+                self.rhs = Some(Rhs::Set(&a.value));
                 a.targets.iter().for_each(|t| self.target(t));
+                self.rhs = None;
             }
             Stmt::AnnAssign(a) => {
                 if let Some(v) = &a.value {
                     self.expr(v, if self.all_local(&a.target) { Pos::Bind } else { Pos::Change });
+                    self.rhs = Some(Rhs::Set(v));
                     self.target(&a.target);
+                    self.rhs = None;
                 }
             }
             Stmt::AugAssign(a) => {
                 // (an in-place operation: the target's value changes, and holds the value's parts)
                 self.expr(&a.value, Pos::Change);
                 self.expr(&a.target, Pos::Change);
+                self.rhs = Some(Rhs::Aug(a.op, &a.value));
                 self.target(&a.target);
+                self.rhs = None;
             }
             Stmt::Delete(d) => d.targets.iter().for_each(|t| self.target_as(t, true)),
             Stmt::For(f) => {
@@ -1682,4 +1825,18 @@ fn const_key(e: &Expr) -> Option<KeyId> {
 /// `v.remove("k")`; None for any (`v.clear()`, `v.pop()`).
 fn remover_key(m: &str, c: &ast::ExprCall) -> Option<KeyId> {
     matches!(m, "pop" | "remove" | "discard").then(|| c.arguments.args.first().and_then(const_key)).flatten()
+}
+
+/// What `op= e` keeps in an attribute (`AttrStores::aug`): `+= 1` and other operators of an int
+/// keep an int an int, `+= "s"` a str a str; anything else is not said.
+fn aug_of(op: ast::Operator, e: &Expr) -> AttrStores {
+    use ast::Operator as O;
+    let int = matches!(e, Expr::NumberLiteral(ast::ExprNumberLiteral { value: ast::Number::Int(_), .. }));
+    let text = matches!(e, Expr::StringLiteral(_) | Expr::FString(_));
+    let t = match op {
+        O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod | O::LShift | O::RShift | O::BitAnd | O::BitOr | O::BitXor if int => "int",
+        O::Add if text => "str",
+        _ => return AttrStores::any(),
+    };
+    AttrStores { aug: vec![t], ..Default::default() }
 }
