@@ -160,11 +160,13 @@ impl Analyzer {
     /// What the analyzer's side tables keyed by an object refer to: `o`'s entries, or every
     /// entry's (None: the collector's roots, `gc_pinned`).
     pub(super) fn side_edges(&self, o: Option<ObjId>, work: &mut Vec<ObjId>) {
-        fn each<'a, V>(m: &'a FxHashMap<ObjId, V>, o: Option<ObjId>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
-            match o {
-                Some(o) => Box::new(m.get(&o).into_iter()),
-                None => Box::new(m.values()),
-            }
+        // (no allocation: this runs for every object a walk visits)
+        fn each<'a, V>(m: &'a FxHashMap<ObjId, V>, o: Option<ObjId>) -> impl Iterator<Item = &'a V> + 'a {
+            let (one, all) = match o {
+                Some(o) => (m.get(&o), None),
+                None => (None, Some(m.values())),
+            };
+            one.into_iter().chain(all.into_iter().flatten())
         }
         each(&self.m.chainmaps, o).flatten().for_each(|m| m.push_objs(work));
         for m in [&self.m.dd_factories, &self.m.csv_readers, &self.m.wrapped] {
@@ -480,7 +482,8 @@ impl Analyzer {
         }
         self.gc_pinned(&mut buf, unwind, Some(mark));
         // (an older object given a new payload since: what it holds now, through no slot)
-        for o in self.heap.repaid_since(mark).collect::<Vec<_>>() {
+        // (each once, and only one whose payload changed: `Heap::alloc_raw`)
+        for o in self.heap.repaid_since(mark) {
             self.edges_but_slots(o, state, &mut buf);
         }
         // (unknown objects stand for objects outside the call — a parameter's record, an
