@@ -552,8 +552,8 @@ impl Analyzer {
                 }
             }
         }
-        // (objects given a payload since the last look: holders of the target through it; an
-        // older one, which a walk does not expand, may hold it now: `repaid`)
+        // (objects given a payload since the last look: holders of the target through it; what
+        // an older one, which the walk does not expand, holds now of what was made since: `rep`)
         for o in self.heap.payloads_since(b.seen) {
             if self.heap.obj(o).payload.is_none() {
                 continue;
@@ -563,7 +563,9 @@ impl Analyzer {
             if o != target && held.contains(&target) {
                 b.holders.push(o);
             }
-            b.repaid |= self.heap.born_before(o, b.mark) && !held.is_empty();
+            if self.heap.born_before(o, b.mark) {
+                b.rep.extend(held.into_iter().filter(|x| *x == target || !self.heap.born_before(*x, b.mark)));
+            }
         }
         b.seen = self.heap.mark();
         b.roots.sort_unstable();
@@ -572,17 +574,18 @@ impl Analyzer {
         b.looks += 1;
         // (the roots without what the analyzer holds first: those are many, so a construction
         // looked at many times is taken as held from then on)
-        let all = b.repaid.then(|| roots.clone());
+        let all = (!b.rep.is_empty()).then(|| roots.clone());
         let mut work: Vec<ObjId> = roots.into_iter().chain(b.roots.iter().copied()).collect();
         b.held = b.looks > Self::DROP_LOOKS || self.reaches_young(&b, target, &mut work, state);
         if !b.held {
             self.gc_pinned(&mut work, Some(envs), None);
             b.held = self.reaches_young(&b, target, &mut work, state);
         }
-        // (an older object given a payload since: a walk through every object, bounded)
-        if let Some(mut work) = all.filter(|_| !b.held) {
+        // (an older object given a payload since that leads to it: is that one held? a walk
+        // through every object, bounded)
+        if let Some(mut work) = all.filter(|_| !b.held && self.reaches_young(&b, target, &mut b.rep.clone(), state)) {
             self.gc_pinned(&mut work, Some(envs), None);
-            let found = self.find_among(work, &[target], Self::DROP_WALK, true, &mut |o, w| self.obj_edges(o, state, w));
+            let found = self.find_among(work, &[target], Self::DROP_WALK / 4, true, &mut |o, w| self.obj_edges(o, state, w));
             b.held = found.is_err() || found.is_ok_and(|f| !f.is_empty());
         }
         if !b.held {

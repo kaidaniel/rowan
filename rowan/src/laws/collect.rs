@@ -167,7 +167,7 @@ fn d_run(young_payloads: &[Option<u8>], edits: &[Edit]) -> Result<(), String> {
     let target = objs[D_OLD];
     st.set_slot(target, Ns::Attr, key_int(7), Value::lit(key_int(1)), true);
     st.env.insert(s("self"), Value::obj(target));
-    an.cx.fresh_init.insert(target, crate::interp::context::Building { mark: an.heap.serial(), seen: an.heap.mark(), repaid: false, at: st.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
+    an.cx.fresh_init.insert(target, crate::interp::context::Building { mark: an.heap.serial(), seen: an.heap.mark(), rep: Vec::new(), at: st.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
     for i in D_OLD + 1..D_ALL {
         let payload = match young_payloads[i - D_OLD - 1] {
             Some(j) if (j as usize) < i => Payload::Pair(Value::obj(objs[j as usize]), Value::none()),

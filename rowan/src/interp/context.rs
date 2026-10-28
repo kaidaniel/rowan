@@ -211,8 +211,8 @@ pub struct Building {
     pub mark: u64,
     /// the heap at the last look: objects given a payload since are looked at in the next
     pub seen: super::heap::HeapMark,
-    /// an object made before it began was given a payload holding objects since
-    pub repaid: bool,
+    /// what objects made before it began were given since in payloads (the target, younger objects)
+    pub rep: Vec<ObjId>,
     pub at: State,
     pub roots: Vec<ObjId>,
     pub holders: Vec<ObjId>,
