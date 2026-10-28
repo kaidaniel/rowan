@@ -290,7 +290,11 @@ fn get_value(an: &mut Analyzer, st: &mut State, spec: &CfgSpec, kind: &str, sec:
                 Value::new()
             }
         },
-        Some(None) => unknown_of(kind),
+        // (a reference interpolation does not find: InterpolationMissingOptionError)
+        Some(None) => {
+            cfg_raise(an, st, "InterpolationError", true);
+            Value::new()
+        }
         None => match fallback {
             Some(f) => f,
             None => {
@@ -366,12 +370,20 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "options" => {
             let sec = arg(0, "section").as_ref().and_then(lit_str);
-            match sec.filter(|_| spec.known).and_then(|s| spec.options(&s)) {
-                Some(o) => {
+            match sec.filter(|_| spec.known).map(|s| spec.options(&s)) {
+                Some(Some(o)) => {
                     let xs: Vec<String> = o.keys().cloned().collect();
                     str_list(an, st, &c.node, &xs)
                 }
-                None => Value::data("options"),
+                // (a section the text has not)
+                Some(None) => {
+                    cfg_raise(an, st, "NoSectionError", true);
+                    Value::new()
+                }
+                None => {
+                    cfg_raise(an, st, "NoSectionError", false);
+                    Value::data("options")
+                }
             }
         }
         "has_section" => match arg(0, "section").as_ref().and_then(lit_str).filter(|_| spec.known) {
@@ -475,8 +487,24 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "items" if c.args.is_empty() => an.method_value("dict.items", &Value::obj(oid)),
         "items" => {
-            // `items(section)`: (name, value) pairs
+            // `items(section)`: (name, value) pairs, every value interpolated: a section the
+            // text has not raises, so does a value whose interpolation fails
             let sec = arg(0, "section").as_ref().and_then(lit_str);
+            match sec.as_ref().filter(|_| spec.known).map(|s| spec.options(s)) {
+                Some(None) => {
+                    cfg_raise(an, st, "NoSectionError", true);
+                    return Value::new();
+                }
+                Some(Some(o)) if spec.interpolate && !c.kwargs.keys().any(|k| &*intern::str_get(*k) == "raw") && o.values().any(|v| v.is_none()) => {
+                    cfg_raise(an, st, "InterpolationError", true);
+                    return Value::new();
+                }
+                Some(Some(_)) => {}
+                None => {
+                    cfg_raise(an, st, "NoSectionError", false);
+                    cfg_raise(an, st, "InterpolationError", false);
+                }
+            }
             let k = sec.map(|s| key_str_lit(&s));
             match k.filter(|k| spec.known && st.row(oid, Ns::Item).definite.contains(*k)) {
                 Some(k) => {

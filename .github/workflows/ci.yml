@@ -142,6 +142,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/sqlite_protocol.py; about 3 s)
         run: uv run --no-project python tests/sqlite_protocol.py --all
 
+      - name: configparser model (bounded INI reads vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/config_protocol.py; about 3 s)
+        run: uv run --no-project python tests/config_protocol.py --all
+
       - name: Narrowing, pairs (two tests on one value vs CPython)
         # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
         run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
