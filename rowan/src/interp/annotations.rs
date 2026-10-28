@@ -84,15 +84,29 @@ impl Analyzer {
         if none { Value::obj(o).join(&Value::none()) } else { Value::obj(o) }
     }
 
+    /// An annotation's value where the code reads it: Python 3.14 evaluates annotations
+    /// lazily, never where the function runs, so one that would raise (`c: "column.Column"`
+    /// with `column = None`) is no value (None), quietly, raising nowhere.
+    fn eval_annotation(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        let mut probe = state.copy();
+        let tries = std::mem::take(&mut self.unwind.tries);
+        let v = self.quietly(|an| an.eval(e, &mut probe));
+        self.unwind.tries = tries;
+        probe.reachable.then(|| {
+            *state = probe;
+            v
+        })
+    }
+
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
     /// tensor or module, an instance of a class of the program (`annotated_instance`), an open
-    /// DataFrame; None when the annotation names none of those.
+    /// DataFrame; None when the annotation names none of those (or raises).
     pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
             return Some(v);
         }
-        let mut v = self.eval(node, state);
+        let mut v = self.eval_annotation(node, state)?;
         // (a class imported only for type checkers)
         if let ast::Expr::Name(n) = node {
             if !v.pts.iter().any(|o| self.heap.kind(o) == Kind::Class) {
@@ -418,7 +432,7 @@ impl Analyzer {
                         ast::Expr::Tuple(t) => t.elts.iter().collect(),
                         e => vec![e],
                     };
-                    let vals: Vec<Value> = elts.into_iter().map(|e| self.in_module(module, "ann", "<annotation>", |an| an.eval(e, state))).collect();
+                    let vals: Vec<Value> = elts.into_iter().map(|e| self.in_module(module, "ann", "<annotation>", |an| an.eval_annotation(e, state).unwrap_or_else(unknown))).collect();
                     if vals.iter().all(|v| v.pts.is_empty() && v.kv.is_literal()) {
                         vals.into_iter().fold(Value::new(), |a, v| a.join(&v))
                     } else {
@@ -430,7 +444,7 @@ impl Analyzer {
                     Some((t, _)) => typed(self, t, container_annotation(m), k, state),
                     None => {
                         let cv = self.in_module(module, "ann", "<annotation>", |an| {
-                            let v = an.eval(m, state);
+                            let Some(v) = an.eval_annotation(m, state) else { return Value::new() };
                             match m {
                                 ast::Expr::Name(n) if !v.pts.iter().any(|o| an.heap.kind(o) == Kind::Class) => an.type_only_name(n.id.as_str(), state).unwrap_or(v),
                                 _ => v,
