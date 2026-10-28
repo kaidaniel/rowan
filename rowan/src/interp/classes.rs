@@ -84,6 +84,60 @@ impl Analyzer {
     /// The bases a class statement names: the program's classes, whether the class is open
     /// (a base rowan does not see, a metaclass other than ABCMeta), what its library bases make
     /// of it, and the Enum kind its Enum bases give.
+    /// `name = property(fget, fset, fdel, doc)` in a class body (`self.frame()` its frame): as
+    /// the decorators make it — a copy of the getter that is a property, the setter and deleter
+    /// registered under `name`. False (nothing done) for any other statement, or a getter that
+    /// is not one function of the program's.
+    pub(super) fn class_property(&mut self, a: &'static ast::StmtAssign, state: &mut State) -> bool {
+        let ([ast::Expr::Name(target)], ast::Expr::Call(call)) = (&a.targets[..], &*a.value) else { return false };
+        if call.arguments.args.iter().any(|e| matches!(e, ast::Expr::Starred(_))) || call.arguments.keywords.iter().any(|k| k.arg.is_none()) {
+            return false;
+        }
+        if self.decorator_qualname(&call.func, state).as_deref() != Some("builtins.property") {
+            return false;
+        }
+        // (positional or by keyword: fget, fset, fdel, doc)
+        let arg = |i: usize, kw: &str| call.arguments.args.get(i).or_else(|| call.arguments.keywords.iter().find(|k| k.arg.as_ref().is_some_and(|n| n.id.as_str() == kw)).map(|k| &k.value));
+        let [fget, fset, fdel, doc] = [(0, "fget"), (1, "fset"), (2, "fdel"), (3, "doc")].map(|(i, kw)| arg(i, kw));
+        let mut probe = state.copy();
+        let one_function = |an: &mut Analyzer, e: Option<&'static ast::Expr>, st: &mut State| e.map(|e| an.eval(e, st)).and_then(|v| v.single().filter(|f| v.kv.is_bot() && an.heap.kind(*f) == Kind::Function));
+        let Some(getter) = one_function(self, fget, &mut probe) else { return false };
+        let (setter, deleter) = (one_function(self, fset, state), one_function(self, fdel, state));
+        if let Some(d) = doc {
+            self.eval(d, state);
+        }
+        let cls = self.frame().class_oid.unwrap();
+        let nk = key_str_lit(target.id.as_str());
+        let fi = self.heap.func_info(getter);
+        let info = super::FuncInfo {
+            node: fi.node,
+            name: fi.name.clone(),
+            qualname: fi.qualname.clone(),
+            module: fi.module,
+            scope: fi.scope,
+            closure: fi.closure.clone(),
+            defaults: fi.defaults.clone(),
+            cls: fi.cls,
+            is_property: std::cell::Cell::new(true),
+            is_static: std::cell::Cell::new(false),
+            is_classmethod: std::cell::Cell::new(false),
+            is_contextmanager: std::cell::Cell::new(false),
+            is_cached: std::cell::Cell::new(false),
+            is_memo: std::cell::Cell::new(fi.is_memo.get()),
+            opaque: std::cell::Cell::new(fi.opaque.get()),
+        };
+        let prop = self.alloc_at(Kind::Function, &frontend::node(&*a.value), state, &format!("property {}", target.id), Payload::Func(std::rc::Rc::new(info)), Some(crate::domain::Row::new()), Ns::Attr, None, None);
+        self.heap.prop_names.insert(nk);
+        if let Some(f) = setter {
+            self.heap.prop_setters.insert((cls, nk), f);
+        }
+        if let Some(f) = deleter {
+            self.heap.prop_deleters.insert((cls, nk), f);
+        }
+        self.store_name(s(target.id.as_str()), Value::obj(prop), state);
+        true
+    }
+
     fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind) {
         let mut bases: Vec<u32> = Vec::new();
         let mut open_base = false;

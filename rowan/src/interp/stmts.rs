@@ -10,7 +10,7 @@ use crate::intern::{self, key_str_lit, s};
 use crate::state::{CondFact, Kind, State};
 use crate::syntax::{collect_assigned, contains_jump};
 
-use super::{Finally, Handler, Analyzer, FuncNode, Payload};
+use super::{Analyzer, Finally, FrameKind, FuncNode, Handler, Payload};
 
 impl Analyzer {
     /// Runs statements in order, until the path ends (`after_stmt`: the hover facts and row
@@ -50,6 +50,7 @@ impl Analyzer {
                 self.eval(&e.value, state);
             }
             ast::Stmt::Pass(_) | ast::Stmt::Global(_) | ast::Stmt::Nonlocal(_) | ast::Stmt::TypeAlias(_) => {}
+            ast::Stmt::Assign(a) if self.frame().kind == FrameKind::Class && self.class_property(a, state) => {}
             ast::Stmt::Assign(a) => {
                 let v = self.eval(&a.value, state);
                 for t in &a.targets {
