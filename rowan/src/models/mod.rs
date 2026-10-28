@@ -217,8 +217,9 @@ impl Registry {
         r(&["dataclasses.make_dataclass"], m_make_dataclass);
         r(&["namedtuple._asdict", "namedtuple._replace", "namedtuple.index", "namedtuple.count"], m_nt_method);
         r(&["operator.itemgetter", "operator.attrgetter"], m_getter);
-        // a coroutine is analysed as its result: running / awaiting it is that value
-        r(&["asyncio.run", "asyncio.create_task", "asyncio.ensure_future", "asyncio.wait_for", "asyncio.shield"], m_first_arg);
+        // a coroutine of the program runs where it is awaited (`Analyzer::await_value`): by
+        // `asyncio.run`, `wait_for`, `shield`, `gather`; a task at any later `await`
+        r(&["asyncio.run", "asyncio.wait_for", "asyncio.shield", "asyncio.create_task", "asyncio.ensure_future"], m_await_arg);
         r(&["asyncio.gather"], m_gather);
         r(&["builtins.exec", "builtins.eval"], m_exec);
         r(&["builtins.globals"], m_globals);

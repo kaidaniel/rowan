@@ -170,6 +170,11 @@ impl FuncNode {
             FuncNode::Lambda(_) | FuncNode::GenExp(_) => &[],
         }
     }
+    /// Does a call of it make a coroutine (an `async def` that does not yield)? Its body runs
+    /// where the coroutine is awaited (`Analyzer::await_value`).
+    pub(in crate::interp) fn is_coroutine(&self) -> bool {
+        matches!(self, FuncNode::Def(f) if f.is_async && !crate::syntax::is_generator(&f.body))
+    }
     /// Is it a generator expression's?
     pub(in crate::interp) fn is_genexp(&self) -> bool {
         matches!(self, FuncNode::GenExp(_))

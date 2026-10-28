@@ -232,6 +232,11 @@ pub struct Gens {
     pub no_unroll_next: FxHashSet<ObjId>,
     /// generators made but not run yet: the call that made each (`force_gen`)
     pub lazy: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
+    /// tasks of coroutines (`asyncio.create_task`) not awaited yet: each may run at any `await`
+    /// (`await_value`)
+    pub tasks: Vec<ObjId>,
+    /// every coroutine made a task
+    pub task_objs: FxHashSet<ObjId>,
     /// generator expressions a call that does not run is taking the items of
     /// (`force_given_genexps`): one built over itself (`g = (… for r in g)`) not again
     pub forcing: Vec<ObjId>,
@@ -368,6 +373,11 @@ impl Analyzer {
             if !state.reachable || !lazy {
                 continue;
             }
+            // (a coroutine, which code it is given may await: it runs, as awaited)
+            if self.is_coroutine(o) {
+                self.run_coroutine(o, state);
+                continue;
+            }
             let Some(lg) = self.gens.lazy.get(&o).cloned() else { continue };
             // (run already on some of the paths joined here: those keep their state)
             let before = if run { Some(state.copy()) } else { None };
@@ -413,6 +423,123 @@ impl Analyzer {
             state.slots.remove(&o, &(Ns::Attr, key_str_lit("\u{1}lazyargs")));
             state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
         }
+    }
+
+    /// Is `o` a coroutine of the program's (made by calling an `async def` that does not yield)?
+    pub(in crate::interp) fn is_coroutine(&self, o: ObjId) -> bool {
+        self.gens.lazy.get(&o).is_some_and(|lg| self.heap.func_info(lg.foid).node.is_coroutine())
+    }
+
+    /// `await v`: a suspension point, where each task not awaited yet may run (on some paths);
+    /// then the program's coroutines among `v` run (`run_coroutine`) and give what they return.
+    /// Anything else awaited (a library's awaitable) is its own value.
+    pub fn await_value(&mut self, v: &Value, state: &mut State) -> Value {
+        let tasks: Vec<ObjId> = self.gens.tasks.iter().copied().filter(|t| !v.pts.contains(*t)).collect();
+        for t in tasks {
+            // (one that suspends itself may have run up to any of its own suspension points,
+            // between the others' steps: what its code may change, as a call that does not run)
+            if self.interleaves(t) {
+                self.coroutine_steps(t, state);
+                continue;
+            }
+            let mut ran = state.copy();
+            self.run_coroutine(t, &mut ran);
+            let j = state.join(&mut ran);
+            state.replace_with(j);
+        }
+        self.gens.tasks.retain(|t| !v.pts.contains(*t));
+        let coros = v.pts.filter(|o| self.is_coroutine(o));
+        if coros.is_empty() {
+            return v.clone();
+        }
+        let mut out = vec![Value::with_kv(v.pts.filter(|o| !coros.contains(o)), v.kv.clone())];
+        for o in coros.iter() {
+            out.push(self.run_coroutine(o, state));
+        }
+        join_values(out)
+    }
+
+    /// Coroutine `o`'s body runs (on the paths where it has not run yet: one that ran on some
+    /// paths joined here, a task, runs again from there, the others keep what it did) in the
+    /// call's context that made it; its result, kept for a later `await` of it (a task's).
+    fn run_coroutine(&mut self, o: ObjId, state: &mut State) -> Value {
+        let rk = key_str_lit("\u{1}genret");
+        let (lazy, ran) = lazy_state(state, o);
+        let Some(lg) = self.gens.lazy.get(&o).cloned().filter(|_| lazy && state.reachable) else {
+            return state.slot_opt(o, Ns::Attr, rk).unwrap_or_else(|| Value::data("await"));
+        };
+        if self.interleaves(o) {
+            let r = self.coroutine_steps(o, state);
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
+            state.set_slot(o, Ns::Attr, rk, r.clone(), true);
+            return r;
+        }
+        let before = ran.then(|| state.copy());
+        self.gens.force_at = Some((lg.site.clone(), lg.ctx.clone()));
+        let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
+        let saved_files = std::mem::replace(&mut self.cx.call_files, lg.files.clone());
+        let r = self.call_user(lg.foid, lg.self_v.clone(), Args::new(&lg.args, &lg.kwargs, &[], &[]), state, &lg.node, false);
+        self.cx.call_chain = saved;
+        self.cx.call_files = saved_files;
+        state.slots.remove(&o, &(Ns::Attr, key_str_lit("\u{1}lazyargs")));
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
+        state.set_slot(o, Ns::Attr, rk, r.clone(), true);
+        match before {
+            Some(mut b) => {
+                let j = state.join(&mut b);
+                state.replace_with(j);
+                state.slot(o, Ns::Attr, rk)
+            }
+            None => r,
+        }
+    }
+
+    /// `asyncio.create_task(coro)` (`ensure_future`): the coroutine runs at a later `await`, or
+    /// where it is awaited (`await_value`).
+    pub fn start_task(&mut self, v: &Value) {
+        for o in v.pts.iter().filter(|o| self.is_coroutine(*o)).collect::<Vec<_>>() {
+            self.gens.task_objs.insert(o);
+            if !self.gens.tasks.contains(&o) {
+                self.gens.tasks.push(o);
+            }
+        }
+    }
+
+    /// `asyncio.gather(*coros)`: two or more coroutines run together; unless none of them changes
+    /// what another may see (then one after the other is how they run), those that suspend run
+    /// interleaved, as tasks.
+    pub fn gather_tasks(&mut self, vs: &[Value]) {
+        let coros: Vec<ObjId> = vs.iter().flat_map(|v| v.pts.iter()).filter(|o| self.is_coroutine(*o)).collect();
+        let fns: Vec<ObjId> = coros.iter().filter_map(|o| self.gens.lazy.get(o).map(|lg| lg.foid)).collect();
+        if coros.len() > 1 && !fns.into_iter().all(|f| self.writes_nothing_shared(f)) {
+            let suspending: Vec<ObjId> = coros.into_iter().filter(|o| self.suspends(*o)).collect();
+            for o in suspending {
+                self.start_task(&Value::obj(o));
+            }
+        }
+    }
+
+    /// Does coroutine `o`'s body suspend itself (`syntax::suspends`)?
+    fn suspends(&self, o: ObjId) -> bool {
+        self.gens.lazy.get(&o).is_some_and(|lg| crate::syntax::suspends(self.heap.func_info(lg.foid).node.body()))
+    }
+
+    /// A task whose body suspends: its steps interleave with other code's.
+    fn interleaves(&self, o: ObjId) -> bool {
+        self.gens.task_objs.contains(&o) && self.suspends(o)
+    }
+
+    /// What steps of coroutine `o` (`interleaves`) may do, any of them, between other code's: what its code may
+    /// change, as a call that does not run (`skipped_call`); its result.
+    fn coroutine_steps(&mut self, o: ObjId, state: &mut State) -> Value {
+        let Some(lg) = self.gens.lazy.get(&o).cloned() else { return Value::data("await") };
+        let q = self.heap.func_info(lg.foid).qualname.clone();
+        self.skipped_call(lg.foid, &q, lg.self_v.as_ref(), Args::new(&lg.args, &lg.kwargs, &[], &[]), state, &lg.node)
+    }
+
+    /// The event loop ends (`asyncio.run`): the tasks not awaited are cancelled.
+    pub fn end_tasks(&mut self) {
+        self.gens.tasks.clear();
     }
 
     /// Generator `o`'s run gave `r`: when that is not `o`, its body did not run (past its budget,

@@ -232,13 +232,15 @@ impl Analyzer {
         }
         // (the managers of the with statements running: their `__exit__` runs on the way out)
         for (_, fin, _) in &self.unwind.finally_stack {
-            if let crate::interp::Finally::Exit(ms) = &**fin {
+            if let crate::interp::Finally::Exit(ms, _) = &**fin {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
         for (_, env, _, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
+        // (tasks not awaited yet: they run at a later `await`)
+        work.extend(self.gens.tasks.iter().copied());
         for h in &self.gens.stop_hooks {
             h.result.iter().for_each(|v| v.push_objs(work));
         }

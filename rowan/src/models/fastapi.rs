@@ -1661,7 +1661,7 @@ fn scalar_ann_name(a: &ast::Expr) -> String {
 /// the program's own TestClient calls it), through its middlewares and dependencies, from `st`;
 /// its requirements join `state`'s; `general`: its values hold for any request.
 pub(crate) fn fa_entry_run(an: &mut Analyzer, oid: ObjId, fi: &crate::interp::FuncInfo, mut st: State, state: &mut State, general: bool) {
-    an.as_entry_run(oid, fi, general, |an, fake| {
+    an.as_entry_run(oid, fi, general, |an, fake| an.as_framework(|an| {
         if fa_entry_through_middleware(an, oid, &mut st, fake).is_none() {
             an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
             if let Some(idx) = an.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
@@ -1671,7 +1671,7 @@ pub(crate) fn fa_entry_run(an: &mut Analyzer, oid: ObjId, fi: &crate::interp::Fu
             fa_run_handler(an, oid, gens, None, true, &mut st, fake);
             an.m.fa_dep_cache.pop();
         }
-    });
+    }));
     for (src, k) in st.reqs.diff_keys(&state.reqs) {
         let Some(info) = st.reqs.get(&src, &k) else { continue };
         let nv = match state.reqs.get(&src, &k) {

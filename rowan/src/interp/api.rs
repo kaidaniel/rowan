@@ -123,6 +123,15 @@ impl Call {
 }
 
 impl Analyzer {
+    /// `f` runs as a framework runs the program's code (a FastAPI handler's entry run): what it
+    /// calls of the program's coroutines runs there, as awaited.
+    pub fn as_framework<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.cx.eager_coroutines += 1;
+        let r = f(self);
+        self.cx.eager_coroutines -= 1;
+        r
+    }
+
     /// `d.get(k)`'s read of the item: a defaultdict's factory and a Counter's 0 do not answer
     /// a key it lacks (`load_item` otherwise).
     pub fn load_item_for_get(&mut self, obj: &Value, key: &Value, node: &Node, state: &mut State) -> Value {

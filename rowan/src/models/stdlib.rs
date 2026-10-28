@@ -670,17 +670,29 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
 }
 
 pub(super) fn m_gather(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (each coroutine awaited in turn, also those given through `*xs`; those that suspend run
+    // interleaved: `gather_tasks`)
     let mut vals: Option<Vec<Value>> = Some(c.args.clone());
+    let mut rest: Vec<Value> = Vec::new();
     for sa in &c.star_args {
         match (an.iterate(sa, &c.node, st).items, vals.as_mut()) {
             (Some(its), Some(vs)) => vs.extend(its),
-            _ => vals = None,
+            _ => {
+                vals = None;
+                rest.push(an.elem_of(sa, &c.node, st));
+            }
         }
     }
     match vals {
-        Some(vs) => an.alloc_positional(Kind::List, &c.node, Some(vs), Value::new(), DATA, st),
+        Some(vs) => {
+            an.gather_tasks(&vs);
+            let vs: Vec<Value> = vs.iter().map(|v| an.await_value(v, st)).collect();
+            an.alloc_positional(Kind::List, &c.node, Some(vs), Value::new(), DATA, st)
+        }
         None => {
-            let e = join_values(c.args.iter().cloned().chain(c.star_args.iter().map(|sa| an.elem_of(sa, &c.node, st))).collect::<Vec<_>>());
+            let all: Vec<Value> = c.args.iter().chain(rest.iter()).cloned().collect();
+            an.gather_tasks(&all);
+            let e = join_values(all.iter().map(|v| an.await_value(v, st)).collect::<Vec<_>>());
             an.alloc_positional(Kind::List, &c.node, None, e, DATA, st)
         }
     }
@@ -1361,4 +1373,25 @@ pub(super) fn m_num_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         return Value::data("number");
     }
     join_values(outs)
+}
+
+/// `asyncio.run(coro)`, `wait_for(coro, t)`, `shield(coro)`: the coroutine awaited (its value);
+/// `asyncio.run` ends with the tasks not awaited (they may run first, then are cancelled); `create_task` / `ensure_future`:
+/// a task, which runs at a later `await` or where it is awaited.
+pub(super) fn m_await_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(a) = c.args.first().cloned() else { return Value::data(&format!("L{}", c.line)) };
+    match last(&c.qual) {
+        "create_task" | "ensure_future" => {
+            an.start_task(&a);
+            a
+        }
+        "run" => {
+            let v = an.await_value(&a, st);
+            // (the tasks not awaited may run before the loop ends, as at an `await`)
+            an.await_value(&Value::none(), st);
+            an.end_tasks();
+            v
+        }
+        _ => an.await_value(&a, st),
+    }
 }

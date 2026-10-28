@@ -245,11 +245,18 @@ impl Analyzer {
     /// over any element, the requirements on the elements' inputs read per element.
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
-        let itv = self.iterable_part(&itv, state);
+        // (`async for`: the async protocol, not `iter`'s)
+        let itv = if f.is_async { itv } else { self.iterable_part(&itv, state) };
         let iter_node = frontend::node(&*f.iter);
         if self.for_user_iterator(f, &itv, &iter_node, state) {
             return;
         }
+        // (`async for` over an instance whose `__anext__` it does not follow: items not known)
+        let itv = if f.is_async && itv.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance) {
+            Value::with_kv(itv.pts.filter(|o| self.heap.kind(o) != Kind::Instance), DATA).join(&Value::data("async for"))
+        } else {
+            itv
+        };
         // (one made for it alone is closed where the loop leaves it: `genclose.rs`)
         let fresh = self.fresh_gen(&itv, &f.iter, state);
         let deferred = self.force_gen_deferring(&itv, state, true);
@@ -557,32 +564,37 @@ impl Analyzer {
 
     /// An instance of a class of the program with `__iter__` and `__next__` whose `__iter__`
     /// gives itself back: the iterator a `for` asks for each item in turn.
-    fn user_iterator(&mut self, itv: &Value, node: &frontend::Node, state: &mut State) -> Option<ObjId> {
+    fn user_iterator(&mut self, itv: &Value, aio: bool, node: &frontend::Node, state: &mut State) -> Option<ObjId> {
         let o = itv.single().filter(|o| itv.kv.is_bot() && self.heap.kind(*o) == Kind::Instance)?;
         let c = self.heap.instance_class(o)?;
-        self.class_lookup(c, "__iter__")?;
-        self.class_lookup(c, "__next__")?;
-        let r = self.call_method_with(itv, "__iter__", Vec::new(), node, state)?;
+        let (iter, next) = if aio { ("__aiter__", "__anext__") } else { ("__iter__", "__next__") };
+        self.class_lookup(c, iter)?;
+        self.class_lookup(c, next)?;
+        let r = self.call_method_with(itv, iter, Vec::new(), node, state)?;
         // (`__iter__` gave something else: iterated as that, `__iter__` asked again)
         (r.single() == Some(o) && r.kv.is_bot()).then_some(o)
     }
 
-    /// `__next__` of iterator `it`: the item on the path where it returns, and the state where
-    /// it raised StopIteration (other raises leave the loop as raises).
-    fn next_step(&mut self, it: ObjId, node: &frontend::Node, state: &mut State) -> (Value, Option<State>) {
+    /// `__next__` (`aio`: `__anext__`) of iterator `it`: the item on the path where it returns,
+    /// and the state where it raised StopIteration (StopAsyncIteration; other raises leave the
+    /// loop as raises).
+    fn next_step(&mut self, it: ObjId, aio: bool, node: &frontend::Node, state: &mut State) -> (Value, Option<State>) {
+        let (next, stop_cls) = if aio { ("__anext__", "StopAsyncIteration") } else { ("__next__", "StopIteration") };
         let mut pre = state.copy();
-        self.enter_try(rustc_hash::FxHashSet::from_iter(["StopIteration".to_string()]), &mut pre);
-        let v = match self.run_dunder(&Value::obj(it), &["__next__"], Vec::new(), node, state) {
+        self.enter_try(rustc_hash::FxHashSet::from_iter([stop_cls.to_string()]), &mut pre);
+        let v = match self.run_dunder(&Value::obj(it), &[next], Vec::new(), node, state) {
             Some((v, rest)) if rest.empty() => v,
             Some((v, _)) => v.join(&Value::data("next")),
             None => Value::data("next"),
         };
+        // (`__anext__` gives an awaitable: its item, or StopAsyncIteration, where it is awaited)
+        let v = if aio { self.await_value(&v, state) } else { v };
         let out = self.leave_try();
         let mut stops: Option<State> = None;
         for (cls, st, exc) in out.recs {
             // (Some(true): StopIteration; Some(false): surely another class; None: may be either)
             let stop = match cls.as_ref() {
-                Some((names, _)) if names.iter().any(|n| n == "StopIteration") => Some(true),
+                Some((names, _)) if names.iter().any(|n| n == stop_cls) => Some(true),
                 Some((_, true)) => Some(false),
                 _ => None,
             };
@@ -603,7 +615,7 @@ impl Analyzer {
     /// decided (an item, or StopIteration), then to a fixpoint; the loop ends where StopIteration
     /// was raised.
     fn for_user_iterator(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) -> bool {
-        let Some(it) = self.user_iterator(itv, node, state) else { return false };
+        let Some(it) = self.user_iterator(itv, f.is_async, node, state) else { return false };
         let mut stops: Option<State> = None;
         let mut breaks: Option<State> = None;
         let mut decided = true;
@@ -612,7 +624,7 @@ impl Analyzer {
                 break;
             }
             let mut probe = state.copy();
-            let (v, stop) = self.next_step(it, node, &mut probe);
+            let (v, stop) = self.next_step(it, f.is_async, node, &mut probe);
             match (probe.reachable, stop) {
                 (true, None) if idx < UNROLL_MAX => {
                     state.replace_with(probe);
@@ -631,7 +643,7 @@ impl Analyzer {
         }
         if !decided {
             let (_, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
-                let (v, stop) = an.next_step(it, node, body_s);
+                let (v, stop) = an.next_step(it, f.is_async, node, body_s);
                 if let Some(s) = stop {
                     join_into(&mut stops, s);
                 }

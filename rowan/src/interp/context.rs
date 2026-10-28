@@ -140,6 +140,9 @@ pub struct Context {
     /// the call of the program's code starting is a model's (its arguments are the library's
     /// to choose: no TypeError for ones that do not fit)
     pub called_by_model: bool,
+    /// a model's own code calls the program's functions (a framework's entry run): a coroutine runs
+    /// there, as awaited, not made to run later
+    pub eager_coroutines: u32,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// instances whose `__init__` is running for their construction (stores into them are
