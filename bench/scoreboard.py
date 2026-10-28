@@ -127,6 +127,7 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "container-pairs": ["tests/container_protocol.py", "--pairs", "--rowan", "4000"],
              "call-pairs": ["tests/call_protocol.py", "--pairs", "--rowan", "1500"],
              "collections": ["tests/collections_protocol.py", "--all"],
+             "pathlib": ["tests/pathlib_protocol.py", "--all"],
              "argparse": ["tests/argparse_protocol.py", "--all"],
              "configparser": ["tests/config_protocol.py", "--all"],
              "sqlite": ["tests/sqlite_protocol.py", "--all"],
