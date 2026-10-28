@@ -125,11 +125,24 @@ fn fact_json(an: &Analyzer, line: u32, name: StrId, f: &Fact) -> J {
         let calls = f.calls.iter().filter(|(t, _)| *t != g || f.param_of.is_some()).map(|(t, lines)| call(t, lines)).collect();
         (g, calls)
     };
-    let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
+    // (another name's argument the text names, of the type its annotation gives it: `x`,
+    // `int(?)`; the name's own is its `type`)
+    let typed = |sym: &str| {
+        f.general_rows.keys().chain(f.rows.keys()).find_map(|o| {
+            let ob = an.heap.obj(*o);
+            let ty = ob.ty.filter(|_| ob.kind == Kind::Unknown && an.names.get(*o).is_some_and(|n| n == sym))?;
+            Some(match an.heap.ann.get(o) {
+                Some((a, _)) => crate::interp::annotations::annotation_text(a),
+                None => format!("{}(?)", ty),
+            })
+        })
+    };
+    let legend: Vec<(String, String)> = f.legend.iter().map(|(s0, d)| (s0.clone(), if d == "?" && *s0 != *name.to_string() { typed(s0).unwrap_or_else(|| d.clone()) } else { d.clone() })).collect();
+    let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
     // (the unknowns the text names by where they come from, nothing more known of them:
     // `nx.connected_components(g)[*]`)
-    if f.legend.iter().any(|(_, d)| d == "?") {
-        fact["named"] = json!(f.legend.iter().filter(|(_, d)| d == "?").map(|(s0, _)| s0).collect::<Vec<_>>());
+    if legend.iter().any(|(_, d)| d == "?") {
+        fact["named"] = json!(legend.iter().filter(|(_, d)| d == "?").map(|(s0, _)| s0).collect::<Vec<_>>());
     }
     // a parameter at its `def`: what the function reads of it for any call (its contract)
     if let Some(foid) = f.param_of {
