@@ -493,22 +493,19 @@ impl State {
             s.narrowed = self.narrowed.iter().filter(|(k, v)| o.narrowed.get(*k) == Some(*v)).map(|(k, v)| (*k, v.clone())).collect();
         }
         // (an object one side has no facts of was not made there, unless a path makes it when
-        // it first reads it, `mark_found`: the other side holds it as it starts)
-        let mut one_sided: Vec<ObjId> = Vec::new();
-        s.rows = if any_found() {
-            self.rows.join_sides(&o.rows, &mut |a, b| a.join(b), &mut |k, r| {
-                if is_found(k.0) && one_sided.last() != Some(&k.0) {
-                    one_sided.push(k.0);
-                }
-                Some(one_side_row(k, r))
-            })
+        // it first reads it, `mark_found`: the other side holds it as it starts, its rows and
+        // slots as made, its elements and length not known; as `join_from` takes them)
+        if any_found() {
+            s.rows = self.rows.join_sides(&o.rows, &mut |a, b| a.join(b), &mut |k, r| Some(one_side_row(k, r)));
+            s.slots = self.slots.join_sides(&o.slots, &mut |a, b| a.join(b), &mut |oid, sk, v| Some(one_side_slot(*oid, sk, v)));
+            s.elems = self.elems.join_sides(&o.elems, &mut |a, b| kv_join(a, b), &mut |k, v| (!is_found(*k)).then(|| v.clone()));
+            s.lens = self.lens.join_sides(&o.lens, &mut join_len, &mut |k, v| (!is_found(*k)).then_some(*v));
         } else {
-            self.rows.join(&o.rows, &mut |a, b| a.join(b))
-        };
-        s.slots = self.slots.join(&o.slots, &mut |a, b| a.join(b));
-        s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
-        s.lens = self.lens.join(&o.lens, &mut join_len);
-        s.found_one_sided(&one_sided);
+            s.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
+            s.slots = self.slots.join(&o.slots, &mut |a, b| a.join(b));
+            s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
+            s.lens = self.lens.join(&o.lens, &mut join_len);
+        }
         s.reqs = self.reqs.join_with_keep(&o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
         s.ret = ret;
         s.exits = exits;
@@ -1175,25 +1172,6 @@ fn one_side_slot(oid: ObjId, sk: &SlotKey, v: &Value) -> Value {
     match FOUND.with(|m| m.borrow().slots.get(&oid).and_then(|l| l.iter().find(|(k, _)| k == sk).map(|(_, v)| v.clone()))) {
         Some(init) if init != *v => v.join(&init),
         _ => v.clone(),
-    }
-}
-
-impl State {
-    /// After a join that found objects `oids` had facts on one side of only: their slots join
-    /// what they start with, their elements and lengths are not known.
-    fn found_one_sided(&mut self, oids: &[ObjId]) {
-        for &oid in oids {
-            let init = FOUND.with(|m| m.borrow().slots.get(&oid).cloned()).unwrap_or_default();
-            for (sk, v) in init {
-                if let Some(cur) = self.slots.get(&oid, &sk) {
-                    if cur != v {
-                        self.slots.set(&oid, sk, cur.join(&v));
-                    }
-                }
-            }
-            self.elems.remove(&oid);
-            self.lens.remove(&oid);
-        }
     }
 }
 
