@@ -182,6 +182,7 @@ impl Registry {
         r(&["dict.keys", "dict.values", "dict.items"], m_views);
         r(&["dict.copy"], m_dcopy);
         r(&["dict.*", "unknown.*", "class.*"], m_unknown_method);
+        r(&["annotated.append", "annotated.add", "annotated.insert", "annotated.extend", "annotated.update", "annotated.pop"], m_annotated);
         r(
             &[
                 "set.add", "set.update", "set.union", "set.intersection", "set.difference", "set.symmetric_difference", "set.issubset", "set.issuperset",

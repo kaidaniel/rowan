@@ -632,6 +632,10 @@ impl Analyzer {
         }
         acc.items = None;
         acc.exhaustive = false;
+        // (an annotated container's: what the program put into it too)
+        if let Some(put) = self.items_put(oid, state) {
+            acc.elems.push(put);
+        }
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             acc.elems.push(Value::data("deep"));
             return;

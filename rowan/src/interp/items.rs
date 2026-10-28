@@ -528,9 +528,14 @@ impl Analyzer {
         // the key is required of the input all the same — the runtime oracle's rule)
         let caught = try_guard;
         let saved = std::mem::replace(&mut self.unwind.caught_load, caught);
+        // (an annotated container's: what the program put into it, but under a key it stored)
+        let put = self.items_put(oid, state).filter(|_| ns == Ns::Item && self.heap.obj(oid).ty != Some("dict") && !(key.pts.is_empty() && key.kv.is_literal() && kv_literals(&key.kv).iter().all(|k| state.slot_opt(oid, ns, k).is_some())));
         let v = self.load_record_inner(oid, ns, key, node, state, guarded, single_target, try_guard);
         self.unwind.caught_load = saved;
-        v
+        match put {
+            Some(put) => v.join(&put),
+            None => v,
+        }
     }
 
     /// `load_record` with the handler's catching mode set.
@@ -1077,6 +1082,17 @@ impl Analyzer {
                         continue;
                     }
                 }
+                // (an annotated container's items for any call: the value, or a slice's items)
+                // (a slice's items: put, and maybe under any key it stored)
+                Kind::Unknown if ns == Ns::Item && self.heap.ann.contains_key(&oid) && slice_text(&key.kv).is_some() => {
+                    let it = self.iterate(v, node, state);
+                    let put = self.elem_value(&it.elem, node, "el");
+                    self.put_items(oid, &put, state);
+                    for (k, old) in state.obj_slots(oid, Ns::Item) {
+                        state.set_slot(oid, Ns::Item, k, old.join(&put), true);
+                    }
+                    continue;
+                }
                 _ => {}
             }
             self.store_key(oid, ns, &key, v, strong, node, state);
@@ -1094,6 +1110,11 @@ impl Analyzer {
         if self.is_any(oid) {
             self.escape(v, &format!("store into unknown@L{}", node.line), state);
             return;
+        }
+        // (an annotated container's items for any call: a list's value, a dict's key)
+        if ns == Ns::Item && self.heap.ann.contains_key(&oid) {
+            let put = if self.heap.obj(oid).ty == Some("dict") { self.opaque_key(key, state) } else { v.clone() };
+            self.put_items(oid, &put, state);
         }
         // (a key that may be an object — an unknown call's result beside a literal — is a key
         // not known, its literals possible keys: no strong store)

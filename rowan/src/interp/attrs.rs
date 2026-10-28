@@ -1260,6 +1260,11 @@ impl Analyzer {
         if raises && method && !(STR_METHOD_NAMES.contains(&name) && self.heap.obj(oid).ty == Some("str")) {
             self.may_raise_here("AttributeError", state);
         }
+        // (a list or set annotated for any call: what its methods put into it, `put_items`)
+        if matches!(self.heap.obj(oid).ty, Some("list" | "set")) && self.heap.ann.contains_key(&oid) && matches!(name, "append" | "add" | "insert" | "extend" | "update" | "pop") {
+            self.kill_facts_on(&[oid], state);
+            return self.method_value(&format!("annotated.{}", name), &Value::obj(oid));
+        }
         // (one holding attributes of its own is no dict: its method is its own, given it)
         if DICT_METHOD_NAMES.contains(&name) && !opaque && !state.obj_slots(oid, Ns::Attr).is_empty() {
             return self.method_value(&format!("unknown.{}", name), &Value::obj(oid));

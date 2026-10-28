@@ -310,6 +310,31 @@ impl Analyzer {
         out.join(&typed)
     }
 
+    /// Items the program puts into `oid`, an unknown annotated as a container, for any call: its
+    /// parts follow the annotation as the call starts only, so what is stored, appended or
+    /// added afterwards (anything, by unknown code given it) joins every read of its items
+    /// (`items_put`; a dict's items are its keys, its values are its slots'). Kept in its `Elem` slot; a part of such a container (`xs[0]` of
+    /// `list[list[int]]`) stands beside the other parts' placeholders, which do not see it:
+    /// what any of them holds is not known to follow the annotation any more.
+    pub fn put_items(&mut self, oid: ObjId, v: &Value, state: &mut State) {
+        let Some(&(ann, _)) = self.heap.ann.get(&oid).filter(|_| self.heap.kind(oid) == Kind::Unknown) else { return };
+        if self.heap.obj(oid).depth > 0 {
+            self.heap.ann_changed.insert(ann as *const ast::Expr as usize);
+        }
+        let e = state.slot_opt(oid, Ns::Elem, intern::STAR).unwrap_or_default().join(v);
+        state.set_slot(oid, Ns::Elem, intern::STAR, e, true);
+    }
+
+    /// What reads of the items of `oid` give beside the annotation's (`put_items`).
+    pub(in crate::interp) fn items_put(&self, oid: ObjId, state: &State) -> Option<Value> {
+        let &(ann, _) = self.heap.ann.get(&oid)?;
+        let put = state.slot_opt(oid, Ns::Elem, intern::STAR);
+        if self.heap.ann_changed.contains(&(ann as *const ast::Expr as usize)) {
+            return Some(put.unwrap_or_default().join(&Value::data(&format!("items of {}", self.heap.obj(oid).label))));
+        }
+        put
+    }
+
     /// An unknown object of builtin type `t` made at `site` (one beside other values, or a
     /// container whose parts follow annotation `ann`).
     fn typed_object(&mut self, site: &str, t: &'static str, single: bool, depth: u32, ann: Option<(&'static ast::Expr, ObjId)>, state: &mut State) -> Value {

@@ -366,6 +366,30 @@ pub(super) fn m_dcopy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
 }
 
+/// `xs.append(v)` & co. on a list or set annotated for any call (`xs: list[int]`): what they
+/// add joins its items (`Analyzer::put_items`); `pop` gives one of them (or raises IndexError /
+/// KeyError, when empty).
+pub(super) fn m_annotated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let recv = c.recv.clone().unwrap_or_default();
+    let added = match last(&c.qual) {
+        "append" | "add" => c.args.first().cloned(),
+        "insert" => c.args.get(1).cloned(),
+        "extend" | "update" => c.args.first().map(|a| {
+            let it = an.iterate(a, &c.node, st);
+            an.elem_value(&it.elem, &c.node, "el")
+        }),
+        _ => {
+            an.may_raise_here(if c.qual.ends_with("pop") && recv.pts.iter().all(|o| an.heap.obj(o).ty == Some("set")) { "KeyError" } else { "IndexError" }, st);
+            let it = an.iterate(&recv, &c.node, st);
+            return an.elem_value(&it.elem, &c.node, "el");
+        }
+    };
+    for o in recv.pts.iter() {
+        an.put_items(o, &added.clone().unwrap_or_default(), st);
+    }
+    Value::none()
+}
+
 pub(super) fn m_unknown_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node)
 }
