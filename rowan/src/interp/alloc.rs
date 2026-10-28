@@ -79,6 +79,10 @@ impl Analyzer {
             // (an object already merged — its site made again while in use, past its variants —
             // stays merged without a walk: such walks found nothing in their budget)
             let hard = existed == Some(oid) && (self.budget.over_hard_deadline() || (kind == Kind::Unknown) || !self.heap.obj(oid).single);
+            if existed == Some(oid) && self.has_facts(oid, state) {
+                // (PROTOTYPE: a liveness walk sees the callers' names)
+                super::probe::spoil_all_why(3);
+            }
             if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && !self.live_among(&[oid], state).is_empty())) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
@@ -137,6 +141,7 @@ impl Analyzer {
         let rsite = format!("{}#call", site);
         let rctx = format!("{}#{}", ctx, self.cx.frames.len());
         if let Some(r) = self.heap.find(kind, &rsite, &rctx) {
+            super::probe::spoil_all_why(4);
             let in_use = self.has_facts(r, state) || self.cx.frames.iter().any(|f| f.recent.iter().any(|x| x.0 == r)) || self.heap.keys.identity_keys.borrow().contains_key(&r);
             if in_use {
                 return None;

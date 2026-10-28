@@ -194,6 +194,7 @@ impl Analyzer {
     /// round).
     pub(super) fn recursive_call(&mut self, key: &ActKey, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State) -> Value {
         self.recursion.hit.insert(key.clone());
+        super::probe::spoil_why(self.recursion.depth_of.get(key).copied().unwrap_or(0), 0);
         // (inside a try of the activation's frames: what the activation raises matters here)
         if let Some(d) = self.recursion.depth_of.get(key).copied() {
             // (what those tries' handlers catch, and whether a finally runs: the raises they see)

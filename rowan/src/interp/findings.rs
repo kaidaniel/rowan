@@ -312,6 +312,11 @@ impl Findings {
         &self.verdicts
     }
 
+    /// PROTOTYPE: is a verdict with this key recorded?
+    pub(in crate::interp) fn has_key(&self, k: &VerdictKey) -> bool {
+        self.keys.contains(k)
+    }
+
     /// A mark to drop the verdicts recorded after it (`drop_since`).
     pub(in crate::interp) fn mark(&self) -> usize {
         self.verdicts.len()
@@ -319,6 +324,9 @@ impl Findings {
 
     /// Record the verdict `make` builds, unless one with the same key is recorded.
     pub(in crate::interp) fn add(&mut self, key: VerdictKey, make: impl FnOnce() -> Verdict) {
+        if super::probe::on() {
+            super::probe::verdict_key(&key);
+        }
         if self.keys.contains(&key) {
             return;
         }

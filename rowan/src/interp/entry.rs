@@ -86,7 +86,7 @@ pub struct Entries {
     /// constructions and functions may have made and changed them
     for_any: bool,
     /// while the main module runs: the program's calls are noted (`note_call`)
-    recording: bool,
+    pub recording: bool,
     /// the functions the program called while the main module ran
     noted: FxHashSet<ObjId>,
     /// when values for any call are asked for: the heap at the last call module code made, and

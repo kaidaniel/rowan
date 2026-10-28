@@ -315,6 +315,7 @@ impl Analyzer {
     /// Its slot `\u{1}lazy` is 1 while not run, 0 after (both: run on some paths). Two calls at
     /// one site before either is consumed: one run with their arguments joined.
     pub(super) fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
+        super::probe::spoil_all_why(1);
         let site = self.callee_site(node);
         // (a generator expression allocates as the code it is written in: its frame's context)
         let genexp = self.heap.func_info(foid).node.is_genexp();
@@ -369,6 +370,7 @@ impl Analyzer {
                 continue;
             }
             let Some(lg) = self.gens.lazy.get(&o).cloned() else { continue };
+            super::probe::spoil_all_why(2);
             // (run already on some of the paths joined here: those keep their state)
             let before = if run { Some(state.copy()) } else { None };
             // (its items on the paths where it ran are in `before`: this run's start afresh)

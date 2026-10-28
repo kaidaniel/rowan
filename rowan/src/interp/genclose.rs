@@ -441,6 +441,7 @@ impl Analyzer {
                 return;
             }
             cands.sort_unstable();
+            super::probe::spoil_all_why(5);
             let must = self.must_held(&cands, state);
             cands.retain(|o| !must.contains(o));
             if cands.is_empty() {

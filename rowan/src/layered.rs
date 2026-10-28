@@ -15,17 +15,50 @@ use rustc_hash::FxHashMap;
 /// A key that is a small integer: its `u64` image orders the trie.
 pub trait PKey: Clone + Eq + Hash {
     fn key64(&self) -> u64;
+    /// PROBE: the object the key is about
+    fn obj_of(&self) -> Option<u32> {
+        None
+    }
+}
+
+pub static PROBE_ENV: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("ROWAN_PROBE").is_ok());
+
+pub fn probe_on() -> bool {
+    *PROBE_ENV
+}
+
+thread_local! {
+    pub static PROBE_SETS: std::cell::RefCell<Vec<rustc_hash::FxHashSet<u32>>> = Default::default();
+}
+
+#[inline]
+pub fn probe_note<K: PKey>(k: &K) {
+    if probe_on() {
+        if let Some(o) = k.obj_of() {
+            PROBE_SETS.with(|s| {
+                if let Some(top) = s.borrow_mut().last_mut() {
+                    top.insert(o);
+                }
+            });
+        }
+    }
 }
 
 impl PKey for u32 {
     fn key64(&self) -> u64 {
         *self as u64
     }
+    fn obj_of(&self) -> Option<u32> {
+        Some(*self)
+    }
 }
 
 impl PKey for (u32, Ns) {
     fn key64(&self) -> u64 {
         ((self.0 as u64) << 3) | self.1 as u64
+    }
+    fn obj_of(&self) -> Option<u32> {
+        Some(self.0)
     }
 }
 
@@ -426,11 +459,13 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
     }
 
     pub fn get(&self, k: &K) -> Option<V> {
+        probe_note(k);
         self.root.as_ref().and_then(|t| get(t, k.key64())).cloned()
     }
 
     /// The value without a clone.
     pub fn get_ref(&self, k: &K) -> Option<&V> {
+        probe_note(k);
         self.root.as_ref().and_then(|t| get(t, k.key64()))
     }
 
@@ -475,6 +510,7 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
     }
 
     pub fn insert(&mut self, k: K, v: V) {
+        probe_note(&k);
         let h = k.key64();
         match &mut self.root {
             None => self.root = Some(Arc::new(Node::Leaf { h, k, v })),
@@ -485,6 +521,7 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
     }
 
     pub fn remove(&mut self, k: &K) -> Option<V> {
+        probe_note(k);
         let t = self.root.as_ref()?;
         let (rest, v) = remove(t, k.key64())?;
         self.root = rest;
@@ -494,6 +531,7 @@ impl<K: PKey, V: MapValue> LayerMap<K, V> {
     /// Removes every key whose image agrees with `k`'s from bit `bits` up (an object's rows in
     /// all namespaces), in one path copy.
     pub fn remove_block(&mut self, k: &K, bits: u32) {
+        probe_note(k);
         if let Some(rest) = self.root.as_ref().and_then(|t| remove_hi(t, k.key64() >> bits, bits)) {
             self.root = rest;
         }
@@ -612,6 +650,9 @@ impl<K: PKey, IK: IKey> PKey for Pair<K, IK> {
         debug_assert!(self.0.key64() < 1 << 32, "outer key past 2^32");
         (self.0.key64() << 32) | self.1.key32() as u64
     }
+    fn obj_of(&self) -> Option<u32> {
+        self.0.obj_of()
+    }
 }
 
 /// The subtree holding exactly the keys whose high 32 bits are `hi` (big-endian Patricia
@@ -679,6 +720,7 @@ impl<K: PKey, IK: IKey, V: MapValue> TwoLevel<K, IK, V> {
 
     /// The subtree of `key`'s entries.
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
+        probe_note(key);
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
     }
 

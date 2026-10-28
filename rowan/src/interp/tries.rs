@@ -276,6 +276,7 @@ impl Analyzer {
     /// running try: its handlers and finally start from this state (with the try frame's
     /// locals when the raise is inside a callee). False: no try is running.
     pub(in crate::interp) fn record_raise_state(&mut self, state: &mut State) -> bool {
+        super::probe::raised(self.unwind.tries.last().map(|t| t.frames).unwrap_or(0));
         let mut exc = self.unwind.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
         let cls = self.unwind.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         // (GeneratorExit raised at a yield, leaving the body of the generator run whole there)

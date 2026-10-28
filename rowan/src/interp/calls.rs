@@ -1055,7 +1055,34 @@ impl Analyzer {
         if let Some(gid) = gen_id.filter(|_| bound) {
             self.closing_begin(gid, state);
         }
-        let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
+        let probe_on = gen_id.is_none() && !entry && super::probe::on();
+        let memo_ctx = if probe_on { self.memo_context() } else { None };
+        let probe_args: super::probe::ArgsKey = (self_v.clone(), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec());
+        let hit = match memo_ctx.as_ref() {
+            Some(c) => self.memo_lookup(&key, &probe_args, c, &pre_bind),
+            None => None,
+        };
+        let (mut ret, mut st) = match hit {
+            Some(h) => h,
+            None => {
+                if probe_on {
+                    super::probe::begin(self.cx.frames.len());
+                }
+                let st0 = self.budget.statements;
+                let (ret, st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
+                if probe_on {
+                    // (what the run changed, also through writes no map logged: a join's)
+                    let fp = st.footprint(&pre_bind);
+                    crate::layered::PROBE_SETS.with(|s| {
+                        if let Some(top) = s.borrow_mut().last_mut() {
+                            top.extend(fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(st.lens.diff_keys(&pre_bind.lens)));
+                        }
+                    });
+                    super::probe::end(self, key.clone(), probe_args, memo_ctx, pre_bind.copy(), &ret, &st, self.budget.statements - st0);
+                }
+                (ret, st)
+            }
+        };
         let closes = if bound { self.gens.bounds.pop() } else { None };
         if let Some(gid) = gen_id {
             self.gen_activation_end(gid, gen_cm, &mut st, &pre_bind, born_mark, closes);

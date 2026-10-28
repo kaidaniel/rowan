@@ -9,6 +9,7 @@ use crate::state::{reset_thread_state, Kind, State};
 
 // The components: each owns one field of `Analyzer`.
 pub mod budget;
+pub mod probe;
 pub mod context;
 pub mod effects;
 pub mod entry;
