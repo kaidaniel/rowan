@@ -445,19 +445,20 @@ impl Analyzer {
         let (members, none) = self.members_in(ann, module, 0);
         let alone = members.len() == 1 && !none;
         // an unknown of builtin type `t`: a scalar alone is a typed unknown (`str(?)`); one of
-        // several members, or a container (its parts as annotated `c` says), an unknown object
-        // of that type
-        let typed = |an: &mut Analyzer, t: &'static str, c: Option<&'static ast::Expr>, k: usize, state: &mut State| {
+        // several members, or a container (its parts as annotated `c` says, in module `cm`), an
+        // unknown object of that type
+        let typed = |an: &mut Analyzer, t: &'static str, c: Option<&'static ast::Expr>, cm: ObjId, k: usize, state: &mut State| {
             if alone && c.is_none() && crate::domain::TYPE_NAMES.contains(&t) {
                 return Value::data(&crate::domain::typed_label(t, ""));
             }
-            an.typed_object(&format!("ann:{}:{}", path, k), t, single, depth + 1, c.map(|c| (c, module)), state)
+            an.typed_object(&format!("ann:{}:{}", path, k), t, single, depth + 1, c.map(|c| (c, cm)), state)
         };
         let mut out = if none { Value::none() } else { Value::new() };
         if members.is_empty() && !none {
             return unknown();
         }
-        for (k, m) in members.into_iter().enumerate() {
+        // (each member in the module that writes it: an alias's in its own)
+        for (k, (m, module)) in members.into_iter().enumerate() {
             let v = match m {
                 ast::Expr::Subscript(sub) if dotted_last(&sub.value) == "Literal" => {
                     let elts: Vec<&'static ast::Expr> = match &*sub.slice {
@@ -471,9 +472,9 @@ impl Analyzer {
                         unknown()
                     }
                 }
-                _ if validated && dotted_last(m) == "float" && !matches!(m, ast::Expr::Subscript(_)) => typed(self, "float", None, k, state),
+                _ if validated && dotted_last(m) == "float" && !matches!(m, ast::Expr::Subscript(_)) => typed(self, "float", None, module, k, state),
                 _ => match builtin_annotation(m) {
-                    Some((t, _)) => typed(self, t, container_annotation(m), k, state),
+                    Some((t, _)) => typed(self, t, container_annotation(m), module, k, state),
                     None => {
                         let cv = self.in_module(module, "ann", "<annotation>", |an| {
                             let Some(v) = an.eval_annotation(m, state) else { return Value::new() };
@@ -497,16 +498,23 @@ impl Analyzer {
 
     /// What a name an annotation uses stands for when the module binds it once, at its top
     /// level, to a type (`Mode = Literal["r", "w"]`, `Json: TypeAlias = dict[str, Any]`, `type
-    /// Pair = tuple[int, int]`): that expression; None for anything else.
-    pub(in crate::interp) fn alias_of(&self, name: &str, module: ObjId) -> Option<&'static ast::Expr> {
-        fn walk(b: &'static [ast::Stmt], name: &str, n: &mut usize, found: &mut Option<&'static ast::Expr>) {
+    /// Pair = tuple[int, int]`), or imports it from a module of the program that does
+    /// (`from .types import Mode`): that expression and the module it is written in; None for
+    /// anything else.
+    pub(in crate::interp) fn alias_of(&self, name: &str, module: ObjId, depth: u32) -> Option<(&'static ast::Expr, ObjId)> {
+        #[derive(Clone, Copy)]
+        enum Found {
+            Expr(Option<&'static ast::Expr>),
+            From(&'static ast::StmtImportFrom, &'static str),
+        }
+        fn walk(b: &'static [ast::Stmt], name: &str, n: &mut usize, found: &mut Option<Found>) {
             let named = |e: &ast::Expr| matches!(e, ast::Expr::Name(x) if x.id.as_str() == name);
             for st in b {
                 match st {
                     ast::Stmt::Assign(a) => {
                         if a.targets.iter().any(|t| named(t)) {
                             *n += 1;
-                            *found = (a.targets.len() == 1).then_some(&*a.value);
+                            *found = Some(Found::Expr((a.targets.len() == 1).then_some(&*a.value)));
                         } else if a.targets.iter().any(|t| matches!(t, ast::Expr::Tuple(_) | ast::Expr::List(_))) {
                             // (unpacked: counted when it may bind the name)
                             *n += usize::from(crate::interp::annotations::binds_in(&a.targets, name));
@@ -514,17 +522,23 @@ impl Analyzer {
                     }
                     ast::Stmt::AnnAssign(a) if named(&a.target) => {
                         *n += 1;
-                        *found = a.value.as_deref();
+                        *found = Some(Found::Expr(a.value.as_deref()));
                     }
                     ast::Stmt::AugAssign(a) if named(&a.target) => *n += 2,
                     ast::Stmt::TypeAlias(a) if named(&a.name) => {
                         *n += 1;
-                        *found = Some(&*a.value);
+                        *found = Some(Found::Expr(Some(&*a.value)));
                     }
                     ast::Stmt::FunctionDef(f) if f.name.as_str() == name => *n += 2,
                     ast::Stmt::ClassDef(c) if c.name.as_str() == name => *n += 2,
                     ast::Stmt::Import(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str().split('.').next() == Some(name), |x| x.as_str() == name)) => *n += 2,
-                    ast::Stmt::ImportFrom(i) if i.names.iter().any(|a| a.asname.as_ref().map_or(a.name.as_str() == name || a.name.as_str() == "*", |x| x.as_str() == name)) => *n += 2,
+                    ast::Stmt::ImportFrom(i) if i.names.iter().any(|a| a.name.as_str() == "*") => *n += 2,
+                    ast::Stmt::ImportFrom(i) => {
+                        if let Some(a) = i.names.iter().find(|a| a.asname.as_ref().map_or(a.name.as_str() == name, |x| x.as_str() == name)) {
+                            *n += 1;
+                            *found = Some(Found::From(i, a.name.as_str()));
+                        }
+                    }
                     ast::Stmt::For(f) => {
                         *n += usize::from(crate::interp::annotations::binds_in(std::slice::from_ref(&*f.target), name)) * 2;
                         walk(&f.body, name, n, found);
@@ -551,38 +565,60 @@ impl Analyzer {
                 }
             }
         }
-        let tree = self.heap.module_info(module).tree;
+        if depth > 4 {
+            return None;
+        }
+        let info = self.heap.module_info(module);
         let (mut n, mut found) = (0, None);
-        walk(&tree.body, name, &mut n, &mut found);
-        let v = found.filter(|_| n == 1)?;
-        matches!(v, ast::Expr::Subscript(_) | ast::Expr::BinOp(_) | ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::StringLiteral(_)).then_some(v)
+        walk(&info.tree.body, name, &mut n, &mut found);
+        match found.filter(|_| n == 1)? {
+            Found::Expr(v) => {
+                let v = v?;
+                matches!(v, ast::Expr::Subscript(_) | ast::Expr::BinOp(_) | ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::StringLiteral(_)).then_some((v, module))
+            }
+            // (from a module of the program: its alias of the name)
+            Found::From(i, orig) => {
+                let modname = if i.level > 0 {
+                    let mut base: Vec<&str> = info.pkg.split('.').filter(|x| !x.is_empty()).collect();
+                    for _ in 1..i.level {
+                        base.pop();
+                    }
+                    base.into_iter().map(str::to_string).chain(i.module.iter().map(|m| m.id.to_string())).collect::<Vec<_>>().join(".")
+                } else {
+                    i.module.as_ref()?.id.to_string()
+                };
+                let m = *self.program.modules.get(&modname)?;
+                (self.is_local_module(m) && matches!(self.heap.obj(m).payload, Payload::Module(_))).then_some(())?;
+                self.alias_of(orig, m, depth + 1)
+            }
+        }
     }
 
     /// `annotation_members`, with the aliases the module binds (`alias_of`) standing for what
-    /// they name.
-    pub(in crate::interp) fn members_in(&self, ann: &'static ast::Expr, module: ObjId, depth: u32) -> (Vec<&'static ast::Expr>, bool) {
+    /// they name, each member with the module it is written in.
+    pub(in crate::interp) fn members_in(&self, ann: &'static ast::Expr, module: ObjId, depth: u32) -> (Vec<(&'static ast::Expr, ObjId)>, bool) {
         let (ms, mut none) = annotation_members(ann);
         let mut out = Vec::new();
         for m in ms {
             match m {
-                ast::Expr::Name(n) if depth < 4 => match self.alias_of(n.id.as_str(), module) {
-                    Some(a) => {
-                        let (sub, n2) = self.members_in(a, module, depth + 1);
+                ast::Expr::Name(n) if depth < 4 => match self.alias_of(n.id.as_str(), module, 0) {
+                    Some((a, am)) => {
+                        let (sub, n2) = self.members_in(a, am, depth + 1);
                         none |= n2;
                         out.extend(sub);
                     }
-                    None => out.push(m),
+                    None => out.push((m, module)),
                 },
-                _ => out.push(m),
+                _ => out.push((m, module)),
             }
         }
         (out, none)
     }
 
-    /// An annotation that is an alias the module binds (`Mode`, `"Mode"`): what it names, alias
-    /// by alias; else the annotation.
-    pub(in crate::interp) fn resolved_annotation(&self, ann: &'static ast::Expr, module: ObjId) -> &'static ast::Expr {
-        let mut a = ann;
+    /// An annotation that is an alias the program binds (`Mode`, `"Mode"`): what it names, alias
+    /// by alias, and the module it is written in; else the annotation.
+    pub(in crate::interp) fn resolved_annotation(&self, ann: &'static ast::Expr, module: ObjId) -> (&'static ast::Expr, ObjId) {
+        let (mut a, mut m) = (ann, module);
         for _ in 0..4 {
             let name = match a {
                 ast::Expr::Name(n) => n.id.as_str(),
@@ -591,16 +627,16 @@ impl Analyzer {
                         a = e;
                         continue;
                     }
-                    _ => return a,
+                    _ => return (a, m),
                 },
-                _ => return a,
+                _ => return (a, m),
             };
-            match self.alias_of(name, module) {
-                Some(x) => a = x,
-                None => return a,
+            match self.alias_of(name, m, 0) {
+                Some((x, xm)) => (a, m) = (x, xm),
+                None => return (a, m),
             }
         }
-        a
+        (a, m)
     }
 
     /// The value parameter `a` of `fi` takes in a run for any call when its annotation is a
@@ -610,19 +646,18 @@ impl Analyzer {
     /// members; an instance of the program's class (not for a parameter with a default:
     /// `open_param`); anything else (a library's class, `Callable`, `Any`) the parameter's
     /// unknown, of no type. None for a single member: `param_from_annotation`, `as_annotated`.
-    pub(in crate::interp) fn param_from_members(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, a: &ast::Parameter, defaulted: bool, state: &mut State) -> Option<Value> {
-        let module = fi.module;
+    pub(in crate::interp) fn param_from_members(&mut self, ann: &'static ast::Expr, module: ObjId, fi: &FuncInfo, a: &ast::Parameter, defaulted: bool, state: &mut State) -> Option<Value> {
         let (members, none) = self.members_in(ann, module, 0);
         let literal = |m: &ast::Expr| matches!(m, ast::Expr::Subscript(s) if dotted_last(&s.value) == "Literal");
-        if members.is_empty() || (members.len() == 1 && !literal(members[0])) {
+        if members.is_empty() || (members.len() == 1 && !literal(members[0].0)) {
             return None;
         }
         let pname = a.name.id.as_str();
         let path = format!("{}.{}", fi.qualname, pname);
         let mut out = if none { Value::none() } else { Value::new() };
         let mut untyped = false;
-        let mut builtins: Vec<(usize, &'static ast::Expr, &'static str)> = Vec::new();
-        for (k, m) in members.into_iter().enumerate() {
+        let mut builtins: Vec<(usize, &'static ast::Expr, ObjId)> = Vec::new();
+        for (k, (m, module)) in members.into_iter().enumerate() {
             if let ast::Expr::Subscript(sub) = m {
                 if dotted_last(&sub.value) == "Literal" {
                     let elts: Vec<&'static ast::Expr> = match &*sub.slice {
@@ -637,8 +672,8 @@ impl Analyzer {
                     continue;
                 }
             }
-            if let Some((t, _)) = builtin_annotation(m) {
-                builtins.push((k, m, t));
+            if builtin_annotation(m).is_some() {
+                builtins.push((k, m, module));
                 continue;
             }
             let cv = self.in_module(module, "ann", "<annotation>", |an| {
@@ -663,7 +698,7 @@ impl Analyzer {
             // (anything: the builtin types' values among it)
             return Some(out.join(&Value::obj(o)));
         }
-        for (i, (k, m, _)) in builtins.into_iter().enumerate() {
+        for (i, (k, m, module)) in builtins.into_iter().enumerate() {
             let v = match i {
                 0 => self.as_annotated(o, m, module),
                 _ => {

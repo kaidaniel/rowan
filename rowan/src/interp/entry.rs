@@ -758,22 +758,23 @@ impl Analyzer {
         }
         // (with a default, only a torch annotation is taken: an instance for a defaulted
         // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
-        // (an alias the module binds stands for what it names)
-        let ann = a.annotation.as_deref().map(|x| self.resolved_annotation(x, fi.module));
+        // (an alias the program binds stands for what it names, in the module that writes it)
+        let resolved = a.annotation.as_deref().map(|x| self.resolved_annotation(x, fi.module));
+        let (ann, amod) = (resolved.map(|r| r.0), resolved.map_or(fi.module, |r| r.1));
         // (a union of several members, a `Literal`: member by member)
-        if let Some(v) = ann.filter(|_| !self.entry.torch_modules.contains(&fi.module)).and_then(|x| self.param_from_members(x, fi, a, d.is_some(), st)) {
+        if let Some(v) = ann.filter(|_| !self.entry.torch_modules.contains(&fi.module)).and_then(|x| self.param_from_members(x, amod, fi, a, d.is_some(), st)) {
             return match d {
                 Some(d) => d.join(&v),
                 None => v,
             };
         }
-        let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+        let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else if amod != fi.module { self.in_module(amod, "ann", "<annotation>", |an| an.param_from_annotation(ann, fi, a.name.id.as_str(), st)) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
             None => {
                 let o = self.param_source(fi, a, st);
                 // (`x: int`: an int, as the annotation says; `x: int | None` an int or None)
                 match ann {
-                    Some(ann) => self.as_annotated(o, ann, fi.module),
+                    Some(ann) => self.as_annotated(o, ann, amod),
                     None => Value::obj(o),
                 }
             }
