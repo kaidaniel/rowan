@@ -196,6 +196,10 @@ impl Analyzer {
             let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
             let v = self.heap.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
             for d in v.pts.iter() {
+                // (a data descriptor takes reads over the instance's own value, as a property does)
+                if self.is_descriptor(d, "__set__") || self.is_descriptor(d, "__delete__") {
+                    self.heap.prop_names.insert(key_str_lit(n.id.as_str()));
+                }
                 if self.heap.kind(d) == Kind::Instance && self.heap.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
                     self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], cnode, state);
                 }

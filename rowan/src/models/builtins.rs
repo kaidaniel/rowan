@@ -1269,13 +1269,13 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if report {
                 return an.load_attr(&obj, name, &c.node, st, true);
             }
-            let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
+            let has = has_attr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
             if has.kv.as_lit() != Some(intern::key_bool(true)) || !has.pts.is_empty() {
                 an.may_raise_here("AttributeError", st);
             }
             return an.load_attr(&obj, name, &c.node, st, false);
         };
-        let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
+        let has = has_attr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(name)], ..c.clone() });
         let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, name, &c.node, st, false);
         match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
             Some(false) => d.clone(),
@@ -1312,7 +1312,7 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut v = Value::new();
     if !afs.is_empty() {
         for n in attr_names_like(an, &obj, &afs, st) {
-            let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(&n)], ..c.clone() });
+            let has = has_attr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(&n)], ..c.clone() });
             if has.kv.as_lit() != Some(intern::key_bool(false)) || !has.pts.is_empty() {
                 v = v.join(&an.load_attr(&obj, &n, &c.node, st, false));
             }
@@ -1684,6 +1684,21 @@ pub(super) const STR_ATTRS: &[&str] = &[
 ];
 
 pub(super) fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (a property's or a descriptor's getter runs, for its effects)
+    if let (Some(o), Some(name)) = (c.args.first(), c.args.get(1).and_then(|n| n.kv.as_lit()).and_then(intern::key_as_str)) {
+        if o.pts.iter().any(|x| an.attr_has_getter(x, &name)) {
+            let mut ran = st.copy();
+            an.load_attr(o, &name, &c.node, &mut ran, false);
+            if ran.reachable {
+                *st = ran;
+            }
+        }
+    }
+    has_attr(an, st, c)
+}
+
+/// Whether `hasattr(o, name)` holds, by what rowan knows of `o`'s attributes (no getter runs).
+fn has_attr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (undecided: a bool all the same)
     let unknown = Value::data(&crate::domain::typed_label("bool", ""));
     if c.args.len() < 2 {

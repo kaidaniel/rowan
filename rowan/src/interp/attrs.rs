@@ -104,14 +104,38 @@ impl Analyzer {
 
     /// `obj.__dict__`: a view of its attributes (None: an AttributeError, `__slots__` on every
     /// class of an instance's MRO).
-    fn own_dict(&mut self, oid: ObjId, state: &mut State) -> Option<Value> {
-        if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).and_then(|c| self.slots_of(c)).is_some() {
-            self.raise_here("AttributeError", state);
-            return None;
+    fn own_dict(&mut self, oid: ObjId, single: bool, state: &mut State) -> Option<Value> {
+        match self.slots_refuse(oid, None) {
+            Some(true) => {
+                if single {
+                    self.raise_here("AttributeError", state);
+                } else {
+                    self.may_raise_here("AttributeError", state);
+                }
+                return None;
+            }
+            Some(false) => self.may_raise_here("AttributeError", state),
+            None => {}
         }
         let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
         self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
         Some(Value::obj(vid))
+    }
+
+    /// Does `__slots__` refuse instance `oid` attribute `name` (None: a `__dict__`) — on every
+    /// class it may be of (`classes_of_instance`: a subclass without `__slots__` has a
+    /// `__dict__`): Some(true) surely, Some(false) on some, None on none?
+    fn slots_refuse(&self, oid: ObjId, name: Option<&str>) -> Option<bool> {
+        if self.heap.kind(oid) != Kind::Instance {
+            return None;
+        }
+        let own = self.heap.instance_class(oid)?;
+        let cs = self.classes_of_instance(oid).unwrap_or_else(|| vec![own, own]);
+        let refuse = |c: &u32| self.slots_of(*c).is_some_and(|allowed| name.is_none_or(|n| !allowed.iter().any(|a| a == n)));
+        let n = cs.iter().filter(|c| refuse(c)).count();
+        // (past the subclasses `classes_of_instance` lists: the own class's, and others may not)
+        let all = n == cs.len() && !(cs.len() == 2 && cs[0] == cs[1]);
+        (n > 0).then_some(all)
     }
 
     /// The class of an instance, when it is a user class.
@@ -128,6 +152,10 @@ impl Analyzer {
     /// Reading / writing attribute `name` of `o` runs user code: a property, a descriptor,
     /// `__getattr__` / `__getattribute__` (reading), `__setattr__` (writing).
     pub(super) fn attr_runs_user_code(&self, o: u32, name: &str, store: bool) -> bool {
+        // (a class of the program's: a descriptor's `__get__` runs for a read through it)
+        if !store && self.heap.kind(o) == Kind::Class && self.heap.class_info_opt(o).is_some() {
+            return self.class_lookup(o, name).is_some_and(|dc| self.heap.class_attr(dc, name).pts.iter().any(|d| self.is_descriptor(d, "__get__")));
+        }
         let Some(c) = self.user_class_of(o) else { return false };
         let hooks: &[&str] = if store { &["__setattr__"] } else { &["__getattr__", "__getattribute__"] };
         if hooks.iter().any(|h| self.class_lookup(c, h).is_some()) {
@@ -137,6 +165,13 @@ impl Analyzer {
         let cv = self.heap.class_attr(dc, name);
         let runs = cv.pts.iter().any(|f| (self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) || (self.heap.kind(f) == Kind::Instance && self.heap.instance_class(f).is_some_and(|fc| self.class_lookup(fc, if store { "__set__" } else { "__get__" }).is_some())));
         runs
+    }
+
+    /// Is `d` an instance of a class with method `m` (`__get__`, `__set__`, `__delete__`): a
+    /// descriptor (with `__set__` or `__delete__`, a data descriptor: it takes reads over the
+    /// instance's own value)?
+    pub(in crate::interp) fn is_descriptor(&self, d: ObjId, m: &str) -> bool {
+        self.heap.kind(d) == Kind::Instance && self.heap.instance_class(d).and_then(|dc| self.class_lookup(dc, m)).is_some()
     }
 
     // ---------------------------------------------------------- attributes
@@ -186,7 +221,7 @@ impl Analyzer {
                     Some(cs) => Value::objs(crate::domain::ObjSet::from_vec(cs)),
                     None => Value::data(&format!("L{}", node.line)),
                 },
-                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => match self.own_dict(oid, state) {
+                Kind::Namespace | Kind::Instance | Kind::Function if name == "__dict__" => match self.own_dict(oid, single, state) {
                     Some(v) => v,
                     None => continue,
                 },
@@ -679,16 +714,21 @@ impl Analyzer {
             let v = self.class_attr_value(oid, name, state);
             let mut out = Value::new();
             let mut changed = false;
-            for f in v.pts.iter() {
+            for f in v.pts.iter().collect::<Vec<_>>() {
                 if self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_classmethod.get() {
                     let label = format!("{} bound", self.heap.obj(f).label);
                     out = out.join(&Value::obj(self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:cls{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
+                    changed = true;
+                } else if self.is_descriptor(f, "__get__") {
+                    // (a descriptor read through the class: what `__get__(None, cls)` returns)
+                    let r = self.call_method_with(&Value::obj(f), "__get__", vec![Value::none(), Value::obj(oid)], node, state);
+                    out = out.join(&r.unwrap_or_else(|| Value::data(&format!("L{}", node.line))));
                     changed = true;
                 } else {
                     out = out.join(&Value::obj(f));
                 }
             }
-            if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
+            if changed { out.join(&Value::kv_only(v.kv.clone())) } else { v }
         } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base.get())) {
             crate::models::enums::class_attr(self, oid, name, node, guarded, state)
         } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
@@ -787,8 +827,10 @@ impl Analyzer {
                 if fi.is_property.get() {
                     let r = self.call_user(f, Some(Value::obj(oid)), Args::pos(&[]), state, node, false);
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
-                        // stored on the instance: later accesses find this value
-                        let strong = self.heap.obj(oid).single;
+                        // stored on the instance: later accesses find this value (maybe, where the
+                        // class may hold something else under the name)
+                        let only = cv.kv.is_bot() && cv.pts.len() == 1;
+                        let strong = self.heap.obj(oid).single && only;
                         self.store_key(oid, Ns::Attr, &Value::lit(key_str_lit(name)), &r, strong, node, state);
                     }
                     outs.push(r);
@@ -801,6 +843,9 @@ impl Analyzer {
                     let label = format!("{} bound to {}", self.heap.obj(f).label, self.heap.obj(oid).label);
                     outs.push(Value::obj(self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
                 }
+            } else if self.is_descriptor(f, "__get__") {
+                let r = self.call_method_with(&Value::obj(f), "__get__", vec![Value::obj(oid), Value::obj(cls)], node, state);
+                outs.push(r.unwrap_or_else(|| Value::data(&format!("L{}", node.line))));
             } else {
                 outs.push(Value::obj(f));
             }
@@ -910,7 +955,7 @@ impl Analyzer {
         let cls_of = self.heap.instance_class(oid);
         // (a property is a data descriptor: it takes the read over the instance's own value;
         // where the class holds it on some paths only, both)
-        let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get() && !an.heap.func_info(f).is_cached.get();
+        let is_prop = |an: &Analyzer, f: u32| (an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get() && !an.heap.func_info(f).is_cached.get()) || an.is_descriptor(f, "__set__") || an.is_descriptor(f, "__delete__");
         if let (Some(c), Some(own)) = (cls_of.filter(|_| self.heap.prop_names.contains(&nk)), &v) {
             let (defs, sure) = self.class_lookup_on_path(c, name, state);
             let cv = self.class_values(&defs, nk, state);
@@ -942,14 +987,21 @@ impl Analyzer {
             let mut class_v: Option<Value> = None;
             if let (true, Some((defs, sure))) = (row.present.contains(nk), class_attr) {
                 let cv = self.class_values(&defs, nk, state);
-                let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound));
+                let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound) || self.is_descriptor(f, "__get__"));
                 if plain && sure {
                     if !guarded {
                         self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                     }
                     return v.join(&cv);
                 }
-                class_v = (plain && !defs.is_empty()).then_some(cv);
+                class_v = (plain && !defs.is_empty()).then_some(cv.clone());
+                // (a descriptor's: what `__get__` gives, on the paths without the own value)
+                if let (Some(c), true) = (cls_of, !defs.is_empty() && cv.pts.iter().any(|f| self.is_descriptor(f, "__get__"))) {
+                    let mut through = state.copy();
+                    let got = self.bound_outs(&cv, oid, c, name, node, &mut through);
+                    *state = state.join(&mut through);
+                    class_v = Some(got);
+                }
             }
             if let Some(cv) = class_v {
                 v = v.join(&cv);
@@ -1449,13 +1501,13 @@ impl Analyzer {
             }
         }
         // `__slots__` on every class of the MRO (no `__dict__`): another name raises
-        if kind == Kind::Instance {
-            if let Some(allowed) = self.heap.instance_class(oid).and_then(|c| self.slots_of(c)) {
-                if !allowed.iter().any(|a| a == name) {
-                    self.raise_here("AttributeError", state);
-                    return true;
-                }
+        match self.slots_refuse(oid, Some(name)) {
+            Some(true) => {
+                self.raise_here("AttributeError", state);
+                return true;
             }
+            Some(false) => self.may_raise_here("AttributeError", state),
+            None => {}
         }
         false
     }
