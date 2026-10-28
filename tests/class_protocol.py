@@ -8,15 +8,18 @@ Soundness: `isinstance`; `classes.rs`, `attrs.rs`):
   property overridden by a class attribute, a property with a setter, a staticmethod, a mixin
   before the base, a per-class counter through `type(self)`, an instance attribute shadowing
   the class's then deleted, `__init__` calling an overridden method that reads what the
-  subclass sets later, the instance shadowing `v` in `f`;
+  subclass sets later, the instance shadowing `v` in `f`, a `__new__` storing before
+  `__init__`, a property in the subclass over the base's class attribute;
 - a receiver (`RECV`): `AN()`, `BN()`, one or the other by `c1`;
 - one operation (`OPS`): attribute reads (`v`, `a`, `b`, `tag`, through `type(o)`, `getattr`
-  with a default, `hasattr`, `__dict__`, `__name__`), `f()` once or three times, a store then a
-  read, `del` then a read, `isinstance`, the classmethod, the unbound method, two constructions
-  then the counter;
+  with a default, `hasattr`, `__dict__`, `__name__`, `vars`), `f()` once or three times, a store
+  then a read (on the instance, by `setattr`, on the class; then through `type(o)`), `del` then
+  a read (on the instance, on the class), `isinstance`, the classmethod, the unbound method,
+  two-argument `super`, a method only one shape has, two constructions then the counter;
 - in a `try` catching AttributeError and TypeError; and the same operation in `qN(o: AN)` for
   any call, called with each receiver.
-Observation points: the result (`O = r` after the `try`), then the classes' own `v`.
+Observation points: the result (`O = r` after the `try`), then the classes' own `v` (by
+`getattr` with a default: an observation line must not raise).
     uv run --no-project python tests/class_protocol.py [--rowan N | --all] [--seed S] [--limits L] [-v]
 """
 from __future__ import annotations
@@ -59,6 +62,9 @@ SHAPES = {
                      ["class B{N}(A{N}):", "    def __init__(self):", "        super().__init__()", "        self.b = 2", "    def f(self):", "        return self.b"]),
     "self_shadow": (["class A{N}:", "    v = 1", "    def __init__(self):", "        self.a = 1", "    def f(self):", "        self.v = self.v + 1", "        return self.v"],
                     ["class B{N}(A{N}):", "    pass"]),
+    "new": (["class A{N}:", "    v = 1", "    def __new__(cls):", "        inst = super().__new__(cls)", "        inst.n = 3", "        return inst", "    def __init__(self):", "        self.a = self.n", "    def f(self):", "        return self.a"],
+            ["class B{N}(A{N}):", "    def __init__(self):", "        self.a = 4"]),
+    "sub_prop": (BASE, ["class B{N}(A{N}):", "    @property", "    def v(self):", "        return self.a + 10"]),
 }
 
 RECV = {"A": "A{N}()", "B": "B{N}()", "either": "A{N}() if c1 else B{N}()"}
@@ -81,6 +87,14 @@ OPS = {
     "make": ["O = o.make().v"],
     "unbound": ["O = A{N}.f(o)"],
     "twice": ["A{N}()", "B{N}()", "O = o.count"],
+    "clsstore": ["A{N}.v = 9", "O = o.v"],
+    "storetype": ["o.v = 5", "O = type(o).v"],
+    "setattr": ["setattr(o, 'v', 5)", "O = o.v"],
+    "delcls": ["del A{N}.v", "O = o.v"],
+    "super2": ["O = super(B{N}, o).f()"],
+    "vars": ["O = len(vars(o))"],
+    "hasv": ["O = hasattr(o, 'v')"],
+    "g": ["O = o.g()"],
 }
 
 
@@ -94,8 +108,8 @@ def body(op) -> list:
 def program(shape, recv, op) -> Prog:
     base, sub = SHAPES[shape]
     lines = [*base, *sub, "", "def p{N}():", "    global O, OA, OB", f"    o = {RECV[recv]}", *("    " + ln for ln in body(op)),
-             "    OA = A{N}.v", "    OB = B{N}.v", "",
-             "def q{N}(o: A{N}):", "    global O, OA, OB", *("    " + ln for ln in body(op)), "    OA = A{N}.v", "    OB = B{N}.v", ""]
+             "    OA = getattr(A{N}, 'v', -1)", "    OB = getattr(B{N}, 'v', -1)", "",
+             "def q{N}(o: A{N}):", "    global O, OA, OB", *("    " + ln for ln in body(op)), "    OA = getattr(A{N}, 'v', -1)", "    OB = getattr(B{N}, 'v', -1)", ""]
     calls = [RECV["A"], RECV["B"]] if recv == "either" else [RECV[recv]]
     end = [f"run(lambda: q{{N}}({c}))" for c in calls]
     return Prog(lines, end=end + ["O = O"], desc=f"{shape} {recv} {op}")

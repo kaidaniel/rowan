@@ -8,7 +8,8 @@ known items unrolled, else a fixpoint, widened past 40 rounds; `loops.rs`):
 - a body (`BODIES`): a trace `G = G * 10 + x`, the last item, an append, a dict store, a counter,
   the loop variable rebound, `break` / `continue` / `return` (surely, on a path, or through a
   `finally`), a raise, `boom()` (raising on some inputs), a handler that continues or breaks,
-  an inner loop's break, a store on some rounds, and pairs of these;
+  an inner loop's break (also its `else` continuing the outer loop), the inner loop variable
+  read after it, an append undone by `pop`, a store on some rounds, and pairs of these;
 - a form (`FORMS`): plain, with an `else:`, or inside a `try` catching ValueError;
 - and, for any call, the same loop over a parameter `xs` (`param_program`), called with the
   items.
@@ -68,6 +69,9 @@ BODIES = {
     "some": ["if c2:", "    G = x"],
     "markbrk": ["G = G * 10 + x", "if x == 2:", "    break"],
     "appendcont": ["acc.append(x)", "if c1:", "    continue", "n += 1"],
+    "leak": ["for y in [1, 2]:", "    pass", "G = G * 10 + y"],
+    "pop": ["acc.append(x)", "if c1:", "    acc.pop()"],
+    "nestedbrk": ["for y in [1, 2]:", "    if y == x:", "        break", "else:", "    continue", "break"],
 }
 
 FORMS = {
