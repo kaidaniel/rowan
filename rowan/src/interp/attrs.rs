@@ -190,7 +190,7 @@ impl Analyzer {
                     let n = self.heap.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
                     Value::lit(key_str_lit(&n))
                 }
-                Kind::Class => self.class_attr(oid, name, node, state, guarded, report),
+                Kind::Class => self.class_attr(oid, name, node, state, guarded, report, single),
                 Kind::Dict => self.dict_attr(oid, name, node, state),
                 Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => self.deque_attr(oid, name),
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
@@ -644,14 +644,18 @@ impl Analyzer {
     /// An attribute of a class object: a class attribute (a classmethod bound to this class), an Enum
     /// member, a pydantic model's attribute or method, a dataclass `__init__`, else a method of the
     /// class object.
-    fn class_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, guarded: bool, report: bool) -> Value {
+    #[allow(clippy::too_many_arguments)]
+    fn class_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, guarded: bool, report: bool, single: bool) -> Value {
         if self.class_lookup(oid, name).is_some() {
             // (one no class of the MRO holds on this path — deleted, or stored on other paths
-            // only — raises; held on some paths: may; not a read with a default, `getattr`)
+            // only — raises; held on some paths: may; not a read with a default, `getattr`;
+            // one of several objects read: may)
             let (defs, sure) = self.class_lookup_on_path(oid, name, state);
             if defs.is_empty() {
-                if report {
+                if report && single {
                     self.raise_here("AttributeError", state);
+                } else if report {
+                    self.may_raise_here("AttributeError", state);
                 }
                 return Value::new();
             }
@@ -892,6 +896,18 @@ impl Analyzer {
         let v = state.slot_opt(oid, Ns::Attr, nk);
         let row = self.read_row(oid, Ns::Attr, state);
         let cls_of = self.heap.instance_class(oid);
+        // (a property is a data descriptor: it takes the read over the instance's own value;
+        // where the class holds it on some paths only, both)
+        let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get() && !an.heap.func_info(f).is_cached.get();
+        if let (Some(c), Some(own)) = (cls_of.filter(|_| self.heap.prop_names.contains(&nk)), &v) {
+            let (defs, sure) = self.class_lookup_on_path(c, name, state);
+            let cv = self.class_values(&defs, nk, state);
+            if cv.pts.iter().any(|f| is_prop(self, f)) {
+                let surely = sure && cv.kv.is_bot() && cv.pts.iter().all(|f| is_prop(self, f));
+                let got = self.instance_class_attr(oid, c, name, &row, node, state, (guarded, try_guard, single_target)).unwrap_or_default();
+                return if surely { got } else { got.join(own) };
+            }
+        }
         if let Some(mut v) = v {
             // (stored on some paths only, on an object unknown code changed: on the others it
             // holds what that code put there — of a class of the program's only: a library
@@ -1038,7 +1054,7 @@ impl Analyzer {
             }
         }
         // the methods every NamedTuple has
-        if matches!(name, "_asdict" | "_replace" | "_fields") {
+        if matches!(name, "_asdict" | "_replace" | "_fields" | "index" | "count") {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, name).is_none() && crate::models::dataclasses::is_named_tuple_class(self, cls) {
                     if name == "_fields" {
@@ -1062,9 +1078,12 @@ impl Analyzer {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
                     let by_data = self.data_stored(oid, nk, &row, state);
-                    if !row.present.contains(nk) && by_data.is_none() {
+                    // (a row unknown code may have added the name to: there or not)
+                    let opened = !row.present.contains(nk) && !row.closed() && !row.absent.contains(nk);
+                    if !row.present.contains(nk) && by_data.is_none() && !opened {
                         return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
                     }
+                    let by_data = if opened && (by_data.is_none() || !row.mutators.is_empty()) { Some(by_data.unwrap_or_default().join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state))) } else { by_data };
                     // (there unless unknown code removed it: on the path where it did, what
                     // `__getattr__` does follows from that code's doing — a call that does not
                     // run, its result unknown, as any attribute that code may have replaced; it
@@ -1360,16 +1379,29 @@ impl Analyzer {
         };
         if let Some(cls) = cls_of {
             if let Some(defc) = self.class_lookup(cls, name) {
-                if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
+                // (what the class holds under the name on this path: a store or `del` of the class
+                // attribute may have replaced the property)
+                let (defs, sure) = self.class_lookup_on_path(cls, name, state);
+                let cv = self.class_values(&defs, nk, state);
+                let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get() && !an.heap.func_info(f).is_cached.get();
+                let surely_prop = sure && cv.kv.is_bot() && !cv.pts.is_empty() && cv.pts.iter().all(|f| is_prop(self, f));
+                if let (Some(&setter), true) = (self.heap.prop_setters.get(&(defc, nk)), cv.pts.iter().any(|f| is_prop(self, f))) {
+                    // (the property on some paths only: the others store on the instance)
+                    let mut plain = (!surely_prop).then(|| state.copy());
                     self.call_user(setter, Some(Value::obj(oid)), Args::pos(&[v.clone()]), state, node, false);
+                    if let Some(mut plain) = plain.take() {
+                        let r = plain.row(oid, Ns::Attr).store(nk, strong);
+                        plain.set_row(oid, Ns::Attr, r);
+                        plain.set_slot(oid, Ns::Attr, nk, v.clone(), strong);
+                        let j = state.join(&mut plain);
+                        state.replace_with(j);
+                    }
                     return true;
                 }
                 // a property without a setter: the assignment raises (one the class attribute
                 // may be, beside what else it may hold: may raise)
                 if kind == Kind::Instance {
-                    let cv = self.class_slot(defc, nk, state);
-                    let is_prop = |an: &Analyzer, f: u32| an.heap.kind(f) == Kind::Function && an.heap.func_info(f).is_property.get();
-                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| is_prop(self, f)) {
+                    if surely_prop {
                         self.raise_here("AttributeError", state);
                         return true;
                     }

@@ -223,7 +223,7 @@ def check(progs: list, names: list, tally: Tally, show: int = 5, verbose: bool =
                 if n not in badhere:
                     badhere.add(n)
                     if len(tally.bad_programs) < show or verbose:
-                        print(f"ROWAN MISSES {sorted(missed)} at {where_text(part[n], pt)} "
+                        print(f"ROWAN MISSES {sorted(missed)} at {where_text(part[n], pt)} [{part[n].desc}] "
                               f"(main {sorted(mlits)}{' | ?' if munk else ''}; any call {fmt(gen.get((n, pt)))}){' ' + label if label else ''}\n"
                               + show_prog(part[n], pt) + "\n")
                     tally.bad_programs.append(start + n)
@@ -262,13 +262,16 @@ def report(tally: Tally, what: str) -> str:
             f"({len(set(tally.bad_programs))} programs), {tally.exact} exact; rowan failed on {tally.crashed} batches; {tally.seconds:.1f} s")
 
 
-def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: tuple = (None,)) -> None:
+def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: tuple = (None,), pairs=None) -> None:
     """The command line every enumerator shares: CPython on every program, rowan on a sample
     (`--rowan N`, default `quick`) or on all (`--all`), under each of `limit_sets` (ROWAN_LIMITS;
     `--limits` names one; `programs(limits)`, when it takes them, makes the programs for each);
     exit 1 when rowan's claims miss a run.
     Programs whose description names one of `gaps` (known misses, listed in AGENTS.md) are
-    checked and counted apart, and fail the run only with `--strict`."""
+    checked and counted apart, and fail the run only with `--strict`.
+    `pairs` (a second generator: two operations in sequence on shared values) is the grammar
+    `--pairs` selects instead of `programs`. `--shard K/N` checks every N-th program from K
+    (local runs of a whole grammar, N at once)."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--rowan", type=int, default=quick, help="programs rowan runs on (a sample)")
     ap.add_argument("--all", action="store_true", help="rowan on every program")
@@ -276,11 +279,20 @@ def cli(programs, names: list, quick: int = 2000, gaps: tuple = (), limit_sets: 
     ap.add_argument("--limits", help="ROWAN_LIMITS for rowan's runs")
     ap.add_argument("--strict", action="store_true", help="the known gaps fail the run too")
     ap.add_argument("-v", action="store_true")
+    if pairs:
+        ap.add_argument("--pairs", action="store_true", help="two operations in sequence on shared values")
+    ap.add_argument("--shard", help="K/N: every N-th program from the K-th")
     a = ap.parse_args()
+    if getattr(a, "pairs", False):
+        programs = pairs
     progs = list(programs())
     print(f"{len(progs)} programs, {len(INPUTS)} inputs each")
     rng = random.Random(a.seed)
     idx = sorted(rng.sample(range(len(progs)), min(a.rowan, len(progs))))
+    if a.shard:
+        k, n = map(int, a.shard.split("/"))
+        idx = [i for i in idx if i % n == k] if not a.all else list(range(k, len(progs), n))
+        a.all = False
     pick = progs if a.all else [progs[i] for i in idx]
     gap = lambda p: any(g in p.desc.split() for g in gaps)
     failed = False

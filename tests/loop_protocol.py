@@ -15,7 +15,9 @@ known items unrolled, else a fixpoint, widened past 40 rounds; `loops.rs`):
   items.
 Observation points: the loop variable and `G` at the end of each round (the join over rounds),
 in the `else`, and after the loop: `G`, the loop variable (bound to -1 before the loop), the
-list's length and the counter. Each batch runs under the default limits and `budget=0`.
+list's length and the counter; and (`unbound`) the loop variable not bound before the loop,
+read after it in a `try` catching UnboundLocalError. Each batch runs under the default limits
+and `budget=0`.
     uv run --no-project python tests/loop_protocol.py [--rowan N | --all] [--seed S] [--limits L] [-v]
 """
 from __future__ import annotations
@@ -114,11 +116,34 @@ def param_program(iter_, body) -> Prog:
     return Prog(lines, end=["OG = G"], desc=f"param {iter_} {body}")
 
 
+# the loop variable not bound before the loop, read after it in a `try` (a loop that never
+# ran, or left before binding it: UnboundLocalError); its own observation
+UNBOUND_READ = ["try:", "    ux = x", "except UnboundLocalError:", "    ux = 'unbound'", "OX = ux"]
+
+
+def unbound_program(iter_, body) -> Prog:
+    lines = [ln for ln in program(iter_, body, "plain").lines if ln not in ("    x = -1", "    OX = x")]
+    lines = [*lines[:-1], *("    " + ln for ln in UNBOUND_READ), ""]
+    return Prog(lines, end=["OG = G"], desc=f"{iter_} {body} unbound")
+
+
+def param_unbound_program(iter_, body) -> Prog:
+    lines = [ln for ln in param_program(iter_, body).lines if ln != "    x = -1"]
+    i = lines.index("    OX = x")
+    lines[i:i + 1] = ["    " + ln for ln in UNBOUND_READ]
+    return Prog(lines, end=["OG = G"], desc=f"param {iter_} {body} unbound")
+
+
 def programs():
     for iter_, body, form in itertools.product(ITERS, BODIES, FORMS):
         yield program(iter_, body, form)
     for iter_, body in itertools.product(PARAM_ITERS, BODIES):
         yield param_program(iter_, body)
+    for iter_, body in itertools.product(ITERS, BODIES):
+        if iter_ not in ("while", "whileunk", "whiletrue"):
+            yield unbound_program(iter_, body)
+    for iter_, body in itertools.product(PARAM_ITERS, BODIES):
+        yield param_unbound_program(iter_, body)
 
 
 if __name__ == "__main__":

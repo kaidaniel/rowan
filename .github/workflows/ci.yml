@@ -130,6 +130,50 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/class_protocol.py; about 10 s)
         run: uv run --no-project python tests/class_protocol.py --all
 
+      - name: collections models (bounded Counter, defaultdict, OrderedDict, deque, namedtuple calls vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/collections_protocol.py; about 5 s)
+        run: uv run --no-project python tests/collections_protocol.py --all
+
+      - name: itertools model (bounded itertools calls vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/itertools_protocol.py; about 3 s)
+        run: uv run --no-project python tests/itertools_protocol.py --all
+
+      - name: sqlite3 model (bounded queries on in-memory tables vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/sqlite_protocol.py; about 3 s)
+        run: uv run --no-project python tests/sqlite_protocol.py --all
+
+      - name: configparser model (bounded INI reads vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/config_protocol.py; about 3 s)
+        run: uv run --no-project python tests/config_protocol.py --all
+
+      - name: argparse model (bounded parsers x argvs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/argparse_protocol.py; about 5 s)
+        run: uv run --no-project python tests/argparse_protocol.py --all
+
+      - name: pure paths (bounded PurePosixPath / os.path operations vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/pathlib_protocol.py; about 3 s)
+        run: uv run --no-project python tests/pathlib_protocol.py --all
+
+      - name: Narrowing, pairs (two tests on one value vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
+        run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
+
+      - name: The data model, pairs (two operations on the same instances vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/dunder_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/dunder_protocol.py --pairs --rowan 2500
+
+      - name: Classes, pairs (a change then an operation vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/class_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/class_protocol.py --pairs --rowan 2500
+
+      - name: Container models, pairs (a mutation then an operation vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/container_protocol.py --pairs; about 15 s)
+        run: uv run --no-project python tests/container_protocol.py --pairs --rowan 4000
+
+      - name: Calls, pairs (two callees on shared values vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/call_protocol.py --pairs; about 25 s)
+        run: uv run --no-project python tests/call_protocol.py --pairs --rowan 1500
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick

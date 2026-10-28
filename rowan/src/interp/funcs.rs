@@ -179,6 +179,8 @@ impl Analyzer {
                     fi.is_property.set(true);
                     if q.ends_with("cached_property") {
                         fi.is_cached.set(true);
+                    } else {
+                        self.heap.prop_names.insert(key_str_lit(&fi.name));
                     }
                 }
                 continue;

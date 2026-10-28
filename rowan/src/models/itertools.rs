@@ -196,9 +196,16 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             };
             let (start, stop, step) = if c.args.len() <= 2 { (Some(None), lit(c.args.get(1).cloned()), Some(None)) } else { (lit(c.args.get(1).cloned()), lit(c.args.get(2).cloned()), lit(c.args.get(3).cloned())) };
             let (Some(start), Some(stop), Some(step)) = (start, stop, step) else {
+                // (a bound not known may be negative, a step zero: ValueError)
+                an.may_raise_here("ValueError", st);
                 let e = items(an, &src, &node, st).1;
                 return it_list(an, None, e, &node, st, &ctx);
             };
+            // (a negative start or stop, a step below 1: ValueError)
+            if start.is_some_and(|x| x < 0) || stop.is_some_and(|x| x < 0) || step.is_some_and(|x| x < 1) {
+                an.raise_here("ValueError", st);
+                return Value::new();
+            }
             let (s0, st1) = (start.unwrap_or(0).max(0) as usize, step.unwrap_or(1).max(1) as usize);
             let its = match infinite_of(an, &src) {
                 Some(inf) => match stop {
@@ -435,6 +442,9 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "takewhile" | "dropwhile" | "filterfalse" => {
             let (Some(pred), Some(src)) = (arg(0, "predicate"), arg(1, "iterable")) else { return Value::data(&name) };
+            // (`filterfalse(None, xs)`: the items themselves are tested)
+            let identity = name == "filterfalse" && pred.pts.is_empty() && pred.kv.as_lit() == Some(intern::key_none());
+            let it_call = |an: &mut Analyzer, f: &Value, args: Vec<Value>, nd: &Node, st: &mut State| if identity { args[0].clone() } else { it_call(an, f, args, nd, st) };
             let (its, e) = items(an, &src, &node, st);
             match its {
                 Some(its) => {
@@ -525,6 +535,15 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "batched" => {
             let Some(src) = arg(0, "iterable") else { return Value::data("batched") };
             let n = arg(1, "n").and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int));
+            // (a batch size below 1: ValueError; one not known may be)
+            match n {
+                Some(n) if n < 1 => {
+                    an.raise_here("ValueError", st);
+                    return Value::new();
+                }
+                None => an.may_raise_here("ValueError", st),
+                _ => {}
+            }
             let (its, e) = items(an, &src, &node, st);
             match (its, n) {
                 (Some(its), Some(n)) if n > 0 => {

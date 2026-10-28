@@ -172,6 +172,8 @@ pub struct Modes {
     pub key_alias: Option<(KeyId, KeyId)>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
+    /// a `get` reads the item: a defaultdict's factory and a Counter's 0 do not answer it
+    pub plain_get: bool,
     /// expressions in call position (`x.m` of `x.m(…)`): a method read of an input is not a
     /// key of it
     pub callee_nodes: FxHashSet<usize>,

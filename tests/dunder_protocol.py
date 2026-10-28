@@ -17,7 +17,10 @@ fallbacks, and what it raises.
 Observation points: the log's length and its text after the operation, and the result. Each
 batch runs under the default limits and `budget=0` (the helper skipped).
 
-    uv run --no-project python tests/dunder_protocol.py [--rowan N | --all] [--seed S] [-v]
+`--pairs`: one of `FIRST` (an operation that changes `a` / `b` or runs their dunders) then any
+operation, each in its own `try`, on the same instances; observed after the second.
+
+    uv run --no-project python tests/dunder_protocol.py [--pairs] [--rowan N | --all] [--seed S] [-v]
 """
 from __future__ import annotations
 
@@ -133,11 +136,13 @@ OPS = {
 WHERE = ["here", "helper"]
 
 
-def program(cls, op, where) -> Prog:
+def program(cls, op, where, first=None) -> Prog:
     lines = ["import copy", "E{N} = []", "", "class K{N}:", "    def __init__(self, v):", "        object.__setattr__(self, 'v', v)"]
     for d in CLASSES[cls]:
         lines += ["    " + ln for ln in DUNDERS[d]]
     body = ["try:", *("    " + ln for ln in OPS[op]), "except Exception:", "    r = -1"]
+    if first:
+        body = ["try:", *("    " + ln for ln in OPS[first]), "except Exception:", "    r = -1", *body]
     obs = ["n = len(E{N})", "O = n", "t = ','.join(E{N})", "O = t", "t = r if isinstance(r, (bool, int, str)) else 'obj'", "O = t"]
     lines += ["", "def h{N}(a, b):", "    global O", "    r = 0", *("    " + ln for ln in body + obs), "    return r", ""]
     lines += ["def p{N}():", "    global O", "    a = K{N}(1)", "    b = K{N}(2)", "    E{N}.clear()"]
@@ -145,7 +150,7 @@ def program(cls, op, where) -> Prog:
         lines += ["    r = 0", *("    " + ln for ln in body + obs)]
     else:
         lines += ["    r = h{N}(a, b)", *("    " + ln for ln in obs)]
-    return Prog(lines, end=["O = O"], desc=f"{cls} {op} {where}")
+    return Prog(lines, end=["O = O"], desc=f"{cls} {first + '+' if first else ''}{op} {where}")
 
 
 def programs():
@@ -153,7 +158,17 @@ def programs():
         yield program(cls, op, where)
 
 
+# the first operation of a pair: those that change the instances or the log's dunders' state
+FIRST = ["iadd", "setattr", "delattr", "sort", "setitem", "delitem", "with", "copy", "getattr", "hasattr", "eq", "hash",
+         "dict_key", "bool", "iter"]
+
+
+def pair_programs():
+    for cls, first, op, where in itertools.product(CLASSES, FIRST, OPS, WHERE):
+        yield program(cls, op, where, first)
+
+
 LIMITS = (None, "budget=0")
 
 if __name__ == "__main__":
-    cli(programs, NAMES, limit_sets=LIMITS)
+    cli(programs, NAMES, limit_sets=LIMITS, pairs=pair_programs)

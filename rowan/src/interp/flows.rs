@@ -1151,6 +1151,10 @@ impl<'a> Flow<'a> {
                 // (the receiver: a method that may change it; `n.f(…)` of a name: n's method, or
                 // a module's function)
                 match &*a.value {
+                    // (`object.__setattr__(x, "a", …)`: `setattr(x, "a", …)` past x's own hooks)
+                    Expr::Name(n) if n.id.as_str() == "object" && matches!(m, "__setattr__" | "__delattr__") && !self.local("object") && self.builtin("object") => {
+                        return self.attr_builtin(if m == "__setattr__" { "setattr" } else { "delattr" }, c);
+                    }
                     Expr::Name(n) if !self.local(n.id.as_str()) => {
                         self.name(s(n.id.as_str()), Some(s(m)));
                         if !pure {
@@ -1163,6 +1167,15 @@ impl<'a> Flow<'a> {
                     Expr::Call(sc) if matches!(&*sc.func, Expr::Name(f) if f.id.as_str() == "super") && (sc.arguments.args.is_empty() || sc.arguments.args.get(1).is_some_and(|x| self.recv_base(x))) => {
                         self.recv.supers.insert(s(m));
                         sc.arguments.args.iter().take(1).for_each(|x| self.expr(x, Pos::Read));
+                        // (`super().__setattr__("a", …)`: the receiver's attribute, by its name)
+                        if matches!(m, "__setattr__" | "__delattr__") {
+                            match self.attr_name(c.arguments.args.first()) {
+                                (Some(n), _) => drop(if m == "__setattr__" { self.recv.stores.insert(n) } else { self.recv.deletes.insert(n) }),
+                                (_, Some(l)) if m == "__setattr__" => self.recv.stores_like.push(l),
+                                (_, Some(l)) => self.recv.deletes_like.push(l),
+                                _ => self.recv.escapes = true,
+                            }
+                        }
                     }
                     v => {
                         let recv = self.srcs(v);

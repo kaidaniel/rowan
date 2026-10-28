@@ -215,7 +215,7 @@ impl Registry {
         r(&["dataclasses.replace"], m_dc_replace);
         r(&["dataclasses.astuple"], m_astuple);
         r(&["dataclasses.make_dataclass"], m_make_dataclass);
-        r(&["namedtuple._asdict", "namedtuple._replace"], m_nt_method);
+        r(&["namedtuple._asdict", "namedtuple._replace", "namedtuple.index", "namedtuple.count"], m_nt_method);
         r(&["operator.itemgetter", "operator.attrgetter"], m_getter);
         // a coroutine is analysed as its result: running / awaiting it is that value
         r(&["asyncio.run", "asyncio.create_task", "asyncio.ensure_future", "asyncio.wait_for", "asyncio.shield"], m_first_arg);

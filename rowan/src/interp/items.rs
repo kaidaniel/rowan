@@ -199,7 +199,7 @@ impl Analyzer {
         let (report, guarded, single_target, line_data) = (rd.report, rd.guarded, rd.single_target, &rd.line_data);
         let kind = self.heap.kind(oid);
         // (a defaultdict / Counter key read: `models::counter::default_on_read`)
-        let counter_restore = if kind == Kind::Dict && ns == Ns::Item && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
+        let counter_restore = if kind == Kind::Dict && ns == Ns::Item && !self.mode.plain_get && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
             crate::models::counter::default_on_read(self, oid, key, node, single_target, state)
         } else {
             None
@@ -1433,6 +1433,13 @@ impl Analyzer {
         let key = &ckey;
         let mut row = state.row(oid, ns);
         let is_lit = matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty();
+        // (an object rowan cannot see the class of may be a list: `del x[0]` shifts its later
+        // items down, so no index is surely gone and none keeps its value)
+        let shifts = kind == Kind::Unknown && ns == Ns::Item && kv_literals(&key.kv).iter().any(|k| intern::key_as_int(k).is_some());
+        if shifts {
+            state.slots.drop_where(&oid, |(n, k)| *n == Ns::Item && intern::key_as_int(*k).is_some());
+        }
+        let strong = strong && !shifts;
         let mut raise: Option<(bool, Value)> = None;
         for k in intern::sorted_by_str(kv_literals(&key.kv).iter()) {
             let cls = classify(&row, k);
@@ -1471,8 +1478,10 @@ impl Analyzer {
                 raise = Some((true, key.clone()));
             }
         }
-        // (not reported: a model's removal, `pop` with a default, raises on its own terms)
-        if let Some((surely, kv)) = raise.filter(|_| report && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
+        // (not reported: a model's removal, `pop` with a default, raises on its own terms; a
+        // Counter's `del` of a key it lacks does nothing)
+        let counter = ns == Ns::Item && self.m.counters.contains(&oid);
+        if let Some((surely, kv)) = raise.filter(|_| report && !counter && ((ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises)) {
             state.set_row(oid, ns, row.clone());
             let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
             if !self.unwind.tries.is_empty() {

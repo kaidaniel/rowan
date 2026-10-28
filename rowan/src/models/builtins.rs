@@ -5,6 +5,81 @@
 
 use super::*;
 
+/// `dict(x)`'s pairs from object `x` into the dict `oid` (a zip, a sequence of pairs, an
+/// instance with `__iter__`; else pairs not known).
+fn dict_pairs_from(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, x: ObjId) {
+    match an.heap.kind(x) {
+        Kind::Zip if an.cursor_of(x, st) == Some(0) => {
+            let Payload::Zip(ks, vs) = an.heap.obj(x).payload.clone() else { return };
+            // both lengths known: the pairs zip makes (it stops at the shorter)
+            if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
+                for item in items {
+                    let parts = an.unpack(&item, 2, st, &c.node);
+                    an.check_hashable(&parts[0], st);
+                    an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
+                }
+                return;
+            }
+            // (each key is hashed: a list among them raises, if there is one)
+            let kel = an.elem_of(&ks, &c.node, st);
+            an.check_hashable_if(&kel, false, st);
+            let lits = an.lit_keys(&ks, st);
+            let vel = an.elem_of(&vs, &c.node, st);
+            // values that are one of several sequences of known lengths: the keys
+            // the shortest pairs are definite, those of the longer ones possible
+            let klist = an.iterate(&ks, &c.node, st).items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<Vec<KeyId>>>());
+            let lens: Option<Vec<usize>> = if vs.pts.len() > 1 && vs.kv.is_bot() { vs.pts.iter().map(|o| if matches!(an.heap.kind(o), Kind::List | Kind::Tuple) && !an.heap.obj(o).iterator { an.heap.llen(o, st) } else { None }).collect() } else { None };
+            if let (Some(kl), Some(lens)) = (klist, lens) {
+                let (lo, hi) = (lens.iter().copied().min().unwrap_or(0), lens.iter().copied().max().unwrap_or(0));
+                let mut row = st.row(oid, Ns::Item);
+                for (i, k) in kl.into_iter().enumerate().take(hi) {
+                    row = row.store(k, i < lo);
+                    st.set_slot(oid, Ns::Item, k, Value::with_kv(vel.pts.clone(), DATA), false);
+                }
+                st.set_row(oid, Ns::Item, row);
+            } else if let Some(lits) = lits {
+                // the values' length is unknown: the header/row idiom pairs every
+                // key (design case d30), so the keys are definite
+                let mut row = st.row(oid, Ns::Item);
+                for k in lits.iter() {
+                    row = row.store(k, true);
+                    st.set_slot(oid, Ns::Item, k, Value::with_kv(vel.pts.clone(), DATA), false);
+                }
+                st.set_row(oid, Ns::Item, row);
+            } else {
+                let kel = an.elem_of(&ks, &c.node, st);
+                an.store_key(oid, Ns::Item, &kel, &vel, false, &c.node, st);
+            }
+        }
+        Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Zip | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
+            let it = an.iterate(&Value::obj(x), &c.node, st);
+            match (&it.elem, &it.items) {
+                // (each item a pair: ValueError for another length; its key hashed)
+                (_, Some(items)) => {
+                    for item in items {
+                        an.check_unpack_len(item, 2, st);
+                        let parts = an.unpack(item, 2, st, &c.node);
+                        an.check_hashable(&parts[0], st);
+                        an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
+                    }
+                }
+                (Elem::Pair(k, v), None) => {
+                    an.check_hashable_if(k, false, st);
+                    an.store_key(oid, Ns::Item, &k, v, false, &c.node, st)
+                }
+                _ => {
+                    let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
+                    st.set_row(oid, Ns::Item, r);
+                }
+            }
+        }
+        _ => {
+            let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
+            st.set_row(oid, Ns::Item, r);
+        }
+    }
+}
+
 pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (pairs from a number, None or a str: TypeError / ValueError)
     if let Some(src) = c.args.first() {
@@ -51,74 +126,25 @@ pub(super) fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             d.order = order.into();
             st.set_row(oid, Ns::Item, Row::from_data(d));
         } else {
-            for x in src.pts.iter() {
-                match an.heap.kind(x) {
-                    Kind::Zip if an.cursor_of(x, st) == Some(0) => {
-                        let Payload::Zip(ks, vs) = an.heap.obj(x).payload.clone() else { continue };
-                        // both lengths known: the pairs zip makes (it stops at the shorter)
-                        if let Some(items) = an.iterate(&Value::obj(x), &c.node, st).items {
-                            for item in items {
-                                let parts = an.unpack(&item, 2, st, &c.node);
-                                an.check_hashable(&parts[0], st);
-                                an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
-                            }
-                            continue;
-                        }
-                        let lits = an.lit_keys(&ks, st);
-                        let vel = an.elem_of(&vs, &c.node, st);
-                        // values that are one of several sequences of known lengths: the keys
-                        // the shortest pairs are definite, those of the longer ones possible
-                        let klist = an.iterate(&ks, &c.node, st).items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<Vec<KeyId>>>());
-                        let lens: Option<Vec<usize>> = if vs.pts.len() > 1 && vs.kv.is_bot() { vs.pts.iter().map(|o| if matches!(an.heap.kind(o), Kind::List | Kind::Tuple) && !an.heap.obj(o).iterator { an.heap.llen(o, st) } else { None }).collect() } else { None };
-                        if let (Some(kl), Some(lens)) = (klist, lens) {
-                            let (lo, hi) = (lens.iter().copied().min().unwrap_or(0), lens.iter().copied().max().unwrap_or(0));
-                            let mut row = st.row(oid, Ns::Item);
-                            for (i, k) in kl.into_iter().enumerate().take(hi) {
-                                row = row.store(k, i < lo);
-                                st.set_slot(oid, Ns::Item, k, Value::with_kv(vel.pts.clone(), DATA), false);
-                            }
-                            st.set_row(oid, Ns::Item, row);
-                        } else if let Some(lits) = lits {
-                            // the values' length is unknown: the header/row idiom pairs every
-                            // key (design case d30), so the keys are definite
-                            let mut row = st.row(oid, Ns::Item);
-                            for k in lits.iter() {
-                                row = row.store(k, true);
-                                st.set_slot(oid, Ns::Item, k, Value::with_kv(vel.pts.clone(), DATA), false);
-                            }
-                            st.set_row(oid, Ns::Item, row);
-                        } else {
-                            let kel = an.elem_of(&ks, &c.node, st);
-                            an.store_key(oid, Ns::Item, &kel, &vel, false, &c.node, st);
-                        }
-                    }
-                    Kind::List | Kind::Tuple | Kind::Set | Kind::View | Kind::Enumerate | Kind::Zip | Kind::Instance if an.heap.kind(x) != Kind::Instance || an.heap.instance_class(x).is_some_and(|cl| an.class_lookup(cl, "keys").is_none()) => {
-                        let it = an.iterate(&Value::obj(x), &c.node, st);
-                        match (&it.elem, &it.items) {
-                            // (each item a pair: ValueError for another length; its key hashed)
-                            (_, Some(items)) => {
-                                for item in items {
-                                    an.check_unpack_len(item, 2, st);
-                                    let parts = an.unpack(item, 2, st, &c.node);
-                                    an.check_hashable(&parts[0], st);
-                                    an.store_key(oid, Ns::Item, &parts[0], &parts[1], true, &c.node, st);
-                                }
-                            }
-                            (Elem::Pair(k, v), None) => {
-                                an.check_hashable_if(k, false, st);
-                                an.store_key(oid, Ns::Item, &k, v, false, &c.node, st)
-                            }
-                            _ => {
-                                let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
-                                st.set_row(oid, Ns::Item, r);
-                            }
-                        }
-                    }
-                    _ => {
-                        let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
-                        st.set_row(oid, Ns::Item, r);
-                    }
+            // (several objects the pairs may come from: each on a state of its own — one's
+            // pairs are not the other's)
+            let alts: Vec<ObjId> = src.pts.iter().collect();
+            if alts.len() > 1 {
+                let base = st.copy();
+                let mut out: Option<State> = None;
+                for x in alts {
+                    let mut here = base.copy();
+                    dict_pairs_from(an, &mut here, c, oid, x);
+                    out = Some(match out {
+                        Some(mut o) => o.join(&mut here),
+                        None => here,
+                    });
                 }
+                if let Some(o) = out {
+                    st.replace_with(o);
+                }
+            } else if let Some(x) = alts.first() {
+                dict_pairs_from(an, st, c, oid, *x);
             }
             if src.pts.is_empty() {
                 let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("dict@L{}", c.line), SourceKind::Data));
@@ -167,9 +193,18 @@ pub(super) fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
-/// Items `sort` / `sorted` may find that do not compare with each other: literals of two
-/// kinds that do not (numbers, strs, bytes, the others), or None among two or more.
-pub(super) fn incomparable(items: &[Value]) -> bool {
+/// Items `sort` / `sorted` / `min` / `max` may find that do not compare with each other:
+/// literals or containers of two kinds that do not (numbers, strs, bytes, lists, tuples, sets),
+/// or among two or more, one of a kind that orders with nothing (None, a dict, other literals).
+/// Instances and unknowns are left to their own `__lt__`.
+pub(super) fn incomparable(an: &Analyzer, items: &[Value]) -> bool {
+    order_kinds(an, items).0
+}
+
+/// `incomparable`, and whether surely so: every item of one kind alone (a literal kind or a
+/// container's), two kinds among them — the first item of another kind meets one of the
+/// first's (`min`, `max`, `sorted` compare every item).
+fn order_kinds(an: &Analyzer, items: &[Value]) -> (bool, bool) {
     let kind = |k: KeyId| intern::with_key(k, |k| match k {
         intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
         intern::Key::Str(_) => 1,
@@ -177,20 +212,38 @@ pub(super) fn incomparable(items: &[Value]) -> bool {
         intern::Key::None => 3,
         _ => 4,
     });
-    let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
+    let obj_kind = |o: ObjId| match an.heap.kind(o) {
+        Kind::List if !an.heap.obj(o).iterator => Some(5u8),
+        Kind::Tuple => Some(6),
+        Kind::Dict => Some(7),
+        Kind::Set => Some(8),
+        _ => None,
+    };
+    let of = |v: &Value| -> Vec<u8> { crate::domain::kv_literals(&v.kv).iter().map(kind).chain(v.pts.iter().filter_map(obj_kind)).collect() };
+    let mut kinds: Vec<u8> = items.iter().flat_map(of).collect();
     kinds.sort_unstable();
     kinds.dedup();
-    kinds.len() > 1 || (kinds.contains(&3) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())))
+    let may = kinds.len() > 1 || (kinds.iter().any(|k| matches!(k, 3 | 4 | 7)) && (items.len() > 1 || items.iter().any(|v| !v.kv.is_literal())));
+    let one_kind = |v: &Value| (v.kv.is_literal() || v.kv.is_bot()) && v.pts.iter().all(|o| obj_kind(o).is_some()) && { let mut ks = of(v); ks.sort_unstable(); ks.dedup(); ks.len() == 1 };
+    (may, may && kinds.len() > 1 && items.iter().all(one_kind))
+}
+
+/// The items of the containers in `v` as `incomparable` looks at them: their positions where
+/// known, else their elements twice (two of them).
+pub(super) fn order_items(an: &Analyzer, v: &Value, st: &State) -> Vec<Value> {
+    v.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
+        Some(ps) => ps,
+        None => {
+            let e = Value::with_kv(st.slot(o, Ns::Elem, crate::intern::STAR).pts, st.elems.get(&o).unwrap_or(DATA));
+            vec![e.clone(), e]
+        }
+    }).collect()
 }
 
 pub(super) fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (`sorted` compares the items, as `list.sort`)
     if let (true, Some(a)) = (c.qual == "builtins.sorted" && c.kw("key").is_none(), c.args.first()) {
-        let items: Vec<Value> = a.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && !an.heap.obj(*o).iterator).flat_map(|o| match an.known_positions(o, st) {
-            Some(ps) => ps,
-            None => vec![Value::kv_only(st.elems.get(&o).unwrap_or(DATA)), Value::kv_only(st.elems.get(&o).unwrap_or(DATA))],
-        }).collect();
-        if incomparable(&items) {
+        if incomparable(an, &order_items(an, a, st)) {
             an.may_raise_here("TypeError", st);
         }
     }
@@ -556,10 +609,15 @@ pub(super) fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value 
     }
 }
 
+/// An undecided `isinstance`: True or False.
+fn either_bool() -> Value {
+    Value::kv_only(KeyVal::lits(KeySet::from_iter([intern::key_bool(false), intern::key_bool(true)])))
+}
+
 /// `isinstance(x, C)`: decided when every object of `x` has a known kind / class; a
 /// placeholder records an event so the call site decides.
 pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
+    let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return either_bool() };
     // isinstance(x, torch.Tensor): decided for tensors and for containers / literals
     if an.m.torch_on {
         if let Some(q) = cv.single().filter(|o| an.heap.kind(*o) == Kind::External).map(|o| an.heap.external_qual(o)) {
@@ -576,11 +634,11 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
                 if not_tensor {
                     return Value::lit(intern::key_bool(false));
                 }
-                return Value::data("bool");
+                return either_bool();
             }
         }
     }
-    let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
+    let Some(classes) = an.isinstance_classes(cv, st) else { return either_bool() };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     let mut verdicts: Vec<bool> = Vec::new();
     // (an unknown beside objects: of the program's classes it is no instance — unknown values
@@ -592,11 +650,11 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
             (true, _) => verdicts.push(false),
             (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => match typed_isinstance(an, t, &classes) {
                 Some(b) => verdicts.push(b),
-                None => return Value::data("bool"),
+                None => return either_bool(),
             },
             // (a library class's: decided by the objects, as for the program's classes)
             _ if classes.iter().all(|c| an.heap.kind(*c) != Kind::External || !an.heap.external_qual(*c).starts_with("builtins.")) => verdicts.push(false),
-            _ => return Value::data("bool"),
+            _ => return either_bool(),
         }
     }
     // a typed unknown alone (`str(?)`, `None | int(?)`): by its type
@@ -605,7 +663,7 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
             for (_, kind) in parts {
                 match typed_isinstance(an, kind, &classes) {
                     Some(b) => verdicts.push(b),
-                    None => return Value::data("bool"),
+                    None => return either_bool(),
                 }
             }
         }
@@ -614,19 +672,19 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     if (v.pts.is_empty() && typed_parts(&v.kv).is_none()) || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
         if !v.kv.is_literal() || lits.is_empty() {
-            return Value::data("bool");
+            return either_bool();
         }
         for k in lits.iter() {
             match kind_isinstance(an, lit_kind_name(k), &classes) {
                 Some(b) => verdicts.push(b),
-                None => return Value::data("bool"),
+                None => return either_bool(),
             }
         }
     }
     for o in v.pts.iter() {
         match an.instance_of(o, &classes, st) {
             Some(b) => verdicts.push(b),
-            None => return Value::data("bool"),
+            None => return either_bool(),
         }
     }
     if verdicts.iter().all(|b| *b) {
@@ -634,7 +692,7 @@ pub(super) fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     } else if verdicts.iter().all(|b| !*b) {
         Value::lit(intern::key_bool(false))
     } else {
-        Value::data("bool")
+        either_bool()
     }
 }
 
@@ -882,23 +940,21 @@ pub(super) fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         };
     }
+    // (items not known one by one: the containers' elements may not compare)
+    let known = matches!(&cands, Some(its) if !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX);
+    if !known && c.args.len() == 1 && c.kw("key").is_none() && incomparable(an, &order_items(an, &c.args[0], st)) {
+        an.may_raise_here("TypeError", st);
+    }
     if let Some(items) = cands.filter(|its| !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX) {
         let keyf = c.kw("key").filter(|k| !k.pts.is_empty());
         // (literals of kinds that do not compare: `min('a', 1)`, None, tuples whose items may not)
-        if keyf.is_none() && items.len() >= 2 {
-            let kind = |k: KeyId| intern::with_key(k, |k| match k {
-                intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => 0u8,
-                intern::Key::Str(_) => 1,
-                intern::Key::Bytes(_) => 2,
-                intern::Key::None => 3,
-                _ => 4,
-            });
-            let mut kinds: Vec<u8> = items.iter().flat_map(|v| crate::domain::kv_literals(&v.kv).iter().map(kind).collect::<Vec<u8>>()).collect();
-            kinds.sort_unstable();
-            kinds.dedup();
-            if kinds.len() > 1 || kinds.iter().any(|k| *k >= 3) {
-                an.may_raise_here("TypeError", st);
+        match (keyf.is_none() && items.len() >= 2).then(|| order_kinds(an, &items)) {
+            Some((_, true)) => {
+                an.raise_here("TypeError", st);
+                return Value::new();
             }
+            Some((true, _)) => an.may_raise_here("TypeError", st),
+            _ => {}
         }
         let mut keys: Vec<Option<KeyId>> = Vec::new();
         let mut kvals: Vec<Value> = Vec::new();

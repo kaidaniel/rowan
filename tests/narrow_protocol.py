@@ -13,7 +13,11 @@ join; Soundness: `isinstance` against a builtin class, None, typed unknowns):
 - or matched (`match x:`) against two patterns of `PATTERNS` (literals, None, class patterns of
   builtins and of the program's class, sequence and mapping patterns, a guard) and `case _`.
 
-    uv run --no-project python tests/narrow_protocol.py [--rowan N | --all] [--seed S] [-v]
+`--pairs`: two tests of `TESTS` on the same `x` (`PAIR_FORMS`: nested, in sequence after the
+first's join, `and` / `or`, an early return on the first then the second, the first rebinding
+`x` on a path then the second).
+
+    uv run --no-project python tests/narrow_protocol.py [--pairs] [--rowan N | --all] [--seed S] [-v]
 """
 from __future__ import annotations
 
@@ -104,6 +108,29 @@ def match_program(pair, pats) -> Prog:
     return Prog(lines, end=["O = O"], desc=f"{'/'.join(pair)} match {'+'.join(pats)}")
 
 
+PAIR_FORMS = {
+    "nested": ["if T1:", "    if T2:", "        O = x", "    else:", "        O = x", "    O = x", "O = x"],
+    "seq": ["if T1:", "    O = x", "if T2:", "    O = x", "else:", "    O = x", "O = x"],
+    "and": ["if T1 and T2:", "    O = x", "else:", "    O = x", "O = x"],
+    "or": ["if T1 or T2:", "    O = x", "else:", "    O = x", "O = x"],
+    "guard": ["if not (T1):", "    return", "if T2:", "    O = x", "O = x"],
+    "rebind": ["if T1:", "    x = 4 if c2 else x", "if T2:", "    O = x", "else:", "    O = x", "O = x"],
+}
+
+
+def pair_program(pair, t1, t2, form) -> Prog:
+    body = [ln.replace("T1", TESTS[t1]).replace("T2", TESTS[t2]) for ln in PAIR_FORMS[form]]
+    lines = [*header(), "def p{N}():", "    global O", f"    x = {value(pair)}", *("    " + ln for ln in body), "",
+             "def q{N}(x):", "    global O", *("    " + ln for ln in body), ""]
+    end = [f"run(lambda: q{{N}}({v}))" for v in pair]
+    return Prog(lines, end=end + ["O = O"], desc=f"{'/'.join(pair)} {t1}+{t2} {form}")
+
+
+def pair_programs():
+    for pair, (t1, t2), form in itertools.product(pairs(), itertools.permutations(TESTS, 2), PAIR_FORMS):
+        yield pair_program(pair, t1, t2, form)
+
+
 def programs():
     for pair, test, form in itertools.product(pairs(), TESTS, FORMS):
         yield test_program(pair, test, form)
@@ -112,4 +139,4 @@ def programs():
 
 
 if __name__ == "__main__":
-    cli(programs, NAMES)
+    cli(programs, NAMES, pairs=pair_programs)

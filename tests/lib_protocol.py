@@ -15,6 +15,7 @@ Observation point: the result (a scalar, else its `repr`) or the class it raised
 from __future__ import annotations
 
 import itertools
+import re
 
 from protocol_lib import Prog, cli
 
@@ -149,9 +150,17 @@ TAIL = [
 
 
 def program(lib: dict, value: str, expr: str, desc: str) -> Prog:
-    helpers = [ln.replace("def W", "def W{N}_").replace("WD(", "WD{N}_(") for ln in lib.get("helpers", [])]
-    expr = expr.replace("WD(", "WD{N}_(").replace("W(", "W{N}_(")
-    lines = [*lib["imports"], *helpers, "def p{N}():", "    global O", f"    v = {value}", "    try:", f"        r = {expr}"]
+    """The program: the library's imports and helpers (the helpers' and module-level names made
+    the program's own, `W` → `W{N}_`: programs share one module), then the operation."""
+    helpers = lib.get("helpers", [])
+    names = [m.group(1) for ln in helpers if (m := re.match(r"def (\w+)\(", ln))]
+    names += [m.group(1) for ln in lib["imports"] if (m := re.match(r"(\w+) = ", ln))]
+
+    def own(t: str) -> str:
+        for n in names:
+            t = re.sub(rf"\b{n}\b", n + "{N}_", t)
+        return t
+    lines = [*map(own, lib["imports"]), *map(own, helpers), "def p{N}():", "    global O", f"    v = {value}", "    try:", f"        r = {own(expr)}"]
     lines += ["    " + ln for ln in TAIL]
     return Prog(lines, desc=desc)
 

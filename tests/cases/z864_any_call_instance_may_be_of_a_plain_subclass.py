@@ -21,7 +21,7 @@ class Sub(Base):
 
 def kind(o: Base):
     is_sub = isinstance(o, Sub)
-    #@general is_sub: types={bool}  # (an undecided isinstance is `bool(?)`, not True | False)
+    #@general is_sub: exactly={False, True}  # (an undecided isinstance is True | False, it was a bool not known)
     name = type(o).__name__
     #@general name: exactly={"Base", "Sub"}
     cls_name = o.__class__.__name__

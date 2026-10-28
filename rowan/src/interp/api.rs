@@ -16,7 +16,7 @@
 //!   - modules: `import_module`, `make_module`, `is_local_module`, `type_only_name`,
 //!     `file_of_frame`;
 //!   - reads and writes: `load_attr`, `load_item`, `store_attr`, `store_item`, `store_key`,
-//!     `delete_item`, `delete_subscript`, `copy_into`, `copy_object`, `method_value`,
+//!     `delete_item`, `delete_subscript`, `load_item_for_get`, `copy_into`, `copy_object`, `method_value`,
 //!     `class_lookup`, `class_lookup_on_path`, the literal views (`lit_keys`, `sure_lit_keys`,
 //!     `literal_mapping`, `literal_dict_items`, `maybe_dict_items`, `known_members`,
 //!     `known_positions`, `all_values`, `record_objects`) and their writers (`set_members`,
@@ -123,6 +123,15 @@ impl Call {
 }
 
 impl Analyzer {
+    /// `d.get(k)`'s read of the item: a defaultdict's factory and a Counter's 0 do not answer
+    /// a key it lacks (`load_item` otherwise).
+    pub fn load_item_for_get(&mut self, obj: &Value, key: &Value, node: &Node, state: &mut State) -> Value {
+        let saved = std::mem::replace(&mut self.mode.plain_get, true);
+        let out = self.load_item(obj, Ns::Item, key, node, state, false);
+        self.mode.plain_get = saved;
+        out
+    }
+
     /// `call_user` with the callee's call site and allocation context `site` in place of the
     /// call's own (every call of a cached function whose arguments are not known: one context).
     pub fn call_user_in(&mut self, foid: u32, self_v: Option<Value>, a: Args, state: &mut State, node: &Node, site: &str) -> Value {

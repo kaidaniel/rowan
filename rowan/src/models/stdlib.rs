@@ -693,6 +693,14 @@ pub(super) fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
         let cls = an.heap.instance_class(o);
         let Some(cls) = cls.filter(|cl| crate::models::dataclasses::is_named_tuple_class(an, *cl)) else { continue };
         let fields: Vec<String> = crate::models::dataclasses::dataclass_fields_mro(an, cls).into_iter().map(|(f, _)| f).collect();
+        // (the tuple's own methods: a count; a position, or ValueError)
+        if c.qual.ends_with(".count") || c.qual.ends_with(".index") {
+            if c.qual.ends_with(".index") {
+                an.may_raise_here("ValueError", st);
+            }
+            outs.push(Value::kv_only(crate::domain::kv_of_type(&DATA, "int")));
+            continue;
+        }
         if c.qual.ends_with("_asdict") {
             let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
             for f in &fields {

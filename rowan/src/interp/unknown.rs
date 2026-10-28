@@ -685,9 +685,24 @@ impl Analyzer {
             let removed: Vec<(ObjId, Removes)> = cl.removed_locs.iter().map(|((o, ns, k), r)| (state.slot(*o, *ns, *k), *r)).chain(cl.removed_values.iter().cloned()).flat_map(|(v, r)| v.pts.iter().map(move |o| (o, r)).collect::<Vec<_>>()).collect();
             deps.extend(removed.iter().map(|(o, _)| *o));
             may_have_removed(&self.heap, &removed, state);
+            // (a class attribute the code may `del`: maybe gone after)
+            let deleted: FxHashSet<StrId> = if cl.rebound.iter().any(|(o, _, _)| self.heap.kind(*o) == Kind::Class) {
+                let fis: Vec<_> = full.code.iter().filter_map(|f| match &self.heap.obj(*f).payload {
+                    super::Payload::Func(fi) => Some(fi.clone()),
+                    _ => None,
+                }).collect();
+                fis.iter().flat_map(|fi| self.code_uses(fi).deleted.iter().copied().collect::<Vec<_>>()).collect()
+            } else {
+                FxHashSet::default()
+            };
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
+                if self.heap.kind(*o) == Kind::Class && intern::key_str_id(*k).is_some_and(|n| deleted.contains(&n)) {
+                    let r = state.row(*o, *ns).delete(*k, false);
+                    state.set_row(*o, *ns, r);
+                    self.heap.cls_late.insert((*o, *k));
+                }
             }
             self.havoc.code.retain(|c| !full.code.contains(c));
             prev = Some(full);
