@@ -492,9 +492,10 @@ impl Analyzer {
     /// A library call's `*xs` and `**kw`: those whose items or keys are known become positional
     /// and keyword arguments, the only ones most models read (`*xs` only after every other
     /// positional argument; not for the models that read them themselves, `STAR_MODELS`).
-    /// False: a `**kw` of keys not known stays, given to a model of the standard library's
-    /// modules that reads only the keywords written (`KEYWORDS_ONLY`): what it does with them
-    /// is not known. (Other models read `**` from the call's text, pandas' `agg(**spec)`.)
+    /// False: a `*xs` of items not known stays, given to a model that does not read it
+    /// (`Registry::reads_stars`); or a `**kw` of keys not known, given to a model of the
+    /// standard library's modules that reads only the keywords written (`KEYWORDS_ONLY`): what
+    /// it does with them is not known. (Other models read `**` from the call's text, pandas' `agg(**spec)`.)
     fn spread_stars(&mut self, call: &mut Call, state: &State) -> bool {
         const STAR_MODELS: &[&str] = &["builtins.dict", "builtins.zip", "dict.update", "str.format", "str.format_map", "types.SimpleNamespace", "argparse.Namespace"];
         const KEYWORDS_ONLY: &[&str] = &["builtins.", "str.", "bytes.", "json.", "csv.", "re.", "datetime.", "decimal.", "io.", "math.", "stdobj."];
@@ -532,6 +533,11 @@ impl Analyzer {
             }
         }
         call.star_kwargs = rest;
+        // (a `*xs` of items not known, given to a model that reads only the arguments written,
+        // would be taken for none)
+        if !call.star_args.is_empty() && !self.program.models.reads_stars(&call.qual) {
+            return false;
+        }
         call.star_kwargs.is_empty() || !KEYWORDS_ONLY.iter().any(|p| call.qual.starts_with(p))
     }
 
