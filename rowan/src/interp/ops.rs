@@ -936,6 +936,30 @@ impl Analyzer {
 
     /// `r`, what `a op b` gives where either is of `kind` (a list, a dict), and what it gives
     /// where neither is: `"k" + "s"`, an unknown text's (`[1] if c else s`).
+    /// `with_rest` where `r` was computed in `part`, a copy of `state` (the part's raises are
+    /// its own): the rest runs on `state`; the states and the results of the reachable ones join.
+    #[allow(clippy::too_many_arguments)]
+    fn with_rest_from(&mut self, op: ast::Operator, a: &Value, b: &Value, kind: Kind, r: Value, mut part: State, node: &Node, state: &mut State) -> Value {
+        let rest = |an: &Analyzer, v: &Value| Value::with_kv(v.pts.filter(|o| an.heap.kind(o) != kind), v.kv.clone());
+        let (ra, rb) = (rest(self, a), rest(self, b));
+        let empty = |v: &Value| v.pts.is_empty() && v.kv.is_bot();
+        if empty(&ra) || empty(&rb) {
+            state.replace_with(part);
+            return r;
+        }
+        let other = self.binop(op, &ra, &rb, node, state);
+        let mut out = Value::new();
+        if part.reachable {
+            out = out.join(&r);
+        }
+        if state.reachable {
+            out = out.join(&other);
+        }
+        let joined = state.join(&mut part);
+        state.replace_with(joined);
+        out
+    }
+
     fn with_rest(&mut self, op: ast::Operator, a: &Value, b: &Value, kind: Kind, r: Value, node: &Node, state: &mut State) -> Value {
         let rest = |an: &Analyzer, v: &Value| Value::with_kv(v.pts.filter(|o| an.heap.kind(o) != kind), v.kv.clone());
         let (ra, rb) = (rest(self, a), rest(self, b));
@@ -978,16 +1002,19 @@ impl Analyzer {
         }
         let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
         if !lists.is_empty() {
+            // (the lists' part on a state of its own: the other side's elements, which a
+            // number has not — a TypeError there — are no concern of the rest's, `with_rest`)
+            let mut lst = state.copy();
             // (a list and what may be no list: a TypeError, unknown code's for an unknown)
             if lists.len() < both.len() || !a.kv.is_bot() || !b.kv.is_bot() || a.pts.is_empty() || b.pts.is_empty() {
-                self.objects_op_raises(both, state);
+                self.objects_op_raises(both, &mut lst);
             }
             // (the elements of every alternative of either side: a list's, an unknown's)
-            let acc = join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
-            let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
-            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
-            state.elems.insert(oid, acc.kv);
-            return Some(self.with_rest(ast::Operator::Add, a, b, Kind::List, Value::obj(oid), node, state));
+            let acc = join_values([a, b].map(|v| self.iterate(v, node, &mut lst).elem.flat()));
+            let oid = self.alloc_at(Kind::List, node, &mut lst, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
+            lst.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+            lst.elems.insert(oid, acc.kv);
+            return Some(self.with_rest_from(ast::Operator::Add, a, b, Kind::List, Value::obj(oid), lst, node, state));
         }
         // (two unknowns — sequences, texts, numbers, arrays: as sequences, the elements of
         // either; a slice or concatenation stands for its sequences)
