@@ -217,6 +217,7 @@ impl Registry {
         r(&["dataclasses.make_dataclass"], m_make_dataclass);
         r(&["namedtuple._asdict", "namedtuple._replace", "namedtuple.index", "namedtuple.count"], m_nt_method);
         r(&["operator.itemgetter", "operator.attrgetter"], m_getter);
+        r(&["builtins.property"], m_property);
         // a coroutine of the program runs where it is awaited (`Analyzer::await_value`): by
         // `asyncio.run`, `wait_for`, `shield`, `gather`; a task at any later `await`
         r(&["asyncio.run", "asyncio.wait_for", "asyncio.shield", "asyncio.create_task", "asyncio.ensure_future"], m_await_arg);
@@ -322,7 +323,7 @@ fn allowlisted(qual: &str) -> bool {
         return false;
     }
     ALLOWLIST_PREFIXES.iter().any(|p| qual.starts_with(p) || qual.strip_prefix("builtins.").is_some_and(|q| q.starts_with(p)))
-        || matches!(qual.strip_prefix("builtins."), Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "property" | "bytearray" | "memoryview"))
+        || matches!(qual.strip_prefix("builtins."), Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "bytearray" | "memoryview"))
 }
 
 /// `operator.iadd` & co.: `a op= b`, which changes a list, dict, set or instance in place

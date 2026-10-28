@@ -621,6 +621,14 @@ impl Analyzer {
         if b == "object" {
             return Some(true);
         }
+        // (a property: one `@property` or `property(f)` made, or the `property` model's instance)
+        if full == "builtins.property" {
+            let made = k == Kind::Function && self.heap.func_info(o).is_property.get() && !self.heap.func_info(o).is_cached.get();
+            let modelled = k == Kind::Instance && self.heap.instance_class(o).and_then(|c| self.heap.class_info_opt(c)).is_some_and(|ci| self.module("<builtins.property>") == Some(ci.module));
+            if made || modelled {
+                return Some(true);
+            }
+        }
         if k == Kind::Instance {
             // (a class deriving from a builtin / library class, or one an ABC may recognise by
             // its methods: not decided)

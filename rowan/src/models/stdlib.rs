@@ -12,6 +12,7 @@ use super::*;
 pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<Value> {
     let (modname, cname, src) = match qual {
         "collections.UserDict" => ("<collections.UserDict>", "UserDict", USERDICT_SRC),
+        "builtins.property" => ("<builtins.property>", "property", PROPERTY_SRC),
         _ => match qual.strip_prefix("urllib.parse.") {
             Some(n) if URLLIB_NAMES.contains(&n) => ("<urllib.parse>", n, URLLIB_SRC),
             _ => return None,
@@ -364,6 +365,52 @@ def urlencode(query, doseq=False, safe='', encoding=None, errors=None):
             for elt in v:
                 l.append(k + '=' + _up.quote_plus(elt if isinstance(elt, str) else str(elt), safe))
     return '&'.join(l)
+"#;
+
+/// `property(fget, fset, fdel, doc)` called where its getter is not one function of the
+/// program's (`class_property` makes those): an instance of the descriptor HOWTO's pure-Python
+/// `property`, so a read runs whatever the getter may be (several functions, a library
+/// function, an unknown) through `__get__`.
+pub(super) fn m_property(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    match generated_class(an, st, "builtins.property").and_then(|v| v.single()) {
+        Some(cls) => an.construct(cls, c.arguments(), st, &c.node),
+        None => an.unknown_call(&c.qual, None, c.arguments(), st, &c.node),
+    }
+}
+
+pub(super) const PROPERTY_SRC: &str = r#"
+class property:
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        self.__doc__ = doc
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        if self.fget is None:
+            raise AttributeError("property has no getter")
+        return self.fget(obj)
+
+    def __set__(self, obj, value):
+        if self.fset is None:
+            raise AttributeError("property has no setter")
+        self.fset(obj, value)
+
+    def __delete__(self, obj):
+        if self.fdel is None:
+            raise AttributeError("property has no deleter")
+        self.fdel(obj)
+
+    def getter(self, fget):
+        return property(fget, self.fset, self.fdel, self.__doc__)
+
+    def setter(self, fset):
+        return property(self.fget, fset, self.fdel, self.__doc__)
+
+    def deleter(self, fdel):
+        return property(self.fget, self.fset, fdel, self.__doc__)
 "#;
 
 pub(super) const USERDICT_SRC: &str = r#"
