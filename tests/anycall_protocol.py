@@ -7,8 +7,10 @@ annotations):
   method of the program's class) inside a `try` catching one class (`CATCH`), returning the
   operation's result, `"caught"` or `"other"`;
 - the parameters unannotated, or annotated (`ANNS`: `int`, `Optional[int]`, `str`, `list`,
-  `dict`, `Optional[Ob]`, `Ob` with a subclass overriding its method and operator), called with
-  two values the annotation allows (unannotated: two of `VALUES`);
+  `dict`, `Optional[Ob]`, `Ob` with a subclass overriding its method and operator, `int | str`,
+  a `Literal`, `Ob | list`, an alias of a union, an Enum, `Ob` given the module's own instance
+  `DEF`), called with two values the annotation allows (unannotated: two of `VALUES`); the
+  operations include identity with what the module made (`x is DEF`, `{DEF: 1}[x]`);
 - observed inside the function (rowan's rows for each call and for any call) and at module
   level (`T = qN(…)`: under `budget=0` the second call is skipped, its result the function's
   summary).
@@ -126,6 +128,13 @@ OPS = {
     "and": "x and y",
     "or": "x or y",
     "concat": "'p' + x",
+    # identity with what the program made (an argument may be it)
+    "isdef": "x is DEF{N}",
+    "eqdef": "x == DEF{N}",
+    "indef": "x in [DEF{N}]",
+    "keydef": "{DEF{N}: 1}[x]",
+    "isA": "x is Col{N}.A",
+    "name": "x.name",
 }
 TWO = {"iadd", "add", "sub", "mul", "div", "mod", "pow", "lt", "eq", "in", "ni", "sub_item", "and", "or", "update", "zip", "slice2", "floordiv", "lshift", "band", "ge", "is", "contains_y"}
 
@@ -140,13 +149,22 @@ ANNS = {
     "dict": ("dict", ["{}", "{'k': 1}"]),
     "optob": ("Optional[Ob{N}]", ["None", "Ob{N}()"]),
     "ob": ("Ob{N}", ["Ob{N}()", "Sub{N}()"]),
+    # (unions, literals, an alias, an Enum; an instance the program made)
+    "intstr": ("int | str", ["3", "'ab'"]),
+    "lit": ("Literal['a', 3]", ["'a'", "3"]),
+    "oblist": ("Ob{N} | list", ["Ob{N}()", "[1, 2]"]),
+    "alias": ("Al{N}", ["None", "'ab'"]),
+    "enum": ("Col{N}", ["Col{N}.A", "Col{N}.B"]),
+    "obdef": ("Ob{N}", ["DEF{N}", "Sub{N}()"]),
 }
 
 
 def header() -> list:
-    return ["from typing import Optional", "", "class Ob{N}:", "    v = 1", "", "    def m(self):", "        return 1", "",
+    return ["import enum", "from typing import Literal, Optional, Union", "", "class Ob{N}:", "    v = 1", "", "    def m(self):", "        return 1", "",
             "class Sub{N}(Ob{N}):", "    def m(self):", "        return [][0]", "",
-            "    def __add__(self, o):", "        return 7", ""]
+            "    def __add__(self, o):", "        return 7", "",
+            "class Col{N}(enum.Enum):", "    A = 1", "    B = 2", "",
+            "DEF{N} = Ob{N}()", "Al{N} = Union[str, None, Ob{N}]", ""]
 
 
 def program(op: str, catch: str, ann: str | None, xs: tuple, y: str, inside: bool) -> Prog:

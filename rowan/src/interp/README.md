@@ -84,13 +84,13 @@ only `heap`, their own `m` (`models::Tables`) and the methods listed in `api.rs`
 | `calls.rs` | calls, construction, frames, binding arguments |
 | `narrow.rs` | tests split into true and false states, narrowing |
 | `guards.rs` | tests of a function's own parameters along a path (`only if` requirements) |
-| `annotations.rs` | what a value annotated `X` is for any call: a builtin type's unknown, a container whose parts follow the annotation, an instance of the program's class with its declared fields as annotated; an unknown the program gives an annotated field (`field_as_annotated`) |
+| `annotations.rs` | what a value annotated `X` is for any call: a builtin type's unknown, a container whose parts follow the annotation, an instance of the program's class with its declared fields as annotated, a union member by member, an alias as what it names; an unknown the program gives an annotated field or a declared attribute (`field_as_annotated`, `attr_as_annotated`) |
 | `access.rs` | what every access shares: guards, requirements, per-receiver runs |
 | `items.rs` | item access: reads, stores, deletes, copies of keys, positions, elements |
 | `attrs.rs` | attribute access through classes, instances, unknowns |
 | `keys.rs` | the key a value stands for (numbers, Enum members, identity-hashed objects), literal key views |
 | `alloc.rs`, `gc.rs` | allocation policy; liveness and collection (`find_among`: the one search for which objects a walk reaches, also generators' and closing's) |
-| `flows.rs` | what a function's text does with the values it handles (for calls that do not run) |
+| `flows.rs` | what a function's text does with the values it handles (for calls that do not run), and what its attribute stores put there (`AttrStores`) |
 | `summary.rs` | result summaries: the shape of what a function returns for any call (from a pre-pass's runs), made anew where a call of it does not run |
 | `libclosure.rs` | the closure followed libraries' calls that do not run share once theirs is large (`LibClosure`): walked once, applied again where it gained or the state changed |
 | `library.rs` | followed installed packages (`--follow`): each entry's allowance of work, the library's share, undoing an entry past it |

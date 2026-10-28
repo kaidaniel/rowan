@@ -92,6 +92,16 @@ pub struct Entries {
     /// when values for any call are asked for: the heap at the last call module code made, and
     /// joined over them (`note_call`)
     calls_heap: Option<(State, State)>,
+    /// the container annotations `*args: T` / `**kw: T` stand for (`tuple[T, ...]`, `dict[str,
+    /// T]`), parsed once per text
+    star_annotations: FxHashMap<String, Option<&'static ast::Expr>>,
+}
+
+impl Entries {
+    /// The annotation `text` parses to (once per text: parsed annotations are kept for good).
+    fn star_annotation(&mut self, text: &str) -> Option<&'static ast::Expr> {
+        *self.star_annotations.entry(text.to_string()).or_insert_with(|| frontend::parse_expression(text))
+    }
 }
 
 /// The analysis as the main module's run left it, before the entry runs: its state, the hover
@@ -658,8 +668,18 @@ impl Analyzer {
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
         for a in params {
             if [&fparams.vararg, &fparams.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
-                // a caller may pass any arguments here
-                let v = Value::obj(self.param_source(fi, a, st));
+                // a caller may pass any arguments here (`*args: int`: ints; `**kw: str`: str
+                // values under str keys)
+                let o = self.param_source(fi, a, st);
+                let star = fparams.vararg.as_deref().is_some_and(|v| std::ptr::eq(v, a));
+                if let Some(ann) = a.annotation.as_deref().filter(|_| !self.entry.torch_modules.contains(&fi.module)) {
+                    let text = frontend::text(ann);
+                    let whole = if star { format!("tuple[{}, ...]", text) } else { format!("dict[str, {}]", text) };
+                    if let Some(e) = (!text.is_empty()).then(|| self.entry.star_annotation(&whole)).flatten() {
+                        self.as_annotated(o, e, fi.module);
+                    }
+                }
+                let v = Value::obj(o);
                 if fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false) {
                     star_args.push(v);
                 } else {
@@ -738,14 +758,23 @@ impl Analyzer {
         }
         // (with a default, only a torch annotation is taken: an instance for a defaulted
         // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
-        let ann = a.annotation.as_deref();
-        let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+        // (an alias the program binds stands for what it names, in the module that writes it)
+        let resolved = a.annotation.as_deref().map(|x| self.resolved_annotation(x, fi.module));
+        let (ann, amod) = (resolved.map(|r| r.0), resolved.map_or(fi.module, |r| r.1));
+        // (a union of several members, a `Literal`: member by member)
+        if let Some(v) = ann.filter(|_| !self.entry.torch_modules.contains(&fi.module)).and_then(|x| self.param_from_members(x, amod, fi, a, d.is_some(), st)) {
+            return match d {
+                Some(d) => d.join(&v),
+                None => v,
+            };
+        }
+        let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else if amod != fi.module { self.in_module(amod, "ann", "<annotation>", |an| an.param_from_annotation(ann, fi, a.name.id.as_str(), st)) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
             None => {
                 let o = self.param_source(fi, a, st);
                 // (`x: int`: an int, as the annotation says; `x: int | None` an int or None)
                 match ann {
-                    Some(ann) => self.as_annotated(o, ann, fi.module),
+                    Some(ann) => self.as_annotated(o, ann, amod),
                     None => Value::obj(o),
                 }
             }
@@ -783,7 +812,9 @@ impl Analyzer {
 
     /// An instance of `cls_oid` whose attributes are unknown (`instance C`).
     fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
-        self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
+        let o = self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx);
+        self.heap.obj_mut(o).arg = true;
+        o
     }
 
     /// An instance of `cls_oid` made for entry runs with `row` as its attributes' row.
@@ -841,6 +872,8 @@ impl Analyzer {
 
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
         let inst = self.new_instance(cls_oid, ci, state, ctx);
+        // (what a caller passes: maybe an instance the program made, or another argument)
+        self.heap.obj_mut(inst).arg = true;
         let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
             let inits = self.heap.class_attr(init_cls, "__init__");
@@ -885,14 +918,29 @@ impl Analyzer {
         let (set, deleted) = self.attrs_set_by_methods(cls_oid, state);
         if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
+            let uses = self.program_uses();
             let mut row = state.row(inst, Ns::Attr);
-            // (a name the class itself defines — a property, a class-level default — reads
-            // through the class anyway)
+            // (a name whose class attribute is a data descriptor — a property — takes the store
+            // itself; over a class-level default the instance's own value is read)
             let had = row.present.clone();
-            let by_class = |an: &Analyzer, k: KeyId| intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some());
-            for k in set.into_iter().filter(|k| !had.contains(*k) && !by_class(self, *k)) {
+            let descriptor = |an: &Analyzer, k: KeyId| {
+                an.heap.prop_names.contains(&k)
+                    || intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some_and(|c| an.heap.class_attr(c, &n).pts.iter().any(|f| an.is_descriptor(f, "__set__"))))
+            };
+            let set: Vec<KeyId> = set.into_iter().filter(|k| !had.contains(*k) && !descriptor(self, *k)).collect();
+            for k in set {
                 row = row.store(k, false);
-                state.set_slot(inst, Ns::Attr, k, any.clone(), false);
+                let put = match intern::key_as_str(k) {
+                    Some(n) => {
+                        // (it held the class-level default before)
+                        let before: Vec<Value> = self.class_lookup(cls_oid, &n).map(|c| self.heap.class_attr(c, &n)).into_iter().collect();
+                        let put = super::effects::stored_value(uses.values.get(&s(&n)), uses.computed, &before, &any);
+                        // (of the type the class declares it with, `count: int`)
+                        self.attr_as_annotated(cls_oid, &n, put, state)
+                    }
+                    None => any.clone(),
+                };
+                state.set_slot(inst, Ns::Attr, k, put, false);
             }
             for k in deleted {
                 row = row.delete(k, false);

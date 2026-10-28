@@ -717,6 +717,11 @@ impl Analyzer {
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => acc = acc.join(&crate::models::pandas::series_values(state, oid, node.line).1),
                 Kind::Dict | Kind::Frame => acc = acc.join(&Value::kv_only(KeyVal::KeysOf(state.keys_of(ObjSet::one(oid), Ns::Item)))),
+                // (a character of a text not known: a str; an item of bytes: an int)
+                Kind::Unknown if matches!(self.heap.obj(oid).ty, Some("str" | "bytes")) => {
+                    let t = if self.heap.obj(oid).ty == Some("str") { "str" } else { "int" };
+                    acc = acc.join(&Value::data(&crate::domain::typed_label(t, &format!("L{}", node.line))));
+                }
                 _ => acc = acc.join(&Value::data(&format!("L{}", node.line))),
             }
         }

@@ -111,7 +111,8 @@ impl Analyzer {
             return Some(*k);
         }
         let ob = self.heap.obj(o);
-        if !ob.single || ob.site.ends_with("#recent") {
+        // (an argument for any call may be any instance of its class: no key of its own)
+        if !ob.single || ob.arg || ob.site.ends_with("#recent") {
             return None;
         }
         let ok = match ob.kind {

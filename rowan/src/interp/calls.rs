@@ -1257,8 +1257,12 @@ impl Analyzer {
             if !star_args.is_empty() {
                 acc = acc.join(&extra);
             }
-            state.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), DATA), true);
-            state.elems.insert(tid, if !rest_pos.is_empty() { acc.kv.clone() } else { DATA });
+            // (spread from unknowns annotated as containers, `*args: int` for any call: their
+            // items, of the annotation's type, nothing else)
+            let annotated = |an: &Analyzer, v: &Value| v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| an.heap.kind(o) == Kind::Unknown && an.heap.ann.contains_key(&o));
+            let scalars = if !rest_pos.is_empty() || (!star_args.is_empty() && star_args.iter().all(|sa| annotated(self, sa))) { acc.kv.clone() } else { DATA };
+            state.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), if scalars.is_bot() { DATA } else { scalars.clone() }), true);
+            state.elems.insert(tid, scalars);
             self.heap.set_llen(tid, state, if star_args.is_empty() { Some(rest_pos.len()) } else { None });
             for (i, v) in rest_pos.iter().enumerate() {
                 state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
@@ -1280,6 +1284,13 @@ impl Analyzer {
             let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key_of_str(*n)));
             for sk in star_kwargs {
                 self.copy_into(did, Ns::Item, sk, state, true, &kill);
+            }
+            // (from an unknown annotated as a mapping, `**kw: str` for any call: what it holds
+            // under keys not read yet is of the annotation's type, as its own parts are)
+            let anns: Vec<_> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|o| self.heap.ann.get(&o).copied())).collect();
+            match anns[..] {
+                [Some(a)] => drop(self.heap.ann.insert(did, a)),
+                _ => drop(self.heap.ann.remove(&did)),
             }
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }
