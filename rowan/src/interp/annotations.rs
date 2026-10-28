@@ -84,15 +84,29 @@ impl Analyzer {
         if none { Value::obj(o).join(&Value::none()) } else { Value::obj(o) }
     }
 
+    /// An annotation's value where the code reads it: Python 3.14 evaluates annotations
+    /// lazily, never where the function runs, so one that would raise (`c: "column.Column"`
+    /// with `column = None`) is no value (None), quietly, raising nowhere.
+    fn eval_annotation(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        let mut probe = state.copy();
+        let tries = std::mem::take(&mut self.unwind.tries);
+        let v = self.quietly(|an| an.eval(e, &mut probe));
+        self.unwind.tries = tries;
+        probe.reachable.then(|| {
+            *state = probe;
+            v
+        })
+    }
+
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
     /// tensor or module, an instance of a class of the program (`annotated_instance`), an open
-    /// DataFrame; None when the annotation names none of those.
+    /// DataFrame; None when the annotation names none of those (or raises).
     pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
             return Some(v);
         }
-        let mut v = self.eval(node, state);
+        let mut v = self.eval_annotation(node, state)?;
         // (a class imported only for type checkers)
         if let ast::Expr::Name(n) = node {
             if !v.pts.iter().any(|o| self.heap.kind(o) == Kind::Class) {
@@ -296,6 +310,31 @@ impl Analyzer {
         out.join(&typed)
     }
 
+    /// Items the program puts into `oid`, an unknown annotated as a container, for any call: its
+    /// parts follow the annotation as the call starts only, so what is stored, appended or
+    /// added afterwards (anything, by unknown code given it) joins every read of its items
+    /// (`items_put`; a dict's items are its keys, its values are its slots'). Kept in its `Elem` slot; a part of such a container (`xs[0]` of
+    /// `list[list[int]]`) stands beside the other parts' placeholders, which do not see it:
+    /// what any of them holds is not known to follow the annotation any more.
+    pub fn put_items(&mut self, oid: ObjId, v: &Value, state: &mut State) {
+        let Some(&(ann, _)) = self.heap.ann.get(&oid).filter(|_| self.heap.kind(oid) == Kind::Unknown) else { return };
+        if self.heap.obj(oid).depth > 0 {
+            self.heap.ann_changed.insert(ann as *const ast::Expr as usize);
+        }
+        let e = state.slot_opt(oid, Ns::Elem, intern::STAR).unwrap_or_default().join(v);
+        state.set_slot(oid, Ns::Elem, intern::STAR, e, true);
+    }
+
+    /// What reads of the items of `oid` give beside the annotation's (`put_items`).
+    pub(in crate::interp) fn items_put(&self, oid: ObjId, state: &State) -> Option<Value> {
+        let &(ann, _) = self.heap.ann.get(&oid)?;
+        let put = state.slot_opt(oid, Ns::Elem, intern::STAR);
+        if self.heap.ann_changed.contains(&(ann as *const ast::Expr as usize)) {
+            return Some(put.unwrap_or_default().join(&Value::data(&format!("items of {}", self.heap.obj(oid).label))));
+        }
+        put
+    }
+
     /// An unknown object of builtin type `t` made at `site` (one beside other values, or a
     /// container whose parts follow annotation `ann`).
     fn typed_object(&mut self, site: &str, t: &'static str, single: bool, depth: u32, ann: Option<(&'static ast::Expr, ObjId)>, state: &mut State) -> Value {
@@ -418,7 +457,7 @@ impl Analyzer {
                         ast::Expr::Tuple(t) => t.elts.iter().collect(),
                         e => vec![e],
                     };
-                    let vals: Vec<Value> = elts.into_iter().map(|e| self.in_module(module, "ann", "<annotation>", |an| an.eval(e, state))).collect();
+                    let vals: Vec<Value> = elts.into_iter().map(|e| self.in_module(module, "ann", "<annotation>", |an| an.eval_annotation(e, state).unwrap_or_else(unknown))).collect();
                     if vals.iter().all(|v| v.pts.is_empty() && v.kv.is_literal()) {
                         vals.into_iter().fold(Value::new(), |a, v| a.join(&v))
                     } else {
@@ -430,7 +469,7 @@ impl Analyzer {
                     Some((t, _)) => typed(self, t, container_annotation(m), k, state),
                     None => {
                         let cv = self.in_module(module, "ann", "<annotation>", |an| {
-                            let v = an.eval(m, state);
+                            let Some(v) = an.eval_annotation(m, state) else { return Value::new() };
                             match m {
                                 ast::Expr::Name(n) if !v.pts.iter().any(|o| an.heap.kind(o) == Kind::Class) => an.type_only_name(n.id.as_str(), state).unwrap_or(v),
                                 _ => v,

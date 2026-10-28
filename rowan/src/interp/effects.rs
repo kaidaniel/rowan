@@ -1261,23 +1261,36 @@ impl Analyzer {
                 }
             }
         }
+        self.closure_changes_nothing(f, state)
+    }
+
+    /// Does the code `f` reaches (`code_closure`: its own and its callees') change nothing beyond
+    /// what it is given? (A library object a name holds — a module `asyncio.sleep` is read
+    /// from — has nothing rowan follows to change.)
+    fn closure_changes_nothing(&mut self, f: ObjId, state: &State) -> bool {
         let cl = self.code_closure(&[f], &mut None, state);
-        [&cl.locs, &cl.held_locs, &cl.held2_locs, &cl.rebound, &cl.edited_locs].iter().all(|l| l.is_empty())
+        let library = |l: &Loc| {
+            let v = state.slot(l.0, l.1, l.2);
+            v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.kind(o) == Kind::External)
+        };
+        [&cl.locs, &cl.held_locs, &cl.held2_locs].iter().all(|l| l.iter().all(library))
+            && [&cl.rebound, &cl.edited_locs].iter().all(|l| l.is_empty())
             && [&cl.values, &cl.held_values, &cl.edited_values].iter().all(|v| v.is_empty())
             && cl.removed_locs.is_empty()
             && cl.removed_values.is_empty()
     }
 
-    /// Does `f`'s own code write nothing other code shares: no `global` / `nonlocal` name, nothing
-    /// in what it is given (its receiver neither)? Coroutines of such code run together as one
-    /// after the other (`Analyzer::gather_tasks`; what code they call writes is not looked at).
-    pub(in crate::interp) fn writes_nothing_shared(&mut self, f: ObjId) -> bool {
+    /// Does `f`'s code write nothing other code shares: no `global` / `nonlocal` name, nothing
+    /// in what it is given (its receiver neither), nothing the code it calls changes
+    /// (`closure_changes_nothing`)? Coroutines of such code run together as one after the
+    /// other (`Analyzer::gather_tasks`).
+    pub(in crate::interp) fn writes_nothing_shared(&mut self, f: ObjId, state: &State) -> bool {
         let fi = self.heap.func_info(f);
         let u = self.code_uses(&fi);
         let quiet = |f: &Flags| !(f.changes || f.called || f.methods || f.rebinds || f.edits);
         let recv_quiet = u.recv.as_ref().is_none_or(|r| !r.escapes && r.stores.is_empty() && r.deletes.is_empty() && r.stores_like.is_empty() && r.deletes_like.is_empty() && r.calls.is_empty());
         let declares = crate::syntax::walk_stmts(fi.node.body()).iter().any(|s| matches!(s, ast::Stmt::Global(_) | ast::Stmt::Nonlocal(_)));
-        recv_quiet && !declares && u.params.iter().all(|(_, f)| quiet(f))
+        recv_quiet && !declares && u.params.iter().all(|(_, f)| quiet(f)) && self.closure_changes_nothing(f, state)
     }
 
     /// One call of several of the program's functions (with their receivers, if bound) none of

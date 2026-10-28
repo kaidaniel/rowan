@@ -118,14 +118,6 @@ def body(op) -> list:
             "except TypeError:", "    r = 'type'", "O = r", "O = OK"]
 
 
-# known misses (AGENTS.md, Tests; checked apart, failing only with `--strict`): for any call, a
-# `cached_property` a subclass shadows with a class attribute, read twice after a function of
-# another class stored or deleted that name; a `__dict__` entry under the name of a base's
-# `__slots__` member (the member takes the read); at `budget=0`, for any call, the `__dict__` entry
-# an `__init__` beside a data descriptor makes
-GAPS = {("cached", "over", "read2"): "cached-shadowed", ("slots", "plain", "dictstore"): "slot-dict", ("data_dict", "plain", "dict"): "dict-beside-descriptor", ("data_dict", "over", "dict"): "dict-beside-descriptor", ("data_dict", "own", "dict"): "dict-beside-descriptor"}
-
-
 def program(shape, sub, recv, op) -> Prog:
     ind = lambda ls: ["    " + ln for ln in ls]
     lines = ["import functools", "", *DESCR, "class A{N}:", *ind(SHAPES[shape]), "", *SUBS[sub], "",
@@ -133,8 +125,7 @@ def program(shape, sub, recv, op) -> Prog:
              "def q{N}(o: A{N}):", "    global O, OK", *ind(body(op)), ""]
     calls = [RECV["A"], RECV["B"]] if recv == "either" else [RECV[recv]]
     end = [f"run(lambda: q{{N}}({c}))" for c in calls]
-    gap = GAPS.get((shape, sub, op), "")
-    return Prog(lines, end=end + ["O = O"], desc=f"{shape} {sub} {recv} {op}{' ' + gap if gap else ''}")
+    return Prog(lines, end=end + ["O = O"], desc=f"{shape} {sub} {recv} {op}")
 
 
 def programs():
@@ -143,4 +134,4 @@ def programs():
 
 
 if __name__ == "__main__":
-    cli(programs, NAMES, quick=3000, gaps=tuple(sorted(set(GAPS.values()))), limit_sets=(None, "budget=0"))
+    cli(programs, NAMES, quick=3000, limit_sets=(None, "budget=0"))

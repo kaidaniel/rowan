@@ -373,9 +373,14 @@ impl Analyzer {
             if !state.reachable || !lazy {
                 continue;
             }
-            // (a coroutine, which code it is given may await: it runs, as awaited)
+            // (a coroutine, which code it is given may await there, run later as a task at any
+            // `await`, or never)
             if self.is_coroutine(o) {
-                self.run_coroutine(o, state);
+                let mut ran = state.copy();
+                self.run_coroutine(o, &mut ran);
+                let j = state.join(&mut ran);
+                state.replace_with(j);
+                self.start_task(&Value::obj(o));
                 continue;
             }
             let Some(lg) = self.gens.lazy.get(&o).cloned() else { continue };
@@ -508,10 +513,10 @@ impl Analyzer {
     /// `asyncio.gather(*coros)`: two or more coroutines run together; unless none of them changes
     /// what another may see (then one after the other is how they run), those that suspend run
     /// interleaved, as tasks.
-    pub fn gather_tasks(&mut self, vs: &[Value]) {
+    pub fn gather_tasks(&mut self, vs: &[Value], state: &State) {
         let coros: Vec<ObjId> = vs.iter().flat_map(|v| v.pts.iter()).filter(|o| self.is_coroutine(*o)).collect();
         let fns: Vec<ObjId> = coros.iter().filter_map(|o| self.gens.lazy.get(o).map(|lg| lg.foid)).collect();
-        if coros.len() > 1 && !fns.into_iter().all(|f| self.writes_nothing_shared(f)) {
+        if coros.len() > 1 && !fns.into_iter().all(|f| self.writes_nothing_shared(f, state)) {
             let suspending: Vec<ObjId> = coros.into_iter().filter(|o| self.suspends(*o)).collect();
             for o in suspending {
                 self.start_task(&Value::obj(o));

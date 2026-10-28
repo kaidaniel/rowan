@@ -86,8 +86,8 @@ impl Analyzer {
     /// of it, and the Enum kind its Enum bases give.
     /// `name = property(fget, fset, fdel, doc)` in a class body (`self.frame()` its frame): as
     /// the decorators make it — a copy of the getter that is a property, the setter and deleter
-    /// registered under `name`. False (nothing done) for any other statement, or a getter that
-    /// is not one function of the program's.
+    /// registered under `name`. False (nothing done) for any other statement, or a getter, setter
+    /// or deleter that is not one function of the program's (the `property` model's call then).
     pub(super) fn class_property(&mut self, a: &'static ast::StmtAssign, state: &mut State) -> bool {
         let ([ast::Expr::Name(target)], ast::Expr::Call(call)) = (&a.targets[..], &*a.value) else { return false };
         if call.arguments.args.iter().any(|e| matches!(e, ast::Expr::Starred(_))) || call.arguments.keywords.iter().any(|k| k.arg.is_none()) {
@@ -102,10 +102,14 @@ impl Analyzer {
         let mut probe = state.copy();
         let one_function = |an: &mut Analyzer, e: Option<&'static ast::Expr>, st: &mut State| e.map(|e| an.eval(e, st)).and_then(|v| v.single().filter(|f| v.kv.is_bot() && an.heap.kind(*f) == Kind::Function));
         let Some(getter) = one_function(self, fget, &mut probe) else { return false };
-        let (setter, deleter) = (one_function(self, fset, state), one_function(self, fdel, state));
-        if let Some(d) = doc {
-            self.eval(d, state);
+        let (setter, deleter) = (one_function(self, fset, &mut probe), one_function(self, fdel, &mut probe));
+        if setter.is_none() && fset.is_some() || deleter.is_none() && fdel.is_some() {
+            return false;
         }
+        if let Some(d) = doc {
+            self.eval(d, &mut probe);
+        }
+        *state = probe;
         let cls = self.frame().class_oid.unwrap();
         let nk = key_str_lit(target.id.as_str());
         let fi = self.heap.func_info(getter);

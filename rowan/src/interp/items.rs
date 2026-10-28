@@ -231,7 +231,11 @@ impl Analyzer {
             }
             Kind::View => {
                 if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
-                    // `obj.__dict__[k]`: an attribute load
+                    // `obj.__dict__[k]`: an attribute load (under a `__slots__` member's
+                    // name the member's value is no entry of the dict: maybe a KeyError)
+                    if inst.pts.iter().any(|i| self.slot_member_key(i, key)) {
+                        self.may_raise_here("KeyError", state);
+                    }
                     let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
                     let v = self.force(v, state);
                     parts.push(v);
@@ -524,9 +528,14 @@ impl Analyzer {
         // the key is required of the input all the same — the runtime oracle's rule)
         let caught = try_guard;
         let saved = std::mem::replace(&mut self.unwind.caught_load, caught);
+        // (an annotated container's: what the program put into it, but under a key it stored)
+        let put = self.items_put(oid, state).filter(|_| ns == Ns::Item && self.heap.obj(oid).ty != Some("dict") && !(key.pts.is_empty() && key.kv.is_literal() && kv_literals(&key.kv).iter().all(|k| state.slot_opt(oid, ns, k).is_some())));
         let v = self.load_record_inner(oid, ns, key, node, state, guarded, single_target, try_guard);
         self.unwind.caught_load = saved;
-        v
+        match put {
+            Some(put) => v.join(&put),
+            None => v,
+        }
     }
 
     /// `load_record` with the handler's catching mode set.
@@ -820,6 +829,13 @@ impl Analyzer {
     /// through the input's part (`row["user"]["id"]`); `PATH_DEPTH` keys deep, then an unknown.
     /// In a read on many objects (`wide_read`) one weak placeholder per key; a part annotated
     /// with a class of the program is an instance of it.
+    /// Is `key` (may it be) a `__slots__` member's name on instance `o` (`slot_member`)?
+    pub(crate) fn slot_member_key(&self, o: ObjId, key: &Value) -> bool {
+        let Some(c) = self.heap.instance_class(o).filter(|_| self.heap.kind(o) == Kind::Instance) else { return false };
+        let name = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str);
+        self.slot_member(c, name.as_deref())
+    }
+
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
@@ -1030,7 +1046,9 @@ impl Analyzer {
                     if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
                         let insts: Vec<u32> = inst.pts.iter().collect();
                         for i in &insts {
-                            let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single;
+                            // (under a `__slots__` member's name the entry is the dict's, which
+                            // the member hides from reads of the attribute: kept weakly, as both)
+                            let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single && !self.slot_member_key(*i, &key);
                             self.store_key(*i, Ns::Attr, &key, v, s1, node, state);
                         }
                     }
@@ -1064,6 +1082,17 @@ impl Analyzer {
                         continue;
                     }
                 }
+                // (an annotated container's items for any call: the value, or a slice's items)
+                // (a slice's items: put, and maybe under any key it stored)
+                Kind::Unknown if ns == Ns::Item && self.heap.ann.contains_key(&oid) && slice_text(&key.kv).is_some() => {
+                    let it = self.iterate(v, node, state);
+                    let put = self.elem_value(&it.elem, node, "el");
+                    self.put_items(oid, &put, state);
+                    for (k, old) in state.obj_slots(oid, Ns::Item) {
+                        state.set_slot(oid, Ns::Item, k, old.join(&put), true);
+                    }
+                    continue;
+                }
                 _ => {}
             }
             self.store_key(oid, ns, &key, v, strong, node, state);
@@ -1081,6 +1110,11 @@ impl Analyzer {
         if self.is_any(oid) {
             self.escape(v, &format!("store into unknown@L{}", node.line), state);
             return;
+        }
+        // (an annotated container's items for any call: a list's value, a dict's key)
+        if ns == Ns::Item && self.heap.ann.contains_key(&oid) {
+            let put = if self.heap.obj(oid).ty == Some("dict") { self.opaque_key(key, state) } else { v.clone() };
+            self.put_items(oid, &put, state);
         }
         // (a key that may be an object — an unknown call's result beside a literal — is a key
         // not known, its literals possible keys: no strong store)
