@@ -757,6 +757,9 @@ impl Analyzer {
     /// element.
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
         let v = &self.iterable_part(v, state);
+        // (the program's instances that cannot be iterated raise TypeError: on their paths only,
+        // when other values beside them may be unpacked)
+        let Some(v) = &self.without_dunders(v, &["__iter__", "__getitem__"], state) else { return (0..n).map(|_| Value::new()).collect() };
         self.force_gen(v, state, false);
         self.sync_live(v, state, true);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();

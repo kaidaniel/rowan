@@ -502,14 +502,20 @@ impl Analyzer {
             }
             if let Some(ci) = self.heap.class_info_opt(cls) {
                 if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base.get() {
-                    // (a class of the program's own with no `__getitem__`: not subscriptable)
-                    if self.plain_program_class(cls) {
+                    // (a class of the program's own with no `__getitem__`, or an Enum's of no other
+                    // library base: not subscriptable)
+                    let enum_only = ci.lib.is_enum && self.heap.mro(cls).iter().all(|c| self.heap.class_info_opt(*c).is_none_or(|x| x.lib.quals.iter().all(|q| matches!(q.as_str(), "builtins.object" | "builtins.int" | "enum.Enum" | "enum.IntEnum" | "enum.Flag" | "enum.IntFlag"))));
+                    if self.plain_program_class(cls) || enum_only {
                         if single_target {
                             self.raise_here("TypeError", state);
                         } else {
                             self.may_raise_here("TypeError", state);
                         }
                     } else {
+                        // (a library base's `__getitem__`: anything it raises)
+                        if !self.unwind.tries.is_empty() {
+                            self.flag_may_raise(state);
+                        }
                         parts.push(line_data.clone());
                     }
                     return true;
