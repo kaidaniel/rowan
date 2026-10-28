@@ -30,8 +30,8 @@ at once.
 | `mod.rs` | the registry, module constants (`sys.maxsize`, `string.digits`), `os.environ`, `noeffect`, builtins called through dunders, `ClassBase` (what library bases make of a class), the side tables, attributes of model objects |
 | **builtins and the standard library** | |
 | `builtins.rs` | builtin functions (`dict()`, `isinstance`, `getattr`, `min` / `max`, `zip`, `len`, `sorted`'s order, …) and `str` methods |
-| `containers.rs` | `dict.*`, `list.*`, `set.*` methods, ChainMap |
-| `stdlib.rs` | copies, namedtuple, SimpleNamespace, `operator` getters, `globals` / `locals`, `exec`, dataclass helpers, `defaultdict`, `DictReader`, `functools.partial`, `itertools.chain`, logging, `os.getenv`, `get_type_hints`, number and datetime constructors, `collections.UserDict` and `urllib.parse` analysed from Python source |
+| `containers.rs` | `dict.*`, `list.*`, `set.*` methods, ChainMap (read through its maps as they are now: `Analyzer::sync_chainmaps`) |
+| `stdlib.rs` | copies, namedtuple, SimpleNamespace, `asyncio.run` / `gather` / `wait_for` / `create_task` (awaiting the coroutines they are given), `operator` getters, `globals` / `locals`, `exec`, dataclass helpers, `defaultdict`, `DictReader`, `functools.partial`, `itertools.chain`, logging, `os.getenv`, `get_type_hints`, number and datetime constructors, `collections.UserDict` and `urllib.parse` analysed from Python source |
 | `json.rs` | `json.dumps` / `loads`, HTTP bodies and responses |
 | `pure.rs` | calls whose arguments are all literals, computed by `pyvalues.rs` |
 | `pyvalues.rs` | Python operations on literal values exactly as CPython 3.14 does (formatting, arithmetic, str methods, …) |
