@@ -381,8 +381,12 @@ impl Analyzer {
         let fr_module = self.frame().module;
         if fr_kind == FrameKind::Function {
             if let Some(&cid) = self.frame().cells.get(&name) {
-                let v = state.slot(cid, Ns::Cell, cell_key());
-                return v;
+                // (an enclosing function's variable this path holds nothing of — a closure run
+                // for any call, from a state its maker's run is not in: whatever it may hold)
+                return match state.slot_opt(cid, Ns::Cell, cell_key()) {
+                    None if self.frame().func.is_some_and(|f| self.heap.func_info(f).closure.iter().any(|(_, c)| *c == cid)) => Value::data(&str_get(name)),
+                    v => v.unwrap_or_default(),
+                };
             }
             let scope = self.frame().scope;
             let mi = self.heap.module_info(fr_module);
