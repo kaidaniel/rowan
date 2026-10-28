@@ -548,8 +548,9 @@ impl Analyzer {
             if !fi.is_static.get() {
                 // (an instance of the class or of one of its subclasses: what their
                 // `__init__`s set may be there; a torch module's method is analysed in
-                // its own terms: its attributes as symbols)
-                let torch = self.entry.torch_modules.contains(&fi.module);
+                // its own terms: its attributes as symbols — an `nn.Module`'s, not a plain
+                // class's beside it, nor one of a module that only imports numpy)
+                let torch = self.entry.torch_modules.contains(&fi.module) && self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.nn_module));
                 let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
                 // (a classmethod's is the class or one of its subclasses)
                 if fi.is_classmethod.get() {
