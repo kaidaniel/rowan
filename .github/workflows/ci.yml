@@ -146,6 +146,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/config_protocol.py; about 3 s)
         run: uv run --no-project python tests/config_protocol.py --all
 
+      - name: argparse model (bounded parsers x argvs vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/argparse_protocol.py; about 5 s)
+        run: uv run --no-project python tests/argparse_protocol.py --all
+
       - name: Narrowing, pairs (two tests on one value vs CPython)
         # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
         run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000

@@ -596,12 +596,13 @@ fn parse_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, to
     let n_before_sub = spec.sub.as_ref().map(|s| s.after_positionals);
     while i < tokens.len() {
         let t = tokens[i].clone();
+        // (`--`: every token after it is a positional)
+        if t == "--" && !only_pos {
+            only_pos = true;
+            i += 1;
+            continue;
+        }
         if only_pos || !is_option(&t) {
-            if t == "--" && !only_pos {
-                only_pos = true;
-                i += 1;
-                continue;
-            }
             // the subcommand: after the positionals that come before it
             if let Some(nb) = n_before_sub {
                 let need: usize = positionals.iter().take(nb).map(|a| min_count(&a.nargs)).sum();
