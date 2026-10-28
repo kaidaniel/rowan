@@ -126,7 +126,8 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "class-pairs": ["tests/class_protocol.py", "--pairs", "--rowan", "2500"],
              "container-pairs": ["tests/container_protocol.py", "--pairs", "--rowan", "4000"],
              "call-pairs": ["tests/call_protocol.py", "--pairs", "--rowan", "1500"],
-             "collections": ["tests/collections_protocol.py", "--all"]}
+             "collections": ["tests/collections_protocol.py", "--all"],
+             "itertools": ["tests/itertools_protocol.py", "--all"]}
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 

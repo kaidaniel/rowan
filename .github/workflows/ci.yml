@@ -134,6 +134,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/collections_protocol.py; about 5 s)
         run: uv run --no-project python tests/collections_protocol.py --all
 
+      - name: itertools model (bounded itertools calls vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/itertools_protocol.py; about 3 s)
+        run: uv run --no-project python tests/itertools_protocol.py --all
+
       - name: Narrowing, pairs (two tests on one value vs CPython)
         # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
         run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
