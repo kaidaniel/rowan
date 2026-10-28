@@ -450,6 +450,7 @@ impl Analyzer {
     /// An attribute of a dict: a Series', a config parser's or section's, a Counter's, a
     /// ChainMap's, a cookie jar's methods, else `dict`'s.
     fn dict_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
+        self.sync_chainmaps(&Value::obj(oid), state);
         if crate::models::pandas::is_series_obj(self, oid) {
             crate::models::pandas::series_getattr(self, oid, name, node, state)
         } else if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) {

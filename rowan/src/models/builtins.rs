@@ -2875,6 +2875,7 @@ fn m_any_all_items(an: &mut Analyzer, st: &mut State, c: &Call, is_any: bool, a:
 /// length, a closed record whose keys are all definite), else unknown data.
 pub(super) fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("len") };
+    an.sync_chainmaps(v, st);
     if an.m.torch_on {
         if let Some(r) = crate::models::torch::t_len(an, v, &c.node, st) {
             return r;

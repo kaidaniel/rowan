@@ -1227,8 +1227,14 @@ pub struct Tables {
 impl Tables {
     /// Recent objects fold into their summaries (`map`, recent → summary: `gc.rs`
     /// `rename_recent`): what the tables say of a recent object holds for its summary too (a
-    /// `functools.wraps` wrapper made in a loop is one on every round, a Counter one).
+    /// `functools.wraps` wrapper made in a loop is one on every round, a Counter one, a
+    /// ChainMap's maps, a `vars()` dict's instance), and what they hold refers to the summaries
+    /// (the recent objects are other objects once made again). An entry the summary has already
+    /// stays (one of the objects it stands for; values joined where they are values).
     pub fn rename_recent(&mut self, map: &FxHashMap<ObjId, ObjId>) {
+        let rv = |v: &Value| crate::interp::gc::rename_value(v, map).unwrap_or_else(|| v.clone());
+        let ro = |o: &ObjId| map.get(o).copied().unwrap_or(*o);
+        let rvs = |vs: &mut Vec<Value>| vs.iter_mut().for_each(|v| *v = rv(v));
         for (r, s) in map {
             for t in [&mut self.wrapped, &mut self.dd_factories, &mut self.csv_readers] {
                 if let Some(v) = t.get(r).cloned() {
@@ -1236,14 +1242,59 @@ impl Tables {
                     t.insert(*s, j);
                 }
             }
-            if let Some(c) = self.live_iters.get(r).cloned() {
-                self.live_iters.entry(*s).or_insert(c);
+            fn copy<V: Clone>(t: &mut FxHashMap<ObjId, V>, r: &ObjId, s: &ObjId) {
+                if let Some(v) = t.get(r).cloned() {
+                    t.entry(*s).or_insert(v);
+                }
             }
-            for t in [&mut self.counters, &mut self.ci_dicts, &mut self.zip_strict] {
+            copy(&mut self.live_iters, r, s);
+            copy(&mut self.chainmaps, r, s);
+            copy(&mut self.attr_mirrors, r, s);
+            copy(&mut self.deques, r, s);
+            copy(&mut self.partial_star, r, s);
+            copy(&mut self.sorted_items, r, s);
+            copy(&mut self.lazy_src, r, s);
+            copy(&mut self.exit_callbacks, r, s);
+            copy(&mut self.sdispatch, r, s);
+            copy(&mut self.sql_cursors, r, s);
+            copy(&mut self.sql_rows, r, s);
+            copy(&mut self.re_matches, r, s);
+            copy(&mut self.re_patterns, r, s);
+            copy(&mut self.csv_writers, r, s);
+            copy(&mut self.cfg_parsers, r, s);
+            copy(&mut self.cfg_sections, r, s);
+            copy(&mut self.infinites, r, s);
+            copy(&mut self.exc_objs, r, s);
+            copy(&mut self.fa_app_deps, r, s);
+            for t in [&mut self.counters, &mut self.ci_dicts, &mut self.zip_strict, &mut self.cookie_jars, &mut self.np_struct] {
                 if t.contains(r) {
                     t.insert(*s);
                 }
             }
+        }
+        for t in [&mut self.wrapped, &mut self.dd_factories, &mut self.csv_readers] {
+            t.values_mut().for_each(|v| *v = rv(v));
+        }
+        for t in [&mut self.chainmaps, &mut self.partial_star, &mut self.fa_app_deps] {
+            t.values_mut().for_each(&rvs);
+        }
+        for t in [&mut self.attr_mirrors, &mut self.sql_cursors] {
+            t.values_mut().for_each(|o| *o = ro(o));
+        }
+        self.lazy_src.values_mut().flatten().for_each(|(o, _)| *o = ro(o));
+        for items in self.sorted_items.values_mut() {
+            if items.iter().any(|(_, v, _)| crate::interp::gc::rename_value(v, map).is_some()) {
+                *items = Rc::new(items.iter().map(|(k, v, b)| (*k, rv(v), *b)).collect());
+            }
+        }
+        for (f, args, kw) in self.exit_callbacks.values_mut().flatten() {
+            *f = rv(f);
+            rvs(args);
+            kw.values_mut().for_each(|v| *v = rv(v));
+        }
+        for (v, f) in self.sdispatch.values_mut().flatten() {
+            *v = rv(v);
+            *f = ro(f);
         }
     }
 }
