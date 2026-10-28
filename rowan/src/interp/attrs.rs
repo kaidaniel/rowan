@@ -1411,6 +1411,11 @@ impl Analyzer {
             }
             let r = state.row(oid, Ns::Attr).store(nk, strong_key);
             state.set_row(oid, Ns::Attr, r);
+            // (an attribute the class declares, `count: int`: an unknown stored is of its type)
+            let v = match self.heap.instance_class(oid).filter(|_| kind == Kind::Instance) {
+                Some(c) => self.attr_as_annotated(c, name, v.clone(), state),
+                None => v.clone(),
+            };
             state.set_slot(oid, Ns::Attr, nk, v.clone(), strong);
             if kind == Kind::Class {
                 self.heap.set_cls_slot((oid, Ns::Attr, nk), v.clone());

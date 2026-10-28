@@ -927,13 +927,16 @@ impl Analyzer {
                 an.heap.prop_names.contains(&k)
                     || intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some_and(|c| an.heap.class_attr(c, &n).pts.iter().any(|f| an.is_descriptor(f, "__set__"))))
             };
-            for k in set.into_iter().filter(|k| !had.contains(*k) && !descriptor(self, *k)) {
+            let set: Vec<KeyId> = set.into_iter().filter(|k| !had.contains(*k) && !descriptor(self, *k)).collect();
+            for k in set {
                 row = row.store(k, false);
                 let put = match intern::key_as_str(k) {
                     Some(n) => {
                         // (it held the class-level default before)
                         let before: Vec<Value> = self.class_lookup(cls_oid, &n).map(|c| self.heap.class_attr(c, &n)).into_iter().collect();
-                        super::effects::stored_value(uses.values.get(&s(&n)), uses.computed, &before, &any)
+                        let put = super::effects::stored_value(uses.values.get(&s(&n)), uses.computed, &before, &any);
+                        // (of the type the class declares it with, `count: int`)
+                        self.attr_as_annotated(cls_oid, &n, put, state)
                     }
                     None => any.clone(),
                 };

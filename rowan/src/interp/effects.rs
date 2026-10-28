@@ -379,7 +379,11 @@ impl Analyzer {
                     if let Some(c) = self.heap.instance_class(inst).and_then(|c| self.class_lookup(c, &str_get(name))) {
                         before.push(self.heap.class_attr(c, &str_get(name)));
                     }
-                    let put = stored_value(uses.values.get(&name), uses.computed, &before, &any);
+                    let mut put = stored_value(uses.values.get(&name), uses.computed, &before, &any);
+                    // (of the type the class declares it with, `count: int`)
+                    if let Some(c) = self.heap.instance_class(inst) {
+                        put = self.attr_as_annotated(c, &str_get(name), put, state);
+                    }
                     state.set_slot(inst, Ns::Attr, k, v.join(&put), false);
                 }
                 let Some(f) = by_name.get(&name).copied() else { continue };
@@ -896,6 +900,14 @@ impl Analyzer {
                 before.push(an.heap.class_attr(c, &str_get(name)));
             }
             stored_value(put_by.get(&name), computed, &before, any)
+        };
+        let put = |an: &mut Analyzer, o: ObjId, k: KeyId, state: &mut State, any: &Value| {
+            let v = put(an, o, k, state, any);
+            // (of the type the class declares it with, `count: int`)
+            match an.heap.instance_class(o) {
+                Some(c) => an.attr_as_annotated(c, &intern::key_as_str(k).unwrap_or_default(), v, state),
+                None => v,
+            }
         };
         for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
             if n > 1 {

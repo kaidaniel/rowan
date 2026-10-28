@@ -286,9 +286,53 @@ impl Analyzer {
     /// (untyped unknown scalars, unknown objects of no known type) are of that type, or None
     /// when the annotation allows it; literals and the program's objects stay as they are.
     pub fn field_as_annotated(&mut self, cls: ObjId, name: &str, v: Value, validated: bool, state: &mut State) -> Value {
-        let Some((ann, _)) = self.field_annotation(cls, name) else { return v };
-        let (members, none) = annotation_members(ann);
-        let [m] = members[..] else { return v };
+        let Some((ann, module)) = self.field_annotation(cls, name) else { return v };
+        let site = format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name);
+        self.value_as_annotated(ann, module, v, validated, &site, state)
+    }
+
+    /// `v`, stored into attribute `name` of an instance of `cls` the class declares (`count:
+    /// int` in a class body of its MRO, `self.size: int = …` in a method: `attr_annotation`), as
+    /// `field_as_annotated` takes a field's.
+    pub(in crate::interp) fn attr_as_annotated(&mut self, cls: ObjId, name: &str, v: Value, state: &mut State) -> Value {
+        let Some((ann, module)) = self.attr_annotation(cls, name) else { return v };
+        let site = format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name);
+        self.value_as_annotated(ann, module, v, false, &site, state)
+    }
+
+    /// The annotation attribute `name` of `cls`'s instances is declared with, and the module it
+    /// is written in: in a class body of its MRO (`count: int`), else where a method of one
+    /// stores it on its receiver (`self.size: int = …`); remembered per class and name.
+    fn attr_annotation(&self, cls: ObjId, name: &str) -> Option<(&'static ast::Expr, ObjId)> {
+        let key = (cls, intern::s(name));
+        if let Some(a) = self.heap.attr_anns.borrow().get(&key) {
+            return *a;
+        }
+        let found = self.field_annotation(cls, name).or_else(|| {
+            self.heap.mro(cls).into_iter().find_map(|c| {
+                let ci = self.heap.class_info_opt(c)?;
+                ci.node.body.iter().find_map(|st| {
+                    let ast::Stmt::FunctionDef(f) = st else { return None };
+                    let me = f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).next()?.parameter.name.id.as_str();
+                    crate::syntax::walk_stmts(&f.body).into_iter().find_map(|s0| match s0 {
+                        ast::Stmt::AnnAssign(a) => match &*a.target {
+                            ast::Expr::Attribute(at) if at.attr.as_str() == name && matches!(&*at.value, ast::Expr::Name(n) if n.id.as_str() == me) => Some((&*a.annotation, ci.module)),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                })
+            })
+        });
+        self.heap.attr_anns.borrow_mut().insert(key, found);
+        found
+    }
+
+    /// `v` stored where annotation `ann` (written in `module`) names one scalar builtin type
+    /// (`field_as_annotated`); `site` makes the unknown object of the type beside None.
+    fn value_as_annotated(&mut self, ann: &'static ast::Expr, module: ObjId, v: Value, validated: bool, site: &str, state: &mut State) -> Value {
+        let (members, none) = self.members_in(ann, module, 0);
+        let [(m, _)] = members[..] else { return v };
         let t = match builtin_annotation(m) {
             Some((t, _)) if matches!(t, "bool" | "bytes" | "int" | "str") => t,
             _ if validated && dotted_last(m) == "float" && !matches!(m, ast::Expr::Subscript(_)) => "float",
@@ -312,7 +356,7 @@ impl Analyzer {
         // (beside None: an unknown object of the type, as a general run's field holds)
         let typed = match none {
             false => Value::data(&crate::domain::typed_label(t, scalar.as_deref().unwrap_or(""))),
-            true => self.typed_object(&format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name), t, false, 0, None, state).join(&Value::none()),
+            true => self.typed_object(site, t, false, 0, None, state).join(&Value::none()),
         };
         out.join(&typed)
     }
