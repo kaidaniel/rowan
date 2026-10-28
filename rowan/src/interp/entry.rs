@@ -720,7 +720,11 @@ impl Analyzer {
     /// `self.cfg` the very object passed.
     pub(super) fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
         let ctx = if self.entry.fresh_in_progress.is_empty() { "" } else { "instance" };
-        self.unknown_source_in(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), ctx)
+        let o = self.unknown_source_in(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), ctx);
+        // (as this `def` annotates it, not as another of the name did: an `@overload` stub's)
+        self.heap.obj_mut(o).ty = None;
+        self.heap.ann.remove(&o);
+        o
     }
 
     /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
