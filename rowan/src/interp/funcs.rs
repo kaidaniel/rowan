@@ -687,7 +687,7 @@ impl Analyzer {
         let seq = |an: &Analyzer, o: ObjId| match an.heap.kind(o) {
             Kind::List | Kind::Tuple | Kind::Set => true,
             // (an instance of a class of the program's own without `keys`)
-            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c) && an.class_lookup(c, "keys").is_none()),
+            Kind::Instance => an.heap.instance_class(o).is_some_and(|c| (an.plain_program_class(c) || an.plain_enum_class(c)) && an.class_lookup(c, "keys").is_none()),
             _ => false,
         };
         let (lits, kept) = super::items::value_literals(&v.kv);

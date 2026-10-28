@@ -2815,6 +2815,19 @@ pub(super) fn pure_result(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId)
 /// `range(...)` with known int bounds: a list whose items are known when it is short; its
 /// bounds decide membership at any length.
 pub(super) fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (a literal that is no int — a str, None, a float —: TypeError; on every path when an
+    // argument is nothing else)
+    for a in &c.args {
+        let lits = if a.kv.is_literal() { crate::domain::kv_literals(&a.kv) } else { intern::KeySet::EMPTY };
+        let bad = |k: intern::KeyId| intern::key_as_int(k).is_none();
+        if lits.iter().any(bad) {
+            if a.pts.is_empty() && lits.iter().all(bad) {
+                an.raise_here("TypeError", st);
+                return Value::new();
+            }
+            an.may_raise_here("TypeError", st);
+        }
+    }
     let ints: Option<Vec<i64>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().and_then(intern::key_as_int) } else { None }).collect();
     let bounds = match ints.as_deref() {
         Some([stop]) => Some((0, *stop, 1)),

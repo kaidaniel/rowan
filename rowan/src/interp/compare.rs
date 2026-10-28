@@ -152,7 +152,7 @@ impl Analyzer {
     fn in_instance(&mut self, a: &Value, b: &Value, nd: &Node, state: &mut State) -> Option<Value> {
         // (of classes of the program's alone: a library base's — an Enum Flag's `in` — is its
         // model's)
-        let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c));
+        let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c) || an.plain_enum_class(c));
         if !b.pts.iter().any(|o| user(self, o)) {
             return None;
         }
