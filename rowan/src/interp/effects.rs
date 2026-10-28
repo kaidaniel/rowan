@@ -897,11 +897,16 @@ impl Analyzer {
         }
         let put = |an: &Analyzer, o: ObjId, k: KeyId, state: &State, any: &Value| {
             let name = s(&intern::key_as_str(k).unwrap_or_default());
-            let mut before = vec![state.slot(o, Ns::Attr, k)];
-            if let Some(c) = an.heap.instance_class(o).and_then(|c| an.class_lookup(c, &str_get(name))) {
-                before.push(an.heap.class_attr(c, &str_get(name)));
+            let a = put_by.get(&name);
+            // (what it held before matters to `+= 1` only)
+            let mut before = Vec::new();
+            if a.is_some_and(|a| !a.aug.is_empty()) {
+                before.push(state.slot(o, Ns::Attr, k));
+                if let Some(c) = an.heap.instance_class(o).and_then(|c| an.class_lookup(c, &str_get(name))) {
+                    before.push(an.heap.class_attr(c, &str_get(name)));
+                }
             }
-            stored_value(put_by.get(&name), computed, &before, any)
+            stored_value(a, computed, &before, any)
         };
         let put = |an: &mut Analyzer, o: ObjId, k: KeyId, state: &mut State, any: &Value| {
             let v = put(an, o, k, state, any);

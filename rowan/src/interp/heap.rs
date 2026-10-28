@@ -417,6 +417,9 @@ pub struct Heap {
     /// container annotations (by node) a part following them was given items in place: what
     /// any part following them holds is not known (`Analyzer::put_items`)
     pub ann_changed: rustc_hash::FxHashSet<usize>,
+    /// per class: its MRO and the class payloads it was computed from (`mro`)
+    #[allow(clippy::type_complexity)]
+    mro_cache: std::cell::RefCell<FxHashMap<u32, (Vec<u32>, Vec<Option<Rc<ClassInfo>>>)>>,
     /// per class and attribute name: the annotation its instances' attribute is declared with
     /// (`Analyzer::attr_annotation`), found once
     #[allow(clippy::type_complexity)]
@@ -435,7 +438,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false, arg: false };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_anns: Default::default(), aliases: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_anns: Default::default(), aliases: Default::default(), mro_cache: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
 
@@ -765,8 +768,28 @@ impl Heap {
         out
     }
 
-    /// The C3 method resolution order of a user class (user classes only).
+    /// The C3 method resolution order of a user class (user classes only), remembered while the
+    /// classes it lists keep their class objects' payloads.
     pub fn mro(&self, cls: u32) -> Vec<u32> {
+        // (the payloads kept alive with it: one made since at the same address is no match)
+        let info = |c: u32| self.class_info_opt(c);
+        let same = |a: &Option<Rc<ClassInfo>>, b: &Option<Rc<ClassInfo>>| match (a, b) {
+            (Some(x), Some(y)) => Rc::ptr_eq(x, y),
+            (None, None) => true,
+            _ => false,
+        };
+        if let Some((m, ps)) = self.mro_cache.borrow().get(&cls) {
+            if m.iter().zip(ps.iter()).all(|(c, p)| same(&info(*c), p)) {
+                return m.clone();
+            }
+        }
+        let m = self.mro_uncached(cls);
+        let ps = m.iter().map(|c| info(*c)).collect();
+        self.mro_cache.borrow_mut().insert(cls, (m.clone(), ps));
+        m
+    }
+
+    fn mro_uncached(&self, cls: u32) -> Vec<u32> {
         /// C3 linearisation (None: inconsistent bases, or deeper than 64).
         fn c3(an: &Heap, cls: u32, depth: usize) -> Option<Vec<u32>> {
             if depth > 64 {

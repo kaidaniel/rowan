@@ -295,6 +295,11 @@ impl Analyzer {
     /// int` in a class body of its MRO, `self.size: int = …` in a method: `attr_annotation`), as
     /// `field_as_annotated` takes a field's.
     pub(in crate::interp) fn attr_as_annotated(&mut self, cls: ObjId, name: &str, v: Value, state: &mut State) -> Value {
+        // (nothing of no type in it: as it is)
+        let untyped_label = matches!(&v.kv, KeyVal::Data(l, _) if crate::domain::label_type(&intern::str_get(*l)).is_none());
+        if !untyped_label && !v.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown && self.heap.obj(o).ty.is_none()) {
+            return v;
+        }
         let Some((ann, module)) = self.attr_annotation(cls, name) else { return v };
         let site = format!("ann:{}#{}.{}", self.heap.class_info(cls).name, cls, name);
         self.value_as_annotated(ann, module, v, false, &site, state)
