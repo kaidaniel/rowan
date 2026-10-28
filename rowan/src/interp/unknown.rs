@@ -491,12 +491,15 @@ impl Analyzer {
 
     /// The generators among the objects unknown code met (`met`) may run on (it may consume
     /// them): what they were given may change, as unknown code changes what it is given, and
-    /// their functions' code is met (`found`), so what it changes is followed.
+    /// their functions' code is met (`found`), so what it changes is followed. A coroutine may
+    /// also run later, as a task an event loop runs at any later `await` (`start_task`).
     fn unknown_runs_generators(&mut self, met: &[ObjId], rid: ObjId, site_id: StrId, found: &mut Vec<ObjId>, state: &mut State) {
         let gens: Vec<std::rc::Rc<super::gens::LazyGen>> = met.iter().filter_map(|o| self.gens.lazy.get(o).cloned()).collect();
         if gens.is_empty() {
             return;
         }
+        let coros = met.iter().copied().filter(|o| self.is_coroutine(*o)).collect::<Vec<_>>();
+        self.start_task(&Value::objs(crate::domain::ObjSet::from_vec(coros)));
         let given: Vec<Value> = gens.iter().flat_map(|lg| lg.args.iter().chain(lg.kwargs.values()).chain(lg.self_v.iter()).cloned().collect::<Vec<_>>()).collect();
         let walk = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &given, rid, site_id, state, walk);

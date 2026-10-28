@@ -82,10 +82,20 @@ impl Analyzer {
         Some(out)
     }
 
-    /// Is `name` (may it be; None: any name) a `__slots__` member of a class of `cls`'s MRO: a
-    /// data descriptor that takes reads and stores of the name over the instance's `__dict__`?
+    /// Is `name` (may it be; None: any name) a `__slots__` member of a class of `cls`'s MRO, not
+    /// shadowed by a class attribute before it: a data descriptor that takes reads and stores
+    /// of the name over the instance's `__dict__`?
     pub(in crate::interp) fn slot_member(&self, cls: u32, name: Option<&str>) -> bool {
-        self.heap.mro(cls).iter().filter_map(|c| self.heap.class_info_opt(*c)).any(|ci| declared_slots(ci.node).map_or(true, |ns| ns.is_some_and(|ns| name.is_none_or(|name| ns.iter().any(|n| n == name)))))
+        for c in self.heap.mro(cls) {
+            let Some(ci) = self.heap.class_info_opt(c) else { continue };
+            if declared_slots(ci.node).map_or(true, |ns| ns.is_some_and(|ns| name.is_none_or(|name| ns.iter().any(|n| n == name)))) {
+                return true;
+            }
+            if name.is_some_and(|n| self.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit(n)))) {
+                return false;
+            }
+        }
+        false
     }
 
     /// `obj.__dict__`: a view of its attributes (None: an AttributeError, `__slots__` on every

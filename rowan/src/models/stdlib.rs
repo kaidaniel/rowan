@@ -732,13 +732,13 @@ pub(super) fn m_gather(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     match vals {
         Some(vs) => {
-            an.gather_tasks(&vs);
+            an.gather_tasks(&vs, st);
             let vs: Vec<Value> = vs.iter().map(|v| an.await_value(v, st)).collect();
             an.alloc_positional(Kind::List, &c.node, Some(vs), Value::new(), DATA, st)
         }
         None => {
             let all: Vec<Value> = c.args.iter().chain(rest.iter()).cloned().collect();
-            an.gather_tasks(&all);
+            an.gather_tasks(&all, st);
             let e = join_values(all.iter().map(|v| an.await_value(v, st)).collect::<Vec<_>>());
             an.alloc_positional(Kind::List, &c.node, None, e, DATA, st)
         }

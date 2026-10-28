@@ -11,8 +11,9 @@ against CPython (`asyncio.run` drives each program; AGENTS.md, Calls):
 - what the entry coroutine does with them (`SHAPES`): awaits the call (also in a loop, a stored
   list of them, a method), calls it and never awaits
   it, awaits it later, makes a task of it and awaits that later (also after a yield to the loop,
-  two tasks, one never awaited),
-  gathers two, `wait_for`, awaits twice; iterates the generator (also breaking out, with a
+  two tasks, one never awaited, a task a library's loop makes),
+  gathers two (also two coroutines whose callee changes `G` around a suspension), `wait_for`,
+  awaits twice; iterates the generator (also breaking out, with a
   comprehension, with `anext`), makes it and never iterates it; `async with`; `async for` over
   the class; `async with` the `@asynccontextmanager`;
 - in a `try` catching the KeyError the raising effect may raise (`WRAPS`), or not;
@@ -63,6 +64,8 @@ SHAPES = {
     "loop": ["for i in range(2):", "    r = await co{N}(xs)"],
     "task_never": ["t = asyncio.create_task(co{N}(xs))", "O = G"],
     "tasks_two": ["t1 = asyncio.create_task(co{N}(xs))", "t2 = asyncio.create_task(co{N}(xs))", "O = G", "r = await t2", "O = G", "r = await t1"],
+    "lib_task": ["t = asyncio.get_running_loop().create_task(co{N}(xs))", "G = 7", "O = G", "await asyncio.sleep(0)", "O = G", "r = await t"],
+    "gather_callee": ["rs = await asyncio.gather(ci{N}(xs), ci{N}(xs))", "r = rs[0]", "O = r", "r = rs[-1]"],
 }
 
 WRAPS = ["plain", "try"]
@@ -82,6 +85,17 @@ def program(effects, shape, wrap) -> Prog:
         "    global G",
         *ind(body),
         "    return G * 100 + len(a)",
+        "",
+        "def bump{N}(a):",
+        "    global G",
+        "    G = G * 10 + 5",
+        "",
+        "async def ci{N}(a):",
+        "    bump{N}(a)",
+        "    x = G",
+        "    await asyncio.sleep(0)",
+        "    bump{N}(a)",
+        "    return x * 100 + len(a)",
         "",
         "async def ag{N}(a):",
         "    global G",
