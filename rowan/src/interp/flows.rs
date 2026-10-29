@@ -638,6 +638,17 @@ impl<'a> Flow<'a> {
                 _ => {}
             }
         }
+        self.dict_uses();
+        if self.first.is_some() {
+            self.out.recv = Some(std::mem::take(&mut self.recv));
+        }
+        self.out
+    }
+
+    /// What the code's `__dict__` uses (`vars()` too) do: where it changes one in place or gives
+    /// it away, a store by names not said on what each belongs to; where it does more than read
+    /// the receiver's, the receiver escapes.
+    fn dict_uses(&mut self) {
         // (a `__dict__` changed in place or given away: stores on what each one used belongs to)
         let dict = s("__dict__");
         let dicts = || self.flags.iter().filter(|(o, _)| matches!(o, Origin::Attr(a) | Origin::NameAttr(_, a) if *a == dict)).map(|(_, f)| f);
@@ -649,10 +660,6 @@ impl<'a> Flow<'a> {
         if self.recv_dict && dicts().any(|f| f.changes || f.held || f.held2 || f.kept || f.edits || f.methods || f.called || f.rebinds || f.removes != Removes::No) {
             self.recv.escapes = true;
         }
-        if self.first.is_some() {
-            self.out.recv = Some(std::mem::take(&mut self.recv));
-        }
-        self.out
     }
 
     /// What a store by a name not said on `x` reaches (`StoreTarget`), one per value it may be.
