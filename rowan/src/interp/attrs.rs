@@ -113,9 +113,14 @@ impl Analyzer {
             Some(false) => self.may_raise_here("AttributeError", state),
             None => {}
         }
+        Some(self.dict_view(oid))
+    }
+
+    /// The view `oid.__dict__` is: one per object, its attributes.
+    pub(crate) fn dict_view(&mut self, oid: ObjId) -> Value {
         let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
         self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
-        Some(Value::obj(vid))
+        Value::obj(vid)
     }
 
     /// The attributes `obj.__dict__` holds, as the records and namespace that hold them: a

@@ -1881,9 +1881,15 @@ pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
     // `vars(obj)` is `obj.__dict__` itself (of objects that have one; a module's: a copy of
     // the names it binds, not those every module has)
-    let own = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Instance | Kind::Function | Kind::Namespace) && an.slots_refuse(o, None).is_none();
+    // (an instance whose class may have `__slots__` without a `__dict__`: a TypeError there)
+    // (an unknown object, an instance of a class rowan does not see: its attributes too)
+    let own = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Instance | Kind::Function | Kind::Namespace | Kind::Unknown) && an.slots_refuse(o, None) != Some(true);
     if c.qual == "builtins.vars" && a.kv.is_bot() && !a.pts.is_empty() && a.pts.iter().all(|o| own(an, o)) {
-        return an.load_attr(a, "__dict__", &c.node, st, false);
+        if a.pts.iter().any(|o| an.slots_refuse(o, None).is_some()) {
+            an.may_raise_here("TypeError", st);
+        }
+        let views: Vec<Value> = a.pts.iter().map(|o| an.dict_view(o)).collect();
+        return join_values(views);
     }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     // (one of several objects: the attributes of each, joined)

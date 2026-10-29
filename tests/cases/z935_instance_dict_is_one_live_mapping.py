@@ -28,6 +28,8 @@ def live(p):
     d["k"] = 6
     a2 = p.k
     #@value a2: exactly={6}
+    # (for any call too)
+    #@general a2: exactly={6}
     same = d is p.__dict__
     #@value same: exactly={True}
     d |= {"k": 8}
