@@ -2252,10 +2252,16 @@ impl Computed {
 /// What stores whose text says `a` (`AttrStores`) leave in an attribute that held one of `before`
 /// (its value then, a class-level default): the literals and the one builtin type their text
 /// says, `+= 1` keeping an int an int where every value it may apply to is one; `any` (the
-/// shared unknown) where a store's value is not said (`a` None or `any`), the types are several,
-/// or attributes may be stored by names or ways the text does not say (`computed`).
+/// shared unknown) beside its literals where a store's value is not said (`a` None or `any`), the
+/// types are several, or attributes may be stored by names or ways the text does not say
+/// (`computed`).
 pub(in crate::interp) fn stored_value(a: Option<&AttrStores>, computed: bool, before: &[Value], any: &Value) -> Value {
-    let Some(a) = a.filter(|a| !a.any && !computed) else { return any.clone() };
+    let Some(a) = a else { return any.clone() };
+    // (the literals its text stores are among what it holds, also beside anything)
+    let lits = a.lits.iter().fold(Value::new(), |v, k| v.join(&Value::lit(k)));
+    if a.any || computed {
+        return lits.join(any);
+    }
     let lit_type = |k: KeyId| intern::with_key(k, |kk| match kk {
         intern::Key::Int(_) => Some("int"),
         intern::Key::Bool(_) => Some("bool"),
@@ -2278,16 +2284,15 @@ pub(in crate::interp) fn stored_value(a: Option<&AttrStores>, computed: bool, be
                 }
         });
         if !lits_fit(&a.lits) || !a.types.iter().all(|x| fits(x)) || !before_fits {
-            return any.clone();
+            return lits.join(any);
         }
         if !types.contains(&t) {
             types.push(t);
         }
     }
-    let lits = a.lits.iter().fold(Value::new(), |v, k| v.join(&Value::lit(k)));
     match types[..] {
         [] => lits,
         [t] => lits.join(&Value::data(&crate::domain::typed_label(t, ""))),
-        _ => any.clone(),
+        _ => lits.join(any),
     }
 }
