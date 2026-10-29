@@ -1376,6 +1376,11 @@ pub fn t_getattr(an: &mut Analyzer, obj: &Value, name: &str, node: &Node, st: &m
                 None => tensor_value(Shape::any()),
             })
         }
+        // (fewer than 2 dims: a RuntimeError, not a dim out of range)
+        "mT" | "mH" if s.rank().is_some_and(|r| r < 2) => {
+            t_error(an, node, format!("{}: only for matrices, not {} dims", name, s.rank().unwrap_or(0)), st);
+            return Some(Value::new());
+        }
         "mT" | "mH" => return Some(t_transpose(an, &s, -2, -1, node, st)),
         "data" | "real" | "grad" => return Some(tensor_value(s)),
         "device" | "dtype" | "requires_grad" | "is_cuda" | "layout" | "grad_fn" => return Some(Value::data(&format!("L{}", node.line))),

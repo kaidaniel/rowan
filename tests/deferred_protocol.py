@@ -1,17 +1,17 @@
 """Deferred definitions (`interp/deferred.rs`: an imported module's `@d def f` whose decorators
 are all plain inert code runs them when `f` is first read), checked exhaustively against CPython:
 
-- a module `dlN` of the program's own (`LIB`) with decorators (`DECOS`): plain ones that rowan
-  defers (a `functools.wraps` wrapper, an attribute or `setattr` store, a call counter, a factory's
-  closure, one reading a closure's cell another closure changes later, one from another
-  module `dhN`, two stacked) and ones it must run at the `def` (a
-  registry, a global counter, one that raises, one reading a name bound later or only on some
-  paths, one giving back something else);
+- a module `dlN` of the program's own (`LIB_HEAD`) with decorators (`DECOS`): plain ones that
+  rowan defers (a `functools.wraps` wrapper, an attribute or `setattr` store, a call counter, a
+  factory's closure, one reading a closure's cell another closure changes later, one from
+  another module `dhN`, two stacked) and ones it must run at the `def` (a registry, a global
+  counter, one that raises, one reading a name bound later or only on some paths, one giving
+  back something else);
 - where the `def` is (`PLACES`): module level, under a test, in a `try`, in a class body (a
   staticmethod), at module level beside an undecorated twin;
 - what the module does after it (`AFTERS`): nothing, rebinds a name the decorator read (a
-  global, a cell), reads `f` itself (an attribute store, a call, an alias), deletes or rebinds `f`, re-exports it
-  from a second module;
+  global, a cell), reads `f` itself (an attribute store, a call, an alias), deletes or rebinds
+  `f`, re-exports it from a second module;
 - what the main module does with it (`USES`): calls it, reads its attributes (also after
   storing one, after rebinding the module's name the decorator read), its `__wrapped__`, through
   `vars`, `__dict__`, `getattr` by a name not known, `sys.modules`, `from … import`, a function

@@ -162,6 +162,14 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/descriptor_protocol.py; about 9 s)
         run: uv run --no-project python tests/descriptor_protocol.py --all
 
+      - name: Deferred definitions (bounded decorated defs in imported modules vs CPython, at two budgets)
+        # fails when rowan's claims miss a CPython run (tests/deferred_protocol.py; about 25 s)
+        run: uv run --no-project python tests/deferred_protocol.py --rowan 2000
+
+      - name: csv model (bounded readers / writers with dialects, quoting, dict readers / writers vs CPython)
+        # fails when rowan's claims miss a CPython run (tests/csv_protocol.py; about 6 s)
+        run: uv run --no-project python tests/csv_protocol.py --all
+
       - name: Narrowing, pairs (two tests on one value vs CPython)
         # fails when rowan's claims miss a CPython run (tests/narrow_protocol.py --pairs; about 20 s)
         run: uv run --no-project python tests/narrow_protocol.py --pairs --rowan 5000
@@ -321,6 +329,14 @@ jobs:
           --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy
           python tests/oracle.py
 
+      - name: pandas model (bounded frame operations vs real pandas)
+        # fails when rowan's claims miss a run (tests/pandas_protocol.py; about 25 s)
+        run: uv run --no-project --with pandas python tests/pandas_protocol.py --all
+
+      - name: pydantic model (bounded model validations vs real pydantic)
+        # fails when rowan's claims miss a run (tests/pydantic_protocol.py; about 30 s)
+        run: uv run --no-project --with pydantic python tests/pydantic_protocol.py --all
+
   torch-oracle:
     name: torch oracle
     needs: test
@@ -345,6 +361,12 @@ jobs:
         env:
           UV_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
         run: uv run --no-project --with torch --with numpy python tests/torch_oracle.py
+
+      - name: Tensor shapes (bounded torch / numpy operations vs real torch and numpy)
+        # fails when rowan's claims miss a run (tests/tensor_protocol.py; about 10 s)
+        env:
+          UV_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+        run: uv run --no-project --with torch --with numpy python tests/tensor_protocol.py --all
 
   package:
     name: package the VS Code extension
