@@ -1744,26 +1744,37 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
         Ann::Scalar(t) => {
             let t = *t;
             // (the value's literal part: its objects, if any, are checked below)
-            if val.kv.is_literal() && !val.kv.is_bot() && matches!(t, "int" | "float" | "Decimal") {
+            if val.kv.is_literal() && !val.kv.is_bot() && matches!(t, "int" | "float" | "Decimal" | "bool" | "str") {
                 let lits = crate::domain::kv_literals(&val.kv);
+                let text = |k: KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Str(_) | intern::Key::Bytes(_)));
                 let fails = |k: KeyId| {
                     let c = coerce_kv(t, &KeyVal::Lit(k));
                     let k2 = c.as_lit().unwrap();
                     match t {
                         "int" => intern::key_as_int(k2).is_none(),
                         "Decimal" => crate::models::pynum::as_dec(k2).is_none(),
+                        "bool" => !intern::with_key(k2, |kk| matches!(kk, intern::Key::Bool(_))),
+                        "str" => !text(k),
                         _ => !intern::key_is_number(k2),
                     }
                 };
                 let bad: Vec<KeyId> = lits.iter().filter(|k| fails(*k)).collect();
                 if !bad.is_empty() {
                     let loc = an.m.pyd_field;
-                    // (an int from a float with a fractional part: int_from_float)
+                    // (an int from a float with a fractional part: int_from_float; text that does
+                    // not parse: *_parsing; anything else — None — of the wrong type: *_type)
                     let code_of = |k: KeyId| match t {
+                        "str" => "string_type",
+                        // (text or an int that is no boolean: parsing; None, a float: type)
+                        "bool" if text(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Int(_))) => "bool_parsing",
+                        "bool" => "bool_type",
                         "int" if intern::with_key(k, |kk| matches!(kk, intern::Key::Float(_))) => "int_from_float",
-                        "int" => "int_parsing",
-                        "Decimal" => "decimal_parsing",
-                        _ => "float_parsing",
+                        "int" if text(k) => "int_parsing",
+                        "int" => "int_type",
+                        "Decimal" if text(k) => "decimal_parsing",
+                        "Decimal" => "decimal_type",
+                        _ if text(k) => "float_parsing",
+                        _ => "float_type",
                     };
                     let mut codes: Vec<&str> = bad.iter().map(|k| code_of(*k)).collect();
                     codes.sort();
@@ -2108,9 +2119,11 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
             "bool" => match as_str.as_deref().map(|x| x.to_lowercase()) {
                 Some(x) if matches!(x.as_str(), "true" | "1" | "yes" | "on" | "t" | "y") => intern::key_bool(true),
                 Some(x) if matches!(x.as_str(), "false" | "0" | "no" | "off" | "f" | "n") => intern::key_bool(false),
-                _ => match as_int {
-                    Some(1) => intern::key_bool(true),
-                    Some(0) => intern::key_bool(false),
+                _ => match (as_int, as_float(k)) {
+                    (Some(1), _) => intern::key_bool(true),
+                    (Some(0), _) => intern::key_bool(false),
+                    (_, Some(f)) if f == 1.0 => intern::key_bool(true),
+                    (_, Some(f)) if f == 0.0 => intern::key_bool(false),
                     _ => k,
                 },
             },

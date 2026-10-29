@@ -92,6 +92,7 @@ class Prog:
     end: list = field(default_factory=list)  # module-level lines after `run(pN)`
     desc: str = ""
     files: dict = field(default_factory=dict)  # modules beside the batch: {name (with `{N}`): text}
+    group: str = ""  # programs of different groups never share a batch (torch beside numpy)
 
     def text(self, n: int = 0) -> list:
         return [ln.replace("{N}", str(n)) for ln in self.lines]
@@ -243,8 +244,10 @@ def check(progs: list, names: list, tally: Tally, show: int = 5, verbose: bool =
     claims miss a CPython run; returns the indices of the programs with a miss."""
     bad = []
     t0 = time.time()
-    for start in range(0, len(progs), batch):
-        part = progs[start:start + batch]
+    starts = [i for i in range(len(progs)) if i == 0 or progs[i].group != progs[i - 1].group]
+    spans = [(a, min(a + batch, e)) for a, e in zip(starts, starts[1:] + [len(progs)]) for a in range(a, e, batch)]
+    for start, stop in spans:
+        part = progs[start:stop]
         text, where = module(part, names)
         fs = files(part)
         conc = concrete(text, where, fs)
