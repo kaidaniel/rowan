@@ -168,28 +168,29 @@ impl Analyzer {
     }
 
     /// `import m` of a module rowan ran before: where its code raised (`loaded_key` not
-    /// definite: not in `sys.modules` on some paths), it runs again, joined with the paths
-    /// where it is loaded, from an empty namespace (Python makes a new module); after it,
-    /// loaded everywhere. Not while its code is running (a circular import gives the module as
-    /// far as it got).
-    pub(in crate::interp) fn import_again(&mut self, m: ObjId, state: &mut State) {
+    /// definite: not in `sys.modules` on some paths), Python runs it again, in a new module.
+    /// Rowan takes that run for unknown code given the module (`unknown_call`: what the
+    /// module's code may change, `follow_code`; any raise), joined with the paths where it is
+    /// loaded; after it, loaded everywhere. (Running it again here cost a tenth of rich's work:
+    /// an import in a function called again and again.) Not while its code is running: a
+    /// circular import gives the module as far as it got.
+    pub(in crate::interp) fn import_again(&mut self, m: ObjId, node: &Node, state: &mut State) {
         let main = self.program.main_module;
         if m == main || !state.reachable || !state.has_row(main, Ns::Meta) || state.row(main, Ns::Meta).definite.contains(loaded_key(m)) {
             return;
         }
-        if self.cx.frames.iter().any(|f| f.kind == FrameKind::Module && f.module == m) {
+        // (a namespace package has no code)
+        if self.cx.frames.iter().any(|f| f.kind == FrameKind::Module && f.module == m) || self.heap.module_info(m).path.as_ref().is_some_and(|p| std::path::Path::new(p).is_dir()) {
+            return;
+        }
+        // (a module another run imported — an entry run of another function —, never run on
+        // this path: imported here first)
+        if !state.row(main, Ns::Meta).present.contains(loaded_key(m)) && !self.has_facts(m, state) {
+            self.run_module(m, state);
             return;
         }
         let mut again = state.copy();
-        // (what the earlier run bound stays reachable while the code runs again, in a slot of
-        // no name: what it makes are other objects, not those made again in their place)
-        let stale = key_str_lit("\u{1}stale");
-        let old = again.all_slots(m, Ns::Attr);
-        again.drop_obj_ns(m, Ns::Attr);
-        again.set_row(m, Ns::Attr, Row::new());
-        again.set_slot(m, Ns::Meta, stale, old, true);
-        self.run_module(m, &mut again);
-        again.pop_slot(m, Ns::Meta, stale);
+        self.unknown_call("import", None, Args::pos(&[Value::obj(m)]), &mut again, node);
         *state = state.join(&mut again);
         state.store_key_row(main, Ns::Meta, loaded_key(m), true);
     }

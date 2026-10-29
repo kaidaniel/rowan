@@ -361,9 +361,13 @@ impl Analyzer {
         if node.line == 0 {
             return;
         }
-        let key = intern::key_of_str(name);
-        let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "is only assigned on some paths");
-        self.verdict(node, key, &cls, module, Ns::Name, None, None);
+        // (a function's read of a global: may raise, unreported — a module's names bound in a
+        // `try` or under a test are the code's own business where it calls the function)
+        if self.frame().kind != FrameKind::Function || exc != "NameError" {
+            let key = intern::key_of_str(name);
+            let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "is only assigned on some paths");
+            self.verdict(node, key, &cls, module, Ns::Name, None, None);
+        }
         self.may_raise_here(exc, state);
         if state.unbound.contains(&name) {
             state.unbound = std::sync::Arc::new(state.unbound.iter().copied().filter(|n| *n != name).collect());

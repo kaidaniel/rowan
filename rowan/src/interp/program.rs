@@ -261,7 +261,7 @@ impl Analyzer {
     /// of its package; a module that is not found is an external object.
     pub fn import_module(&mut self, name: &str, node: &Node, state: &mut State) -> Value {
         if let Some(&m) = self.program.modules.get(name) {
-            self.import_again(m, state);
+            self.import_again(m, node, state);
             return Value::obj(m);
         }
         // (a followed library imported by the program's code: one entry into it)

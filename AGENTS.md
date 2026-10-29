@@ -4,7 +4,7 @@
 
 ## How rowan works
 
-rowan is a whole-program **abstract interpreter** for Python, written in Rust (`rowan/`). It parses with ruff (private names mangled as CPython does) and walks the syntax tree, running the program on abstract values instead of real ones. Imports run as Python runs them: `TYPE_CHECKING` is False, `import *` and namespace packages work; a module whose code raised is not loaded there, and its next import runs it again from an empty namespace (`import_again`). `rowan/src/interp/README.md` follows one run through the code.
+rowan is a whole-program **abstract interpreter** for Python, written in Rust (`rowan/`). It parses with ruff (private names mangled as CPython does) and walks the syntax tree, running the program on abstract values instead of real ones. Imports run as Python runs them: `TYPE_CHECKING` is False, `import *` and namespace packages work; a module whose code raised is not loaded there, and its next import is unknown code given the module; one a path never ran (another run imported it) runs at its first import there (`import_again`). Every module is a root of the collectors. `rowan/src/interp/README.md` follows one run through the code.
 
 ### Values, objects and states
 
