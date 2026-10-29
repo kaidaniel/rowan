@@ -2,8 +2,7 @@
 call starts where the module may not have been imported yet: its import runs the module's code
 there. Rowan ran the module's code in the first such run only; the second found a module it
 knew nothing of, and storing an attribute on it made the module one of that attribute only:
-`m.LIMIT` was claimed to raise AttributeError.
-
+`m.LIMIT` was claimed to raise AttributeError. (Now such a module holds anything there.)
 Expectations were written from the program text before running the engine."""
 
 
@@ -22,4 +21,5 @@ def second():
     except AttributeError:
         r = "AE"
     return r
-    #@general r: exactly={10}
+    #@general r: includes={10}
+    #@todo general r: exactly={10}   (a module another run imported holds anything here)

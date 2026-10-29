@@ -173,7 +173,8 @@ impl Analyzer {
     /// module's code may change, `follow_code`; any raise), joined with the paths where it is
     /// loaded; after it, loaded everywhere. (Running it again here cost a tenth of rich's work:
     /// an import in a function called again and again.) Not while its code is running: a
-    /// circular import gives the module as far as it got.
+    /// circular import gives the module as far as it got. A module this path has no facts of
+    /// (another run imported it) holds anything, and its import may raise anything.
     pub(in crate::interp) fn import_again(&mut self, m: ObjId, node: &Node, state: &mut State) {
         let main = self.program.main_module;
         if m == main || !state.reachable || !state.has_row(main, Ns::Meta) || state.row(main, Ns::Meta).definite.contains(loaded_key(m)) {
@@ -184,9 +185,12 @@ impl Analyzer {
             return;
         }
         // (a module another run imported — an entry run of another function —, never run on
-        // this path: imported here first)
+        // this path: what it holds is not known here, and stores into it keep it so; running
+        // its code again in every run that imports it cost the cost set a twentieth)
         if !state.row(main, Ns::Meta).present.contains(loaded_key(m)) && !self.has_facts(m, state) {
-            self.run_module(m, state);
+            // (its code may raise here as there)
+            self.flag_may_raise(state);
+            state.set_row(m, Ns::Attr, Row::top());
             return;
         }
         let mut again = state.copy();
