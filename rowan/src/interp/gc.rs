@@ -182,9 +182,7 @@ impl Analyzer {
             // (a method read off an object holds it; no root of its own)
             work.extend(self.heap.attr_of.get(&o.unwrap()).into_iter().flatten().copied());
         }
-        for m in [&self.m.attr_mirrors, &self.m.sql_cursors] {
-            work.extend(each(m, o).copied());
-        }
+        work.extend(each(&self.m.sql_cursors, o).copied());
         work.extend(each(&self.entry.instances, o).flatten());
         work.extend(each(&self.entry.general_instances, o).flatten());
         work.extend(each(&self.entry.any_instances, o).flatten());

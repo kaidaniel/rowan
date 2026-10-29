@@ -123,7 +123,8 @@ pub type LenFact = (Option<usize>, usize, u16);
 pub struct State {
     /// the running frame's local names (small; copied eagerly)
     pub env: IndexMap<StrId, Value>,
-    /// path-sensitive facts about attribute chains (`isinstance(a.b, C)` → `a.b` on this path)
+    /// path-sensitive facts about attribute chains (`isinstance(a.b, C)` → `a.b` on this path),
+    /// kept while no store of an attribute of the chain's names happens (`forget_narrowed`)
     pub narrowed: FxHashMap<StrId, Value>,
     /// per (object, namespace) its keys (`Row`)
     pub rows: LayerMap<(ObjId, Ns), Row>,
@@ -856,6 +857,9 @@ impl State {
     /// The program stored `v` under the key: replacing what is there when `strong` (and the object
     /// is not merged), else joined with it.
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
+        if ns == Ns::Attr {
+            self.forget_narrowed(key);
+        }
         // (a value stored into a loop's item or the records it is one of: maybe into the others)
         for m in family(oid) {
             if self.has_row(m, Ns::Item) || self.has_row(m, Ns::Attr) {
@@ -884,8 +888,22 @@ impl State {
         }
     }
 
+    /// An attribute named `key` changed on some object (`o.k = v`, `o.__dict__["k"] = v`,
+    /// `setattr`): the attribute chains a test narrowed that read such a name (`a.k`, `a.k.b`)
+    /// are no longer known to be what the test saw.
+    pub fn forget_narrowed(&mut self, key: KeyId) {
+        if self.narrowed.is_empty() {
+            return;
+        }
+        let Some(name) = crate::intern::key_as_str(key) else { return };
+        self.narrowed.retain(|k, _| !str_get(*k).split('.').skip(1).any(|part| part == &*name));
+    }
+
     /// Removes the value under the key, giving it back.
     pub fn pop_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId) -> Option<Value> {
+        if ns == Ns::Attr {
+            self.forget_narrowed(key);
+        }
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
         }

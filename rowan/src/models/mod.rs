@@ -1208,8 +1208,6 @@ pub struct Tables {
     pub wrapped: FxHashMap<ObjId, Value>,
     /// classes decorated with functools.total_ordering
     pub total_ordering: FxHashSet<ObjId>,
-    /// `vars(obj)` dicts: stores into them are stores of obj's attributes
-    pub attr_mirrors: FxHashMap<ObjId, ObjId>,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
@@ -1252,7 +1250,6 @@ impl Tables {
             }
             copy(&mut self.live_iters, r, s);
             copy(&mut self.chainmaps, r, s);
-            copy(&mut self.attr_mirrors, r, s);
             copy(&mut self.deques, r, s);
             copy(&mut self.partial_star, r, s);
             copy(&mut self.sorted_items, r, s);
@@ -1281,9 +1278,7 @@ impl Tables {
         for t in [&mut self.chainmaps, &mut self.partial_star, &mut self.fa_app_deps] {
             t.values_mut().for_each(&rvs);
         }
-        for t in [&mut self.attr_mirrors, &mut self.sql_cursors] {
-            t.values_mut().for_each(|o| *o = ro(o));
-        }
+        self.sql_cursors.values_mut().for_each(|o| *o = ro(o));
         self.lazy_src.values_mut().flatten().for_each(|(o, _)| *o = ro(o));
         for items in self.sorted_items.values_mut() {
             if items.iter().any(|(_, v, _)| crate::interp::gc::rename_value(v, map).is_some()) {

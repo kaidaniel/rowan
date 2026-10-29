@@ -1084,12 +1084,6 @@ impl Analyzer {
                         self.store_key(oid, Ns::Item, &key, v, s1, node, state);
                     }
                 }
-                Kind::Dict if self.m.attr_mirrors.contains_key(&oid) => {
-                    // a `vars(obj)` dict: obj's attributes change with it
-                    let inst = self.m.attr_mirrors[&oid];
-                    let s1 = strong && self.heap.obj(inst).single;
-                    self.store_key(inst, Ns::Attr, &key, v, s1, node, state);
-                }
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(fs) = self.own_methods(oid, "__setitem__") {
                         for f in fs {
@@ -1207,6 +1201,11 @@ impl Analyzer {
 
     /// `oid[ns] ∪= keys` of every record in `src` (a dict spread, `update`, `dict(x)`).
     pub fn copy_into(&mut self, oid: u32, ns: Ns, src: &Value, state: &mut State, strong: bool, kill: &KeySet) {
+        // (`obj.__dict__`: obj's attributes)
+        let (src, attrs) = match self.mapping_parts(src) {
+            Some((insts, Ns::Attr)) => (&insts.clone(), true),
+            _ => (src, false),
+        };
         let recs = self.record_objects(src);
         // an unknown value copied in (`{**entry}` with entry unknown): any keys
         if recs.is_empty() && src.pts.is_empty() && !src.kv.is_bot() && !src.kv.is_literal() {
@@ -1222,7 +1221,7 @@ impl Analyzer {
             }
             return;
         }
-        let ns_of = |an: &Analyzer, x: u32| if an.heap.kind(x) != Kind::Instance { Ns::Item } else { Ns::Attr };
+        let ns_of = |an: &Analyzer, x: u32| if an.heap.kind(x) != Kind::Instance && !attrs { Ns::Item } else { Ns::Attr };
         let srcrow = join_rows(recs.iter().map(|x| state.row(*x, ns_of(self, *x))));
         let r = state.row(oid, ns).copy_from(&srcrow, strong, kill, intern::EMPTY_LENS);
         state.set_row(oid, ns, r);
@@ -1378,6 +1377,16 @@ impl Analyzer {
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);
         state.drop_name_keys(None);
+        // `del obj.__dict__[k]`: the attribute goes (a KeyError when it is not there)
+        if ns == Ns::Item {
+            let attrs: Vec<u32> = objs.iter().filter_map(|o| self.heap.attrs_view(*o)).flat_map(|i| i.pts.iter()).collect();
+            let saved = std::mem::replace(&mut self.unwind.attr_as_key, true);
+            for &i in &attrs {
+                let strong = attrs.len() == 1 && objs.len() == 1 && self.heap.obj(i).single;
+                self.delete_key(i, Ns::Attr, key, strong, node, state, report);
+            }
+            self.unwind.attr_as_key = saved;
+        }
         let targets = self.record_objects(obj);
         for &oid in &targets {
             let kind = self.heap.kind(oid);
@@ -1581,14 +1590,14 @@ impl Analyzer {
 
     /// The values a record holds, including what its unknown keys hold (a parameter's dict,
     /// an open record: its content under an unknown key).
-    pub(in crate::interp) fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
-        let v = state.all_slots(oid, Ns::Item);
-        let row = state.row(oid, Ns::Item);
+    pub(in crate::interp) fn record_values(&mut self, oid: u32, ns: Ns, state: &mut State) -> Value {
+        let v = state.all_slots(oid, ns);
+        let row = state.row(oid, ns);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
         let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !source_fills_star(src));
         if row.open() && outside {
-            return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
+            return v.join(&self.path_placeholder_value(oid, ns, STAR, &row, state));
         }
         v
     }
@@ -1628,7 +1637,13 @@ impl Analyzer {
             base = rest.rsplit_once("@L").filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map(|(b, _)| b).unwrap_or(rest);
         }
         let label = format!("{} of {}@L{}", tag, base, node.line);
-        let payload = self.heap.obj(oid).payload.clone();
+        // (`obj.__dict__`: a dict of obj's attributes)
+        let attrs_of = self.heap.attrs_view(oid).and_then(|i| i.single());
+        let parts: Vec<(ObjId, Ns, Ns)> = match attrs_of {
+            Some(i) => vec![(i, Ns::Attr, Ns::Item)],
+            None => vec![(oid, Ns::Item, Ns::Item), (oid, Ns::Attr, Ns::Attr)],
+        };
+        let payload = if attrs_of.is_some() { Payload::None } else { self.heap.obj(oid).payload.clone() };
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         self.heap.set_copy_root(nid, root);
         if kind == Kind::Unknown {
@@ -1638,12 +1653,12 @@ impl Analyzer {
         let ll = self.heap.llen(oid, state);
         self.heap.set_llen(nid, state, ll);
         let nsingle = self.heap.obj(nid).single;
-        for ns in [Ns::Item, Ns::Attr] {
-            if state.has_row(oid, ns) {
+        for &(src, sns, ns) in &parts {
+            if state.has_row(src, sns) {
                 let prev = state.rows.get(&(nid, ns));
                 let r = match prev {
-                    Some(p) if !nsingle => p.join(&state.row(oid, ns)),
-                    _ => state.row(oid, ns),
+                    Some(p) if !nsingle => p.join(&state.row(src, sns)),
+                    _ => state.row(src, sns),
                 };
                 state.set_row(nid, ns, r);
             }
@@ -1651,7 +1666,11 @@ impl Analyzer {
         if let Some(e) = state.elems.get(&oid) {
             state.elems.insert(nid, e);
         }
-        for ((ns, k), mut v) in state.slots_of(oid) {
+        let slots: Vec<((Ns, KeyId), Value)> = match attrs_of {
+            Some(i) => state.slots_of(i).into_iter().filter(|((ns, _), _)| *ns == Ns::Attr).map(|((_, k), v)| ((Ns::Item, k), v)).collect(),
+            None => state.slots_of(oid),
+        };
+        for ((ns, k), mut v) in slots {
             if deep && seen.len() < 64 {
                 let mut newp: Vec<u32> = Vec::new();
                 for x in v.pts.iter() {

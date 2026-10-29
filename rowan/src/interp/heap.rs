@@ -640,6 +640,15 @@ impl Heap {
             _ => String::new(),
         }
     }
+    /// The objects a view `obj.__dict__` (`vars(obj)`, `globals()`) holds the attributes of;
+    /// None: no such view.
+    pub fn attrs_view(&self, oid: ObjId) -> Option<&Value> {
+        match &self.obj(oid).payload {
+            Payload::View(ViewKind::Attrs, inst) if self.kind(oid) == Kind::View => Some(inst),
+            _ => None,
+        }
+    }
+
     /// Is the object a record (it has keys: a dict, frame, instance, unknown, module, class,
     /// namespace)?
     pub fn is_record(&self, oid: ObjId) -> bool {

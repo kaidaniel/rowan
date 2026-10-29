@@ -573,7 +573,12 @@ impl Analyzer {
     /// Is object `o` an instance of one of `classes` (None: not known)? For both the value of
     /// an `isinstance` test and what it narrows.
     pub fn instance_of(&self, o: u32, classes: &[u32], st: &State) -> Option<bool> {
-        let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.heap.kind(o) };
+        let k = match self.heap.kind(o) {
+            _ if crate::models::pandas::is_series_obj(self, o) => Kind::Series,
+            // (`obj.__dict__` is a dict)
+            Kind::View if self.heap.attrs_view(o).is_some() => Kind::Dict,
+            k => k,
+        };
         if k == Kind::Unknown {
             // (an unknown of a builtin type, as annotated: by its type)
             return self.heap.obj(o).ty.filter(|t| crate::domain::TYPE_NAMES.contains(t)).and_then(|t| crate::models::builtins::typed_isinstance(self, t, classes));

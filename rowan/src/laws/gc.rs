@@ -38,7 +38,7 @@ enum Edit {
     Narrowed(u8, u8),
     /// a model's side table keyed by object `.0` holds object `.1` (a defaultdict's factory)
     Side(u8, u8),
-    /// an attribute mirror of object `.0` is object `.1`
+    /// a side table maps object `.0` to object `.1` (`sql_cursors`)
     Mirror(u8, u8),
     /// an exception in flight is the object
     Exc(u8),
@@ -116,7 +116,7 @@ fn run(young_payloads: &[Option<u8>], edits: &[Edit]) -> (Analyzer, State, State
                 an.m.dd_factories.insert(ob(a), Value::obj(ob(b)));
             }
             Edit::Mirror(a, b) => {
-                an.m.attr_mirrors.insert(ob(a), ob(b));
+                an.m.sql_cursors.insert(ob(a), ob(b));
             }
             Edit::Exc(b) => an.unwind.cur_exc = Some(Value::obj(ob(b))),
             Edit::Caller(b) => {
@@ -148,7 +148,7 @@ fn reached(an: &Analyzer, st: &State, objs: &[ObjId], old: bool) -> BTreeSet<Obj
         v.push_objs(&mut work);
     }
     an.m.dd_factories.values().for_each(|v| v.push_objs(&mut work));
-    work.extend(an.m.attr_mirrors.values().copied());
+    work.extend(an.m.sql_cursors.values().copied());
     an.unwind.cur_exc.iter().for_each(|v| v.push_objs(&mut work));
     an.cx.env_stack.iter().flat_map(|e| e.values()).for_each(|v| v.push_objs(&mut work));
     let mut seen = BTreeSet::new();
@@ -169,7 +169,7 @@ fn reached(an: &Analyzer, st: &State, objs: &[ObjId], old: bool) -> BTreeSet<Obj
         if let Some(v) = an.m.dd_factories.get(&o) {
             v.push_objs(&mut work);
         }
-        work.extend(an.m.attr_mirrors.get(&o).copied());
+        work.extend(an.m.sql_cursors.get(&o).copied());
     }
     seen
 }
