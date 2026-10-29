@@ -36,6 +36,11 @@ env:
   CARGO_TERM_COLOR: always
   UV_PYTHON_PREFERENCE: managed
 
+defaults:
+  run:
+    # (bash -eo pipefail: a harness piped into tee fails its step)
+    shell: bash
+
 jobs:
   build:
     name: build (frame pointers)

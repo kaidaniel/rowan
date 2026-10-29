@@ -15,7 +15,9 @@ manifest:
 
   stdlib   a module of the pinned CPython (.python-version), from the interpreter `uv run` uses,
            copied alone into bench/work/costset/stdlib (beside the stdlib's other files they
-           would be the program's modules, not the library rowan models)
+           would be the program's modules, not the library rowan models); .python-version pins
+           the minor version only, so another patch release's text is measured too, marked
+           `sha256_mismatch` in its run (CI's runners: 3.14.10)
   bench    a file of one of the eight benchmarks' programs (bench/prepare.py NAME), in place
   pypi     a module of a PyPI sdist (url, sha256), fetched into bench/work/costset/src, in place
 
@@ -63,6 +65,9 @@ MODES = ("default", "nodeadline")
 # per run: the default mode's 10 s deadline and what follows it; with no deadline the slowest
 # cost-set modules take about a minute here (pyflakes' checker, pycparser's parser)
 TIMEOUT_S = {"default": 60, "nodeadline": 180}
+
+
+MISMATCHED: set[str] = set()  # stdlib modules whose text is not the manifest's here
 
 
 def costset_manifest() -> dict:
@@ -132,7 +137,12 @@ def path_of(p: dict) -> Path:
     else:
         src = bench_dir(p["bench"]) / p["path"]
     if hashlib.sha256(src.read_bytes()).hexdigest() != p["sha256"]:
-        sys.exit(f"{p['name']}: sha256 mismatch for {src}")
+        if p["source"] != "stdlib":
+            sys.exit(f"{p['name']}: sha256 mismatch for {src}")
+        # (the interpreter's own patch release: .python-version pins 3.14, not its patch, so a
+        # stdlib module, as stdlib12k, may differ between machines; measured, and marked)
+        MISMATCHED.add(p["name"])
+        print(f"tracked.py: {p['name']}: {src} is not the manifest's (another 3.14 patch release); measured anyway", file=sys.stderr)
     return src
 
 
@@ -151,6 +161,8 @@ def run_one(binary: Path, p: dict, path: Path, mode: str, limits: str | None, ou
     """One measured run of one program in one mode (bench/heldout.py's `run_module`)."""
     r = heldout.run_module(Path(binary), path, limits_for(mode, limits), TIMEOUT_S[mode], out_dir / mode)
     r.update(kind=p["kind"], what=p["what"])
+    if p["name"] in MISMATCHED:
+        r["sha256_mismatch"] = True
     return r
 
 

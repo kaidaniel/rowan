@@ -144,9 +144,11 @@ def sha_file(p: Path) -> str:
 
 
 def tests_fingerprint() -> str:
-    """This checkout's tests and harnesses (committed and not): a cached check is valid for them."""
-    h = hashlib.sha256(git("ls-files", "-s", "tests", "bench", ".github", "vscode-rowan").encode())
-    h.update(git("diff", "HEAD", "--", "tests", "bench", ".github", "vscode-rowan").encode())
+    """What the checks run (committed and not): the tests, the extension's, ci.yml's steps and the
+    two bench harnesses checks use; a cached check is valid for them."""
+    paths = ["tests", "vscode-rowan", ".github/workflows/ci.yml", "bench/protocols.py", "bench/heldout.py", "bench/heldout"]
+    h = hashlib.sha256(git("ls-files", "-s", *paths).encode())
+    h.update(git("diff", "HEAD", "--", *paths).encode())
     return h.hexdigest()[:16]
 
 
