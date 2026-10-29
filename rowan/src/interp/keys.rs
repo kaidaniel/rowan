@@ -441,3 +441,19 @@ pub(in crate::interp) fn keys_now(kv: &KeyVal, state: &State) -> Option<KeyVal> 
         None => crate::domain::DATA,
     })
 }
+
+impl Analyzer {
+    /// The builtin type of the keys `ko` ranges over (`State::keys_of_type`); where that is not
+    /// known, strs for `**kw` dicts the code neither changes nor gives away (`Heap::str_keyed`)
+    /// holding no literal key of another type.
+    pub(in crate::interp) fn keys_type(&self, ko: &crate::domain::KeysOf, state: &State) -> Option<&'static str> {
+        if let Some(t) = state.keys_of_type(ko) {
+            return Some(t);
+        }
+        if ko.ns != Ns::Item || ko.objs.is_empty() || !ko.objs.iter().all(|o| self.heap.str_keyed.contains(&o)) {
+            return None;
+        }
+        let row = state.keys_row(ko);
+        (!row.top && row.mutators.is_empty() && row.present.iter().all(|k| crate::domain::key_type(k, "str"))).then_some("str")
+    }
+}

@@ -657,7 +657,7 @@ impl Analyzer {
             // (and the literals it is known it may be: `8080 | ?`)
             info.lits = v.kv.hint().iter().collect();
             let ty = match &v.kv {
-                KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => state.keys_of_type(ko),
+                KeyVal::KeysOf(ko) if ko.chain == intern::EMPTY_LENS => self.keys_type(ko, state),
                 kv => match kv.data_site().and_then(|l| label_base(&intern::str_get(l))) {
                     // (an unknown of a type or None: None among the literals)
                     Some((t, opt)) => {

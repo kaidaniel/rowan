@@ -976,7 +976,7 @@ impl Analyzer {
                     Some(n) => {
                         // (it held the class-level default before)
                         let before: Vec<Value> = self.class_lookup(cls_oid, &n).map(|c| self.heap.class_attr(c, &n)).into_iter().collect();
-                        let put = super::effects::stored_value(uses.values.get(&s(&n)), uses.computed, &before, &any);
+                        let put = super::effects::stored_value(uses.values.get(&s(&n)), uses.computed.reaches(&self.heap, Some(cls_oid)), &before, &any);
                         // (of the type the class declares it with, `count: int`)
                         self.attr_as_annotated(cls_oid, &n, put, state)
                     }

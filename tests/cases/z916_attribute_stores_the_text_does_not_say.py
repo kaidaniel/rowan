@@ -18,8 +18,8 @@ class Box:
 
     def show(self):
         x = self.v
-        #@general x: untyped
-        #@todo general x: shows={0, 1} untyped  (the unknown such a store leaves is an object, which names no literals beside it)
+        #@general x: shows={0, 1} untyped
+        # (the literals the text stores stand beside the unknown a store by a computed name leaves)
         r = self.ratio
         #@general r: shows={0.5} untyped
         return x

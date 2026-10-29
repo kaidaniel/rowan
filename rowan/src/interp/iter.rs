@@ -361,7 +361,13 @@ impl Analyzer {
             }
             return;
         }
-        let kv = KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item));
+        // (of a dict annotated `dict[K, V]` for any call: its keys as the annotation and the
+        // program's stores say)
+        let annotated = recv.single().filter(|r| recv.kv.is_bot() && self.heap.kind(*r) == Kind::Unknown && self.heap.obj(*r).depth < PATH_DEPTH);
+        let keys = match annotated.and_then(|r| self.annotated_keys(r, state)) {
+            Some(k) => k,
+            None => Value::kv_only(KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item))),
+        };
         let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
         let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
         match (lit, acc.items.as_mut()) {
@@ -389,11 +395,11 @@ impl Analyzer {
             _ => acc.items = None,
         }
         match vk {
-            ViewKind::Keys | ViewKind::Proxy => acc.elems.push(Value::kv_only(kv)),
+            ViewKind::Keys | ViewKind::Proxy => acc.elems.push(keys),
             ViewKind::Values => acc.elems.push(vals),
             _ => {
                 acc.pair = true;
-                acc.pairs.push((Value::kv_only(kv), vals));
+                acc.pairs.push((keys, vals));
             }
         }
     }
@@ -632,6 +638,13 @@ impl Analyzer {
         }
         acc.items = None;
         acc.exhaustive = false;
+        // (a dict annotated `dict[str, V]`: its keys, and those the program put into it)
+        if self.heap.obj(oid).depth < PATH_DEPTH {
+            if let Some(v) = self.annotated_keys(oid, state) {
+                acc.elems.push(v);
+                return;
+            }
+        }
         // (an annotated container's: what the program put into it too)
         if let Some(put) = self.items_put(oid, state) {
             acc.elems.push(put);
@@ -640,12 +653,7 @@ impl Analyzer {
             acc.elems.push(Value::data("deep"));
             return;
         }
-        // (a dict annotated `dict[str, V]`: its keys; an element annotated with a class of the
-        // program: an instance of it)
-        if let Some(v) = self.annotated_key(oid, state) {
-            acc.elems.push(v);
-            return;
-        }
+        // (an element annotated with a class of the program: an instance of it)
         if let Some(v) = self.part_instance(oid, STAR, state) {
             acc.elems.push(v);
             return;

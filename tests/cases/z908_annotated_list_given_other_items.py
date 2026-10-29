@@ -71,8 +71,8 @@ def f(xs: list[list[int]]):
     for row in xs:
         for y in row:
             vf = y
-            #@general vf: unknown
-            #@todo general vf: shows={'n'} types={int}  (a part given items in place: rowan does not tell the parts of one container apart, so none of them follows the annotation any more)
+            #@general vf: shows={'n'} types={int}
+            # (the parts of one container are not told apart: what one is given, every one may hold)
 
 
 def a(xs: list[int]):
