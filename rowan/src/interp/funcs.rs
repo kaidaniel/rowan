@@ -446,13 +446,16 @@ impl Analyzer {
         if fr_module != self.program.main_module && self.heap.module_info(fr_module).path.is_some() && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
             self.may_raise_here("NameError", state);
         }
-        // (one the main module binds, but not yet on this path: NameError; not a read the
+        // (one the main module binds, but not yet on this path: NameError — reported in module
+        // code; a function's call there is often one the program never makes; not a read the
         // output makes, line 0)
         if fr_module == self.program.main_module && node.line > 0 && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
             let mi = self.heap.module_info(fr_module);
             if mi.scopes.get(mi.scopes.module()).is_local(&nm) {
-                let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "is not assigned on any path to here");
-                self.verdict(node, intern::key_of_str(name), &cls, fr_module, Ns::Name, None, None);
+                if fr_kind != FrameKind::Function {
+                    let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "is not assigned on any path to here");
+                    self.verdict(node, intern::key_of_str(name), &cls, fr_module, Ns::Name, None, None);
+                }
                 self.raise_here("NameError", state);
                 return Value::new();
             }
