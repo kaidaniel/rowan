@@ -691,12 +691,20 @@ pub fn t_error(an: &mut Analyzer, node: &Node, msg: String, st: &mut State) {
     if an.m.t_quiet {
         return;
     }
+    // (what the library raises: a dim out of range or too many indices an IndexError — numpy's
+    // AxisError is a ValueError too —, any other mismatch torch's RuntimeError, numpy's
+    // ValueError)
+    let dim = msg.contains("out of range");
+    let index = dim || msg.contains("too many indices") || msg.contains("out of bounds");
     let (chain, entry) = t_note_ctx(an);
     let n = ShapeNote { module: node.module, line: node.line, chain, entry, general: an.for_any_call(), text: msg, cons: None };
     if !an.m.shape_errors.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.text == n.text) {
         an.m.shape_errors.push(n);
     }
-    an.raise_here("RuntimeError", st);
+    if dim && !an.m.torch_real {
+        an.may_raise_here("ValueError", st);
+    }
+    an.raise_here(if index { "IndexError" } else if an.m.torch_real { "RuntimeError" } else { "ValueError" }, st);
 }
 
 /// Check a condition: true → fine; false → shape error (the op raises, the path ends);
@@ -718,6 +726,8 @@ pub fn t_require(an: &mut Analyzer, c: Cons, node: &Node, st: &mut State, msg: i
             if !text.contains('?') {
                 t_require_note(an, node, text, Some((c.clone(), ctx)));
             }
+            // (where it does not hold the op raises; where it goes on, it holds)
+            an.may_raise_here(if an.m.torch_real { "RuntimeError" } else { "ValueError" }, st);
             let mut f = (*st.tf).clone();
             sh::learn(&mut f, &c);
             st.tf = std::sync::Arc::new(f);
@@ -1366,6 +1376,11 @@ pub fn t_getattr(an: &mut Analyzer, obj: &Value, name: &str, node: &Node, st: &m
                 None => tensor_value(Shape::any()),
             })
         }
+        // (fewer than 2 dims: a RuntimeError, not a dim out of range)
+        "mT" | "mH" if s.rank().is_some_and(|r| r < 2) => {
+            t_error(an, node, format!("{}: only for matrices, not {} dims", name, s.rank().unwrap_or(0)), st);
+            return Some(Value::new());
+        }
         "mT" | "mH" => return Some(t_transpose(an, &s, -2, -1, node, st)),
         "data" | "real" | "grad" => return Some(tensor_value(s)),
         "device" | "dtype" | "requires_grad" | "is_cuda" | "layout" | "grad_fn" => return Some(Value::data(&format!("L{}", node.line))),
@@ -1582,7 +1597,7 @@ fn t_index(an: &mut Analyzer, s: &Shape, items: &[&'static ruff_python_ast::Expr
         let c = cons[i].unwrap();
         let d: Vec<DimId> = pre[j..j + c].to_vec();
         j += c;
-        match t_index_one(an, items[i], vals[i].as_ref(), &d, st, &mut adv) {
+        match t_index_one(an, items[i], vals[i].as_ref(), &d, node, st, &mut adv) {
             Some(x) => front.extend(x),
             None => return tensor_value(Shape::any()),
         }
@@ -1593,7 +1608,7 @@ fn t_index(an: &mut Analyzer, s: &Shape, items: &[&'static ruff_python_ast::Expr
         let c = cons[i].unwrap();
         let d: Vec<DimId> = suf[j..j + c].to_vec();
         j += c;
-        match t_index_one(an, items[i], vals[i].as_ref(), &d, st, &mut adv) {
+        match t_index_one(an, items[i], vals[i].as_ref(), &d, node, st, &mut adv) {
             Some(x) => back.extend(x),
             None => return tensor_value(Shape::any()),
         }
@@ -1605,7 +1620,7 @@ fn t_index(an: &mut Analyzer, s: &Shape, items: &[&'static ruff_python_ast::Expr
 }
 
 /// One index item over the dims it consumes: the dims it produces (None: unknown).
-fn t_index_one(an: &mut Analyzer, e: &'static ruff_python_ast::Expr, v: Option<&Value>, dims: &[DimId], st: &mut State, adv: &mut usize) -> Option<Vec<DimId>> {
+fn t_index_one(an: &mut Analyzer, e: &'static ruff_python_ast::Expr, v: Option<&Value>, dims: &[DimId], node: &Node, st: &mut State, adv: &mut usize) -> Option<Vec<DimId>> {
     use ruff_python_ast::Expr as E;
     let d = dims.first().copied();
     match e {
@@ -1695,6 +1710,22 @@ fn t_index_one(an: &mut Analyzer, e: &'static ruff_python_ast::Expr, v: Option<&
             }
             // (an int, or one of several ints: a loop's index run to a fixpoint)
             let ints = v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().all(|k| matches!(intern::key_get(k), intern::Key::Int(_) | intern::Key::Bool(_)));
+            // (an int past a dim of known size: IndexError, where every one of them is)
+            if let (true, Some(n)) = (ints, d.and_then(sh::as_lit)) {
+                let ks = crate::domain::kv_literals(&v.kv);
+                let out = |k: KeyId| intern::key_as_int(k).is_some_and(|i| i >= n || i < -n);
+                let bad = ks.iter().filter(|k| out(*k)).count();
+                if bad == ks.len() && bad > 0 {
+                    t_error(an, node, format!("index out of bounds for a dim of size {}", n), st);
+                    return Some(vec![]);
+                }
+                if bad > 0 {
+                    an.may_raise_here("IndexError", st);
+                }
+            } else if ints || t_int(an, v).is_some() || dim_of_label(v).is_some() {
+                // (a dim of a size not known, or an index not known: maybe past it)
+                an.may_raise_here("IndexError", st);
+            }
             if ints || t_int(an, v).is_some() || dim_of_label(v).is_some() {
                 return Some(vec![]);
             }
@@ -2597,6 +2628,10 @@ pub fn t_chunk(an: &mut Analyzer, s: &Shape, n: Option<Value>, d: i64, node: &No
     let x = get_at(&e, p);
     let n = n.and_then(|v| t_int(an, &v));
     if let Some(n) = n {
+        // (a dim of size 0: n empty pieces)
+        if sh::as_lit(x) == Some(0) && n > 0 {
+            return t_pieces(an, &e, p, vec![sh::lit(0); n as usize], node, st);
+        }
         if let Some(len) = sh::as_lit(x) {
             let size = (len + n - 1) / n.max(1);
             let mut sizes = Vec::new();

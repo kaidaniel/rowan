@@ -44,12 +44,11 @@ def flag(row):
 
 
 flags = df.apply(flag, axis=1)
-# (was `ok flag` / `missing small`: a function returning a dict gives a Series of dicts, one per
-# row, unless result_type="expand"; its labels are the row numbers, so both raise KeyError.
-# rowan keeps no RangeIndex of unknown length: no verdict)
+# (was `ok flag` / `missing small`, then `none`: a Series of dicts, one per row, unless
+# result_type="expand", labelled 0..n-1; a frame of no rows gives its empty copy, without flag)
 #@todo missing flag ; missing small (labels of a read_csv frame are 0..n-1)
-flags["flag"]                                    #@ none flag
-flags["small"]                                   #@ none small
+flags["flag"]                                    #@ possibly flag
+flags["small"]                                   #@ possibly small
 wide = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "c": 4}])
 wide["c"]                                        #@ ok c
 wide["d"]                                        #@ missing d

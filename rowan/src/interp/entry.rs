@@ -144,17 +144,59 @@ impl Analyzer {
     }
 
     /// Runs a module's code in a module frame of its own (the main module, an import).
+    /// Run module `moid`'s code. Where it completes, the module is loaded (`loaded_key` in the
+    /// main module's Meta row: the collector keeps it on paths where nothing holds the module);
+    /// where it raised, it is not (`import_again`).
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
         let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
         self.cx.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
         let (exits, ret) = (state.exits.take(), state.ret.take());
+        let main = self.program.main_module;
+        if moid == main {
+            state.set_row(main, Ns::Meta, Row::new());
+        }
         self.with_gen_restart(state, true, &mut |an, s| an.exec_block(&info.tree.body, s));
         self.cx.frames.pop();
+        if state.reachable && moid != main {
+            state.store_key_row(main, Ns::Meta, loaded_key(moid), true);
+        }
         state.reachable = true;
         state.exits = exits;
         state.ret = ret;
+    }
+
+    /// `import m` of a module rowan ran before: where its code raised (`loaded_key` not
+    /// definite: not in `sys.modules` on some paths), Python runs it again, in a new module.
+    /// Rowan takes that run for unknown code given the module (`unknown_call`: what the
+    /// module's code may change, `follow_code`; any raise), joined with the paths where it is
+    /// loaded; after it, loaded everywhere. (Running it again here cost a tenth of rich's work:
+    /// an import in a function called again and again.) Not while its code is running: a
+    /// circular import gives the module as far as it got. A module this path has no facts of
+    /// (another run imported it) holds anything, and its import may raise anything.
+    pub(in crate::interp) fn import_again(&mut self, m: ObjId, node: &Node, state: &mut State) {
+        let main = self.program.main_module;
+        if m == main || !state.reachable || !state.has_row(main, Ns::Meta) || state.row(main, Ns::Meta).definite.contains(loaded_key(m)) {
+            return;
+        }
+        // (a namespace package has no code)
+        if self.cx.frames.iter().any(|f| f.kind == FrameKind::Module && f.module == m) || self.heap.module_info(m).path.as_ref().is_some_and(|p| std::path::Path::new(p).is_dir()) {
+            return;
+        }
+        // (a module another run imported — an entry run of another function —, never run on
+        // this path: what it holds is not known here, and stores into it keep it so; running
+        // its code again in every run that imports it cost the cost set a twentieth)
+        if !state.row(main, Ns::Meta).present.contains(loaded_key(m)) && !self.has_facts(m, state) {
+            // (its code may raise here as there)
+            self.flag_may_raise(state);
+            state.set_row(m, Ns::Attr, Row::top());
+            return;
+        }
+        let mut again = state.copy();
+        self.unknown_call("import", None, Args::pos(&[Value::obj(m)]), &mut again, node);
+        *state = state.join(&mut again);
+        state.store_key_row(main, Ns::Meta, loaded_key(m), true);
     }
 
     /// The program's call of `foid` from `state`, while the main module runs. A run for any
@@ -980,4 +1022,10 @@ fn own_source(label: &str, own: &str, span: (u32, u32), in_main: bool) -> bool {
         Some(n) => span.0 <= n && n <= span.1,
         None => false,
     }
+}
+
+/// The key of the main module's Meta row present where module `m`'s code completed
+/// (`run_module`).
+fn loaded_key(m: ObjId) -> KeyId {
+    key_str_lit(&format!("\u{1}loaded {}", m))
 }

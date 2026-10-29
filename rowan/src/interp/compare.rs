@@ -600,6 +600,23 @@ impl Analyzer {
                     let vals: Vec<KeyId> = items.iter().map(|(_, v)| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<_>>()?;
                     return decide(vals.contains(&k));
                 }
+                // a module's namespace (not the names every module has, which its row does
+                // not hold), or a plain instance's attributes, by their rows
+                Payload::View(ViewKind::Attrs, inner) => {
+                    let own = |an: &Analyzer, i: ObjId| match an.heap.kind(i) {
+                        Kind::Module => intern::key_as_str(k).is_some_and(|n| !super::attrs::MODULE_NAMES.contains(&&*n)),
+                        Kind::Instance => an.heap.instance_class(i).is_some_and(|c| an.plain_program_class(c)),
+                        _ => false,
+                    };
+                    if inner.pts.is_empty() || !inner.pts.iter().all(|i| own(self, i)) {
+                        return None;
+                    }
+                    let rows: Vec<Row> = inner.pts.iter().map(|i| state.row(i, Ns::Attr)).collect();
+                    if rows.iter().all(|r| r.definite.contains(k)) {
+                        return decide(true);
+                    }
+                    return rows.iter().all(|r| r.lacks(k)).then(|| op != ast::CmpOp::In);
+                }
                 _ => {}
             }
         }

@@ -149,19 +149,45 @@ TAIL = [
 ]
 
 
-def program(lib: dict, value: str, expr: str, desc: str) -> Prog:
+# An encoding of a result that rowan's claims can be literals of where its parts are known
+# (`repr` of a container is not computed): a scalar as it is; a list, tuple or dict as its
+# items' reprs joined, one level of nesting spelled out (`ENC` instead of the `repr` above).
+ENC_HELPERS = [
+    "def ENC(r):",
+    "    if r is None or isinstance(r, (bool, int, float, str)):",
+    "        return r",
+    "    if isinstance(r, list):",
+    "        return 'list:' + '|'.join([ENC1(x) for x in r])",
+    "    if isinstance(r, tuple):",
+    "        return 'tuple:' + '|'.join([ENC1(x) for x in r])",
+    "    if isinstance(r, dict):",
+    "        return 'dict:' + '|'.join([ENC1(k) + '=' + ENC1(x) for k, x in r.items()])",
+    "    return repr(r)",
+    "def ENC1(x):",
+    "    if isinstance(x, list):",
+    "        return '[' + ','.join([repr(y) for y in x]) + ']'",
+    "    if isinstance(x, tuple):",
+    "        return '(' + ','.join([repr(y) for y in x]) + ')'",
+    "    if isinstance(x, dict):",
+    "        return '{' + ','.join([repr(k) + '=' + repr(y) for k, y in x.items()]) + '}'",
+    "    return repr(x)",
+]
+TAIL_ENC = [*TAIL[:-4], "o = ENC(r)", "O = o"]
+
+
+def program(lib: dict, value: str, expr: str, desc: str, tail: list = TAIL) -> Prog:
     """The program: the library's imports and helpers (the helpers' and module-level names made
     the program's own, `W` → `W{N}_`: programs share one module), then the operation."""
     helpers = lib.get("helpers", [])
-    names = [m.group(1) for ln in helpers if (m := re.match(r"def (\w+)\(", ln))]
+    names = [m.group(1) for ln in helpers if (m := re.match(r"(?:def|class) (\w+)[(:]", ln))]
     names += [m.group(1) for ln in lib["imports"] if (m := re.match(r"(\w+) = ", ln))]
 
     def own(t: str) -> str:
         for n in names:
             t = re.sub(rf"\b{n}\b", n + "{N}_", t)
         return t
-    lines = [*map(own, lib["imports"]), *map(own, helpers), "def p{N}():", "    global O", f"    v = {value}", "    try:", f"        r = {own(expr)}"]
-    lines += ["    " + ln for ln in TAIL]
+    lines = [*map(own, lib["imports"]), *map(own, helpers), "def p{N}():", "    global O", f"    v = {own(value)}", "    try:", f"        r = {own(expr)}"]
+    lines += ["    " + own(ln) for ln in tail]
     return Prog(lines, desc=desc)
 
 

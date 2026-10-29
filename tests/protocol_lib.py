@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -67,11 +68,31 @@ def run(f):
 '''
 
 
+def typing_shim() -> None:
+    """As `oracle.py`'s: pydantic >= 2.12 passes `prefer_fwd_module` to `typing._eval_type`,
+    which the 3.14 uv provides may lack; drop the argument (the pydantic enumerator's runs)."""
+    import inspect
+    import typing
+    try:
+        params = inspect.signature(typing._eval_type).parameters  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        return
+    if "prefer_fwd_module" not in params:
+        real = typing._eval_type  # type: ignore[attr-defined]
+
+        def _eval_type(*a, prefer_fwd_module=False, **kw):  # noqa: ARG001
+            return real(*a, **kw)
+
+        typing._eval_type = _eval_type  # type: ignore[attr-defined]
+
+
 @dataclass
 class Prog:
     lines: list  # module-level lines (functions), `{N}` for the program's number
     end: list = field(default_factory=list)  # module-level lines after `run(pN)`
     desc: str = ""
+    files: dict = field(default_factory=dict)  # modules beside the batch: {name (with `{N}`): text}
+    group: str = ""  # programs of different groups never share a batch (torch beside numpy)
 
     def text(self, n: int = 0) -> list:
         return [ln.replace("{N}", str(n)) for ln in self.lines]
@@ -79,7 +100,8 @@ class Prog:
 
 def module(progs: list, names: list) -> tuple[str, dict]:
     """One module of the programs; {line number: (program, point, name)} for its observation
-    lines (point: the line's index in the program's own text, or ("end", i))."""
+    lines (point: the line's index in the program's own text, or ("end", i)). The programs'
+    own modules (`Prog.files`) are `files(progs)`."""
     g = "\n".join(f"{x} = 0" for x in names)
     reset = "\n".join(f"    {x} = 0" for x in names)
     lines = PRELUDE.format(globals=g, reset_names=", ".join(names), reset=reset).split("\n")
@@ -101,20 +123,40 @@ def module(progs: list, names: list) -> tuple[str, dict]:
     return "\n".join(lines) + "\n", where
 
 
-def concrete(text: str, where: dict) -> dict:
+def files(progs: list) -> dict:
+    """{module name: text} of the programs' own modules (`Prog.files`, `{N}` replaced)."""
+    return {k.replace("{N}", str(n)): v.replace("{N}", str(n)) for n, p in enumerate(progs) for k, v in p.files.items()}
+
+
+def write_files(d, fs: dict) -> None:
+    for k, v in fs.items():
+        (Path(d) / f"{k}.py").write_text(v)
+
+
+def concrete(text: str, where: dict, fs: dict | None = None) -> dict:
     """{(program, point): values} over every input, from CPython's runs: a line tracer reads
-    the observed global once its line ran (at the next event)."""
+    the observed global once its line ran (at the next event). `fs`: modules the batch imports
+    (written to a directory on `sys.path`, imported afresh for each input)."""
     seen: dict = defaultdict(set)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         code = compile(text, "<protocol>", "exec")
     old_hook = sys.unraisablehook
     sys.unraisablehook = lambda u: None  # (a raise in a finally run by a generator's collection)
+    tmp = tempfile.TemporaryDirectory() if fs else None
+    if tmp:
+        write_files(tmp.name, fs)
+        sys.path.insert(0, tmp.name)
     try:
         for c1, c2, b in INPUTS:
             os.environ.update(C1="1" if c1 else "0", C2="1" if c2 else "0", B=b)
+            for k in fs or ():
+                sys.modules.pop(k, None)
             pending: list = []
-            g: dict = {"__name__": "__protocol__"}
+            # (a module of its own in `sys.modules`: pydantic resolves annotations there)
+            mod = types.ModuleType("__protocol__")
+            g: dict = mod.__dict__
+            sys.modules["__protocol__"] = mod
 
             def flush():
                 while pending:
@@ -138,10 +180,15 @@ def concrete(text: str, where: dict) -> dict:
             flush()
     finally:
         sys.unraisablehook = old_hook
+        if tmp:
+            sys.path.remove(tmp.name)
+            for k in fs:
+                sys.modules.pop(k, None)
+            tmp.cleanup()
     return seen
 
 
-def rowan_claims(text: str, where: dict, limits: str | None = None, timeout: int = 300) -> tuple[dict, dict, str]:
+def rowan_claims(text: str, where: dict, limits: str | None = None, timeout: int = 300, fs: dict | None = None) -> tuple[dict, dict, str]:
     """({(program, point): (literals, unknown)} of the main run, the same for any call, stderr)."""
     lines = text.split("\n")
     for ln, (_, _, name) in where.items():
@@ -149,6 +196,7 @@ def rowan_claims(text: str, where: dict, limits: str | None = None, timeout: int
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "protocol_batch.py"
         p.write_text("\n".join(lines))
+        write_files(d, fs or {})
         cmd = [RUST_BIN, str(p), "--golden"]
         # (the guard is the owner's Mac's; CI's macOS runners have none)
         if sys.platform == "darwin" and GUARD.exists():
@@ -196,11 +244,14 @@ def check(progs: list, names: list, tally: Tally, show: int = 5, verbose: bool =
     claims miss a CPython run; returns the indices of the programs with a miss."""
     bad = []
     t0 = time.time()
-    for start in range(0, len(progs), batch):
-        part = progs[start:start + batch]
+    starts = [i for i in range(len(progs)) if i == 0 or progs[i].group != progs[i - 1].group]
+    spans = [(a, min(a + batch, e)) for a, e in zip(starts, starts[1:] + [len(progs)]) for a in range(a, e, batch)]
+    for start, stop in spans:
+        part = progs[start:stop]
         text, where = module(part, names)
-        conc = concrete(text, where)
-        main, gen, err = rowan_claims(text, where, limits)
+        fs = files(part)
+        conc = concrete(text, where, fs)
+        main, gen, err = rowan_claims(text, where, limits, fs=fs)
         tally.programs += len(part)
         if main is None:
             tally.crashed += 1
@@ -249,6 +300,8 @@ def where_text(p: Prog, pt) -> str:
 
 def show_prog(p: Prog, pt=None) -> str:
     out = []
+    for k, v in p.files.items():
+        out += [f"# {k.replace('{N}', '0')}.py", *v.replace("{N}", "0").rstrip().split("\n"), "# main"]
     for i, ln in enumerate(p.text()):
         out.append(ln + ("    # <-" if i == pt else ""))
     out.append("run(p0)")

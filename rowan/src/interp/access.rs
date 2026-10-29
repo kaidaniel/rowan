@@ -22,6 +22,8 @@ pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", 
 pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
+/// (a name an expression reads: pandas' `query` / `eval` of a column a frame lacks)
+pub const NAME_GUARDS: &[&str] = &["NameError", "Exception", "BaseException", "*"];
 /// Handlers that catch everything: a guard only around the read in its own function.
 pub(super) const CATCH_ALL: &[&str] = &["Exception", "BaseException", "*"];
 
@@ -32,12 +34,22 @@ impl Analyzer {
     /// The handler names that guard a failing read in namespace `ns` here.
     fn guard_names(&self, ns: Ns) -> &'static [&'static str] {
         if ns != Ns::Item {
-            return ATTR_GUARDS;
+            return if self.unwind.attr_as_key { ITEM_GUARDS } else { ATTR_GUARDS };
         }
-        match self.unwind.item_exc {
+        match self.unwind.item_exc.or(self.unwind.item_exc_force) {
             Some("ValueError") => VALUE_GUARDS,
             Some("ValidationError") => VALIDATION_GUARDS,
+            Some("NameError") => NAME_GUARDS,
             _ => ITEM_GUARDS,
+        }
+    }
+
+    /// What a read of a key namespace `ns` lacks raises here.
+    pub(in crate::interp) fn miss_exc(&self, ns: Ns) -> &'static str {
+        match ns {
+            Ns::Item => self.unwind.item_exc.unwrap_or("KeyError"),
+            _ if self.unwind.attr_as_key => "KeyError",
+            _ => "AttributeError",
         }
     }
 

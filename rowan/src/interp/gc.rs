@@ -1,6 +1,6 @@
 //! Liveness and garbage collection: which objects the program can still reach (the state's
-//! names, the callers' names, the frames' modules and cells, and what the analyzer's own side
-//! tables hold: `gc_pinned`), and the collectors at returns, loop exits and try exits that drop
+//! names, the callers' names, the frames' modules and cells, every module imported, and what
+//! the analyzer's own side tables hold: `gc_pinned`), and the collectors at returns, loop exits and try exits that drop
 //! the facts of objects made since a mark that nothing reaches.
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -30,6 +30,9 @@ impl Analyzer {
         for fr in self.cx.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
+        }
+        if frames == usize::MAX {
+            work.extend(self.program.modules.values().copied());
         }
         let callers = self.cx.env_stack.iter().take(envs).flat_map(|e| e.values());
         for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
@@ -216,6 +219,8 @@ impl Analyzer {
     pub(in crate::interp) fn held_by_analyzer(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (a raise state is one path: the exceptions other raises took to the running tries are
         // other paths')
+        // (every module imported: `sys.modules` holds it, also one a call imported and dropped)
+        work.extend(self.program.modules.values().copied());
         let recorded = self.unwind.tries.iter().filter(|_| unwind.is_none()).flat_map(|t| t.recs.iter().map(|r| &r.2));
         for v in self.unwind.cur_exc.iter().chain(recorded).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);

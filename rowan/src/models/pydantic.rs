@@ -46,6 +46,10 @@ pub enum Ann {
     Union(Vec<Ann>, Option<String>),
     /// an Enum class: a member, or a value equal to one's
     Enum(ObjId),
+    /// `Any` / `object`: anything, as given
+    Any,
+    /// an annotation rowan does not model: what it makes of a value, and whether it fails,
+    /// are not known
     Other,
 }
 
@@ -443,6 +447,8 @@ fn pyd_ann(an: &mut Analyzer, e: &ast::Expr, module: ObjId, state: &State) -> An
             };
             match base.as_str() {
                 "Optional" => Ann::Optional(Box::new(pyd_ann(an, elts[0], module, state))),
+                // (the field's literals check it: `PField::lits`)
+                "Literal" => Ann::Any,
                 "Annotated" => {
                     let inner = pyd_ann(an, elts[0], module, state);
                     // `Field(discriminator="kind")` on a union
@@ -603,6 +609,10 @@ fn pyd_ann(an: &mut Analyzer, e: &ast::Expr, module: ObjId, state: &State) -> An
                     "datetime" => Ann::Scalar("datetime"),
                     "date" => Ann::Scalar("date"),
                     "time" => Ann::Scalar("time"),
+                    "Any" | "object" => Ann::Any,
+                    // (a bare container: of anything, as a container of `Any`)
+                    "dict" | "Dict" | "Mapping" => Ann::Dict(Box::new(Ann::Any)),
+                    "list" | "List" => Ann::List(Box::new(Ann::Any), "list"),
                     _ => Ann::Other,
                 },
             }
@@ -1071,14 +1081,15 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
         for e in errs {
             let loc = match (nest_prefix, e.loc) {
                 (Some(p), Some(l)) => {
-                    let mut parts = vec![p];
+                    // (a prefix of several parts: a list's item, (field, position))
+                    let mut parts = intern::with_key(p, |kk| if let intern::Key::Tuple(t) = kk { Some(t.clone()) } else { None }).unwrap_or_else(|| vec![p]);
                     match intern::with_key(l, |kk| if let intern::Key::Tuple(t) = kk { Some(t.clone()) } else { None }) {
                         Some(t) => parts.extend(t),
                         None => parts.push(l),
                     }
                     Some(intern::key_tuple(parts))
                 }
-                (Some(p), None) => Some(intern::key_tuple(vec![p])),
+                (Some(p), None) => Some(intern::with_key(p, |kk| matches!(kk, intern::Key::Tuple(_))).then_some(p).unwrap_or_else(|| intern::key_tuple(vec![p]))),
                 (None, _) => None,
             };
             if let Some(top) = an.m.pyd_errs.last_mut() {
@@ -1744,26 +1755,37 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
         Ann::Scalar(t) => {
             let t = *t;
             // (the value's literal part: its objects, if any, are checked below)
-            if val.kv.is_literal() && !val.kv.is_bot() && matches!(t, "int" | "float" | "Decimal") {
+            if val.kv.is_literal() && !val.kv.is_bot() && matches!(t, "int" | "float" | "Decimal" | "bool" | "str") {
                 let lits = crate::domain::kv_literals(&val.kv);
+                let text = |k: KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Str(_) | intern::Key::Bytes(_)));
                 let fails = |k: KeyId| {
                     let c = coerce_kv(t, &KeyVal::Lit(k));
                     let k2 = c.as_lit().unwrap();
                     match t {
                         "int" => intern::key_as_int(k2).is_none(),
                         "Decimal" => crate::models::pynum::as_dec(k2).is_none(),
+                        "bool" => !intern::with_key(k2, |kk| matches!(kk, intern::Key::Bool(_))),
+                        "str" => !text(k),
                         _ => !intern::key_is_number(k2),
                     }
                 };
                 let bad: Vec<KeyId> = lits.iter().filter(|k| fails(*k)).collect();
                 if !bad.is_empty() {
                     let loc = an.m.pyd_field;
-                    // (an int from a float with a fractional part: int_from_float)
+                    // (an int from a float with a fractional part: int_from_float; text that does
+                    // not parse: *_parsing; anything else — None — of the wrong type: *_type)
                     let code_of = |k: KeyId| match t {
+                        "str" => "string_type",
+                        // (text or an int that is no boolean: parsing; None, a float: type)
+                        "bool" if text(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Int(_))) => "bool_parsing",
+                        "bool" => "bool_type",
                         "int" if intern::with_key(k, |kk| matches!(kk, intern::Key::Float(_))) => "int_from_float",
-                        "int" => "int_parsing",
-                        "Decimal" => "decimal_parsing",
-                        _ => "float_parsing",
+                        "int" if text(k) => "int_parsing",
+                        "int" => "int_type",
+                        "Decimal" if text(k) => "decimal_parsing",
+                        "Decimal" => "decimal_type",
+                        _ if text(k) => "float_parsing",
+                        _ => "float_type",
                     };
                     let mut codes: Vec<&str> = bad.iter().map(|k| code_of(*k)).collect();
                     codes.sort();
@@ -1903,7 +1925,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
             state.set_row(nid, Ns::Item, row);
             Value::obj(nid)
         }
-        Ann::List(inner, kind) if !matches!(**inner, Ann::Other) => {
+        Ann::List(inner, kind) if !matches!(**inner, Ann::Other | Ann::Any) => {
             // a scalar is no container (str / bytes: an Iterable's items, a Sequence's
             // sequence_str error)
             if !val.kv.is_bot() {
@@ -1952,9 +1974,17 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                     Some(i) => format!("pyl{}i{}", o, i),
                     None => format!("pyl{}", o),
                 };
+                // (an item's errors are at (field, position); at a position not known, where
+                // is not known)
+                let field = an.m.pyd_field;
                 match it.items {
                     Some(items) => {
-                        let conv: Vec<Value> = items.iter().map(|x| pyd_convert(an, inner, x, state, node)).collect();
+                        let mut conv: Vec<Value> = Vec::new();
+                        for (i, x) in items.iter().enumerate() {
+                            an.m.pyd_field = field.map(|f| intern::key_tuple(vec![f, intern::key_int(i as i64)]));
+                            conv.push(pyd_convert(an, inner, x, state, node));
+                        }
+                        an.m.pyd_field = field;
                         outs.push(pyd_list(an, Some(conv), Value::new(), node, state, &ctx));
                     }
                     None => {
@@ -1962,7 +1992,9 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                             crate::interp::iter::Elem::One(v) => v,
                             _ => Value::data("elem"),
                         };
+                        an.m.pyd_field = None;
                         let ce = pyd_convert(an, inner, &e, state, node);
+                        an.m.pyd_field = field;
                         outs.push(pyd_list(an, None, ce, node, state, &ctx));
                     }
                 }
@@ -1972,7 +2004,7 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
             }
             join_values(outs)
         }
-        Ann::Dict(inner) if !matches!(**inner, Ann::Other) => {
+        Ann::Dict(inner) if !matches!(**inner, Ann::Other | Ann::Any) => {
             let mut outs: Vec<Value> = Vec::new();
             for o in val.pts.iter() {
                 if matches!(an.heap.kind(o), Kind::Unknown) {
@@ -2004,6 +2036,13 @@ fn pyd_convert(an: &mut Analyzer, ann: &Ann, val: &Value, state: &mut State, nod
                 return val.clone();
             }
             join_values(outs)
+        }
+        // (a fixed-length tuple, a union of scalars, a type rowan does not model: the value
+        // may be converted, or rejected — an error of a type not known)
+        Ann::Other if !val.empty() => {
+            let loc = an.m.pyd_field;
+            pyd_err(an, loc, "", false, false);
+            val.join(&Value::data("validated"))
         }
         _ => val.clone(),
     }
@@ -2108,9 +2147,11 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
             "bool" => match as_str.as_deref().map(|x| x.to_lowercase()) {
                 Some(x) if matches!(x.as_str(), "true" | "1" | "yes" | "on" | "t" | "y") => intern::key_bool(true),
                 Some(x) if matches!(x.as_str(), "false" | "0" | "no" | "off" | "f" | "n") => intern::key_bool(false),
-                _ => match as_int {
-                    Some(1) => intern::key_bool(true),
-                    Some(0) => intern::key_bool(false),
+                _ => match (as_int, as_float(k)) {
+                    (Some(1), _) => intern::key_bool(true),
+                    (Some(0), _) => intern::key_bool(false),
+                    (_, Some(f)) if f == 1.0 => intern::key_bool(true),
+                    (_, Some(f)) if f == 0.0 => intern::key_bool(false),
                     _ => k,
                 },
             },
@@ -3149,7 +3190,8 @@ pub fn verr_errors(an: &mut Analyzer, st: &mut State, node: &crate::frontend::No
                     }
                 }
                 let loc = Value::obj(lt);
-                let mut entries: Vec<(&str, Value)> = vec![("type", Value::lit_str(e.typ)), ("loc", loc), ("msg", Value::data("msg")), ("input", Value::data("input"))];
+                let typ = if e.typ.is_empty() { Value::data("error type") } else { Value::lit_str(e.typ) };
+                let mut entries: Vec<(&str, Value)> = vec![("type", typ), ("loc", loc), ("msg", Value::data("msg")), ("input", Value::data("input"))];
                 if url {
                     entries.push(("url", Value::data("url")));
                 }

@@ -129,9 +129,9 @@ impl Analyzer {
         let scalar = self.may_be_scalar(obj);
         let single_target = obj.pts.len() == 1 && !scalar;
         let line_data = Value::data(&format!("L{}", node.line));
-        // a frame column read raises KeyError when the column is missing
+        // a frame column read (or a list of columns) raises KeyError when a column is missing
         let frame_tiers: Option<Vec<Tier>> = if try_guard && ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.heap.kind(o) == Kind::Frame) {
-            key.kv.as_lit().filter(|_| key.pts.is_empty()).map(|k| obj.pts.iter().map(|o| crate::models::pandas::column_tier(&state.row(o, ns), k)).collect())
+            obj.pts.iter().map(|o| crate::models::pandas::selection_tier(self, state, o, key)).collect()
         } else {
             None
         };
@@ -207,7 +207,11 @@ impl Analyzer {
         };
         match kind {
             Kind::Locidx => {
+                // (several indexers: each selection is an object of its own)
+                let several = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Locidx).count() > 1;
+                let saved = if several { self.cx.alloc_extra.replace(format!("loc{}", oid)) } else { self.cx.alloc_extra.clone() };
                 let v = crate::models::pandas::loc_get(self, oid, key, node, state);
+                self.cx.alloc_extra = saved;
                 parts.push(v);
             }
             Kind::Groupby => {
@@ -236,7 +240,9 @@ impl Analyzer {
                     if inst.pts.iter().any(|i| self.slot_member_key(i, key)) {
                         self.may_raise_here("KeyError", state);
                     }
+                    let saved = std::mem::replace(&mut self.unwind.attr_as_key, true);
                     let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
+                    self.unwind.attr_as_key = saved;
                     let v = self.force(v, state);
                     parts.push(v);
                 } else if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
@@ -279,7 +285,11 @@ impl Analyzer {
             Kind::List | Kind::Tuple | Kind::Set => { if self.item_of_sequence(oid, kind, key, node, state, single_target, parts) { return; } }
             Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.m.series), DATA)),
             Kind::Frame if ns == Ns::Item => {
+                // (several frames: each column is an object of its own)
+                let several = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Frame).count() > 1;
+                let saved = if several { self.cx.alloc_extra.replace(format!("df{}", oid)) } else { self.cx.alloc_extra.clone() };
                 let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
+                self.cx.alloc_extra = saved;
                 parts.push(v);
             }
             Kind::Unknown if ns == Ns::Item && (slice_text(&key.kv).is_some() || self.slice_base(oid).is_some()) => parts.push(self.item_of_slice(oid, rd, state)),
@@ -570,7 +580,7 @@ impl Analyzer {
                 if !guarded {
                     // (no handler catches it: a finally that runs code still sees its raise)
                     if cls.tier != Tier::Proven && self.finally_sees() {
-                        self.may_raise_here(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
+                        self.may_raise_here(self.miss_exc(ns), state);
                     }
                     self.unguarded_read(oid, ns, k, &cls, &mut row, node, state, single_target, is_lit);
                 }
@@ -585,7 +595,7 @@ impl Analyzer {
         // Data key: it may be one the record lacks (KeyError), unless the read cannot fail
         if !guarded || try_guard {
             self.unwind.cur_exc = None;
-            self.may_raise_here(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
+            self.may_raise_here(self.miss_exc(ns), state);
         }
         if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
             let k = key_str_lit(&format!("<data {}>", kv.unhinted()));
@@ -627,7 +637,7 @@ impl Analyzer {
         // carrying the key)
         if model_read {
         } else if !self.unwind.tries.is_empty() {
-            let cname = if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
+            let cname = self.miss_exc(ns);
             let e = crate::models::exceptions::exception_object(self, cname, vec![Value::lit(k)], node, state);
             self.unwind.cur_exc = Some(e);
         }
@@ -636,7 +646,7 @@ impl Analyzer {
             self.require_providers_k(cls, row, true, state, Some(k), ns);
         }
         if !model_read {
-            self.unwind.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
+            self.unwind.cur_exc_cls = Some(super::builtin_exc_names(self.miss_exc(ns)));
             self.record_raise_state(state);
             self.unwind.cur_exc_cls = None;
             // (an object of unknown kind indexed by a number may be a sequence: an

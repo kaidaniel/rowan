@@ -40,7 +40,8 @@ e.g. no such feature yet):
                        iter_, call_, rec_, method_, closure_, narrow_, dunder_, anycall_, str_,
                        lib_, container_, loop_, class_protocol.py, the pair modes (`--pairs`) of narrow_,
                        dunder_, class_, container_, call_protocol.py; collections_, itertools_, sqlite_, config_,
-                       argparse_, pathlib_, async_, descriptor_protocol.py, at their CI bounds) run with the release's binary: per
+                       argparse_, pathlib_, async_, descriptor_, deferred_, csv_, pandas_, pydantic_,
+                       tensor_protocol.py, at their CI bounds) run with the release's binary: per
                        enumerator the points checked and those where rowan's claims miss a CPython run;
                        the enumerators' sha256 (changed enumerators are another series)
   heldsound  heldsound bench/heldout.py sound (the held-out corpus's own tests against rowan's claims,
@@ -134,7 +135,14 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "sqlite": ["tests/sqlite_protocol.py", "--all"],
              "itertools": ["tests/itertools_protocol.py", "--all"],
              "async": ["tests/async_protocol.py", "--all"],
-             "descriptor": ["tests/descriptor_protocol.py", "--all"]}
+             "descriptor": ["tests/descriptor_protocol.py", "--all"],
+             "deferred": ["tests/deferred_protocol.py", "--rowan", "2000"],
+             "csv": ["tests/csv_protocol.py", "--all"],
+             "pandas": ["tests/pandas_protocol.py", "--all"],
+             "pydantic": ["tests/pydantic_protocol.py", "--all"],
+             "tensor": ["tests/tensor_protocol.py", "--all"]}
+# the libraries an enumerator runs real code of (`uv run --with`)
+PROTOCOL_DEPS = {"pandas": ["pandas"], "pydantic": ["pydantic"], "tensor": ["torch", "numpy"]}
 FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
 LOCK = threading.RLock()
 
@@ -538,7 +546,8 @@ def measure_protocols(binary: Path, logdir: Path) -> dict:
     points checked and missed (None: it could not run)."""
     out: dict = {"sha256": protocols_sha()}
     for name, argv in PROTOCOLS.items():
-        r = subprocess.run(["uv", "run", "--no-project", "python", str(ROOT / argv[0]), *argv[1:]], cwd=ROOT, capture_output=True, text=True,
+        deps = [x for d in PROTOCOL_DEPS.get(name, []) for x in ("--with", d)]
+        r = subprocess.run(["uv", "run", "--no-project", *deps, "python", str(ROOT / argv[0]), *argv[1:]], cwd=ROOT, capture_output=True, text=True,
                            env={**os.environ, "ROWAN_BIN": str(binary)}, stdin=subprocess.DEVNULL)
         (logdir / f"protocol-{name}.log").write_text(r.stdout + r.stderr)
         # (one line per limit set an enumerator runs under, `rowan (ROWAN_LIMITS=…):`: summed)

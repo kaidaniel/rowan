@@ -205,6 +205,11 @@ impl Analyzer {
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
             let v: Value = match k {
+                // (its namespace, as `vars` gives it: the deferred definitions in it run)
+                Kind::Module if name == "__dict__" => {
+                    self.force_module(oid, state);
+                    self.own_dict(oid, single, state).unwrap_or_default()
+                }
                 Kind::Module => self.module_attr(oid, name, nk, node, state, caught, guarded, single),
                 Kind::External if matches!(name, "__name__" | "__qualname__") && self.heap.external_qual(oid).starts_with("builtins.") => {
                     let q = self.heap.external_qual(oid);
@@ -272,9 +277,11 @@ impl Analyzer {
         acc.join(&self.mixed_literals_attr(obj, name))
     }
 
-    /// None beside `obj`'s objects has no attribute `name` but a dunder: an AttributeError.
+    /// None beside `obj`'s objects has no attribute `name` but what every object has and
+    /// `__bool__`: an AttributeError.
     fn none_beside_lacks(&mut self, obj: &Value, name: &str, report: bool, state: &mut State) {
-        if report && !obj.pts.is_empty() && obj.kv.is_literal() && !name.starts_with("__") && kv_literals(&obj.kv).contains(key_none()) {
+        let lacks = crate::models::tables::builtin_has_attr("NoneType", name) == Some(false);
+        if report && !obj.pts.is_empty() && obj.kv.is_literal() && lacks && kv_literals(&obj.kv).contains(key_none()) {
             self.may_raise_here("AttributeError", state);
         }
     }
@@ -1369,6 +1376,14 @@ impl Analyzer {
             }
             self.may_raise_here("AttributeError", state);
             return self.store_attr(&rest, name, v, node, state);
+        }
+        // (a literal — None, a number, a str — takes no attribute)
+        if obj.kv.is_literal() && !obj.kv.is_bot() {
+            if obj.pts.is_empty() {
+                self.raise_here("AttributeError", state);
+                return;
+            }
+            self.may_raise_here("AttributeError", state);
         }
         if !state.narrowed.is_empty() {
             let needle = format!(".{}", name);
