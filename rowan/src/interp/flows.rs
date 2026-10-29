@@ -351,9 +351,22 @@ pub struct CodeUses {
     /// per attribute name it assigns: what its stores put there, where the text says
     /// (`AttrStores`)
     pub attr_values: FxHashMap<StrId, AttrStores>,
-    /// it may store attributes by names or ways the text does not say (`setattr` of a name not
-    /// written out, `__setattr__`, `__dict__`, `vars()`)
-    pub computed_stores: bool,
+    /// what it may store attributes on by names or ways the text does not say (`setattr` of a
+    /// name not written out, `__setattr__`, a `__dict__` or `vars()` changed or given away)
+    pub computed: Vec<StoreTarget>,
+}
+
+/// What a store by a name or way the text does not say (`CodeUses::computed`) is made on, as
+/// the text says: the method's receiver, a parameter (its annotation), a name the function does
+/// not bind (a class, a global's annotation), an instance a call of a name makes (`C(…)`,
+/// `C.__new__(C)`), or anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StoreTarget {
+    Any,
+    Recv,
+    Param(StrId),
+    Name(StrId),
+    Made(StrId),
 }
 
 /// What the stores of an attribute name put there, where the text says (`x.a = 0`, `x.a = "on"
@@ -508,6 +521,10 @@ pub struct Flow<'a> {
     depth: u32,
     /// the value an attribute target being bound gets (`Rhs`), None for one not said
     rhs: Option<Rhs>,
+    /// what the `__dict__`s (`vars()`) the code uses belong to: stores, if it changes one
+    dict_targets: Vec<StoreTarget>,
+    /// the receiver's `__dict__` is used
+    recv_dict: bool,
     pub out: CodeUses,
 }
 
@@ -515,7 +532,7 @@ impl<'a> Flow<'a> {
     /// A scan of code whose own names `locals` picks (and those bound around it `shadows`), `me`
     /// its receiver's name, in package `pkg`.
     pub fn new(locals: &'a dyn Fn(&str) -> bool, shadows: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
-        Flow { locals, shadows, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, rhs: None, out: CodeUses::default() }
+        Flow { locals, shadows, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, genexp_first: 0, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, rhs: None, dict_targets: Vec::new(), recv_dict: false, out: CodeUses::default() }
     }
 
     /// For a generator expression's code: its first iterable `it` stands for its parameter `.0`.
@@ -621,10 +638,46 @@ impl<'a> Flow<'a> {
                 _ => {}
             }
         }
+        // (a `__dict__` changed in place or given away: stores on what each one used belongs to)
+        let dict = s("__dict__");
+        let dicts = || self.flags.iter().filter(|(o, _)| matches!(o, Origin::Attr(a) | Origin::NameAttr(_, a) if *a == dict)).map(|(_, f)| f);
+        if dicts().any(|f| f.changes || f.edits || f.methods || f.called || f.removes != Removes::No) {
+            let ts = std::mem::take(&mut self.dict_targets);
+            self.out.computed.extend(ts);
+        }
+        // (the receiver's `__dict__` given away, changed, its values reached beyond reads)
+        if self.recv_dict && dicts().any(|f| f.changes || f.held || f.held2 || f.kept || f.edits || f.methods || f.called || f.rebinds || f.removes != Removes::No) {
+            self.recv.escapes = true;
+        }
         if self.first.is_some() {
             self.out.recv = Some(std::mem::take(&mut self.recv));
         }
         self.out
+    }
+
+    /// What a store by a name not said on `x` reaches (`StoreTarget`), one per value it may be.
+    fn store_targets(&self, x: &Expr) -> Vec<StoreTarget> {
+        if matches!(x, Expr::Call(c) if matches!(&*c.func, Expr::Name(f) if f.id.as_str() == "super")) {
+            return vec![StoreTarget::Recv];
+        }
+        let srcs = self.srcs(x);
+        if srcs.is_empty() {
+            return vec![StoreTarget::Any];
+        }
+        srcs.iter().map(|src| match src {
+            (Origin::Param(p), Level::Own) if self.first == Some(*p) => StoreTarget::Recv,
+            (Origin::Param(p), Level::Own) => StoreTarget::Param(*p),
+            (Origin::Name(n), Level::Own) => StoreTarget::Name(*n),
+            (Origin::Result(c, None), Level::Own) => StoreTarget::Made(*c),
+            (Origin::Result(c, Some(m)), Level::Own) if *m == s("__new__") => StoreTarget::Made(*c),
+            _ => StoreTarget::Any,
+        }).collect()
+    }
+
+    /// A store by a name or way the text does not say, on `x` (None: on anything).
+    fn computed_store(&mut self, x: Option<&Expr>) {
+        let ts = x.map_or_else(|| vec![StoreTarget::Any], |x| self.store_targets(x));
+        self.out.computed.extend(ts);
     }
 
     /// The parameters a local name in the function's own code (not a nested one's) stands
@@ -873,6 +926,10 @@ impl<'a> Flow<'a> {
                     // (`cast(T, x)`, `typing.cast(T, x)`: x)
                     Expr::Name(f) if f.id.as_str() == "cast" && !self.local("cast") && c.arguments.args.len() == 2 => self.srcs(&c.arguments.args[1]),
                     Expr::Attribute(a) if a.attr.as_str() == "cast" && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "typing") && c.arguments.args.len() == 2 => self.srcs(&c.arguments.args[1]),
+                    // (a dict's view: a new container of its keys or values, as `list(d)`)
+                    Expr::Attribute(a) if matches!(a.attr.as_str(), "keys" | "values" | "items") && c.arguments.args.is_empty() && c.arguments.keywords.is_empty() => {
+                        self.srcs(&a.value).into_iter().map(|(o, l)| (o, if matches!(l, Level::Own | Level::Copy) { Level::Copy } else { Level::Held })).collect()
+                    }
                     // (a method that keeps nothing may give back what its receiver holds or an
                     // argument; a container's `pop` an item)
                     Expr::Attribute(a) if pure_method(a.attr.as_str()) || matches!(a.attr.as_str(), "pop" | "popitem" | "setdefault") => {
@@ -896,7 +953,8 @@ impl<'a> Flow<'a> {
                             out.extend(c.arguments.args.get(2).map(|d| self.srcs(d)).unwrap_or_default());
                             out
                         }
-                        "vars" => c.arguments.args.first().map(|x| self.srcs(x)).unwrap_or_default(),
+                        // (and the `__dict__` it is: `scan` tells whether the code changes one)
+                        "vars" => c.arguments.args.first().map(|x| self.srcs(x)).unwrap_or_default().into_iter().chain([(Origin::Attr(s("__dict__")), Level::Own)]).collect(),
                         "type" if c.arguments.args.len() == 1 => vec![(Origin::TypeOf, Level::Own)],
                         // (`abs` / `round` may give back their argument, by its dunder; `sorted`,
                         // `min`, … what they were given; `len`, `str`, `isinstance`, … a new value)
@@ -996,11 +1054,16 @@ impl<'a> Flow<'a> {
         // (a container's parts are kept in it, unless only read: `x in (a, b)`; what an
         // expression passes on stands where it does)
         let part = if pos == Pos::Read { Pos::Read } else { Pos::Change };
-        // (attributes stored by ways the text does not name: `__setattr__`, `__dict__`, `vars()`)
+        // (attributes stored by ways the text does not name: `__setattr__`; `__dict__` where the
+        // code changes one, `scan`)
         match e {
-            Expr::Attribute(a) if matches!(a.attr.as_str(), "__dict__" | "__setattr__") => self.out.computed_stores = true,
+            Expr::Attribute(a) if a.attr.as_str() == "__dict__" => {
+                let ts = self.store_targets(&a.value);
+                self.dict_targets.extend(ts);
+            }
+            Expr::Attribute(a) if a.attr.as_str() == "__setattr__" => self.computed_store(Some(&a.value)),
             // (as a value: `partial(setattr, o, "a")`, `map(vars, xs)`)
-            Expr::Name(n) if matches!(n.id.as_str(), "vars" | "setattr") && self.builtin(n.id.as_str()) => self.out.computed_stores = true,
+            Expr::Name(n) if matches!(n.id.as_str(), "vars" | "setattr") && self.builtin(n.id.as_str()) => self.computed_store(None),
             _ => {}
         }
         match e {
@@ -1019,7 +1082,8 @@ impl<'a> Flow<'a> {
                     Expr::Name(n) if !self.local(n.id.as_str()) => self.name(s(n.id.as_str()), Some(s(a.attr.as_str()))),
                     v if self.recv_base(v) => {
                         self.recv.loads.insert(s(a.attr.as_str()));
-                        self.recv.escapes |= a.attr.as_str() == "__dict__";
+                        // (its `__dict__`: it escapes where the code does more than read it, `scan`)
+                        self.recv_dict |= a.attr.as_str() == "__dict__";
                     }
                     v => self.expr(v, Pos::Read),
                 }
@@ -1209,6 +1273,10 @@ impl<'a> Flow<'a> {
                 let m = a.attr.as_str();
                 self.out.reads.insert(s(m));
                 let pure = pure_method(m);
+                // (`x.__setattr__(…)`, `super().__setattr__(…)`: a store the text does not say)
+                if m == "__setattr__" && !matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "object") {
+                    self.computed_store(Some(&a.value));
+                }
                 // (the receiver: a method that may change it; `n.f(…)` of a name: n's method, or
                 // a module's function)
                 match &*a.value {
@@ -1268,7 +1336,11 @@ impl<'a> Flow<'a> {
                     return;
                 }
                 // (`vars(o)` is `o.__dict__`: stores through it are by names not said)
-                self.out.computed_stores |= f == "vars";
+                if f == "vars" {
+                    // (`vars()` is the locals, no attributes)
+                    let ts = c.arguments.args.first().map(|x| self.store_targets(x)).unwrap_or_default();
+                    self.dict_targets.extend(ts);
+                }
                 match f {
                     "setattr" | "delattr" | "getattr" | "hasattr" => self.attr_builtin(f, c),
                     // (`locals()` / `vars()`: every local's value)
@@ -1348,7 +1420,7 @@ impl<'a> Flow<'a> {
                             self.out.attr_values.entry(n).or_default().join(&v);
                         }
                     } else if f == "setattr" {
-                        self.out.computed_stores = true;
+                        self.computed_store(Some(x));
                     }
                     if !self.recv_base(x) {
                         self.expr(x, Pos::Read);
@@ -1420,6 +1492,10 @@ impl<'a> Flow<'a> {
             }
             Expr::Attribute(a) => {
                 let n = s(a.attr.as_str());
+                // (`x.__dict__ = d`: x's attributes are d's, by names not said)
+                if a.attr.as_str() == "__dict__" {
+                    self.computed_store(Some(&a.value));
+                }
                 self.out.reads.insert(n);
                 if deleting { &mut self.out.deleted } else { &mut self.out.stored }.insert(n);
                 if !deleting {

@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{AttrStores, Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
+use super::flows::{AttrStores, StoreTarget, Callee, CodeUses, Flags, KeptKey, KeptPlace, Level, Like, NameUses, Origin, Pass, Removes, Slot};
 use super::{Analyzer, Args, FuncInfo, FuncNode, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -66,6 +66,9 @@ pub struct EffectsCache {
     inert: FxHashMap<usize, Option<std::rc::Rc<super::inert::Inert>>>,
     /// the followed libraries' code that calls not run share (`libclosure.rs`)
     pub lib: super::libclosure::LibClosure,
+    /// per function code (`FuncNode::addr`): what its stores by names not said may reach
+    /// (`computed_of`)
+    computed: FxHashMap<usize, std::rc::Rc<Computed>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -379,7 +382,7 @@ impl Analyzer {
                     if let Some(c) = self.heap.instance_class(inst).and_then(|c| self.class_lookup(c, &str_get(name))) {
                         before.push(self.heap.class_attr(c, &str_get(name)));
                     }
-                    let mut put = stored_value(uses.values.get(&name), uses.computed, &before, &any);
+                    let mut put = stored_value(uses.values.get(&name), uses.computed.reaches(&self.heap, self.heap.instance_class(inst)), &before, &any);
                     // (of the type the class declares it with, `count: int`)
                     if let Some(c) = self.heap.instance_class(inst) {
                         put = self.attr_as_annotated(c, &str_get(name), put, state);
@@ -436,7 +439,7 @@ impl Analyzer {
             return u.clone();
         }
         let (mut by_name, mut stored): (FxHashMap<StrId, Flags>, FxHashSet<StrId>) = Default::default();
-        let (mut values, mut computed): (FxHashMap<StrId, AttrStores>, bool) = Default::default();
+        let (mut values, mut computed): (FxHashMap<StrId, AttrStores>, Computed) = Default::default();
         let mut seen: FxHashSet<usize> = FxHashSet::default();
         for o in 1..self.heap.len() as ObjId {
             let Payload::Func(fi) = &self.heap.obj(o).payload else { continue };
@@ -456,11 +459,89 @@ impl Analyzer {
             for (a, v) in &uses.attr_values {
                 values.entry(*a).or_default().join(v);
             }
-            computed |= uses.computed_stores;
+            computed.join(&self.computed_of(&fi));
         }
         let u = std::rc::Rc::new(ProgramUses { by_name, stored, values, computed });
         self.effects.program = Some(u.clone());
         u
+    }
+
+    /// What the stores of `fi`'s code by names or ways its text does not say may reach: its
+    /// receiver's class, the classes a parameter's annotation names, a class named (`C(…)`, a
+    /// global annotated `Optional[C]`); anything else any object.
+    fn computed_of(&mut self, fi: &FuncInfo) -> std::rc::Rc<Computed> {
+        let addr = fi.node.addr();
+        if let Some(c) = self.effects.computed.get(&addr) {
+            return c.clone();
+        }
+        let uses = self.code_uses(fi);
+        let mut out = Computed::default();
+        for t in uses.computed.iter() {
+            let found = match *t {
+                StoreTarget::Any => None,
+                StoreTarget::Recv => fi.cls.map(|c| vec![c]),
+                StoreTarget::Param(p) => {
+                    let ann = fi.node.params().and_then(|ps| ps.iter().find(|x| s(x.name().id.as_str()) == p).and_then(|x| x.annotation()));
+                    ann.and_then(|a| self.annotation_classes(a))
+                }
+                StoreTarget::Name(n) => {
+                    let named = self.classes_named(&str_get(n));
+                    if named.is_empty() { self.global_annotation(fi.module, &str_get(n)).and_then(|a| self.annotation_classes(a)) } else { Some(named) }
+                }
+                StoreTarget::Made(c) => Some(self.classes_named(&str_get(c))).filter(|v| !v.is_empty()),
+            };
+            match found {
+                Some(cs) => out.classes.extend(cs),
+                None => out.any = true,
+            }
+        }
+        let out = std::rc::Rc::new(out);
+        self.effects.computed.insert(addr, out.clone());
+        out
+    }
+
+    /// The program's classes named `n`.
+    fn classes_named(&self, n: &str) -> Vec<ObjId> {
+        (1..self.heap.len() as ObjId).filter(|&o| matches!(&self.heap.obj(o).payload, Payload::Class(ci) if ci.name == n)).collect()
+    }
+
+    /// The annotation module `m`'s own code gives global `n` (`_console: Optional["Console"]`).
+    fn global_annotation(&self, m: ObjId, n: &str) -> Option<&'static Expr> {
+        self.heap.module_info(m).tree.body.iter().find_map(|st| match st {
+            Stmt::AnnAssign(a) if matches!(&*a.target, Expr::Name(x) if x.id.as_str() == n) => Some(&*a.annotation),
+            _ => None,
+        })
+    }
+
+    /// The program's classes an annotation names, member by member (`C`, `"C"`, `Optional[C]`,
+    /// `C | None`; None, builtin scalar types: none); None where a member is anything else.
+    fn annotation_classes(&self, ann: &'static Expr) -> Option<Vec<ObjId>> {
+        let mut out = Vec::new();
+        let mut work = vec![ann];
+        while let Some(e) = work.pop() {
+            match e {
+                Expr::NoneLiteral(_) => {}
+                Expr::StringLiteral(l) => work.push(crate::frontend::parse_expression(l.value.to_str())?),
+                Expr::BinOp(b) if matches!(b.op, ast::Operator::BitOr) => work.extend([&*b.left, &*b.right]),
+                Expr::Subscript(x) if matches!(crate::syntax::dotted_last(&x.value).as_str(), "Optional" | "Union") => match &*x.slice {
+                    Expr::Tuple(tp) => work.extend(tp.elts.iter()),
+                    one => work.push(one),
+                },
+                Expr::Name(_) | Expr::Attribute(_) => {
+                    let n = crate::syntax::dotted_last(e);
+                    if matches!(n.as_str(), "None" | "int" | "str" | "float" | "bool" | "bytes") {
+                        continue;
+                    }
+                    let cs = self.classes_named(&n);
+                    if cs.is_empty() {
+                        return None;
+                    }
+                    out.extend(cs);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
     }
 
     /// Does a method of `cls` or its bases (but `__init__`, static and class methods) give its
@@ -884,13 +965,13 @@ impl Analyzer {
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         // (what the code run with the receiver stores, where its text says: `AttrStores`)
         let mut put_by: FxHashMap<StrId, AttrStores> = FxHashMap::default();
-        let mut computed = false;
+        let mut computed = Computed::default();
         // (only where it stores something by name)
         let stores_any = !must.is_empty() || effs.iter().any(|(_, e)| !e.stores.is_empty());
         for f in effs.iter().filter(|_| stores_any).flat_map(|(_, e)| e.code.iter().copied()).collect::<FxHashSet<ObjId>>() {
             let Some(fi) = self.heap.func_info_opt(f) else { continue };
             let u = self.code_uses(&fi);
-            computed |= u.computed_stores;
+            computed.join(&self.computed_of(&fi));
             for (a, v) in &u.attr_values {
                 put_by.entry(*a).or_default().join(v);
             }
@@ -906,7 +987,7 @@ impl Analyzer {
                     before.push(an.heap.class_attr(c, &str_get(name)));
                 }
             }
-            stored_value(a, computed, &before, any)
+            stored_value(a, computed.reaches(&an.heap, an.heap.instance_class(o)), &before, any)
         };
         let put = |an: &mut Analyzer, o: ObjId, k: KeyId, state: &mut State, any: &Value| {
             let v = put(an, o, k, state, any);
@@ -2137,7 +2218,35 @@ pub(in crate::interp) struct ProgramUses {
     by_name: FxHashMap<StrId, Flags>,
     stored: FxHashSet<StrId>,
     pub values: FxHashMap<StrId, AttrStores>,
-    pub computed: bool,
+    pub computed: Computed,
+}
+
+/// What stores by names or ways the text does not say may reach (`StoreTarget`s resolved,
+/// `computed_of`): instances of these classes and of their subclasses, or any object.
+#[derive(Default, Debug)]
+pub(in crate::interp) struct Computed {
+    any: bool,
+    classes: FxHashSet<ObjId>,
+}
+
+impl Computed {
+    fn join(&mut self, o: &Computed) {
+        self.any |= o.any;
+        self.classes.extend(o.classes.iter().copied());
+    }
+
+    /// May such a store reach an instance of `cls` (None: not known)? Of a subclass of one of
+    /// the classes, or of a base of one (an instance standing for its plain subclasses' too).
+    pub fn reaches(&self, heap: &super::heap::Heap, cls: Option<ObjId>) -> bool {
+        if self.any {
+            return true;
+        }
+        if self.classes.is_empty() {
+            return false;
+        }
+        let Some(cls) = cls else { return true };
+        heap.mro(cls).iter().any(|c| self.classes.contains(c)) || self.classes.iter().any(|&c| heap.mro(c).contains(&cls))
+    }
 }
 
 /// What stores whose text says `a` (`AttrStores`) leave in an attribute that held one of `before`
