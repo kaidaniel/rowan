@@ -26,16 +26,18 @@ e.g. no such feature yet):
                        named unknown; `exact` = no unknown part; names of library modules,
                        classes and functions apart, `names`). The *known share* is
                        (partial + exact) / (unknown + partial + exact).
-  speed      bench.P   one run of `rowan P --facts` with ROWAN_DEBUG=1 and no deadline
-                       (ROWAN_LIMITS=ms=10^8), serially, cut at BENCH_TIMEOUT_S: wall time,
-                       peak RSS (/usr/bin/time -l), the `work:` counters; `finished`
+  tracked    bench.P   the tracked set (bench/tracked.py: the eight benchmarks P and the cost set's
+             costset   23 modules, 31 programs) in its `nodeadline` mode, serially: one run of
+                       `rowan FILE --facts` each with ROWAN_DEBUG=1 and ROWAN_LIMITS=ms=10^8, cut at
+                       tracked.TIMEOUT_S (bench/heldout.py's `run_module`): wall time, peak RSS,
+                       the `work:` counters, `finished`, `cut`, tiers and facts. Stored as before:
+                       the eight under `bench` (by program), the modules under `costset` (from
+                       COSTSET_SINCE on; the cost set's manifest hash kept). Until v0.1.103 the
+                       eight were cut at 180 s and the cost set at 60 s; one cut (180 s) since.
+                       (`speed` and `costset` are the family's old names, still accepted.)
              sitepackages  today's bench/sitepackages.py (modes none, follow, only), releases
                        from FOLLOW_SINCE on (following installed packages began with PR #43)
   size       size      engine lines (rowan/src/**/*.rs outside models/) and model lines
-  costset    costset   the cost set (bench/costset.py, bench/costset/manifest.json: 23 dense library
-                       modules, tuned on), measured as heldout below, releases from COSTSET_SINCE
-                       on; with the eight it is the
-                       *tracked* (tuned-on) set of 31 the main metrics pool over (`indices`)
   protocols  protocols today's protocol enumerators (PROTOCOLS: tests/try_protocol.py, gen_, with_,
                        iter_, call_, rec_, method_, closure_, narrow_, dunder_, anycall_, str_,
                        lib_, container_, loop_, class_protocol.py, the pair modes (`--pairs`) of narrow_,
@@ -71,7 +73,7 @@ at a time, nothing else running.
 
 Usage (run from anywhere, under `uv run --no-project python`):
   python bench/scoreboard.py run [--tags v0.1.8,v0.1.9|--since v0.1.40] [--ref REF…]
-         [--families soundness,precision,speed,size,sitepackages,costset,heldout] [--redo FAMILY,…] [-j 3]
+         [--families soundness,precision,tracked,size,sitepackages,heldout,protocols,heldsound] [--redo FAMILY,…] [-j 3]
          [--cache DIR]
   python bench/scoreboard.py repeat --tags A,B [-n 3]   timing noise: the benchmarks again
   python bench/scoreboard.py report [--md OUT.md]        per-release deltas, top iterations,
@@ -109,8 +111,11 @@ FUZZ_SEEDS = (1001, 2001, 3001)
 FUZZ_N = 100
 CASE_TIMEOUT_S = 60  # per golden case / fuzz program
 CASE_MEMORY_MB = 3000  # likewise (several run at once under the guard's 16 GB for all)
-BENCH_TIMEOUT_S = 180
-PROGRAMS = ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]
+sys.path.insert(0, str(HERE))
+import tracked  # noqa: E402
+
+BENCH_TIMEOUT_S = tracked.TIMEOUT_S["nodeadline"]
+PROGRAMS = tracked.EIGHT
 FOLLOW_SINCE = 40  # v0.1.40: PR #43, following installed packages
 COSTSET_SINCE = 80  # the cost set measured from v0.1.80 on (PR #89: older releases cost too much to measure)
 HELDSOUND_SINCE = 86  # bench/heldout.py sound (~25 min a release) measured from v0.1.86 on
@@ -143,7 +148,8 @@ PROTOCOLS = {"try": ["tests/try_protocol.py", "--rowan", "2000"], "gen": ["tests
              "tensor": ["tests/tensor_protocol.py", "--all"]}
 # the libraries an enumerator runs real code of (`uv run --with`)
 PROTOCOL_DEPS = {"pandas": ["pandas"], "pydantic": ["pydantic"], "tensor": ["torch", "numpy"]}
-FAMILIES = ["size", "soundness", "precision", "speed", "sitepackages", "costset", "heldout", "protocols", "heldsound"]
+FAMILIES = ["size", "soundness", "precision", "tracked", "sitepackages", "heldout", "protocols", "heldsound"]
+OLD_NAMES = {"speed": "tracked", "costset": "tracked"}  # (the tracked family's parts, measured apart until v0.1.103)
 LOCK = threading.RLock()
 
 
@@ -440,10 +446,6 @@ def measure_fuzz(binary: Path, mset: Path, logdir: Path) -> dict:
     return res
 
 
-WORK_FIELDS = {"work": r"^work: (\d+)", "units": r"units (\d+)", "tabulations": r"tabulations (\d+)",
-               "objects": r"objects (\d+)", "row_joins": r"row joins (\d+)", "havoc": r"havoc visits (\d+)"}
-
-
 def facts_summary(doc: dict) -> dict:
     sys.path.insert(0, str(HERE))
     from sitepackages import is_name, level  # the levels' one definition
@@ -458,46 +460,19 @@ def facts_summary(doc: dict) -> dict:
     return {"tiers": dict(tiers), "facts": dict(lv)}
 
 
-def bench_file(name: str) -> Path:
-    return next((ROOT / "bench" / "work" / name).glob("*.py")) if name == "stdlib12k" else ROOT / "bench" / "work" / name / "main.py"
+def measure_tracked(binary: Path, logdir: Path, with_costset: bool) -> dict:
+    """The tracked set with today's bench/tracked.py (its nodeadline mode, serially): the eight's
+    runs (`bench`) and the cost set's (`costset`, only `with_costset`)."""
+    import heldout
 
-
-def measure_bench(binary: Path, name: str, logdir: Path) -> dict:
-    """One run of the program with --facts, timed (call it with nothing else running)."""
-    out, err = logdir / f"{name}.facts.json", logdir / f"{name}.err"
-    env = dict(os.environ, ROWAN_DEBUG="1", ROWAN_LIMITS="ms=100000000")
-    cmd = [str(GUARD), "-t", str(BENCH_TIMEOUT_S), "/usr/bin/time", "-l", str(binary), str(bench_file(name)), "--facts"]
-    t0 = time.monotonic()
-    with open(out, "w") as so, open(err, "w") as se:
-        p = subprocess.run(cmd, stdout=so, stderr=se, env=env, cwd=bench_file(name).parent)
-    r = {"finished": p.returncode == 0, "wall_s": round(time.monotonic() - t0, 2)}
-    for line in err.read_text(errors="replace").splitlines():
-        if line.startswith("work: "):
-            for k, pat in WORK_FIELDS.items():
-                if m := re.search(pat, line):
-                    r[k] = int(m.group(1))
-        elif m := re.match(r"^\s*([\d.]+) real", line):
-            r["wall_s"] = float(m.group(1))
-        elif "maximum resident set size" in line:
-            r["rss_mb"] = round(int(line.split()[0]) / 2**20)
-        elif line.startswith("GUARD"):
-            r["why"] = line
-    if not r["finished"]:
-        r.setdefault("why", f"exit {p.returncode}")
-        if "over" in r["why"]:
-            r["wall_s"] = BENCH_TIMEOUT_S
-    else:
-        try:
-            doc = json.loads(out.read_text())
-            r.update(facts_summary(doc))
-            r["cut"] = bool(doc.get("analysis", {}).get("cut"))
-        except json.JSONDecodeError:
-            r["facts_doc"] = "unreadable"
-    out.unlink(missing_ok=True)
-    gz = err.with_suffix(".err.tail")
-    gz.write_text("\n".join(err.read_text(errors="replace").splitlines()[-40:]))
-    err.unlink()
-    return r
+    res = tracked.metrics(binary, "nodeadline", None, None if with_costset else ",".join(PROGRAMS), 1, logdir / "tracked")
+    runs = res["runs"]
+    out = {"bench": {n: {k: v for k, v in r.items() if k not in ("kind", "what", "lines")} for n, r in runs.items() if r["kind"] == "program"}}
+    mods = {n: r for n, r in runs.items() if r["kind"] == "module"}
+    if with_costset:
+        out["costset"] = {"manifest_sha256": hashlib.sha256(tracked.COSTSET.read_bytes()).hexdigest(), "pooled": heldout.pooled(mods),
+                          "runs": {m: {k: v for k, v in r.items() if k in KEEP} for m, r in mods.items()}}
+    return out
 
 
 def measure_sitepackages(binary: Path, mset: Path, log: Path) -> dict:
@@ -523,15 +498,6 @@ def measure_heldout(binary: Path, logdir: Path) -> dict:
 
 
 KEEP = ("finished", "wall_s", "rss_mb", "cut", "skipped_calls", "work", "tiers", "facts", "why")
-
-
-def measure_costset(binary: Path, logdir: Path) -> dict:
-    """The cost set with today's bench/costset.py and manifest, no deadline, serially."""
-    import costset
-
-    res = costset.metrics(binary, "nodeadline", None, None, 1, logdir / "costset")
-    return {"manifest_sha256": hashlib.sha256(costset.MANIFEST.read_bytes()).hexdigest(), "pooled": res["pooled"],
-            "runs": {m: {k: v for k, v in r.items() if k in KEEP} for m, r in res["runs"].items()}}
 
 
 def protocols_sha() -> str:
@@ -587,14 +553,17 @@ def cmd_run(a) -> None:
     data.update(measure_ref=MEASURE_REF, fuzz_seeds=list(FUZZ_SEEDS), fuzz_n=FUZZ_N, bench_timeout_s=BENCH_TIMEOUT_S,
                 case_timeout_s=CASE_TIMEOUT_S, machine=machine())
     rels = releases(a.tags.split(",") if a.tags else None, a.since, a.ref or [])
-    fams = a.families.split(",") if a.families else FAMILIES
-    redo = set(FAMILIES if a.redo == "all" else (a.redo.split(",") if a.redo else []))
-    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "speed": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"], "costset": ["costset"],
+    fams = [OLD_NAMES.get(f, f) for f in a.families.split(",")] if a.families else FAMILIES
+    redo = set(FAMILIES if a.redo == "all" else ([OLD_NAMES.get(f, f) for f in a.redo.split(",")] if a.redo else []))
+    keys = {"soundness": ["golden", "fuzz"], "precision": ["budget0"], "tracked": ["bench"], "sitepackages": ["sitepackages"], "size": ["size"],
             "heldout": ["heldout"], "protocols": ["protocols"], "heldsound": ["heldsound"]}
 
     def todo(e: dict, fam: str) -> bool:
-        if (fam == "costset" and not since(e, COSTSET_SINCE)) or (fam == "heldsound" and not since(e, HELDSOUND_SINCE)):
+        if fam == "heldsound" and not since(e, HELDSOUND_SINCE):
             return False
+        # (the cost set's part of the tracked family from COSTSET_SINCE on)
+        if fam == "tracked" and fam in fams and since(e, COSTSET_SINCE) and failed(e.get("costset")):
+            return True
         # (the protocol enumerators changed: measured again)
         if fam == "protocols" and fam in fams and (e.get("protocols") or {}).get("sha256") not in (None, protocols_sha()):
             return True
@@ -648,18 +617,13 @@ def cmd_run(a) -> None:
         e, b = entry(data, rel), binaries.get(rel["tag"])
         if b is None:
             continue
-        if todo(e, "speed"):
-            res = {}
-            for name in PROGRAMS:
-                print(f"[{rel['tag']}] bench {name}", file=sys.stderr, flush=True)
-                res[name] = measure_bench(b, name, logdir(rel))
-            put(data, e, "bench", res)
+        if todo(e, "tracked"):
+            print(f"[{rel['tag']}] tracked", file=sys.stderr, flush=True)
+            for k, v in measure_tracked(b, logdir(rel), since(e, COSTSET_SINCE)).items():
+                put(data, e, k, v)
         if todo(e, "sitepackages") and follows(rel):
             print(f"[{rel['tag']}] sitepackages", file=sys.stderr, flush=True)
             put(data, e, "sitepackages", measure_sitepackages(b, mset, logdir(rel) / "sitepackages.log"))
-        if todo(e, "costset"):
-            print(f"[{rel['tag']}] costset", file=sys.stderr, flush=True)
-            put(data, e, "costset", measure_costset(b, logdir(rel)))
         if todo(e, "heldout"):
             print(f"[{rel['tag']}] heldout", file=sys.stderr, flush=True)
             put(data, e, "heldout", measure_heldout(b, logdir(rel)))
@@ -688,7 +652,8 @@ def cmd_repeat(a) -> None:
         for _ in range(a.n):
             d = cache / "logs" / rel["tag"] / "repeat"
             d.mkdir(parents=True, exist_ok=True)
-            reps.append({name: {k: v for k, v in measure_bench(b, name, d).items() if k in ("finished", "wall_s", "rss_mb", "work")} for name in PROGRAMS})
+            runs = tracked.metrics(b, "nodeadline", None, ",".join(PROGRAMS), 1, d)["runs"]
+            reps.append({name: {k: v for k, v in r.items() if k in ("finished", "wall_s", "rss_mb", "work")} for name, r in runs.items()})
             save_data(data)
 
 

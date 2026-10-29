@@ -49,8 +49,8 @@ real code nobody tunes against. Put its `metrics` (proven %, known facts %, time
 runs) and `sound` mismatch count in your before / after table, but never choose work from its
 individual modules, sites, hovers or timings, nor change its manifest. Only an unsound claim
 its `sound` check finds may become work: shrink it into a golden case written in your own words.
-The scoreboard's headline metrics pool the *tracked* set (the eight + the cost set, tuned on
-freely); its *combined* headline adds the held-out corpus, and the gap between the two is the
+The scoreboard's headline metrics pool the *tracked* set (`bench/tracked.py`: the eight + the
+cost set, 31 programs tuned on freely); its *combined* headline adds the held-out corpus, and the gap between the two is the
 overfitting signal: report all three. **Rotation** is the owner's, about every 20 releases
 (AGENTS.md, Tests: `heldout.py rotate --draw`, then `--apply`); never rotate unasked.
 
@@ -77,12 +77,13 @@ its golden cases go or become `#@todo` with a reason, and your final message say
 4. **Implement one item at a time,** as `AGENTS.md` says (repro first, then fix, then
    measure; never commit a failing state), one measured commit per item, so the owner can
    keep or revert each step.
-5. **Measure.** Locally, `bench/run.py` on all eight programs (up to three runs at a time),
-   comparing `--json` verdict counts between `main` and your branch: a new false `missing`
-   blocks the merge. Use the `ROWAN_DEBUG=1` `work:` counters for reproducible comparisons.
-   Every push runs `bench.yml` (all eight, no deadlines, 10 minute cut, `perf` profiles,
-   the `budget=0` golden count): `gh run list --workflow bench.yml --branch <branch>`,
-   `gh run view <id>`. The chart at https://kaidaniel.github.io/rowan/dev/bench/ shows `main`.
+5. **Measure.** Locally, `bench/all.py` (main vs your branch, ~TOTAL; `--only` re-runs a
+   part): every check, the tracked set's 31 programs and the held-out corpus in both modes,
+   site-packages, hovers on all eight, interleaved for timing, in one table. A new false
+   `missing` blocks the merge. Use the `ROWAN_DEBUG=1` `work:` counters for reproducible
+   comparisons. Every push runs `bench.yml` (everything beyond ci.yml's bounds, one summary
+   table): `gh run list --workflow bench.yml --branch <branch>`, `gh run view <id>`. The
+   charts at https://kaidaniel.github.io/rowan/dev/bench/ show `main`.
 6. **Iterate** until a good chunk of what you set out to do is done. Don't hand back work you
    could finish.
 
@@ -97,19 +98,20 @@ its golden cases go or become `#@todo` with a reason, and your final message say
 
 ## Before you hand back
 
-All must pass, on your last commit: `cargo test --release --lib`, golden (and the
-`budget=0` count), snapshots (diffs reviewed), the full runtime oracle, the torch oracle,
-`cd vscode-rowan && node test.js`, all eight benchmarks run serially before and after, and
-CI and Bench green on the pull request. `AGENTS.md` true and under 200 lines.
+`bench/all.py`'s table for main → your last commit is the checklist: every row must be
+there (a step left out only for a stated reason that it takes hours), and cargo test, golden,
+snapshots, clippy, the oracles, the ci.yml enumerators, the metamorphic checks, `node test.js`
+and on demand must pass; held-out `sound` must show no new site you have not explained. CI and
+Bench green on the pull request. `AGENTS.md` true and under 200 lines.
 
 ## Your final message
 
 Also put it in the pull request's description.
 * **Commits:** one line each, with its effect.
-* **Objectives, before → after** (a table): benchmark time, memory and verdict counts; the held-out
-  corpus's metrics and `sound` mismatches; the
-  golden and `budget=0` counts; `#@todo`s; engine and model lines; the modularity proxies;
-  knobs; what users see.
+* **Objectives, before → after** (a table): `bench/all.py`'s (tracked set and held-out corpus
+  time, memory, verdicts and facts in both modes; `sound` sites; golden and `budget=0`;
+  `#@todo`s; engine and model lines; the modularity proxies; hovers), plus knobs and what
+  users see.
 * **Trade-offs:** what you made less precise or slower, and why.
 * **Ideas not pursued:** each with why (unsound, too costly, too much code, no time).
 * **Remaining:** what you found but didn't do (bugs, gaps, ideas), each with a repro or a

@@ -149,7 +149,7 @@ details.details > summary { font-size: 15px; }
   <div id="drill"></div>
 
   <h2>Every commit on main (CI history)</h2>
-  <p class="note" id="cinote">The Bench workflow's numbers on GitHub's runners (wall time and memory vary 10–20% between runners; work counters are deterministic). Each metric is aggregated as the geometric mean over the programs, as a ratio to its first commit with all of them; every program's own chart is inside. <a href="charts.html">The previous page</a> (every series, uncollapsed) is kept.</p>
+  <p class="note" id="cinote">The Bench workflow's numbers on GitHub's runners (wall time and memory vary 10–20% between runners; work counters are deterministic): the tracked set's 31 programs with no deadline and with the 10 s deadline (bench/tracked.py; until v0.1.103 the eight alone, without --facts), hovers for all eight, site-packages, the protocol enumerators in full, the metamorphic checks, Kani. Each metric is aggregated as the geometric mean over the programs, as a ratio to its first commit with all of them; every program's own chart is inside. <a href="charts.html">The previous page</a> (every series, uncollapsed) is kept.</p>
   <div id="ci"></div>
   </div></details>
 </main>
@@ -481,10 +481,13 @@ function noise(rels) {
 
 function drill(rels, pointsFor) {
   const root = document.getElementById("drill");
+  // the tracked set: the eight (`bench`), then the cost set's modules (`costset.runs`, from v0.1.80)
+  const tracked = [...PROGRAMS, ...new Set(rels.flatMap(r => Object.keys((r.costset || {}).runs || {})))];
+  const run = (r, p) => (r.bench || {})[p] || ((r.costset || {}).runs || {})[p] || {};
   const perProgram = (body, title, f, unit, dg, cutAware) => {
     const g = el("div", { class: "grid" });
-    for (const p of PROGRAMS)
-      g.append(card(p, title, lineChart(rels.map((r, i) => { const b = (r.bench || {})[p] || {}; return { x: i, y: f(b), label: r.tag, short: shortTag(r.tag), lines: prsText(r), cut: cutAware && b.finished === false }; }), { unit, digits: dg })));
+    for (const p of tracked)
+      g.append(card(p, title, lineChart(rels.map((r, i) => { const b = run(r, p); return { x: i, y: Object.keys(b).length ? f(b) : null, label: r.tag, short: shortTag(r.tag), lines: prsText(r), cut: cutAware && b.finished === false }; }), { unit, digits: dg })));
     body.append(g);
   };
   const share = (b, k) => { const t = b.tiers; if (!t || !b.finished) return null; const n = Object.values(t).reduce((a, x) => a + x, 0); return n ? 100 * (t[k] || 0) / n : null; };
@@ -499,12 +502,12 @@ function drill(rels, pointsFor) {
       for (const k of kinds) g.append(card(`Fuzzing: ${k}`, "unsound checks in this area", lineChart(rels.map((r, i) => ({ x: i, y: r.fuzz ? ((r.fuzz.kinds || {})[k] || 0) : null, label: r.tag, lines: prsText(r) })), { digits: 0 })));
       body.append(g);
     }),
-    lazyDetails("Precision", "per benchmark: proven, possibly, known hover facts, verdicts reached", body => {
+    lazyDetails("Precision", "per tracked program (the eight, then the cost set): proven, possibly, known hover facts, verdicts reached", body => {
       for (const [t, f, u, dg] of [["proven verdicts (%)", b => share(b, "proven"), "%", 1], ["possibly verdicts (%)", b => share(b, "possibly"), "%", 1],
                                    ["hover facts known or typed (%)", known, "%", 1], ["verdicts (reads reached)", b => b.finished && b.tiers ? Object.values(b.tiers).reduce((a, x) => a + x, 0) : null, "", 0]])
         body.append(lazyDetails(t, "", b2 => perProgram(b2, t, f, u, dg)));
     }),
-    lazyDetails("Speed and memory", "per benchmark: wall time, peak memory, work", body => {
+    lazyDetails("Speed and memory", "per tracked program (the eight, then the cost set): wall time, peak memory, work", body => {
       body.append(lazyDetails("wall time (s)", "hollow: cut at the timeout", b2 => perProgram(b2, "wall time, s", b => b.wall_s, "s", 1, true)));
       body.append(lazyDetails("peak memory (MB)", "", b2 => perProgram(b2, "peak memory, MB", b => b.finished ? b.rss_mb : null, "MB", 0)));
       body.append(lazyDetails("work (statements)", "deterministic", b2 => perProgram(b2, "statements run", b => b.finished ? b.work : null, "", 0)));
@@ -521,16 +524,22 @@ function drill(rels, pointsFor) {
 }
 
 // ---------------------------------------------------------------- the CI history (data.js)
-// a CI series' group and its member: "rich: wall time" -> wall time / rich; "pip hovers: p50" ->
-// hovers: p50 / pip; "site-packages s2_internal follow: work" -> site-packages: work / s2_internal follow
+// a CI series' group and its member: "rich: wall time" -> wall time / rich (any tracked program,
+// bench/history.py); "rich, 10 s deadline: wall time" -> wall time, 10 s deadline / rich; "pip
+// hovers: p50" -> hovers: p50 / pip; "site-packages s2_internal follow: work" -> site-packages:
+// work / s2_internal follow; "protocol gen --all: seconds" -> protocols --all: seconds / gen
 function ciGroup(name) {
   const m = name.match(/^(.+?): (.+)$/);
   if (!m) return [name, name];
   const [, prefix, metric] = m;
-  if (PROGRAMS.includes(prefix)) return [metric, prefix];
   if (prefix.startsWith("site-packages ")) return [`site-packages: ${metric}`, prefix.slice(14)];
   const h = prefix.match(/^(\S+) (hovers|first hover)$/);
   if (h) return [`${h[2]}: ${metric}`, h[1]];
+  const pr = prefix.match(/^protocol (\S+) --all$/);
+  if (pr) return [`protocols --all: ${metric}`, pr[1]];
+  const d = prefix.match(/^(\S+), 10 s deadline$/);
+  if (d) return [`${metric}, 10 s deadline`, d[1]];
+  if (/^[\w.-]+$/.test(prefix) && !["kani", "metamorphic"].includes(prefix)) return [metric, prefix];
   return [name, name];
 }
 
@@ -550,7 +559,7 @@ function ciHistory() {
     }
   });
   const info = i => { const c = runs[i].commit; return { label: `${c.id.slice(0, 7)} · ${c.timestamp.slice(0, 10)}`, short: c.timestamp.slice(5, 10), lines: [c.message.split("\n")[0].slice(0, 120)] }; };
-  const order = ["wall time", "peak memory", "work", "work units", "tabulations", "objects"];
+  const order = ["wall time", "peak memory", "work", "work units", "tabulations", "objects", "wall time, 10 s deadline", "peak memory, 10 s deadline"];
   const names = [...groups.keys()].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99) || a.localeCompare(b));
   const overview = el("div", { class: "grid" });
   root.append(overview);
@@ -565,7 +574,7 @@ function ciHistory() {
         const y = ok ? Math.exp(members.reduce((s, m) => s + Math.log(g.members.get(m)[i].v / g.members.get(m)[base].v), 0) / members.length) : null;
         return { x: i, y, ...info(i) };
       });
-      overview.append(card(`${name}`, `geometric mean over ${members.length} ${members.every(m => PROGRAMS.includes(m)) ? "programs" : "series"}, ratio to ${info(Math.max(base, 0)).label}`, lineChart(pts, { digits: 2, unit: "×" })));
+      overview.append(card(`${name}`, `geometric mean over ${members.length} ${/^(wall time|peak memory|work|work units|tabulations|objects)/.test(name) ? "tracked programs" : "series"}, ratio to ${info(Math.max(base, 0)).label}`, lineChart(pts, { digits: 2, unit: "×" })));
     }
     root.append(lazyDetails(name, `${members.length} series, ${g.unit}`, body => {
       const grid = el("div", { class: "grid" });
