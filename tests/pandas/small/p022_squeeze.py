@@ -1,4 +1,4 @@
-# squeeze: a one-row frame squeezed on axis 0 is a Series indexed by the columns (a record)
+# squeeze: a one-row frame squeezed on axis 0 is a Series indexed by the columns (a record); a 1 x 1 frame its cell, a numpy scalar (was `exactly={5}`: an int, whose methods are not its)
 import pandas as pd
 
 
@@ -19,7 +19,7 @@ frame = pd.DataFrame({"id": [1], "name": ["a"]})
 r = frame.squeeze(axis=0)                        #@row r: present={id,name} definite={id,name} closed
 r["id"]                                          #@ ok id
 first = frame.iloc[0]                            #@row first: present={id,name} definite={id,name} closed
-cell = pd.DataFrame({"x": [5]}).squeeze()        #@value cell: exactly={5}
+cell = pd.DataFrame({"x": [5]}).squeeze()        #@value cell: includes={5}
 col = frame[["name"]].squeeze(axis=1)            # one column: a Series over the row index
 
 if __name__ == "__main__":

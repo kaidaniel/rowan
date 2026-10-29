@@ -4385,10 +4385,36 @@ fn to_records(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn df_insert(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let col = c.arg(1, Some("column"));
     let val = c.arg(2, Some("value")).unwrap_or_default();
-    for f in frames(an, c.recv.as_ref()) {
+    let loc = c.arg(0, Some("loc")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_int);
+    let dups = key_is_bool(&c.kw("allow_duplicates"), true);
+    let fs = frames(an, c.recv.as_ref());
+    let k = col.as_ref().and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()));
+    // (a column it has already: ValueError, unless duplicates are allowed)
+    if let (Some(k), false) = (k, dups) {
+        let tiers: Vec<Tier> = fs.iter().map(|f| column_tier(&st.row(*f, Ns::Item), k)).collect();
+        if !tiers.is_empty() && tiers.iter().all(|t| matches!(t, Tier::Proven | Tier::Likely)) {
+            an.raise_here("ValueError", st);
+            return Value::new();
+        }
+        if tiers.iter().any(|t| *t != Tier::Missing) {
+            an.may_raise_here("ValueError", st);
+        }
+    }
+    for f in fs {
         if let Some(col) = &col {
             let single = an.heap.obj(f).single;
             frame_setitem(an, f, col, &val, &c.node, st, single);
+            // (the new column at position loc: where it goes in the order, when known)
+            let row = st.row(f, Ns::Item);
+            let order = match (loc, row.ordered_keys(), k) {
+                (Some(i), Some(ks), Some(k)) if i >= 0 => {
+                    let mut ks: Vec<KeyId> = ks.into_iter().filter(|x| *x != k).collect();
+                    ks.insert((i as usize).min(ks.len()), k);
+                    ks
+                }
+                _ => Vec::new(),
+            };
+            st.set_row(f, Ns::Item, row.with_order(order));
         }
     }
     Value::none()
@@ -5422,16 +5448,17 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if one_col {
                 let k = row.present.first().unwrap();
                 if axis.is_none() && rows_one {
-                    // 1 x 1: the cell
-                    return match vals(st, fs[0], k) {
-                        Some(v) if v.may.len() == 1 => Value::lit(v.may.first().unwrap()),
-                        _ => Value::data(&format!("cell@L{}", c.line)),
-                    };
+                    // 1 x 1: the cell, a numpy scalar (its methods are not an int's: `tolist`)
+                    return Value::data(&format!("cell@L{}", c.line));
                 }
-                return match fs.as_slice() {
-                    [f] => column_series(an, st, *f, k, &c.node),
-                    _ => series(an),
-                };
+                // (several frames: each one's column, an object of its own)
+                let mut out = Value::new();
+                for f in &fs {
+                    let several = fs.len() > 1;
+                    let v = if several { an.with_alloc_salt(format!("pd{}", f), |an| column_series(an, st, *f, k, &c.node)) } else { column_series(an, st, *f, k, &c.node) };
+                    out = out.join(&v);
+                }
+                return if fs.is_empty() { series(an) } else { out };
             }
             if axis.is_none() && rows_one && fs.len() == 1 {
                 let sid = new_series(an, st, &c.node, row.clone(), None, "q");

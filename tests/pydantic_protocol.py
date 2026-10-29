@@ -28,7 +28,7 @@ NAMES = ["O"]
 
 LIB = {
     "imports": [
-        "import json", "from typing import Optional",
+        "import json", "from typing import Literal, Optional, Union",
         "from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator",
     ],
     "inputs": {
@@ -54,6 +54,10 @@ LIB = {
         "gt": "C(x=v.get('a', 1)).x", "minlen": "C(x=1, s=v.get('b', 'zz')).s", "bool": "C(x=1, b=v.get('a', False)).b",
         "str_from_int": "M(a=1, b=v.get('a')).b", "int_list": "C(x=1, lst=v.get('tags', [])).lst", "factory": "len(C(x=1).lst)",
         "c_errors": "CERRS(v)", "from_attrs": "FA(v)", "opt_none": "M(a=1, c=v.get('c')).c", "json_errors": "JERR(v)",
+        "union": "U(x=v.get('a')).x", "union_type": "type(U(x=v.get('a')).x).__name__", "literal": "U(x=1, lit=v.get('b', 'a')).lit",
+        "dict_field": "U(x=1, d={'k': v.get('a')}).d", "tuple_field": "U(x=1, t=[v.get('a', 0), 2]).t", "before": "BV(a=v.get('a')).a",
+        "dump_json_mode": "M(**v).model_dump(mode='json')", "populate": "PA(user_id=v.get('a')).user_id", "populate_alias": "PA(userId=v.get('a')).user_id",
+        "nested_loc": "NERR(v)", "deep_copy": "DEEPC(v)",
     },
     "helpers": [
         "class M(BaseModel):", "    a: int", "    b: str = 'x'", "    c: Optional[float] = None", "    tags: list[str] = []",
@@ -70,6 +74,14 @@ LIB = {
         "    lst: list[int] = Field(default_factory=list)",
         "class FromAttrs(BaseModel):", "    model_config = ConfigDict(from_attributes=True)", "    a: int",
         "class Obj:", "    def __init__(self, a):", "        self.a = a",
+        "class U(BaseModel):", "    x: Union[int, str]", "    lit: Literal['a', 'b'] = 'a'", "    d: dict[str, int] = {}",
+        "    t: tuple[int, int] = (0, 0)",
+        "class BV(BaseModel):", "    a: int", "    @field_validator('a', mode='before')", "    @classmethod", "    def ln(cls, x):",
+        "        return len(x) if isinstance(x, str) else x",
+        "class PA(BaseModel):", "    model_config = ConfigDict(populate_by_name=True)", "    user_id: int = Field(alias='userId')",
+        "def NERR(v):", "    try:", "        Nested(m=v, items=[v])", "    except ValidationError as e:",
+        "        return ['.'.join(str(p) for p in x['loc']) for x in e.errors()]", "    return 'ok'",
+        "def DEEPC(v):", "    m = M(**v)", "    c = m.model_copy(deep=True)", "    c.tags.append('z')", "    return [len(m.tags), len(c.tags)]",
         "def CERRS(v):", "    try:", "        C(x=v.get('a', 0), s=v.get('b', ''))", "    except ValidationError as e:",
         "        return [e2['type'] for e2 in e.errors()]", "    return 'ok'",
         "def FA(v):", "    return FromAttrs.model_validate(Obj(v.get('a'))).a",
