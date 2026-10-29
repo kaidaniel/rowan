@@ -872,9 +872,14 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
         }
     });
     // (an annotated container's items: anything now, `put_items`)
-    if k == Kind::Unknown && heap.ann.contains_key(&o) {
+    if let Some(&(ann, _)) = heap.ann.get(&o).filter(|_| k == Kind::Unknown) {
         let e = state.slot(o, Ns::Elem, intern::STAR).join(any);
         state.set_slot(o, Ns::Elem, intern::STAR, e, true);
+        // (a part: every part following the same annotation may be the one changed)
+        if heap.obj(o).depth > 0 {
+            let all = heap.ann_put.entry(ann as *const ruff_python_ast::Expr as usize).or_default();
+            *all = all.join(any);
+        }
     }
     // (a tuple cannot change; an unknown object's content is unknown already)
     if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {

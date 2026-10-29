@@ -1292,6 +1292,13 @@ impl Analyzer {
                 [Some(a)] => drop(self.heap.ann.insert(did, a)),
                 _ => drop(self.heap.ann.remove(&did)),
             }
+            // (its keys are strs while the function's code does not change or give it away)
+            let (uses, me) = (self.code_uses(fi), s(kw.name.id.as_str()));
+            let f = uses.params.get(&me).copied().unwrap_or_default();
+            let passed = uses.passes.iter().any(|p| p.srcs.iter().any(|(o, _)| *o == super::flows::Origin::Param(me)));
+            if !(f.changes || f.edits || f.methods || f.called || f.kept || passed) {
+                self.heap.str_keyed.insert(did);
+            }
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }
         bound

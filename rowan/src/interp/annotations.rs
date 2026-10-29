@@ -371,11 +371,12 @@ impl Analyzer {
     /// added afterwards (anything, by unknown code given it) joins every read of its items
     /// (`items_put`; a dict's items are its keys, its values are its slots'). Kept in its `Elem` slot; a part of such a container (`xs[0]` of
     /// `list[list[int]]`) stands beside the other parts' placeholders, which do not see it:
-    /// what any of them holds is not known to follow the annotation any more.
+    /// what any part was given joins the reads of every part (`Heap::ann_put`).
     pub fn put_items(&mut self, oid: ObjId, v: &Value, state: &mut State) {
         let Some(&(ann, _)) = self.heap.ann.get(&oid).filter(|_| self.heap.kind(oid) == Kind::Unknown) else { return };
         if self.heap.obj(oid).depth > 0 {
-            self.heap.ann_changed.insert(ann as *const ast::Expr as usize);
+            let all = self.heap.ann_put.entry(ann as *const ast::Expr as usize).or_default();
+            *all = all.join(v);
         }
         let e = state.slot_opt(oid, Ns::Elem, intern::STAR).unwrap_or_default().join(v);
         state.set_slot(oid, Ns::Elem, intern::STAR, e, true);
@@ -385,10 +386,18 @@ impl Analyzer {
     pub(in crate::interp) fn items_put(&self, oid: ObjId, state: &State) -> Option<Value> {
         let &(ann, _) = self.heap.ann.get(&oid)?;
         let put = state.slot_opt(oid, Ns::Elem, intern::STAR);
-        if self.heap.ann_changed.contains(&(ann as *const ast::Expr as usize)) {
-            return Some(put.unwrap_or_default().join(&Value::data(&format!("items of {}", self.heap.obj(oid).label))));
+        // (what any part following the same annotation was given: its scalars; objects, which
+        // other paths made, as an unknown)
+        match self.heap.ann_put.get(&(ann as *const ast::Expr as usize)) {
+            Some(all) => {
+                let mut v = put.unwrap_or_default().join(&Value::kv_only(all.kv.clone()));
+                if !all.pts.is_empty() {
+                    v = v.join(&Value::data(&format!("items of {}", self.heap.obj(oid).label)));
+                }
+                Some(v)
+            }
+            None => put,
         }
-        put
     }
 
     /// An unknown object of builtin type `t` made at `site` (one beside other values, or a
@@ -438,6 +447,29 @@ impl Analyzer {
         let (Some(("dict", _)), [kt, _]) = (builtin_annotation(ann), t.elts.as_slice()) else { return None };
         let depth = self.heap.obj(oid).depth;
         Some(self.field_value(kt, module, false, &format!("{}.keys", oid), false, depth, state))
+    }
+
+    /// The keys iterating unknown `oid`, annotated as a dict (`dict[str, V]`), gives: those of
+    /// the annotation's key type (`annotated_key`) and those the program put into it since
+    /// (`items_put`). Beside a literal of another type (`d[5] = …`) the annotation's keys are an
+    /// unknown object of their type (`5 | str(?)`), as a union's member is: a typed unknown alone
+    /// cannot stand beside a literal it does not cover. None for anything but such a dict.
+    pub(in crate::interp) fn annotated_keys(&mut self, oid: ObjId, state: &mut State) -> Option<Value> {
+        let key = self.annotated_key(oid, state)?;
+        let Some(put) = self.items_put(oid, state) else { return Some(key) };
+        let t = match &key.kv {
+            crate::domain::KeyVal::Data(l, _) if key.pts.is_empty() => crate::domain::label_type(&intern::str_get(*l)),
+            _ => None,
+        };
+        let lits = if put.kv.is_literal() { crate::domain::kv_literals(&put.kv) } else { put.kv.hint() };
+        let key = match t {
+            Some(t) if lits.iter().any(|k| !crate::domain::key_type(k, t)) => {
+                let depth = self.heap.obj(oid).depth;
+                self.typed_object(&format!("keys:{}", oid), t, false, depth + 1, None, state)
+            }
+            _ => key,
+        };
+        Some(key.join(&put))
     }
 
     /// The fields of a class whose instances hold its declared fields and nothing else: a

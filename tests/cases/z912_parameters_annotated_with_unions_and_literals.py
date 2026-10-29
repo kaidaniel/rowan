@@ -78,8 +78,8 @@ def stars(*args: int, **kw: str):
         y = val
         #@general y: types={str}
         kk = k
-        #@general kk: unknown
-        #@todo general kk: types={str}  (a `**kw` dict's keys are strs; the keys of a record open through an input have no type)
+        #@general kk: types={str}
+        # (a `**kw` dict's keys are strs: Python takes no other keyword names)
 
 
 open_file("a")

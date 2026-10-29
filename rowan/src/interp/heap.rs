@@ -395,6 +395,9 @@ pub struct Heap {
     /// the names any class body bound to a property (not a cached one): what a read of an
     /// instance's own value checks its class for on the path (a data descriptor takes it)
     pub prop_names: rustc_hash::FxHashSet<KeyId>,
+    /// `**kw` dicts (by allocation site, so for good) whose function's code neither changes
+    /// nor gives away: their keys are strs, the only keyword names Python takes
+    pub str_keyed: rustc_hash::FxHashSet<ObjId>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
     /// a property's deleter by (class, name) (`@name.deleter`): `del obj.name` runs it
@@ -414,9 +417,10 @@ pub struct Heap {
     /// the builtin container annotation an unknown follows (`list[dict[str, int]]`) and the
     /// module it is written in: its parts' types (`annotations::part_annotation`)
     pub ann: FxHashMap<ObjId, (&'static ruff_python_ast::Expr, ObjId)>,
-    /// container annotations (by node) a part following them was given items in place: what
-    /// any part following them holds is not known (`Analyzer::put_items`)
-    pub ann_changed: rustc_hash::FxHashSet<usize>,
+    /// container annotations (by node) parts following them were given items in place: what
+    /// any of those parts was given, which every part following them may hold (the parts of one
+    /// container are not told apart: `Analyzer::put_items`)
+    pub ann_put: FxHashMap<usize, Value>,
     /// per class: its MRO and the class payloads it was computed from (`mro`)
     #[allow(clippy::type_complexity)]
     mro_cache: std::cell::RefCell<FxHashMap<u32, (Vec<u32>, Vec<Option<Rc<ClassInfo>>>)>>,
@@ -438,7 +442,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None, opaque: false, any_sub: false, arg: false };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_changed: Default::default(), attr_anns: Default::default(), aliases: Default::default(), mro_cache: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), from_main: false, main_clones: FxHashMap::default(), serial: 0, repaid: Vec::new(), defs: 0, deferred: 0, forced: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_refs: FxHashMap::default(), cls_late: Default::default(), prop_names: Default::default(), str_keyed: Default::default(), prop_setters: FxHashMap::default(), prop_deleters: FxHashMap::default(), escaped_fns: Default::default(), copy_root: FxHashMap::default(), copy_roots: Default::default(), root_log: Vec::new(), ann: FxHashMap::default(), ann_put: FxHashMap::default(), attr_anns: Default::default(), aliases: Default::default(), mro_cache: Default::default(), attr_of: FxHashMap::default(), builtin_based: FxHashMap::default() }
     }
 }
 
