@@ -587,6 +587,24 @@ impl Analyzer {
         if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
             return decide(hay.contains(&*needle));
         }
+        // a module's namespace (not the names every module has, which its row does not hold),
+        // or a plain instance's attributes (`k in vars(obj)`), by their rows
+        if let Some(inner) = (!b.pts.is_empty() && b.kv.is_bot()).then(|| b.pts.iter().map(|o| self.heap.attrs_view(o).cloned()).collect::<Option<Vec<Value>>>()).flatten() {
+            let inner = crate::domain::join_values(inner);
+            let own = |an: &Analyzer, i: ObjId| match an.heap.kind(i) {
+                Kind::Module => intern::key_as_str(k).is_some_and(|n| !super::attrs::MODULE_NAMES.contains(&&*n)),
+                Kind::Instance => an.heap.instance_class(i).is_some_and(|c| an.plain_program_class(c)),
+                _ => false,
+            };
+            if inner.pts.is_empty() || !inner.pts.iter().all(|i| own(self, i)) {
+                return None;
+            }
+            let rows: Vec<Row> = inner.pts.iter().map(|i| state.row(i, Ns::Attr)).collect();
+            if rows.iter().all(|r| r.definite.contains(k)) {
+                return decide(true);
+            }
+            return rows.iter().all(|r| r.lacks(k)).then(|| op != ast::CmpOp::In);
+        }
         if let Some(o) = b.single() {
             match self.heap.obj(o).payload.clone() {
                 // a view of a dict: its keys are the dict's (live); its values are decided
@@ -599,23 +617,6 @@ impl Analyzer {
                     let items = self.literal_dict_items(d, state)?;
                     let vals: Vec<KeyId> = items.iter().map(|(_, v)| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<_>>()?;
                     return decide(vals.contains(&k));
-                }
-                // a module's namespace (not the names every module has, which its row does
-                // not hold), or a plain instance's attributes, by their rows
-                Payload::View(ViewKind::Attrs, inner) => {
-                    let own = |an: &Analyzer, i: ObjId| match an.heap.kind(i) {
-                        Kind::Module => intern::key_as_str(k).is_some_and(|n| !super::attrs::MODULE_NAMES.contains(&&*n)),
-                        Kind::Instance => an.heap.instance_class(i).is_some_and(|c| an.plain_program_class(c)),
-                        _ => false,
-                    };
-                    if inner.pts.is_empty() || !inner.pts.iter().all(|i| own(self, i)) {
-                        return None;
-                    }
-                    let rows: Vec<Row> = inner.pts.iter().map(|i| state.row(i, Ns::Attr)).collect();
-                    if rows.iter().all(|r| r.definite.contains(k)) {
-                        return decide(true);
-                    }
-                    return rows.iter().all(|r| r.lacks(k)).then(|| op != ast::CmpOp::In);
                 }
                 _ => {}
             }

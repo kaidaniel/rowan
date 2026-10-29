@@ -118,10 +118,35 @@ impl Analyzer {
         Some(Value::obj(vid))
     }
 
+    /// The attributes `obj.__dict__` holds, as the records and namespace that hold them: a
+    /// dict's items (`Ns::Item`), or for views of objects' `__dict__` (`vars(obj)` too) those
+    /// objects' attributes (`Ns::Attr`; None: such views beside other objects, or of objects
+    /// whose rows do not hold every name of their `__dict__`).
+    pub(crate) fn mapping_parts(&self, v: &Value) -> Option<(Value, Ns)> {
+        let attrs_of = |o: ObjId| self.heap.attrs_view(o).cloned();
+        if !v.pts.iter().any(|o| attrs_of(o).is_some()) {
+            return Some((v.clone(), Ns::Item));
+        }
+        let insts: Vec<Value> = v.pts.iter().map(attrs_of).collect::<Option<_>>()?;
+        let insts = join_values(insts);
+        (v.kv.is_bot() && insts.pts.iter().all(|i| self.attrs_are_dict(i))).then_some((insts, Ns::Attr))
+    }
+
+    /// Does object `oid`'s row of attributes hold its `__dict__`, every name and no other (an
+    /// instance without `__slots__` members, a function, a namespace; not a module, whose
+    /// dict has names its row does not hold)?
+    pub(crate) fn attrs_are_dict(&self, oid: ObjId) -> bool {
+        match self.heap.kind(oid) {
+            Kind::Instance => self.heap.instance_class(oid).is_some_and(|c| !self.slot_member(c, None)),
+            Kind::Function | Kind::Namespace => true,
+            _ => false,
+        }
+    }
+
     /// Does `__slots__` refuse instance `oid` attribute `name` (None: a `__dict__`) — on every
     /// class it may be of (`classes_of_instance`: a subclass without `__slots__` has a
     /// `__dict__`): Some(true) surely, Some(false) on some, None on none?
-    fn slots_refuse(&self, oid: ObjId, name: Option<&str>) -> Option<bool> {
+    pub(crate) fn slots_refuse(&self, oid: ObjId, name: Option<&str>) -> Option<bool> {
         if self.heap.kind(oid) != Kind::Instance {
             return None;
         }
@@ -1385,11 +1410,8 @@ impl Analyzer {
             }
             self.may_raise_here("AttributeError", state);
         }
-        if !state.narrowed.is_empty() {
-            let needle = format!(".{}", name);
-            state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));
-        }
         let nk = key_str_lit(name);
+        state.forget_narrowed(nk);
         for o in obj.pts.iter() {
             if self.heap.kind(o) == Kind::View {
                 crate::models::pandas::view_setattr(self, o, name, v, state);

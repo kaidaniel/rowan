@@ -482,7 +482,8 @@ pub(super) fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut outs = Vec::new();
     for o in a.pts.iter() {
         // (an object from input is a new object too: stores into the copy do not reach it)
-        if matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) || (an.heap.kind(o) == Kind::Unknown) {
+        // (`obj.__dict__`: a dict of obj's attributes)
+        if matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame | Kind::Unknown) || an.heap.attrs_view(o).is_some() {
             outs.push(Value::obj(an.copy_object(o, &c.node, st, deep, &mut IndexMap::new())));
         } else {
             outs.push(Value::obj(o));

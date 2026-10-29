@@ -134,7 +134,7 @@ impl Analyzer {
             match kind {
                 Kind::List | Kind::Tuple | Kind::Set => self.iter_sequence(oid, node, state, &mut acc),
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => self.iter_series(oid, node, state, &mut acc),
-                Kind::Dict | Kind::Frame => self.iter_mapping(oid, node, state, &mut acc),
+                Kind::Dict | Kind::Frame => self.iter_mapping(oid, Ns::Item, state, &mut acc),
                 Kind::View => self.iter_view(oid, node, state, &mut acc),
                 // an sqlite cursor: its remaining rows
                 Kind::Namespace if self.m.sql_cursors.contains_key(&oid) => self.iter_cursor(oid, node, state, &mut acc),
@@ -318,14 +318,15 @@ impl Analyzer {
         acc.elems.push(self.elem_of(&Value::obj(oid), node, state));
     }
 
-    /// A dict or frame: its keys (in order when literal).
-    fn iter_mapping(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+    /// A dict or frame: its keys (in order when literal); `obj.__dict__`: obj's attribute names
+    /// (`ns` Attr).
+    fn iter_mapping(&mut self, oid: ObjId, ns: Ns, state: &mut State, acc: &mut ItemsAcc) {
         // (a dict with literal keys, a module constant: its items)
-        let lit = self.literal_dict_items(oid, state);
+        let lit = self.literal_items_in(oid, ns, state);
         match (lit, acc.items.as_mut()) {
             (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
             // (known keys in no known order: each item is any of them, as a set's)
-            (None, Some(its)) => match self.unordered_dict_keys(oid, state) {
+            (None, Some(its)) => match self.unordered_keys_in(oid, ns, state) {
                 Some(ks) => {
                     its.extend(ks.into_iter().map(Value::lit));
                     acc.unordered = true;
@@ -334,7 +335,7 @@ impl Analyzer {
             },
             _ => acc.items = None,
         }
-        acc.elems.push(Value::kv_only(KeyVal::KeysOf(state.keys_of(ObjSet::one(oid), Ns::Item))));
+        acc.elems.push(Value::kv_only(KeyVal::KeysOf(state.keys_of(ObjSet::one(oid), ns))));
     }
 
     /// A pandas Series: its values (not its labels, as a dict's keys).
@@ -350,7 +351,20 @@ impl Analyzer {
     /// A view: keys, values or (key, value) items of its dict; a frame's rows; an object's attributes.
     fn iter_view(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let Payload::View(vk, recv) = self.heap.obj(oid).payload.clone() else { return };
-        if matches!(vk, ViewKind::Rows | ViewKind::Elems | ViewKind::Attrs) {
+        // `obj.__dict__`: obj's attribute names (an instance's, a function's, a namespace's
+        // whose rows hold every name it has)
+        if vk == ViewKind::Attrs {
+            match recv.single().filter(|i| self.attrs_are_dict(*i)) {
+                Some(i) => self.iter_mapping(i, Ns::Attr, state, acc),
+                None => {
+                    acc.items = None;
+                    acc.exhaustive = false;
+                    acc.elems.push(Value::data("attribute name"));
+                }
+            }
+            return;
+        }
+        if matches!(vk, ViewKind::Rows | ViewKind::Elems) {
             acc.items = None;
             acc.exhaustive = false;
             if vk == ViewKind::Rows {
@@ -361,15 +375,29 @@ impl Analyzer {
             }
             return;
         }
+        // (a view of `obj.__dict__`: of obj's attributes)
+        let Some((recv, ns)) = self.mapping_parts(&recv) else {
+            acc.items = None;
+            acc.exhaustive = false;
+            let any = Value::data("attribute");
+            match vk {
+                ViewKind::Keys | ViewKind::Proxy | ViewKind::Values => acc.elems.push(any),
+                _ => {
+                    acc.pair = true;
+                    acc.pairs.push((any.clone(), any));
+                }
+            }
+            return;
+        };
         // (of a dict annotated `dict[K, V]` for any call: its keys as the annotation and the
         // program's stores say)
-        let annotated = recv.single().filter(|r| recv.kv.is_bot() && self.heap.kind(*r) == Kind::Unknown && self.heap.obj(*r).depth < PATH_DEPTH);
+        let annotated = recv.single().filter(|r| ns == Ns::Item && recv.kv.is_bot() && self.heap.kind(*r) == Kind::Unknown && self.heap.obj(*r).depth < PATH_DEPTH);
         let keys = match annotated.and_then(|r| self.annotated_keys(r, state)) {
             Some(k) => k,
-            None => Value::kv_only(KeyVal::KeysOf(state.keys_of(recv.pts.clone(), Ns::Item))),
+            None => Value::kv_only(KeyVal::KeysOf(state.keys_of(recv.pts.clone(), ns))),
         };
-        let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
-        let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
+        let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, ns, state)).collect::<Vec<_>>());
+        let lit = if recv.pts.len() == 1 { self.literal_items_in(recv.pts.first().unwrap(), ns, state) } else { None };
         match (lit, acc.items.as_mut()) {
             (Some(l), Some(its)) => {
                 for (k, val) in l {
@@ -385,7 +413,7 @@ impl Analyzer {
                 }
             }
             // (known keys in no known order: each item is any of them, as a set's)
-            (None, Some(its)) if matches!(vk, ViewKind::Keys | ViewKind::Proxy) => match recv.single().and_then(|r| self.unordered_dict_keys(r, state)) {
+            (None, Some(its)) if matches!(vk, ViewKind::Keys | ViewKind::Proxy) => match recv.single().and_then(|r| self.unordered_keys_in(r, ns, state)) {
                 Some(ks) => {
                     its.extend(ks.into_iter().map(Value::lit));
                     acc.unordered = true;
@@ -755,13 +783,19 @@ impl Analyzer {
     /// The (key, value) items of a closed dict whose keys are all there on every path (at most
     /// `UNROLL_MAX`), in insertion order; None when that order is not known.
     pub fn literal_dict_items(&mut self, oid: u32, state: &State) -> Option<Vec<(KeyId, Value)>> {
-        let row = state.row(oid, Ns::Item);
+        self.literal_items_in(oid, Ns::Item, state)
+    }
+
+    /// `literal_dict_items` of the keys in namespace `ns` (Attr: an object's attributes as
+    /// its `__dict__` holds them).
+    fn literal_items_in(&mut self, oid: u32, ns: Ns, state: &State) -> Option<Vec<(KeyId, Value)>> {
+        let row = state.row(oid, ns);
         // an empty closed dict iterates zero times (known), like an empty list
         if row.open() || row.present != row.definite || row.present.len() > UNROLL_MAX {
             return None;
         }
         // (a Counter's STAR slot is the count of a missing key, not a key)
-        if state.has_slot(oid, Ns::Item, STAR) && !self.m.counters.contains(&oid) {
+        if state.has_slot(oid, ns, STAR) && !self.m.counters.contains(&oid) {
             return None;
         }
         // insertion order when it is known (a guess would make order-dependent results wrong)
@@ -770,7 +804,7 @@ impl Analyzer {
             None if row.present.len() <= 1 => intern::sorted_by_str(row.present.iter()),
             None => return None,
         };
-        Some(keys.into_iter().map(|k| (k, state.slot(oid, Ns::Item, k))).collect())
+        Some(keys.into_iter().map(|k| (k, state.slot(oid, ns, k))).collect())
     }
 
     /// A loop over a closed dict (or a view of one) whose keys are known in their order but
@@ -807,9 +841,9 @@ impl Analyzer {
     }
 
     /// The keys of a closed dict whose keys are all known but not their order.
-    fn unordered_dict_keys(&self, oid: u32, state: &State) -> Option<Vec<KeyId>> {
-        let row = state.row(oid, Ns::Item);
-        let plain = !row.open() && row.present == row.definite && row.present.len() <= UNROLL_MAX && !state.has_slot(oid, Ns::Item, STAR) && !self.m.counters.contains(&oid);
+    fn unordered_keys_in(&self, oid: u32, ns: Ns, state: &State) -> Option<Vec<KeyId>> {
+        let row = state.row(oid, ns);
+        let plain = !row.open() && row.present == row.definite && row.present.len() <= UNROLL_MAX && !state.has_slot(oid, ns, STAR) && !self.m.counters.contains(&oid);
         (plain && row.ordered_keys().is_none()).then(|| intern::sorted_by_str(row.present.iter()))
     }
 }

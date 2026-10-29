@@ -46,10 +46,12 @@ pub(super) fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| Value::none());
     let recv = c.recv.clone().unwrap_or_default();
-    let recs = an.record_objects(&recv);
+    // (`obj.__dict__`: obj's attributes)
+    let (parts, rns) = an.mapping_parts(&recv).unwrap_or_else(|| (Value::new(), Ns::Item));
+    let recs = an.record_objects(&parts);
     if let Some(k) = key.kv.as_lit() {
-        if !recs.is_empty() && recs.len() == recv.pts.len() {
-            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
+        if !recs.is_empty() && recs.len() == parts.pts.len() {
+            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, rns)).collect();
             if rows.iter().all(|r| r.definite.contains(k)) {
                 // present everywhere: the stored value, nothing is written
                 return an.load_item(&recv, Ns::Item, key, &c.node, st, false);
@@ -240,9 +242,11 @@ pub(super) fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let key = &okey;
     let has_default = c.args.len() > 1;
     if let Some(k) = key.kv.as_lit() {
-        let recs = an.record_objects(&recv);
-        if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.heap.kind(*o) != Kind::Frame) {
-            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
+        // (`obj.__dict__`: obj's attributes)
+        let (parts, rns) = an.mapping_parts(&recv).unwrap_or_else(|| (Value::new(), Ns::Item));
+        let recs = an.record_objects(&parts);
+        if !recs.is_empty() && recs.len() == parts.pts.len() && recs.iter().all(|o| an.heap.kind(*o) != Kind::Frame) {
+            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, rns)).collect();
             if has_default && rows.iter().all(|r| r.lacks(k)) {
                 // absent everywhere: the default alone
                 return c.args[1].clone();
@@ -896,10 +900,37 @@ pub(super) fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return out;
         }
-        if name != "update" {
-            return an.unknown_call(&c.qual, c.recv.as_ref(), c.arguments(), st, &c.node);
-        }
         let strong = attrs_of.len() == 1 && an.heap.obj(attrs_of[0]).single;
+        match name {
+            "update" => {}
+            "pop" => return m_pop(an, st, c),
+            "setdefault" => return m_setdefault(an, st, c),
+            "keys" | "values" | "items" => return m_views(an, st, c),
+            // (a new dict of the attributes)
+            "copy" => {
+                let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("copy@L{}", c.line));
+                an.copy_into(oid, Ns::Item, c.recv.as_ref().unwrap(), st, true, &KeySet::new());
+                return Value::obj(oid);
+            }
+            "clear" => {
+                st.drop_name_keys(None);
+                for &o in &attrs_of {
+                    if strong {
+                        st.set_row(o, Ns::Attr, Row::new());
+                        st.drop_obj_ns(o, Ns::Attr);
+                    } else {
+                        let row = st.row(o, Ns::Attr);
+                        st.set_row(o, Ns::Attr, Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() }));
+                    }
+                }
+                return Value::none();
+            }
+            // (anything else as unknown code given the objects themselves)
+            _ => {
+                let insts = Value::objs(crate::domain::ObjSet::from_vec(attrs_of));
+                return an.unknown_call(&c.qual, Some(&insts), c.arguments(), st, &c.node);
+            }
+        }
         for oid in attrs_of {
             if let Some(src) = c.args.first() {
                 if !an.record_objects(src).is_empty() {

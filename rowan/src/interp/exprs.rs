@@ -52,16 +52,17 @@ impl Analyzer {
                 v
             }
             ast::Expr::Attribute(a) => {
-                if !state.narrowed.is_empty() {
-                    if let Some(key) = crate::syntax::chain_text(node) {
-                        if let Some(hit) = state.narrowed.get(&s(&key)) {
-                            return hit.clone();
-                        }
-                    }
-                }
                 let obj = self.eval(&a.value, state);
                 let nd = frontend::node(node);
-                self.load_attr(&obj, a.attr.id.as_str(), &nd, state, true)
+                let v = self.load_attr(&obj, a.attr.id.as_str(), &nd, state, true);
+                // (a chain a test narrowed, read again: what the test saw while nothing that ran
+                // since — a getter, a call, a store of one of its attributes — dropped the fact)
+                if !state.narrowed.is_empty() {
+                    if let Some(hit) = crate::syntax::chain_text(node).and_then(|key| state.narrowed.get(&s(&key))) {
+                        return hit.clone();
+                    }
+                }
+                v
             }
             ast::Expr::Subscript(sub) => self.expr_subscript(sub, node, state),
             ast::Expr::Call(c) => {

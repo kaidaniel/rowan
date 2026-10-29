@@ -264,6 +264,18 @@ impl Havoc {
                     work.extend(recv.pts.iter());
                     continue;
                 }
+                // (`obj.__dict__`: obj's attributes may change; a dict's read-only view: what
+                // the dict holds may)
+                (Kind::View, Payload::View(vk, inner)) => {
+                    if matches!(vk, super::ViewKind::Attrs | super::ViewKind::Elems | super::ViewKind::Rows) {
+                        work.extend(inner.pts.iter());
+                    } else {
+                        for d in inner.pts.iter() {
+                            state.slots.each(&d, &mut |_, v| work.extend(v.pts.iter()));
+                        }
+                    }
+                    continue;
+                }
                 // (a deferred definition: unknown code may run its decorators' code, the function's)
                 (Kind::Unknown, Payload::Deferred(_)) => {
                     let c = super::deferred::deferred_code(heap, o).unwrap_or_default();

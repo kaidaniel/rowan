@@ -9,6 +9,8 @@ use super::*;
 /// instance with `__iter__`; else pairs not known).
 fn dict_pairs_from(an: &mut Analyzer, st: &mut State, c: &Call, oid: ObjId, x: ObjId) {
     match an.heap.kind(x) {
+        // `dict(obj.__dict__)`: obj's attributes (a module's: keys not all known)
+        Kind::View if an.heap.attrs_view(x).is_some() => an.copy_into(oid, Ns::Item, &Value::obj(x), st, true, &KeySet::new()),
         Kind::Zip if an.cursor_of(x, st) == Some(0) => {
             let Payload::Zip(ks, vs) = an.heap.obj(x).payload.clone() else { return };
             // both lengths known: the pairs zip makes (it stops at the shorter)
@@ -1877,12 +1879,13 @@ pub(super) fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
 
 pub(super) fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
-    let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
-    if c.qual == "builtins.vars" {
-        if let Some(inst) = a.single().filter(|o| matches!(an.heap.kind(*o), Kind::Instance | Kind::Function)) {
-            an.m.attr_mirrors.insert(oid, inst);
-        }
+    // `vars(obj)` is `obj.__dict__` itself (of objects that have one; a module's: a copy of
+    // the names it binds, not those every module has)
+    let own = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Instance | Kind::Function | Kind::Namespace) && an.slots_refuse(o, None).is_none();
+    if c.qual == "builtins.vars" && a.kv.is_bot() && !a.pts.is_empty() && a.pts.iter().all(|o| own(an, o)) {
+        return an.load_attr(a, "__dict__", &c.node, st, false);
     }
+    let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     // (one of several objects: the attributes of each, joined)
     let empty = st.row(oid, Ns::Item);
     let mut rows: Vec<Row> = Vec::new();
@@ -2125,6 +2128,8 @@ pub(super) fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     continue;
                 }
                 Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
+                // (`obj.__dict__`)
+                Kind::View if an.heap.attrs_view(o).is_some() => "dict",
                 Kind::List => "list",
                 Kind::Tuple => "tuple",
                 Kind::Set => "set",
@@ -2975,6 +2980,16 @@ pub(super) fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     if let Some(o) = v.single() {
+        // `obj.__dict__` or a view of it: the number of obj's attributes
+        let attrs = match an.heap.obj(o).payload.clone() {
+            Payload::View(ViewKind::Attrs, _) => Some(v.clone()),
+            Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items, inner) => Some(inner),
+            _ => None,
+        };
+        if let Some((parts, Ns::Attr)) = attrs.and_then(|a| an.mapping_parts(&a)) {
+            let row = parts.single().map(|i| st.row(i, Ns::Attr)).filter(|r| r.closed() && r.present == r.definite);
+            return row.map_or_else(|| Value::data("len"), |r| Value::lit(intern::key_int(r.definite.len() as i64)));
+        }
         // a view of one dict: the dict's length
         if let Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy, inner) = an.heap.obj(o).payload.clone() {
             if let Some(d) = inner.single().filter(|d| matches!(an.heap.kind(*d), Kind::Dict | Kind::Frame)) {

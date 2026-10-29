@@ -13,7 +13,9 @@ Soundness: `isinstance`; `classes.rs`, `attrs.rs`):
 - a receiver (`RECV`): `AN()`, `BN()`, one or the other by `c1`;
 - one operation (`OPS`): attribute reads (`v`, `a`, `b`, `tag`, through `type(o)`, `getattr`
   with a default, `hasattr`, `__dict__`, `__name__`, `vars`, a read guarded by `'x' in o.__dict__`
-  or `not in`), `f()` once or three times, a store
+  or `not in`, an attribute tested then read again), the instance's dict changed or read through
+  `__dict__` / `vars()` (`pop`, `del`, `clear`, `update`, `setdefault`, `|=`, keys, items, a
+  copy, a change seen through a dict taken before), `f()` once or three times, a store
   then a read (on the instance, by `setattr`, on the class; then through `type(o)`), `del` then
   a read (on the instance, on the class), `isinstance`, the classmethod, the unbound method,
   two-argument `super`, a method only one shape has, two constructions then the counter;
@@ -102,6 +104,20 @@ OPS = {
     "indict": ["O = o.v if 'v' in o.__dict__ else -1"],
     "notindict": ["O = o.v if 'v' not in o.__dict__ else -1"],
     "dictb": ["O = o.b if 'b' in o.__dict__ else -2"],
+    # (the instance's `__dict__` / `vars()`: one live dict of its attributes)
+    "dictpop": ["o.__dict__.pop('a', None)", "O = o.a"],
+    "varspop": ["O = vars(o).pop('v', -1)"],
+    "varsdel": ["if 'a' in vars(o):", "    del vars(o)['a']", "O = getattr(o, 'a', -1)"],
+    "dictclear": ["o.__dict__.clear()", "O = hasattr(o, 'a')"],
+    "dictkeys": ["O = ','.join(sorted(o.__dict__))"],
+    "varsitems": ["O = ','.join(sorted(f'{k}={v}' for k, v in vars(o).items()))"],
+    "varsupdate": ["vars(o).update(v=4)", "O = o.v"],
+    "setdefault": ["O = vars(o).setdefault('b', 6)", "O = o.b"],
+    "varsior": ["d = vars(o)", "d |= {'a': 3}", "O = o.a"],
+    "dictcopy": ["c = o.__dict__.copy()", "c['a'] = 9", "O = getattr(o, 'a', -1)"],
+    "varslive": ["d = vars(o)", "o.a = 8", "O = d.get('a', -1)"],
+    # (a test of an attribute, then reads of it again: a getter runs each time)
+    "testedv": ["O = o.v if o.v else -1"],
 }
 
 

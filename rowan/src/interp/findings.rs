@@ -723,10 +723,11 @@ impl Analyzer {
                         continue;
                     }
                 }
-                // a mapping proxy shows its dict
-                if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
+                // a mapping proxy shows its dict; `obj.__dict__` obj's attributes
+                if let Payload::View(vk @ (ViewKind::Proxy | ViewKind::Attrs), inner) = self.heap.obj(oid).payload.clone() {
+                    let ns = if vk == ViewKind::Attrs { Ns::Attr } else { Ns::Item };
                     for dd in inner.pts.iter() {
-                        rows.push(state.row(dd, Ns::Item));
+                        rows.push(state.row(dd, ns));
                     }
                     continue;
                 }

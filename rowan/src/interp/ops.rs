@@ -319,9 +319,11 @@ impl Analyzer {
     /// old one would miss the change. Returns the result, or None (nothing changes in place:
     /// `t = t op v`).
     pub fn binop_in_place(&mut self, op: ast::Operator, cur: &Value, rhs: &Value, node: &Node, state: &mut State, store: &dyn Fn(&mut Analyzer, &Value, &mut State)) -> Option<Value> {
-        let in_place = |kind: Kind| match (op, kind) {
+        let in_place = |an: &Analyzer, o: ObjId| match (op, an.heap.kind(o)) {
             (ast::Operator::Add, Kind::List) => Some("list.extend"),
             (ast::Operator::BitOr, Kind::Dict) => Some("dict.update"),
+            // (`vars(obj) |= d`: obj's attributes)
+            (ast::Operator::BitOr, Kind::View) if an.heap.attrs_view(o).is_some() => Some("view.update"),
             (ast::Operator::BitOr, Kind::Set) => Some("set.update"),
             (ast::Operator::BitAnd, Kind::Set) => Some("set.intersection_update"),
             (ast::Operator::Sub, Kind::Set) => Some("set.difference_update"),
@@ -333,7 +335,7 @@ impl Analyzer {
         let mut groups: Vec<(&'static str, Vec<ObjId>)> = Vec::new();
         let mut others: Vec<ObjId> = Vec::new();
         for o in after.pts.iter() {
-            match in_place(self.heap.kind(o)) {
+            match in_place(self, o) {
                 Some(m) => match groups.iter_mut().find(|(g, _)| *g == m) {
                     Some((_, os)) => os.push(o),
                     None => groups.push((m, vec![o])),
