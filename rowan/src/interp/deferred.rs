@@ -122,7 +122,10 @@ impl Analyzer {
                 Some(&cell) => (cell, Ns::Cell, super::funcs::cell_key()),
                 None => (fi.module, Ns::Attr, intern::key_of_str(n)),
             };
+            // (a global bound on some paths only raises NameError on the others: at the `def`)
+            let maybe_unbound = loc.1 == Ns::Attr && !state.row(loc.0, Ns::Attr).definite.contains(loc.2);
             match state.slot_opt(loc.0, loc.1, loc.2) {
+                Some(_) if maybe_unbound => return false,
                 Some(v) => {
                     bound.push((n, v.clone()));
                     names.push((loc, v));

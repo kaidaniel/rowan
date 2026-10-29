@@ -144,17 +144,54 @@ impl Analyzer {
     }
 
     /// Runs a module's code in a module frame of its own (the main module, an import).
+    /// Run module `moid`'s code. Where it completes, the module is loaded (`loaded_key` in the
+    /// main module's Meta row: the collector keeps it on paths where nothing holds the module);
+    /// where it raised, it is not (`import_again`).
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
         let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
         self.cx.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
         let (exits, ret) = (state.exits.take(), state.ret.take());
+        let main = self.program.main_module;
+        if moid == main {
+            state.set_row(main, Ns::Meta, Row::new());
+        }
         self.with_gen_restart(state, true, &mut |an, s| an.exec_block(&info.tree.body, s));
         self.cx.frames.pop();
+        if state.reachable && moid != main {
+            state.store_key_row(main, Ns::Meta, loaded_key(moid), true);
+        }
         state.reachable = true;
         state.exits = exits;
         state.ret = ret;
+    }
+
+    /// `import m` of a module rowan ran before: where its code raised (`loaded_key` not
+    /// definite: not in `sys.modules` on some paths), it runs again, joined with the paths
+    /// where it is loaded, from an empty namespace (Python makes a new module); after it,
+    /// loaded everywhere. Not while its code is running (a circular import gives the module as
+    /// far as it got).
+    pub(in crate::interp) fn import_again(&mut self, m: ObjId, state: &mut State) {
+        let main = self.program.main_module;
+        if m == main || !state.reachable || !state.has_row(main, Ns::Meta) || state.row(main, Ns::Meta).definite.contains(loaded_key(m)) {
+            return;
+        }
+        if self.cx.frames.iter().any(|f| f.kind == FrameKind::Module && f.module == m) {
+            return;
+        }
+        let mut again = state.copy();
+        // (what the earlier run bound stays reachable while the code runs again, in a slot of
+        // no name: what it makes are other objects, not those made again in their place)
+        let stale = key_str_lit("\u{1}stale");
+        let old = again.all_slots(m, Ns::Attr);
+        again.drop_obj_ns(m, Ns::Attr);
+        again.set_row(m, Ns::Attr, Row::new());
+        again.set_slot(m, Ns::Meta, stale, old, true);
+        self.run_module(m, &mut again);
+        again.pop_slot(m, Ns::Meta, stale);
+        *state = state.join(&mut again);
+        state.store_key_row(main, Ns::Meta, loaded_key(m), true);
     }
 
     /// The program's call of `foid` from `state`, while the main module runs. A run for any
@@ -980,4 +1017,10 @@ fn own_source(label: &str, own: &str, span: (u32, u32), in_main: bool) -> bool {
         Some(n) => span.0 <= n && n <= span.1,
         None => false,
     }
+}
+
+/// The key of the main module's Meta row present where module `m`'s code completed
+/// (`run_module`).
+fn loaded_key(m: ObjId) -> KeyId {
+    key_str_lit(&format!("\u{1}loaded {}", m))
 }

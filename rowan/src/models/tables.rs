@@ -131,7 +131,7 @@ pub const BULK_CONSUMERS: &[&str] = &[
     "builtins.bytes", "builtins.bytearray", "torch.cat", "torch.concat", "torch.concatenate", "torch.stack", "numpy.concatenate", "numpy.stack", "pandas.concat",
 ];
 
-pub const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super"];
+pub const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super", "globals", "locals"];
 /// Method names that neither change their receiver nor keep their arguments.
 pub const PURE_METHODS: &[&str] = &[
     "get", "keys", "values", "items", "copy", "count", "index", "startswith", "endswith", "format", "join", "split", "rsplit", "strip", "lstrip", "rstrip", "lower",

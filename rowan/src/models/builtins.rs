@@ -1280,7 +1280,15 @@ pub(super) fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
             Some(false) => d.clone(),
             Some(true) => found(an, st),
-            None => found(an, st).join(d),
+            // (read on a copy: where the read fails, the default, from the state as it was)
+            None => {
+                let mut with = st.copy();
+                let v = found(an, &mut with);
+                if with.reachable {
+                    *st = st.join(&mut with);
+                }
+                v.join(d)
+            }
         }
     };
     if let (Some(name), true) = (name_v.kv.as_lit().and_then(intern::key_as_str), name_v.pts.is_empty()) {

@@ -441,6 +441,15 @@ impl Analyzer {
         r
     }
 
+    /// The objects `f` makes are others than those it makes under another `salt` (one call
+    /// on each of several receivers).
+    pub fn with_alloc_salt<R>(&mut self, salt: String, f: impl FnOnce(&mut Analyzer) -> R) -> R {
+        let saved = self.cx.alloc_extra.replace(salt);
+        let r = f(self);
+        self.cx.alloc_extra = saved;
+        r
+    }
+
     // ------------------------------------------------------------ stores
     /// Inside `object.__setattr__`: a plain store even when the class defines `__setattr__`.
     pub fn setattr_bypassed(&self) -> bool {

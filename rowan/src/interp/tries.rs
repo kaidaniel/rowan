@@ -205,6 +205,9 @@ pub struct Unwind {
     /// what a missing key raises in the reads a model makes (pydantic's field reads: a
     /// ValidationError)
     pub item_exc_force: Option<&'static str>,
+    /// attributes read as the keys of a namespace dict (`obj.__dict__[k]`): a missing one
+    /// raises KeyError
+    pub attr_as_key: bool,
     /// a load guarded by a `try` handler is running (its key is still required)
     pub caught_load: bool,
 }

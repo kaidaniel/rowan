@@ -416,15 +416,15 @@ impl Analyzer {
             }
         }
         if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key_of_str(name)) {
-            if fr_kind == FrameKind::Module {
-                let k = intern::key_of_str(name);
-                let row = state.row(fr_module, Ns::Attr);
-                if row.present.contains(k) && !row.definite.contains(k) && row.mutators.is_empty() && !row.top && row.sources.is_empty() {
-                    self.unbound_read(name, fr_module, node, state, "NameError");
-                    state.set_row_narrowed(fr_module, Ns::Attr, row.narrow_in(k, true));
-                }
+            // (bound on some paths only: NameError on the others, in module code and in the
+            // functions it calls alike)
+            let k = intern::key_of_str(name);
+            let row = state.row(fr_module, Ns::Attr);
+            if row.present.contains(k) && !row.definite.contains(k) && row.closed() && !row.top {
+                self.unbound_read(name, fr_module, node, state, "NameError");
+                state.set_row_narrowed(fr_module, Ns::Attr, row.narrow_in(k, true));
             }
-            return self.force_slot(fr_module, intern::key_of_str(name), v, state);
+            return self.force_slot(fr_module, k, v, state);
         }
         let nm = str_get(name);
         // (the module's own name: `__main__` for the program's entry)
@@ -441,6 +441,17 @@ impl Analyzer {
         // its inputs, as are those of a module a model wrote, `str(_GROUP)`)
         if fr_module != self.program.main_module && self.heap.module_info(fr_module).path.is_some() && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
             self.may_raise_here("NameError", state);
+        }
+        // (one the main module binds, but not yet on this path: NameError; not a read the
+        // output makes, line 0)
+        if fr_module == self.program.main_module && node.line > 0 && !super::attrs::MODULE_NAMES.contains(&&*nm) && state.row(fr_module, Ns::Attr).closed() {
+            let mi = self.heap.module_info(fr_module);
+            if mi.scopes.get(mi.scopes.module()).is_local(&nm) {
+                let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "is not assigned on any path to here");
+                self.verdict(node, intern::key_of_str(name), &cls, fr_module, Ns::Name, None, None);
+                self.raise_here("NameError", state);
+                return Value::new();
+            }
         }
         let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm));
         Value::obj(oid)

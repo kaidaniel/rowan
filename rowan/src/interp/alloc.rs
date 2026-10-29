@@ -38,7 +38,12 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let fr = self.frame();
-        let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
+        // (under a salt, `with_alloc_salt`: another object)
+        let ctx = match (ctx, &self.cx.alloc_extra) {
+            (Some(c), _) => c.to_string(),
+            (None, Some(x)) => format!("{}/{}", fr.ctx, x),
+            (None, None) => fr.ctx.clone(),
+        };
         let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
         // inside unrolled loop iterations each iteration is straight-line code: its own site
         let site_buf;
