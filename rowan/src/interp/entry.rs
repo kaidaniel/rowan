@@ -138,8 +138,10 @@ impl Analyzer {
             let mut base = state.copy();
             self.after_any_code(&mut base);
             self.entry.plain_is_any = base.same(&state);
+            self.widen_unseen();
             self.analyse_uncalled(&mut base, &mut state);
         }
+        self.complete_unseen_rows();
         self.findings.final_state = Some(state);
     }
 
@@ -387,7 +389,7 @@ impl Analyzer {
         self.analyse_uncalled_range(1, n, base, state, true);
         // the general runs (hover facts only) of functions whose entry run took an instance
         // made with `__init__`'s defaults
-        if self.findings.wants_general() {
+        {
             for oid in std::mem::take(&mut self.entry.facts_runs) {
                 if self.budget.tick() {
                     break;
@@ -453,7 +455,7 @@ impl Analyzer {
                 if general {
                     self.note_contract(&fi, &state.reqs.clone(), &before);
                 }
-                if !general && (self.findings.wants_general()) {
+                if !general && self.wants_general_of(oid) {
                     self.entry.facts_runs.push(oid);
                 }
                 continue;
@@ -512,7 +514,7 @@ impl Analyzer {
         // (its values hold for any call: not one with an instance made with the defaults, nor
         // one from the module's end unless that is where any call starts)
         let general = !defaults && (!plain || (self.entry.plain_is_any && !self.entry.noted.contains(&oid)));
-        if !general && plain && self.findings.wants_general() {
+        if !general && plain && self.wants_general_of(oid) {
             self.entry.facts_runs.push(oid);
         }
         let fake = Node::synthetic(mi.idx, fi.node.node().line);

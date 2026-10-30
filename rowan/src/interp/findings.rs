@@ -263,6 +263,11 @@ pub struct Findings {
     pub facts_on: bool,
     /// the golden harness checks values for any call (`#@general`)
     pub general_checks: bool,
+    /// the program's functions code rowan did not run may have run (`follow_code`: a skipped
+    /// call's closure, code given to unknown code): the program's runs of them are not all
+    /// seen, so their lines' row checks for the program's calls also hold what their runs for
+    /// any call claim (`complete_unseen_rows`)
+    pub unseen: FxHashSet<ObjId>,
     /// by (line, column, name): each occurrence of a name on a line has its own value (in
     /// `row["a"] + row["b"]` the second `row` has `"a"`)
     pub facts: IndexMap<FactKey, Fact>,
@@ -642,7 +647,8 @@ impl Analyzer {
     }
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether
-    /// it may also be something unknown, and the (known) objects it may be.
+    /// it may also be something unknown, and the (known) objects it may be. Nothing (on a path
+    /// rowan goes on with past a read that surely fails, for the report) is no value.
     pub(in crate::interp) fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
         let mut info = ValueInfo::default();
         let typed = |info: &mut ValueInfo, t: Option<&'static str>| match t {
@@ -687,11 +693,82 @@ impl Analyzer {
                 _ => info.objects.push(self.heap.obj(o).label.to_string()),
             }
         }
-        if v.pts.is_empty() && v.kv.is_bot() {
-            info.unknown = true;
-            info.untyped = true;
-        }
         info
+    }
+
+    /// `Findings::unseen` grown by what that code may run that the walks of what it may change
+    /// (`follow_code`) need not meet: the methods of the program's classes under the attribute
+    /// names it reads (on instances those walks did not reach), the functions defined inside it,
+    /// and the program's dunders (operators, `with`, iteration run them). Row checks only: once
+    /// before the runs for any call, again before the checks are completed.
+    pub(in crate::interp) fn widen_unseen(&mut self) {
+        if self.findings.row_check_requests.is_empty() || self.findings.unseen.is_empty() {
+            return;
+        }
+        let fns: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|f| self.heap.kind(*f) == Kind::Function && self.is_local_module(self.heap.func_info(*f).module)).collect();
+        for &f in &fns {
+            let fi = self.heap.func_info(f);
+            if fi.cls.is_some() && fi.name.starts_with("__") && fi.name.ends_with("__") {
+                self.findings.unseen.insert(f);
+            }
+        }
+        let mut work: Vec<ObjId> = self.findings.unseen.iter().copied().collect();
+        while let Some(f) = work.pop() {
+            let fi = self.heap.func_info(f);
+            let reads = self.code_uses(&fi).reads.clone();
+            let n = fi.node.node();
+            for &g in &fns {
+                let gi = self.heap.func_info(g);
+                let gn = gi.node.node();
+                let inside = gn.module == n.module && n.line <= gn.line && gn.end_line <= n.end_line;
+                let by_name = gi.cls.is_some() && reads.contains(&s(&gi.name));
+                if (inside || by_name) && self.findings.unseen.insert(g) {
+                    work.push(g);
+                }
+            }
+        }
+    }
+
+    /// Does function `f` need a run for any call: values for any call are asked for, or a row
+    /// check at one of its lines is and code rowan did not run may have run `f` (its checks for
+    /// the program's calls take that run's: `complete_unseen_rows`)?
+    pub(in crate::interp) fn wants_general_of(&self, f: ObjId) -> bool {
+        self.findings.wants_general() || (self.findings.unseen.contains(&f) && self.requested_in(f))
+    }
+
+    /// Is a row check requested at a line of function `f`?
+    fn requested_in(&self, f: ObjId) -> bool {
+        let n = self.heap.func_info(f).node.node();
+        let file = self.program.rel_file(n.module);
+        self.findings.row_check_requests.iter().any(|(fl, ln, _)| *fl == file && n.line <= *ln && *ln <= n.end_line)
+    }
+
+    /// The row checks for the program's calls at the lines of functions code rowan did not run
+    /// may have run (`Findings::unseen`): those runs are not among them, so each also holds what
+    /// the function's run for any call recorded there, or anything where it has none.
+    pub(in crate::interp) fn complete_unseen_rows(&mut self) {
+        if self.findings.row_check_requests.is_empty() || self.findings.unseen.is_empty() {
+            return;
+        }
+        self.widen_unseen();
+
+        let spans: Vec<(String, u32, u32)> = self.findings.unseen.iter().filter(|f| self.requested_in(**f)).map(|f| {
+            let n = self.heap.func_info(*f).node.node();
+            (self.program.rel_file(n.module), n.line, n.end_line)
+        }).collect();
+        for (file, ln, name) in self.findings.row_check_requests.clone() {
+            if !spans.iter().any(|(f, a, b)| *f == file && *a <= ln && ln <= *b) {
+                continue;
+            }
+            let general: Vec<RowCheck> = self.findings.row_checks.iter().filter(|rc| rc.general && rc.file == file && rc.line == ln && rc.name == name).map(|rc| RowCheck { file: rc.file.clone(), line: ln, name: name.clone(), row: rc.row.clone(), value: rc.value.clone(), tensor: rc.tensor.clone(), general: false, quiet: false }).collect();
+            if general.is_empty() {
+                let value = ValueInfo { unknown: true, untyped: true, ..Default::default() };
+                self.findings.add_row_check(RowCheck { file, line: ln, name, row: None, value, tensor: None, general: false, quiet: false });
+            }
+            for rc in general {
+                self.findings.add_row_check(rc);
+            }
+        }
     }
 
     /// Row-check support for the golden harness: after a statement at a requested line.

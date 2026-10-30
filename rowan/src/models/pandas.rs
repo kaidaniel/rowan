@@ -4157,13 +4157,13 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if let Some(cells) = cells.filter(|_| order.is_some() && base.present == base.definite) {
                 let rows: Vec<Value> = (0..lab.len()).map(|i| {
                     let at = |_: &State, j: usize| Some(Value::lit(cells[j].as_ref().map(|cs| cs[i].1).unwrap_or(lab[i])));
-                    Value::obj(tuple_row(an, st, &format!("{}:t{}r{}", crate::interp::site_string(&c.node), j, i), &shape, &at))
+                    Value::obj(tuple_row(an, st, &c.node, &format!(":t{}r{}", j, i), &shape, &at))
                 }).collect();
                 return iterator_list(an, st, &c.node, "rows", rows);
             }
         }
         let joined = |st: &State, i: usize| cell(st, cols[i]);
-        let vrow = tuple_row(an, st, &format!("{}:t{}", crate::interp::site_string(&c.node), j), &shape, &joined);
+        let vrow = tuple_row(an, st, &c.node, &format!(":t{}", j), &shape, &joined);
         mark_view(an, vrow, &[*f]);
         rows_v = rows_v.join(&Value::obj(vrow));
     }
@@ -4188,19 +4188,20 @@ struct TupleRow<'a> {
 }
 
 /// One tuple of `itertuples`, its i-th field `value(i)` (None: not known).
-fn tuple_row(an: &mut Analyzer, st: &mut State, site: &str, t: &TupleRow, value: &dyn Fn(&State, usize) -> Option<Value>) -> u32 {
+fn tuple_row(an: &mut Analyzer, st: &mut State, node: &Node, sfx: &str, t: &TupleRow, value: &dyn Fn(&State, usize) -> Option<Value>) -> u32 {
     if t.plain {
-        // (a tuple: no attributes, its fields by position)
-        let o = an.alloc(Kind::Namespace, site, st, &t.label, Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
-        if t.ordered && t.base.present == t.base.definite {
-            an.heap.set_llen(o, st, Some(t.fields.len()));
-            for i in 0..t.cols.len() {
-                let v = value(st, i).unwrap_or_else(|| Value::data("cell"));
-                st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v, true);
-            }
-        }
+        // (a tuple, its fields by position where the columns are known in order; else items
+        // not known, any number)
+        let known = t.ordered && t.base.present == t.base.definite;
+        let vals: Option<Vec<Value>> = known.then(|| (0..t.cols.len()).map(|i| value(st, i).unwrap_or_else(|| Value::data("cell"))).collect());
+        let elem = Value::data("cell");
+        let kv = vals.as_ref().map(|vs| join_values(vs.clone()).kv).unwrap_or(elem.kv.clone());
+        let o = an.alloc_positional_sfx(Kind::Tuple, node, sfx, vals, elem, kv, st).single().expect("one tuple");
+        // (a plain tuple has no fields by name)
+        st.set_row(o, Ns::Attr, Row::new());
         return o;
     }
+    let site = &format!("{}{}", crate::interp::site_string(node), sfx);
     let mut r = Row::new();
     for (k, def) in t.fields {
         r = r.store(*k, *def);
