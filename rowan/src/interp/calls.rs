@@ -136,6 +136,29 @@ impl Analyzer {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), a, state, node);
         }
+        // (more than `WIDE_READ` functions of the program — `getattr(self, name)(…)` of a name
+        // not known, a table of handlers — not one on many receivers: one call that does not
+        // run for all of them, beside the other callees)
+        let (wide, other): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| self.function_callee(**o).is_some());
+        let mut functions: Vec<ObjId> = wide.iter().filter_map(|o| self.function_callee(*o)).map(|(f, _)| f).collect();
+        functions.sort_unstable();
+        functions.dedup();
+        if functions.len() > super::WIDE_READ {
+            let parts = 1 + usize::from(!other.is_empty() || unknown.is_some());
+            return self.alternatives(parts, false, state, &mut |an, i, st| {
+                if i == 0 {
+                    let fns: Vec<(ObjId, Option<Value>)> = wide.iter().filter_map(|o| an.function_callee(*o)).collect();
+                    an.skipped_calls(&fns, a, st, node, call_ast)
+                } else if other.is_empty() {
+                    let (q, recv) = unknown.as_ref().expect("an unknown callee");
+                    an.unknown_call(q, Some(recv), a, st, node)
+                } else if other.len() == 1 && unknown.is_none() {
+                    an.call_one(other[0], a, st, node, call_ast)
+                } else {
+                    an.several_callees(other.clone(), unknown.clone(), a, st, node, call_ast)
+                }
+            });
+        }
         if unknown.is_none() && targets.len() > 1 && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             if let Some(r) = self.skipped_on_demand(&targets, a, state, node, call_ast) {
                 return r;
