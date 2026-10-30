@@ -190,6 +190,10 @@ jobs:
         # fails when rowan's claims miss a CPython run (tests/call_protocol.py --pairs; about 25 s)
         run: uv run --no-project python tests/call_protocol.py --pairs --rowan 1500
 
+      - name: Calls that do not run (callees whose own callees observe, called twice, vs CPython, at three budgets)
+        # fails when rowan's claims miss a CPython run (tests/call_protocol.py --unrun --all; about 40 s)
+        run: uv run --no-project python tests/call_protocol.py --unrun --all
+
       - name: Metamorphic checks (rowan against itself, quick bound)
         # fails when a changed program's claims miss the original's (tests/metamorphic.py --quick)
         run: uv run --no-project python tests/metamorphic.py --quick
