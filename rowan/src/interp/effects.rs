@@ -290,7 +290,7 @@ impl Analyzer {
 
     /// Is `o` code a closure walk follows (`walk_closure`): a function, class, bound method,
     /// instance (its class), partial, module, deferred definition?
-    fn holds_code(&self, o: ObjId) -> bool {
+    pub(super) fn holds_code(&self, o: ObjId) -> bool {
         matches!(self.heap.kind(o), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module) || matches!(self.heap.obj(o).payload, Payload::Deferred(_))
     }
 

@@ -71,6 +71,20 @@ impl Analyzer {
         }
         self.run_set_name(c, coid, &cnode, state);
         self.run_init_subclass(c, coid, &info, &cnode, state);
+        // (its metaclass's `__new__` / `__init__`, its bases' too, made it: code rowan does not
+        // run — it may rebind the data the body defined, or change it; the methods it keeps)
+        if let Some(meta) = self.metaclass_of(c, state) {
+            let any = Value::obj(super::any_object(&mut self.heap));
+            let mut given = vec![meta];
+            for (k, v) in state.obj_slots(coid, Ns::Attr) {
+                if v.pts.iter().any(|o| self.holds_code(o)) {
+                    continue;
+                }
+                state.set_slot(coid, Ns::Attr, k, v.join(&any), true);
+                given.push(v);
+            }
+            self.unknown_call("metaclass", None, Args::pos(&given), state, &cnode);
+        }
         let mut cv = Value::obj(coid);
         if !is_dataclass && !c.decorator_list.is_empty() {
             cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
@@ -191,6 +205,30 @@ impl Analyzer {
             }
         }
         (bases, open_base, lib, ek)
+    }
+
+    /// The metaclass a class statement, or one of its bases' (the program's classes), names when
+    /// it is not ABCMeta; None for none.
+    fn metaclass_of(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> Option<Value> {
+        let args = c.arguments.as_deref()?;
+        for kw in args.keywords.iter().filter(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "metaclass")) {
+            let mv = self.eval(&kw.value, state);
+            let abc = !mv.pts.is_empty() && mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta"));
+            if !abc {
+                return Some(mv);
+            }
+        }
+        for b in args.args.iter() {
+            let bv = self.eval(b, state);
+            for o in bv.pts.iter() {
+                if let Some(ci) = self.heap.class_info_opt(o).filter(|_| self.heap.kind(o) == Kind::Class) {
+                    if let Some(m) = self.metaclass_of(ci.node, state) {
+                        return Some(m);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// `__set_name__(owner, name)` on the descriptor objects assigned in the class body.
