@@ -19,7 +19,7 @@ place unreached) is a *miss*: one of the two runs is unsound or the analysis dep
 should not matter; the oracle (tests/oracle.py) tells which.
 
     uv run --no-project python tests/metamorphic.py [--checks budget0,rename,wrap,swap,general]
-        [--suites cases,stdlib] [-j 3] [-v] [--limit N] [--quick] [case…]
+        [--suites cases,stdlib] [-j 3] [-v] [--limit N] [--quick] [--shard K/N] [--json OUT] [case…]
 """
 from __future__ import annotations
 
@@ -305,6 +305,8 @@ def main() -> None:
     ap.add_argument("-j", type=int, default=3)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--quick", action="store_true", help="the CI bound: every 40th case")
+    ap.add_argument("--shard", help="K/N: every N-th case from the K-th (bench.yml's matrix)")
+    ap.add_argument("--json", help="also write the counts here (bench/history.py reads them)")
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
     checks = a.checks.split(",")
@@ -313,6 +315,9 @@ def main() -> None:
         paths = paths[::40]
     if a.limit:
         paths = paths[: a.limit]
+    if a.shard:
+        k, n = map(int, a.shard.split("/"))
+        paths = paths[k::n]
     t0 = time.time()
     with ThreadPoolExecutor(a.j) as ex:
         results = list(ex.map(lambda p: check_case(p, checks), paths))
@@ -327,6 +332,9 @@ def main() -> None:
     print(f"{len(paths)} cases ({sum(1 for r in results if 'skipped' in r)} skipped), {time.time() - t0:.0f} s")
     for k in checks:
         print(f"  {k:8} {checked[k]:6} places checked, {missed[k]} missed in {cases_missed[k]} cases")
+    if a.json:
+        Path(a.json).write_text(json.dumps({"cases": len(paths), "checked": {k: checked[k] for k in checks}, "missed": {k: missed[k] for k in checks},
+                                            "cases_missed": {k: cases_missed[k] for k in checks}, "seconds": round(time.time() - t0, 1)}, indent=1))
     sys.exit(1 if sum(missed.values()) else 0)
 
 

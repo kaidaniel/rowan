@@ -1,10 +1,25 @@
-# Benchmarks: rowan on large real programs (stdlib12k, email, rich, click; and the frontier of
-# ~130k-350k-line packages: pip, timm, sktime, functional), without its deadlines, one job each in
-# parallel, cut at 10 minutes; the on-demand hover timings (rich, pip) and the site-packages
-# benchmark. Records wall time, peak memory, rowan's deterministic work
-# counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
-# flamegraph as an artifact). Informational only: every job has continue-on-error, and this
-# workflow must not be a required status check, so it never blocks a merge.
+# Benchmarks: everything that measures rowan beyond ci.yml's blocking bounds, on every push and
+# pull request, one runner per piece. Each job's time on GitHub's runners (PR #107, 2026-10-29):
+#   tracked      the tracked set (bench/tracked.py: the eight benchmarks + the cost set's 23
+#                modules) in both modes, the 10 s deadline and none, in 4 shards; `perf` profiles
+#                of each program (top functions in the job summary, flamegraphs as artifacts):
+#                4–7 min a shard (pyflakes' checker hits the 180 s cut with no deadline)
+#   hovers       every function on demand (bench/hovers.py) and the first hover in a file
+#                (bench/first_hover.py) for all eight benchmarks: 0.3 (stdlib12k) to 15 min
+#                (functional; timm 11, sktime 8, pip 7)
+#   sitepackages bench/sitepackages.py, capped (0.7 min) and --uncapped (21 min)
+#   heldout      the held-out corpus's metrics (bench/heldout.py, default limits): 3 min
+#   golden       the golden suites at budget=0: 0.5 min
+#   protocols    every protocol enumerator ci.yml runs on a sample, on all its programs instead
+#                (bench/protocols.py full: ~930k program runs, 5.1M points, in 4 jobs of 4
+#                processes): 5–7.5 min a job
+#   metamorphic  tests/metamorphic.py in full (ci.yml: every 40th case), 2 shards: under 30 s
+#                each (red while it finds misses: an informational finding)
+#   kani         the bounded proofs (cargo kani --lib): 1–1.5 min
+# Not run here: `heldout.py sound` (heldout.yml, after every merge: 8–25 min), the scoreboard
+# (bench/scoreboard.py: every release, hours; the owner's).
+# Informational only: every job has continue-on-error, and this workflow must not be a required
+# status check, so it never blocks a merge.
 name: Bench
 
 on:
@@ -24,6 +39,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UV_PYTHON_PREFERENCE: managed
+
+defaults:
+  run:
+    # (bash -eo pipefail: a harness piped into tee fails its step)
+    shell: bash
 
 jobs:
   build:
@@ -52,16 +72,16 @@ jobs:
           path: rowan/target/release/rowan
           retention-days: 3
 
-  bench:
-    name: bench ${{ matrix.program }}
+  tracked:
+    name: tracked ${{ matrix.shard }}/4
     needs: build
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        program: [stdlib12k, email, rich, click, pip, timm, sktime, functional]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
 
@@ -76,9 +96,10 @@ jobs:
 
       - run: chmod +x bin/rowan
 
-      - name: Prepare the program
-        id: prep
-        run: echo "file=$(uv run --no-project python bench/prepare.py ${{ matrix.program }})" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: bench/work/costset/src
+          key: costset-src-${{ hashFiles('bench/costset/manifest.json') }}
 
       - name: Install perf and inferno (profiling is optional)
         id: perf
@@ -92,63 +113,51 @@ jobs:
           cargo install inferno --locked --quiet
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run (no deadlines, 10 minute timeout)
+      - name: The shard's programs, 10 s deadline and none (then perf profiles)
         run: |
-          PERF=""
-          if [ "${{ steps.perf.outputs.ok }}" = "true" ]; then PERF="--perf perf.data"; fi
-          uv run --no-project python bench/run.py ${{ matrix.program }} bin/rowan \
-            "${{ steps.prep.outputs.file }}" --timeout 600 --out results $PERF
-
-      - name: Profile report
-        if: steps.perf.outputs.ok == 'true'
-        continue-on-error: true
-        run: |
-          perf report -i perf.data --stdio --no-children --sort symbol -g none --percent-limit 0.5 2>/dev/null \
-            | grep -v '^#' | grep -v '^$' | head -40 > results/${{ matrix.program }}.profile.txt
-          perf script -i perf.data 2>/dev/null | inferno-collapse-perf | inferno-flamegraph \
-            --title "rowan: ${{ matrix.program }}" > results/${{ matrix.program }}.flamegraph.svg
+          PROFILE=""
+          if [ "${{ steps.perf.outputs.ok }}" = "true" ]; then PROFILE="--profile results/profiles"; fi
+          uv run --no-project python bench/tracked.py metrics --rowan bin/rowan --mode both \
+            --shard ${{ matrix.shard }}/4 --json results/tracked-${{ matrix.shard }}.json $PROFILE
 
       - name: Job summary
         if: always()
         run: |
           {
-            echo "### ${{ matrix.program }}"
+            echo "### tracked set, shard ${{ matrix.shard }}/4 (bench/tracked.py)"
             echo
-            echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            cat results/${{ matrix.program }}.md 2>/dev/null || echo "| ${{ matrix.program }} | no result | | | | | | | |"
-            if [ -s results/${{ matrix.program }}.profile.txt ]; then
+            uv run --no-project python bench/tracked.py table results/tracked-${{ matrix.shard }}.json --md || echo "no result"
+            for f in results/profiles/*.profile.txt; do
+              [ -s "$f" ] || continue
               echo
-              echo "Top functions by self time (perf, frame-pointer stacks; flamegraph in the artifact):"
+              echo "Top functions by self time, $(basename "$f" .profile.txt) (perf, frame-pointer stacks; flamegraph in the artifact):"
               echo
               echo '```'
-              cat results/${{ matrix.program }}.profile.txt
+              cat "$f"
               echo '```'
-            fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
-          gzip -f results/*.err 2>/dev/null || true
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-${{ matrix.program }}
+          name: bench-tracked-${{ matrix.shard }}
           path: results/
           retention-days: 30
 
   # Time to information on demand (the editor's hovers): every function of the program run
   # alone after the setup (bench/hovers.py: `rowan hovers`, 4 processes), and `rowan serve`'s
-  # time to the first hover in 12 of its files (bench/first_hover.py). rich: a small program;
-  # pip: a large one (timm takes ~4 minutes of hovers).
+  # time to the first hover in 12 of its files (bench/first_hover.py); all eight programs.
   hovers:
     name: hovers ${{ matrix.program }}
     needs: build
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        program: [rich, pip]
+        program: [stdlib12k, email, rich, click, pip, timm, sktime, functional]
     steps:
       - uses: actions/checkout@v7
 
@@ -205,15 +214,181 @@ jobs:
           path: results/
           retention-days: 30
 
+  # The protocol enumerators beyond ci.yml's bounds: each step ci.yml runs on a sample
+  # (`--rowan N`) on every program, in shards dealt to 4 jobs (bench/protocols.py full; 4
+  # processes each, the runner's cores). A missed point fails the job (shown red; the workflow
+  # stays informational): `bench/protocols.py full --only NAME` and the step's log reproduce it.
+  protocols:
+    name: protocols in full ${{ matrix.job }}/4
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - name: The job's shards (bench/protocols.py full)
+        run: |
+          uv run --no-project python bench/protocols.py full --job ${{ matrix.job }}/4 -j 4 --rowan bin/rowan \
+            --json results/protocols-${{ matrix.job }}.json --logs results/protocol-logs
+
+      - name: Job summary
+        if: always()
+        run: |
+          uv run --no-project python - ${{ matrix.job }} >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import json, sys
+          from pathlib import Path
+          f = Path(f"results/protocols-{sys.argv[1]}.json")
+          print(f"### protocol enumerators in full, job {sys.argv[1]}/4\n")
+          if not f.exists():
+              print("no result")
+              raise SystemExit
+          d = json.loads(f.read_text())
+          print("| step | programs | points | missed | crashed batches | seconds |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          for s in d["steps"]:
+              print(f"| `{s['cmd']}` | {s['programs']:,} | {s['points']:,} | {s['missed']} | {s['crashed']} | {s['seconds']} |")
+          print(f"\nWall time {d['wall_s']} s.")
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-protocols-${{ matrix.job }}
+          path: results/
+          retention-days: 30
+
+  # The metamorphic checks on every golden case (ci.yml: every 40th, --quick), in 2 shards.
+  metamorphic:
+    name: metamorphic ${{ matrix.shard }}/2
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - name: Metamorphic checks, the shard's cases
+        run: |
+          mkdir -p results
+          ROWAN_BIN="$PWD/bin/rowan" uv run --no-project python tests/metamorphic.py --shard ${{ matrix.shard }}/2 -j 4 \
+            --json results/metamorphic-${{ matrix.shard }}.json | tee results/metamorphic-${{ matrix.shard }}.txt
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### metamorphic checks, shard ${{ matrix.shard }}/2 (tests/metamorphic.py)"
+            echo
+            echo '```'
+            tail -6 results/metamorphic-${{ matrix.shard }}.txt 2>/dev/null || echo "no result"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-metamorphic-${{ matrix.shard }}
+          path: results/
+          retention-days: 30
+
+  # The bounded proofs of the tries' bit arithmetic (rowan/src/laws/kani_tries.rs).
+  kani:
+    name: kani
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kani
+            ~/.cargo/bin/cargo-kani
+            ~/.kani
+          key: kani-${{ runner.os }}-0.68.0
+
+      - name: Install Kani
+        run: |
+          command -v cargo-kani || cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+
+      - name: cargo kani --lib
+        working-directory: rowan
+        run: |
+          mkdir -p ../results
+          start=$(date +%s)
+          set +e
+          cargo kani --lib 2>&1 | tee ../results/kani.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          secs=$(( $(date +%s) - start ))
+          ok=$(grep -c "VERIFICATION:- SUCCESSFUL" ../results/kani.txt || true)
+          bad=$(grep -c "VERIFICATION:- FAILED" ../results/kani.txt || true)
+          echo "{\"harnesses\": $((ok + bad)), \"failed\": $bad, \"seconds\": $secs, \"rc\": $rc}" > ../results/kani.json
+          {
+            echo "### Kani (cargo kani --lib)"
+            echo
+            echo "$((ok + bad)) harnesses, $bad failed, ${secs} s (exit $rc)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-kani
+          path: results/
+          retention-days: 30
+
   # What following installed packages costs and buys (bench/sitepackages.py: five pinned venvs,
   # `--follow` off / '*' / the company package alone; not the uncapped mode, which runs for
   # minutes). The venvs are cached by their pins and the local package.
   sitepackages:
-    name: site-packages
+    name: site-packages ${{ matrix.set }}
     needs: build
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 20
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { set: capped, args: "", out: sitepackages }
+          # every bound off (each run cut at --uncapped-timeout, 120 s)
+          - { set: uncapped, args: "--modes none,uncapped,unbounded --no-check", out: sitepackages-uncapped }
     steps:
       - uses: actions/checkout@v7
 
@@ -237,21 +412,21 @@ jobs:
         run: |
           mkdir -p results
           {
-            echo "### site-packages (bench/sitepackages.py)"
+            echo "### site-packages, ${{ matrix.set }} (bench/sitepackages.py ${{ matrix.args }})"
             echo
-            uv run --no-project python bench/sitepackages.py --rowan bin/rowan --out results/sitepackages.json
+            uv run --no-project python bench/sitepackages.py --rowan bin/rowan ${{ matrix.args }} --out results/${{ matrix.out }}.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-sitepackages
+          name: bench-${{ matrix.out }}
           path: results/
           retention-days: 30
 
-  # Tuned-on versus held-out (bench/heldout.py metrics, default limits: the 10 s deadline): the
-  # held-out corpus (31 pinned packages no iteration tunes against, their sdists cached) and the
-  # eight benchmarks measured the same way: proven %, known hover facts %, time, memory, cut runs.
+  # The held-out corpus (bench/heldout.py metrics, default limits: the 10 s deadline; 31 pinned
+  # packages no iteration tunes against, their sdists cached): proven %, known hover facts %,
+  # time, memory, cut runs. The tuned-on side, measured the same way, is the tracked job's.
   heldout:
     name: held-out corpus
     needs: build
@@ -277,35 +452,27 @@ jobs:
           path: bench/work/heldout/src
           key: heldout-src-${{ hashFiles('bench/heldout/manifest.json') }}
 
-      - name: Prepare the eight
-        run: |
-          for p in stdlib12k email rich click pip timm sktime functional; do
-            uv run --no-project python bench/prepare.py $p > /dev/null
-          done
-
-      - name: Held-out corpus and the eight, default limits
+      - name: Held-out corpus, default limits
         run: |
           mkdir -p results
           uv run --no-project python bench/heldout.py fetch
           uv run --no-project python bench/heldout.py metrics --mode default --rowan bin/rowan --json results/heldout.json | tee results/heldout.txt
-          uv run --no-project python bench/heldout.py metrics --mode default --corpus eight --rowan bin/rowan --json results/eight.json | tee results/eight.txt
 
       - name: Job summary
         if: always()
         run: |
           {
-            echo "### held-out corpus and the eight (bench/heldout.py metrics --mode default)"
+            echo "### held-out corpus (bench/heldout.py metrics --mode default)"
             echo
             echo '```'
-            echo "held-out:"; cat results/heldout.txt 2>/dev/null || echo "no result"
-            echo "the eight:"; cat results/eight.txt 2>/dev/null || echo "no result"
+            cat results/heldout.txt 2>/dev/null || echo "no result"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          # (not `bench-*`: history.py reads those as bench/run.py results)
+          # (not `bench-*`: history.py reads those)
           name: heldout-metrics
           path: results/
           retention-days: 30
@@ -356,31 +523,72 @@ jobs:
 
   summary:
     name: summary
-    needs: bench
+    needs: [tracked, hovers, protocols, metamorphic, kani]
     if: always()
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
       - uses: actions/download-artifact@v8
         with:
           pattern: bench-*
           path: results
           merge-multiple: true
 
-      - name: One table for all programs
+      - name: One table for everything
         run: |
-          {
-            echo "## rowan benchmarks (no deadlines, 10 minute timeout per program)"
-            echo
-            echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            for p in stdlib12k email rich click pip timm sktime functional; do
-              cat "results/$p.md" 2>/dev/null || echo "| $p | no result | | | | | | | |"
-            done
-            echo
-            echo "Wall time and memory vary ±10–20% between runners; work, units, tabulations and objects are deterministic."
-            echo "Per-program profiles: the bench jobs' summaries; flamegraphs: the bench-<program> artifacts."
-          } >> "$GITHUB_STEP_SUMMARY"
+          uv run --no-project python - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import json, subprocess, sys
+          from pathlib import Path
+          r = Path("results")
+          tr = sorted(str(f) for f in r.glob("tracked-*.json"))
+          print("## The tracked set (bench/tracked.py: the eight + the cost set; 10 s deadline and none)\n")
+          if tr:
+              print(subprocess.run([sys.executable, "bench/tracked.py", "table", *tr, "--md"], capture_output=True, text=True).stdout)
+              print(f"{len(tr)} of 4 shards. Wall time and memory vary 10–20% between runners; work counters are deterministic. Profiles: the tracked jobs' summaries; flamegraphs: the bench-tracked-* artifacts.\n")
+          else:
+              print("no result\n")
+          print("## Hovers (bench/hovers.py, bench/first_hover.py)\n")
+          print("| program | functions | setup | p50 | p99 | max | cut | first hover p50 | first hover max | serve peak memory |")
+          print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+          for p in ["stdlib12k", "email", "rich", "click", "pip", "timm", "sktime", "functional"]:
+              h = json.loads((r / f"{p}-hovers.json").read_text())["summary"] if (r / f"{p}-hovers.json").exists() else {}
+              f = json.loads((r / f"{p}-first.json").read_text())["summary"] if (r / f"{p}-first.json").exists() else {}
+              fh = f.get("first_hover_ms", {})
+              print(f"| {p} | {h.get('timed', '–')} | {h.get('setup_ms', '–')} ms | {h.get('p50', '–')} ms | {h.get('p99', '–')} ms | {h.get('max', '–')} ms | {h.get('cut', '–')} | {fh.get('p50', '–')} ms | {fh.get('max', '–')} ms | {f.get('peak_mb', '–')} MB |")
+          print("\n## Protocol enumerators in full (bench/protocols.py full)\n")
+          by, jobs = {}, 0
+          for f in sorted(r.glob("protocols-*.json")):
+              jobs += 1
+              for n, t in json.loads(f.read_text())["by_name"].items():
+                  b = by.setdefault(n, {"programs": 0, "points": 0, "missed": 0, "crashed": 0, "seconds": 0.0})
+                  for k in b:
+                      b[k] += t[k]
+          print("| enumerator | programs (× limit sets) | points | missed | crashed batches | seconds (summed over shards) |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          for n, b in sorted(by.items()):
+              print(f"| {n} | {b['programs']:,} | {b['points']:,} | {b['missed']} | {b['crashed']} | {b['seconds']:.0f} |")
+          print(f"\n{jobs} of 4 jobs.\n")
+          print("## Metamorphic checks in full (tests/metamorphic.py)\n")
+          ms = [json.loads(f.read_text()) for f in sorted(r.glob("metamorphic-*.json"))]
+          if ms:
+              checks = ms[0]["checked"].keys()
+              print("| check | places | missed | cases missed |")
+              print("| --- | --- | --- | --- |")
+              for k in checks:
+                  print(f"| {k} | {sum(m['checked'][k] for m in ms)} | {sum(m['missed'][k] for m in ms)} | {sum(m['cases_missed'][k] for m in ms)} |")
+              print(f"\n{sum(m['cases'] for m in ms)} cases in {len(ms)} of 2 shards.\n")
+          else:
+              print("no result\n")
+          k = r / "kani.json"
+          print("## Kani\n")
+          print(json.loads(k.read_text()) if k.exists() else "no result")
+          EOF
 
   # History across commits (main only): github-action-benchmark appends this run's numbers to
   # the data on the `gh-pages` branch (dev/bench/data.js, charts in dev/bench/index.html), and
@@ -388,7 +596,7 @@ jobs:
   # Actions): https://kaidaniel.github.io/rowan/dev/bench/
   history:
     name: history
-    needs: [bench, golden-fallback, hovers, sitepackages]
+    needs: [tracked, golden-fallback, hovers, sitepackages, protocols, metamorphic, kani]
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     continue-on-error: true

@@ -9,11 +9,11 @@ numbers; they do not pick work from its individual sites (AGENTS.md, SUBAGENTS.m
 
     uv run --no-project python bench/heldout.py fetch
     uv run --no-project python bench/heldout.py metrics [--rowan BIN] [--mode default|nodeadline]
-            [--corpus heldout|eight] [--limits K=V,…] [--only PKG,…] [-j N] [--json OUT]
+            [--corpus heldout|tracked] [--limits K=V,…] [--only PKG,…] [-j N] [--json OUT]
     uv run --no-project python bench/heldout.py sound [--rowan BIN] [--only PKG,…] [--json OUT] [-v]
-            [--baseline FILE] [--report OUT.md] [--write-baseline FILE]
+            [--baseline FILE] [--report OUT.md] [--write-baseline FILE] [--scratch DIR]
     uv run --no-project python bench/heldout.py sweep [--rowan BIN] [--bins NAME=BIN,…] [--variants …]
-            [--corpus heldout|eight] [--mode …] [--json OUT]
+            [--corpus heldout|tracked] [--mode …] [--json OUT]
 
 `metrics`: per module one `rowan MODULE --facts` with ROWAN_DEBUG=1 (`/usr/bin/time -l` under
 .guard/run), as the scoreboard measures the eight: verdict tiers, the main file's hover facts by
@@ -51,10 +51,13 @@ A mismatch is a candidate: each is either an unsound claim (shrink it into a rep
 this matching (tests calling with types the annotations exclude, monkeypatching, mocks); the
 report says which. `--baseline`: the candidate sites compared with the known ones
 (heldout/sound_baseline.json: identifiers, each with the kind that explains it), exit 1 when
-there are new ones (CI: heldout.yml, after every merge).
+there are new ones (CI: heldout.yml, after every merge). Sites name modules by their path in
+the sdist, wherever the corpus lies (a scratch worktree's bench/work linked to the main
+checkout's gives the same sites). `--scratch DIR`: the annotated copies, observations and test
+points go there instead of bench/work/heldout (two `sound` runs at once, as bench/all.py's).
 
-`--corpus eight`: the eight benchmarks (bench/prepare.py) measured the same way, for the
-tuned-on side of the comparison.
+`--corpus tracked`: the tracked set (bench/tracked.py: the eight benchmarks and the cost set)
+measured the same way, for the tuned-on side of the comparison.
 
 `sweep`: `metrics` at each knob ×½ and ×2: ROWAN_LIMITS budget and ms, and binaries built with
 other constants (`--bins`).
@@ -108,6 +111,7 @@ MANIFEST = HERE / "heldout" / "manifest.json"
 BASELINE = HERE / "heldout" / "sound_baseline.json"
 WORK = HERE / "work" / "heldout"
 SRC = WORK / "src"
+SCRATCH = WORK  # sound's annotated copies, observations, test points (`--scratch`)
 RUST_BIN = ROOT / "rowan" / "target" / "release" / "rowan"
 DEFAULT_TIMEOUT_S = 60  # a default-mode run (the 10 s deadline, plus what follows it)
 NODEADLINE_TIMEOUT_S = 60
@@ -167,7 +171,8 @@ def cmd_fetch(a) -> None:
 
 
 # ---------------------------------------------------------------- metrics
-WORK_FIELDS = {"work": r"^work: (\d+)", "units": r"units (\d+)", "objects": r"objects (\d+)", "skipped_calls": r"skipped calls (\d+)"}
+WORK_FIELDS = {"work": r"^work: (\d+)", "units": r"units (\d+)", "tabulations": r"tabulations (\d+)", "objects": r"objects (\d+)",
+               "row_joins": r"row joins (\d+)", "havoc": r"havoc visits (\d+)", "skipped_calls": r"skipped calls (\d+)"}
 
 
 def run_guarded(cmd: list[str], timeout: int, **kw) -> tuple[int, bool]:
@@ -272,12 +277,12 @@ def metrics(binary: Path, mode: str, limits: str | None, only: str | None, jobs:
     if mode == "nodeadline":
         lim = ",".join(x for x in [limits, "ms=100000000"] if x)
         timeout = NODEADLINE_TIMEOUT_S
+    if corpus == "tracked":
+        # (the tuned-on set, measured the same way: bench/tracked.py's)
+        import tracked
+        return tracked.metrics(binary, mode, limits, only, jobs, out_dir)
     todo = []
-    if corpus == "eight":
-        # (the tuned-on set, measured the same way: bench/prepare.py's programs)
-        from scoreboard import PROGRAMS, bench_file
-        todo = [({"name": n, "kind": "eight"}, "", bench_file(n)) for n in PROGRAMS if not only or n in only.split(",")]
-    for p in select(manifest(), only) if corpus == "heldout" else []:
+    for p in select(manifest(), only):
         d = fetch_one(p)
         for m in p["modules"]:
             todo.append((p, m, d / m))
@@ -433,7 +438,7 @@ def golden_claims(binary: Path, p: dict, mod: str, stmts: list[dict]) -> tuple[d
     """rowan's rows and verdicts for the annotated copy of the module (a mirror of the sdist, so
     its imports resolve as in the original): rows by (end line, name), the verdicts' JSON."""
     d = src_dir(p)
-    mirror = WORK / "annot" / p["name"]
+    mirror = SCRATCH / "annot" / p["name"]
     if not (mirror / ".stamp").exists() or (mirror / ".stamp").read_text() != p["sha256"]:
         shutil.rmtree(mirror, ignore_errors=True)
         shutil.copytree(d, mirror)
@@ -442,7 +447,7 @@ def golden_claims(binary: Path, p: dict, mod: str, stmts: list[dict]) -> tuple[d
     (mirror / mod).write_text(annotate(src, stmts))
     # (a deadline the budget comes before: the claims do not depend on the machine's load)
     env = dict(os.environ, ROWAN_LIMITS=CLAIM_LIMITS)
-    so, se = WORK / "annot" / f"{p['name']}.out", WORK / "annot" / f"{p['name']}.err"
+    so, se = SCRATCH / "annot" / f"{p['name']}.out", SCRATCH / "annot" / f"{p['name']}.err"
     try:
         with open(so, "w") as o, open(se, "w") as e:
             rc, _ = run_guarded([str(binary), str(mirror / mod), "--golden"], CLAIM_TIMEOUT_S, stdout=o, stderr=e, env=env)
@@ -551,11 +556,13 @@ def value_problem(claim: dict, s: list) -> str | None:
 
 def run_tests(p: dict, points: dict, roots: list[str], out: Path) -> dict:
     py = venv_python(p)
-    d = src_dir(p)
+    # (resolved, as check_package's: the tests' file names are the watched points' wherever
+    # bench/work/heldout/src is linked from)
+    d = src_dir(p).resolve()
     # (files an sdist leaves out that its tests import: the manifest's `shims`)
     for rel, text in p["tests"].get("shims", {}).items():
         (d / rel).write_text(text)
-    spec = WORK / "points" / f"{p['name']}.json"
+    spec = SCRATCH / "points" / f"{p['name']}.json"
     spec.parent.mkdir(parents=True, exist_ok=True)
     spec.write_text(json.dumps({"files": points, "roots": roots}))
     env = dict(os.environ, HELDOUT_POINTS=str(spec), HELDOUT_OUT=str(out), PYTHONDONTWRITEBYTECODE="1",
@@ -572,7 +579,7 @@ def run_tests(p: dict, points: dict, roots: list[str], out: Path) -> dict:
 
 
 def check_package(binary: Path, p: dict, verbose: bool) -> dict:
-    d = fetch_one(p)
+    d = fetch_one(p).resolve()
     roots = [str(d / p["root"])]
     points, claims, per_mod = {}, {}, {}
     for mod in p["modules"]:
@@ -593,8 +600,8 @@ def check_package(binary: Path, p: dict, verbose: bool) -> dict:
         if err:
             # (rowan failed on the module: a crash, counted apart; nothing of it compared)
             continue
-        claims[path] = (stmts, rows, acc)
-    obs_file = WORK / "obs" / f"{p['name']}.json"
+        claims[path] = (mod, stmts, rows, acc)
+    obs_file = SCRATCH / "obs" / f"{p['name']}.json"
     obs_file.parent.mkdir(parents=True, exist_ok=True)
     obs_file.unlink(missing_ok=True)
     tests = run_tests(p, points, roots, obs_file)
@@ -604,8 +611,7 @@ def check_package(binary: Path, p: dict, verbose: bool) -> dict:
         return res
     obs = json.loads(obs_file.read_text())
     cmp = res["compared"]
-    for path, (stmts, rows, acc) in claims.items():
-        mod = os.path.relpath(path, d)
+    for path, (mod, stmts, rows, acc) in claims.items():
         # the functions that had a run for any call (a general row on any of their statements)
         fn_general = {s["func"] for s in stmts if any(rc.get("general") for n in s["names"] for rc in rows.get((s["end"], n), []))}
         for s in stmts:
@@ -647,7 +653,10 @@ def check_package(binary: Path, p: dict, verbose: bool) -> dict:
 
 
 def cmd_sound(a) -> None:
+    global SCRATCH
     binary = Path(a.rowan).resolve()
+    if a.scratch:
+        SCRATCH = Path(a.scratch).resolve()
     out = {}
     for p in select(manifest(), a.only):
         if not p.get("tests"):
@@ -888,13 +897,14 @@ def main() -> None:
         q.add_argument("-v", action="store_true")
         if name in ("metrics", "sweep"):
             q.add_argument("--mode", default="default", choices=["default", "nodeadline"])
-            q.add_argument("--corpus", default="heldout", choices=["heldout", "eight"])
+            q.add_argument("--corpus", default="heldout", choices=["heldout", "tracked"])
         if name == "metrics":
             q.add_argument("--limits")
         if name == "sound":
             q.add_argument("--baseline", help=f"compare with the known candidates (default {BASELINE.relative_to(ROOT)}); exit 1 on new ones")
             q.add_argument("--report", help="the comparison as Markdown")
             q.add_argument("--write-baseline", help="write today's candidate sites as a baseline")
+            q.add_argument("--scratch", help="annotated copies, observations, test points here (default bench/work/heldout)")
         if name == "sweep":
             q.add_argument("--bins")
             q.add_argument("--variants", help="only these (current, budget=x0.5, …, the --bins names)")
