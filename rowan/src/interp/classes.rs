@@ -4,11 +4,15 @@
 use ruff_python_ast as ast;
 
 use crate::domain::{ObjId, Ns, Value};
+use crate::intern::KeyId;
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Args, ClassInfo, Frame, FrameKind, Payload};
+
+/// The names CPython puts in a class namespace beside the body's (`class_namespace`).
+const NS_ADDED: &[&str] = &["__module__", "__qualname__", "__firstlineno__", "__doc__", "__static_attributes__", "__annotate_func__", "__classdictcell__", "__classcell__"];
 
 impl Analyzer {
     /// A `class` statement: its bases (library ones say what it is), the class object, its body
@@ -19,7 +23,7 @@ impl Analyzer {
         let fr_ctx = self.frame().ctx.clone();
         let fr_single = self.frame().single;
         let fr_cells = self.frame().cells.clone();
-        let (bases, mut open_base, lib, ek, own_meta) = self.class_bases(c, state);
+        let (bases, mut open_base, lib, ek, own_meta, base_vals) = self.class_bases(c, state);
         // (its metaclass: the one it names, else its first base's that has one)
         let meta = own_meta.or_else(|| bases.iter().find_map(|b| self.heap.class_info_opt(*b).and_then(|ci| ci.meta.clone())));
         open_base |= lib.open;
@@ -72,27 +76,26 @@ impl Analyzer {
         if is_enum || enum_base {
             crate::models::enums::make_enum_members(self, c, coid, lek, str_mixin, state);
         }
+        // (its metaclass, named by it or a base: the program's runs as Python runs it, given
+        // the namespace the body filled; another is code rowan does not run, which may rebind
+        // the data the body defined)
+        let run_meta = meta.as_ref().map(|m| self.program_metaclass(m));
+        let ns = match run_meta {
+            Some(Some(Some(_))) => Some(self.class_namespace(c, coid, &cnode.sub(0x6d6e), state)),
+            _ => None,
+        };
         self.run_set_name(c, coid, &cnode, state);
         self.run_init_subclass(c, coid, &info, &cnode, state);
-        // (its metaclass's `__new__` / `__init__`, its bases' too, made it: code rowan does not
-        // run — it may rebind the data the body defined, or change it; the methods it keeps)
-        if let Some(meta) = meta {
-            let any = Value::obj(super::any_object(&mut self.heap));
-            let mut given = vec![meta];
-            for (k, v) in state.obj_slots(coid, Ns::Attr) {
-                if v.pts.iter().any(|o| self.holds_code(o)) {
-                    continue;
-                }
-                state.set_slot(coid, Ns::Attr, k, v.join(&any), true);
-                given.push(v);
-            }
-            self.unknown_call("metaclass", None, Args::pos(&given), state, &cnode);
-        }
         let mut cv = Value::obj(coid);
+        match (run_meta, ns) {
+            (Some(Some(Some(m))), Some(ns)) => cv = self.run_metaclass(c, m, coid, ns, &base_vals, &cnode, state),
+            (Some(None), _) => self.metaclass_not_run(meta.as_ref().unwrap(), coid, &cnode, state),
+            _ => {}
+        }
         if !is_dataclass && !c.decorator_list.is_empty() {
-            cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
-            if cv.pts.is_empty() {
-                cv = Value::obj(coid);
+            let dv = self.apply_decorators(&c.decorator_list, cnode, cv.clone(), state);
+            if !dv.pts.is_empty() {
+                cv = dv;
             }
         }
         self.store_name(s(c.name.id.as_str()), cv, state);
@@ -158,9 +161,12 @@ impl Analyzer {
 
     /// The bases a class statement names: the program's classes, whether the class is open
     /// (a base rowan does not see, a metaclass other than ABCMeta), what its library bases make
-    /// of it, the Enum kind its Enum bases give, and the metaclass it names (not ABCMeta).
-    fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind, Option<Value>) {
+    /// of it, the Enum kind its Enum bases give, the metaclass it names (not ABCMeta), and the
+    /// bases' values as written.
+    #[allow(clippy::type_complexity)]
+    fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind, Option<Value>, Vec<Value>) {
         let mut meta = None;
+        let mut base_vals = Vec::new();
         let mut bases: Vec<u32> = Vec::new();
         let mut open_base = false;
         let mut lib = crate::models::ClassBase::default();
@@ -173,6 +179,7 @@ impl Analyzer {
                     other => other,
                 };
                 let bv = self.eval(b, state);
+                base_vals.push(bv.clone());
                 for oid in bv.pts.iter() {
                     match self.heap.kind(oid) {
                         Kind::Class => {
@@ -202,14 +209,16 @@ impl Analyzer {
                 if kw.arg.as_ref().map(|a| a.as_str() == "metaclass").unwrap_or(false) {
                     let mv = self.eval(&kw.value, state);
                     let abc = mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
+                    // (one of the program's that rowan runs and that leaves making instances
+                    // to `type`: as the class's code says)
                     if !abc {
-                        open_base = true;
+                        open_base |= !matches!(self.program_metaclass(&mv), Some(Some(m)) if self.class_lookup(m, "__call__").is_none());
                         meta = Some(mv);
                     }
                 }
             }
         }
-        (bases, open_base, lib, ek, meta)
+        (bases, open_base, lib, ek, meta, base_vals)
     }
 
     /// `__set_name__(owner, name)` on the descriptor objects assigned in the class body.
@@ -238,17 +247,7 @@ impl Analyzer {
         let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
         if let Some(defc) = found {
             let fv = self.heap.class_attr(defc, "__init_subclass__");
-            let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
-            if let Some(args) = &c.arguments {
-                for kw in args.keywords.iter() {
-                    if let Some(a) = &kw.arg {
-                        if a.as_str() != "metaclass" {
-                            let v = self.eval(&kw.value, state);
-                            kwargs.insert(s(a.as_str()), v);
-                        }
-                    }
-                }
-            }
+            let kwargs = self.class_keywords(c, state);
             let skipped = self.budget.skipped;
             let mut library = false;
             for f in fv.pts.iter() {
@@ -262,5 +261,200 @@ impl Analyzer {
                 info.open_base.set(true);
             }
         }
+    }
+
+    /// The class statement's keywords other than `metaclass=`, evaluated.
+    fn class_keywords(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> indexmap::IndexMap<intern::StrId, Value> {
+        let mut kwargs = indexmap::IndexMap::new();
+        for kw in c.arguments.iter().flat_map(|a| a.keywords.iter()) {
+            if let Some(a) = kw.arg.as_ref().filter(|a| a.as_str() != "metaclass") {
+                let v = self.eval(&kw.value, state);
+                kwargs.insert(s(a.as_str()), v);
+            }
+        }
+        kwargs
+    }
+
+    /// What runs of metaclass `mv`: Some(None) nothing of the program's (`type`, ABCMeta);
+    /// Some(Some(m)) the program's class `m` (`is_metaclass`) without `__prepare__`; None
+    /// anything else, which is code rowan does not run.
+    fn program_metaclass(&self, mv: &Value) -> Option<Option<ObjId>> {
+        let m = mv.single().filter(|_| mv.kv.is_bot())?;
+        match self.heap.kind(m) {
+            Kind::External if matches!(self.heap.external_qual(m).as_str(), "builtins.type" | "abc.ABCMeta") => Some(None),
+            Kind::Class if self.is_metaclass(m) && self.class_lookup(m, "__prepare__").is_none() => Some(Some(m)),
+            _ => None,
+        }
+    }
+
+    /// Is `m` a class of the program's deriving from `type` (or ABCMeta) and from no other
+    /// library class?
+    pub fn is_metaclass(&self, m: ObjId) -> bool {
+        let mut typed = false;
+        for c in self.heap.mro(m) {
+            let Some(ci) = self.heap.class_info_opt(c) else { return false };
+            for q in &ci.lib.quals {
+                match q.as_str() {
+                    "builtins.type" | "abc.ABCMeta" => typed = true,
+                    "builtins.object" => {}
+                    _ => return false,
+                }
+            }
+        }
+        typed
+    }
+
+    /// A metaclass rowan does not run made the class: code given the metaclass and the class's
+    /// data attributes, which it may rebind or change (the methods it keeps).
+    fn metaclass_not_run(&mut self, meta: &Value, coid: ObjId, cnode: &Node, state: &mut State) {
+        let any = Value::obj(super::any_object(&mut self.heap));
+        let mut given = vec![meta.clone()];
+        for (k, v) in state.obj_slots(coid, Ns::Attr) {
+            if v.pts.iter().any(|o| self.holds_code(o)) {
+                continue;
+            }
+            state.set_slot(coid, Ns::Attr, k, v.join(&any), true);
+            given.push(v);
+        }
+        self.unknown_call("metaclass", None, Args::pos(&given), state, cnode);
+    }
+
+    /// The namespace the class body filled, as the dict its metaclass is given, in CPython
+    /// 3.14's order: `__module__`, `__qualname__`, `__firstlineno__`, a docstring's `__doc__`,
+    /// the body's names, then what the compiler adds (`syntax::class_namespace_cells`); pushed
+    /// as the class the running statement makes (`Context::making_class`).
+    fn class_namespace(&mut self, c: &'static ast::StmtClassDef, coid: ObjId, node: &Node, state: &mut State) -> ObjId {
+        let ns = self.alloc_simple(Kind::Dict, node, state, &format!("namespace of class {}", c.name.id));
+        self.cx.making_class.push((coid, ns, false));
+        let strong = self.heap.obj(ns).single;
+        let module = self.heap.module_info(self.frame().module).name.clone();
+        let str_ = || Value::data(&crate::domain::typed_label("str", ""));
+        let qualname = if self.cx.frames.len() <= 1 { Value::lit(key_str_lit(c.name.id.as_str())) } else { str_() };
+        let mut items: Vec<(KeyId, Value, bool)> = vec![
+            (key_str_lit("__module__"), Value::lit(key_str_lit(&module)), true),
+            (key_str_lit("__qualname__"), qualname, true),
+            (key_str_lit("__firstlineno__"), Value::lit(intern::key_int(node.line as i64)), true),
+        ];
+        if matches!(c.body.first(), Some(ast::Stmt::Expr(e)) if e.value.is_string_literal_expr()) {
+            items.push((key_str_lit("__doc__"), str_(), true));
+        }
+        let row = state.row(coid, Ns::Attr);
+        let order = row.ordered_keys();
+        let body: Vec<KeyId> = order.clone().unwrap_or_else(|| state.slot_keys(coid, Ns::Attr));
+        for k in body {
+            if row.present.contains(k) && !intern::key_as_str(k).is_some_and(|n| n.starts_with('\u{1}') || NS_ADDED.contains(&&*n)) {
+                items.push((k, state.slot(coid, Ns::Attr, k), row.definite.contains(k)));
+            }
+        }
+        let (defs, anns, cell) = crate::syntax::class_namespace_cells(c);
+        // (a tuple of strs; cells; the annotations' function)
+        if anns {
+            items.push((key_str_lit("__annotate_func__"), Value::data("__annotate_func__"), true));
+        }
+        let statics = self.alloc_positional(Kind::Tuple, &node.sub(1), None, str_(), str_().kv, state);
+        items.push((key_str_lit("__static_attributes__"), statics, true));
+        for (i, (n, there)) in [("__classdictcell__", defs || anns), ("__classcell__", cell)].into_iter().enumerate() {
+            if there {
+                let cell = self.alloc_simple(Kind::Cell, &node.sub(2 + i as u32), state, n);
+                items.push((key_str_lit(n), Value::obj(cell), true));
+            }
+        }
+        for (k, v, sure) in items {
+            self.store_key(ns, Ns::Item, &Value::lit(k), &v, strong && sure, node, state);
+        }
+        // (the body's names in an order not known: the namespace's too)
+        if order.is_none() {
+            let r = state.row(ns, Ns::Item).with_order(Vec::new());
+            state.set_row(ns, Ns::Item, r);
+        }
+        ns
+    }
+
+    /// Metaclass `m` of the program's makes the class `coid` from namespace `ns` (the running
+    /// statement's, `class_namespace`), as Python calls it: `m.__new__(m, name, bases, ns, **kw)`
+    /// (`type.__new__` makes the class from what `ns` holds then, `class_from_namespace`),
+    /// then, given the class, `m.__init__(cls, name, bases, ns, **kw)`. What `__new__` returns
+    /// is what the name is bound to. A `__new__` that did not make the class through
+    /// `type.__new__` (or did not run): the class as code rowan does not run left it.
+    #[allow(clippy::too_many_arguments)]
+    fn run_metaclass(&mut self, c: &'static ast::StmtClassDef, m: ObjId, coid: ObjId, ns: ObjId, base_vals: &[Value], cnode: &Node, state: &mut State) -> Value {
+        let kwargs = self.class_keywords(c, state);
+        let name = Value::lit(key_str_lit(c.name.id.as_str()));
+        let kv = crate::domain::join_values(base_vals.iter().cloned()).kv;
+        let bases = self.alloc_positional(Kind::Tuple, &cnode.sub(0x6d62), Some(base_vals.to_vec()), Value::new(), kv, state);
+        let args = [name, bases, Value::obj(ns)];
+        let skipped = self.budget.skipped;
+        let made = match self.class_lookup(m, "__new__") {
+            Some(defc) => {
+                let pos = [&[Value::obj(m)][..], &args[..]].concat();
+                let mut r = Value::new();
+                for f in self.heap.class_attr(defc, "__new__").pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
+                    r = r.join(&self.call_user(f, None, Args::new(&pos, &kwargs, &[], &[]), state, cnode, false));
+                }
+                r
+            }
+            None => {
+                self.cx.making_class.last_mut().unwrap().2 = true;
+                Value::obj(coid)
+            }
+        };
+        let (_, _, through_type) = self.cx.making_class.pop().unwrap();
+        if !through_type {
+            self.metaclass_not_run(&Value::obj(m), coid, cnode, state);
+        }
+        let info = self.heap.class_info(coid);
+        info.open_base.set(info.open_base.get() || !through_type);
+        if made.pts.contains(coid) || made.pts.is_empty() {
+            if let Some(defc) = self.class_lookup(m, "__init__") {
+                for f in self.heap.class_attr(defc, "__init__").pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
+                    self.call_user(f, Some(Value::obj(coid)), Args::new(&args, &kwargs, &[], &[]), state, cnode, false);
+                }
+            }
+        }
+        // (a call that did not run — its own or one it makes — may have done to the class what
+        // its code says, as code rowan does not run)
+        if through_type && self.budget.skipped > skipped {
+            self.metaclass_not_run(&Value::obj(m), coid, cnode, state);
+        }
+        if made.pts.is_empty() { made.join(&Value::obj(coid)) } else { made }
+    }
+
+    /// `type.__new__(mcs, name, bases, ns)` while a class statement's metaclass runs (its
+    /// `super().__new__`): that statement's class, its attributes now what `ns` holds (a key
+    /// taken out of `ns` is no attribute). None: no class statement is making a class here.
+    pub fn class_from_namespace(&mut self, ns: &Value, node: &Node, state: &mut State) -> Option<ObjId> {
+        let &(coid, _, false) = self.cx.making_class.last()? else { return None };
+        let ns = ns.single().filter(|o| self.heap.kind(*o) == Kind::Dict)?;
+        self.cx.making_class.last_mut().unwrap().2 = true;
+        let row = state.row(ns, Ns::Item);
+        if !row.closed() {
+            self.metaclass_not_run(&Value::new(), coid, node, state);
+            self.heap.class_info(coid).open_base.set(true);
+            return Some(coid);
+        }
+        let added = |k: KeyId| intern::key_as_str(k).is_some_and(|n| NS_ADDED.contains(&&*n));
+        for (k, _) in state.obj_slots(coid, Ns::Attr) {
+            if !row.present.contains(k) && !added(k) && !intern::key_as_str(k).is_some_and(|n| n.starts_with('\u{1}')) {
+                let r = state.row(coid, Ns::Attr).delete(k, true);
+                state.set_row(coid, Ns::Attr, r);
+                state.pop_slot(coid, Ns::Attr, k);
+                // (no longer the body's: the path decides, `class_lookup_on_path`)
+                self.heap.cls_late.insert((coid, k));
+            }
+        }
+        for (k, v) in state.obj_slots(ns, Ns::Item) {
+            if added(k) || !row.present.contains(k) || state.slot_opt(coid, Ns::Attr, k).as_ref() == Some(&v) {
+                continue;
+            }
+            let sure = row.definite.contains(k);
+            let r = state.row(coid, Ns::Attr).store(k, sure);
+            state.set_row(coid, Ns::Attr, r);
+            let old = state.slot_opt(coid, Ns::Attr, k);
+            state.set_slot(coid, Ns::Attr, k, if sure { v.clone() } else { v.join(&old.unwrap_or_default()) }, true);
+            let cls_old = self.heap.cls_slots.get(&(coid, Ns::Attr, k)).cloned().unwrap_or_default();
+            self.heap.set_cls_slot((coid, Ns::Attr, k), cls_old.join(&v));
+            self.heap.cls_late.insert((coid, k));
+        }
+        Some(coid)
     }
 }

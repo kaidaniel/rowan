@@ -615,10 +615,12 @@ impl Analyzer {
             // `object.__setattr__` as modelled, a library base's as unknown code
             // given the receiver (it was a call given nothing)
             None => {
-                let closed = match recv_cls[..] {
-                    [rc] => self.hierarchy_closed(rc),
-                    _ => self.hierarchy_closed(cls),
-                };
+                // (a metaclass's `super().__init__`: `type`'s)
+                let closed = self.is_metaclass(cls)
+                    || match recv_cls[..] {
+                        [rc] => self.hierarchy_closed(rc),
+                        _ => self.hierarchy_closed(cls),
+                    };
                 let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
                 let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
                 let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
@@ -775,6 +777,19 @@ impl Analyzer {
         } else if name == "__init__" && crate::models::dataclasses::dataclass_init_owner(self, oid).is_some() {
             let dc = crate::models::dataclasses::dataclass_init_owner(self, oid).unwrap();
             Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.heap.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
+        } else if let Some(m) = self.heap.class_info_opt(oid).and_then(|ci| ci.meta.as_ref().and_then(|m| m.single())).filter(|m| self.heap.kind(*m) == Kind::Class && self.is_metaclass(*m) && self.class_lookup(*m, name).is_some()) {
+            // (one its metaclass of the program's holds: its methods bound to the class)
+            let v = self.class_attr(m, name, node, state, guarded, report, single);
+            let mut out = Value::kv_only(v.kv.clone());
+            for f in v.pts.iter() {
+                if self.heap.kind(f) == Kind::Function && !self.heap.func_info(f).is_static.get() && !self.heap.func_info(f).is_classmethod.get() && !self.heap.func_info(f).is_property.get() {
+                    let label = format!("{} bound", self.heap.obj(f).label);
+                    out = out.join(&Value::obj(self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:meta{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
+                } else {
+                    out = out.join(&Value::obj(f));
+                }
+            }
+            out
         } else {
             let label = format!("{}.{}", self.heap.obj(oid).label, name);
             Value::obj(self.heap.alloc_raw(Kind::Method, &format!("classattr:{}.{}", oid, name), "", true, &label, Payload::Method(format!("class.{}", name), Value::obj(oid))))
