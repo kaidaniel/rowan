@@ -735,3 +735,68 @@ pub fn sole_assignments(f: &'static ast::StmtFunctionDef, name: &str) -> Option<
     }
     (!v.other && !v.out.is_empty()).then_some(v.out)
 }
+
+/// What CPython's compiler adds to a class body's namespace beyond its names (3.14):
+/// `(defs, annotations, class_cell)` — a `def` at the class's level (`__classdictcell__`),
+/// an annotated name there (`__annotate_func__`, `__classdictcell__`), a function inside it
+/// naming `super` or `__class__` (`__classcell__`).
+pub fn class_namespace_cells(c: &ast::StmtClassDef) -> (bool, bool, bool) {
+    struct V {
+        defs: bool,
+        anns: bool,
+        cell: bool,
+        depth: usize,
+    }
+    impl<'a> SourceOrderVisitor<'a> for V {
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            match st {
+                ast::Stmt::FunctionDef(f) => {
+                    self.defs |= self.depth == 0;
+                    // (decorators, defaults and annotations are evaluated where the def is)
+                    for d in &f.decorator_list {
+                        self.visit_expr(&d.expression);
+                    }
+                    self.visit_parameters(&f.parameters);
+                    if let Some(r) = &f.returns {
+                        self.visit_expr(r);
+                    }
+                    self.depth += 1;
+                    f.body.iter().for_each(|s| self.visit_stmt(s));
+                    self.depth -= 1;
+                }
+                // (a nested class's methods name their own class; its decorators and bases are
+                // this scope's)
+                ast::Stmt::ClassDef(k) => {
+                    for d in &k.decorator_list {
+                        self.visit_expr(&d.expression);
+                    }
+                    if let Some(a) = &k.arguments {
+                        self.visit_arguments(a);
+                    }
+                }
+                ast::Stmt::AnnAssign(_) => {
+                    self.anns |= self.depth == 0;
+                    source_order::walk_stmt(self, st);
+                }
+                _ => source_order::walk_stmt(self, st),
+            }
+        }
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            match e {
+                ast::Expr::Name(n) if self.depth > 0 && matches!(n.id.as_str(), "super" | "__class__") => self.cell = true,
+                ast::Expr::Lambda(l) => {
+                    if let Some(p) = &l.parameters {
+                        self.visit_parameters(p);
+                    }
+                    self.depth += 1;
+                    self.visit_expr(&l.body);
+                    self.depth -= 1;
+                }
+                _ => source_order::walk_expr(self, e),
+            }
+        }
+    }
+    let mut v = V { defs: false, anns: false, cell: false, depth: 0 };
+    c.body.iter().for_each(|s| v.visit_stmt(s));
+    (v.defs, v.anns, v.cell)
+}

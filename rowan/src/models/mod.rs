@@ -114,7 +114,8 @@ impl Registry {
         r(&["builtins.object.__setattr__"], m_object_setattr);
         r(&["builtins.object.__delattr__"], m_object_delattr);
         r(&["builtins.object.__new__"], m_object_new);
-        r(&["builtins.object.__init__"], m_object_init);
+        r(&["builtins.object.__init__", "builtins.type.__init__"], m_object_init);
+        r(&["builtins.type.__new__", "abc.ABCMeta.__new__"], m_type_new);
         r(&["builtins.delattr"], m_delattr);
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);

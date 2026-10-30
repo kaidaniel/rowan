@@ -1587,6 +1587,10 @@ pub(super) fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
     if c.args.len() == 1 && c.kwargs.is_empty() && c.star_args.is_empty() && c.star_kwargs.is_empty() {
         return Value::none();
     }
+    // (`type.__init__(cls, name, bases, ns)`, a metaclass's `super().__init__`: nothing)
+    if c.args.len() == 4 && c.args[0].kv.is_bot() && c.args[0].pts.iter().all(|o| an.heap.kind(o) == Kind::Class) && !c.args[0].pts.is_empty() {
+        return Value::none();
+    }
     an.unknown_call(&c.qual, None, c.arguments(), st, &c.node)
 }
 
@@ -1596,6 +1600,9 @@ pub(super) fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Valu
 /// class) is unknown.
 pub(super) fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(cv) = c.args.first().cloned() else { return Value::new() };
+    if cv.single().is_some_and(|m| an.heap.kind(m) == Kind::Class && an.is_metaclass(m)) {
+        return m_type_new(an, st, c);
+    }
     let mut out = Value::new();
     let mut other = !cv.kv.is_bot();
     for o in cv.pts.iter() {
@@ -1613,6 +1620,18 @@ pub(super) fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
         out = out.join(&an.unknown_call(&c.qual, None, c.arguments(), st, &c.node));
     }
     out
+}
+
+/// `type.__new__(mcs, name, bases, ns)` (a metaclass's `super().__new__`): the class the
+/// running class statement makes, from what `ns` holds (`class_from_namespace`); a class made
+/// by calling a metaclass is unknown.
+pub(super) fn m_type_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.args.len() == 4 && c.star_args.is_empty() && c.star_kwargs.is_empty() {
+        if let Some(cls) = an.class_from_namespace(&c.args[3], &c.node, st) {
+            return Value::obj(cls);
+        }
+    }
+    an.unknown_call(&c.qual, None, c.arguments(), st, &c.node)
 }
 
 pub(super) fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1721,6 +1740,11 @@ fn has_attr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) {
         return Value::lit(intern::key_bool(STR_ATTRS.contains(&&*name)));
     }
+    // (an int literal's public attributes: its type's)
+    const INT_ATTRS: &[&str] = &["as_integer_ratio", "bit_count", "bit_length", "conjugate", "denominator", "from_bytes", "imag", "is_integer", "numerator", "real", "to_bytes"];
+    if !name.starts_with('_') && v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(|k| intern::key_as_int(k).is_some()) {
+        return Value::lit(intern::key_bool(INT_ATTRS.contains(&&*name)));
+    }
     // dunder attributes come from places not modelled (decorators, the type itself)
     if name.starts_with("__") && !(c.args[0].kv.is_bot() && !c.args[0].pts.is_empty() && c.args[0].pts.iter().all(|o| builtin_has_attr(an, o, &name) == Some(false))) {
         return unknown;
@@ -1733,6 +1757,13 @@ fn has_attr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for o in objs {
         if let Some(b) = builtin_has_attr(an, o, &name) {
             verdicts.push(b);
+            continue;
+        }
+        // (a plain tuple — no attributes of its own, as a model's records have — or a cell:
+        // their types' public attributes)
+        let plain_tuple = an.heap.kind(o) == Kind::Tuple && { let r = st.row(o, Ns::Attr); r.closed() && r.present.is_empty() };
+        if !name.starts_with('_') && (plain_tuple || an.heap.kind(o) == Kind::Cell) {
+            verdicts.push(if plain_tuple { matches!(&*name, "count" | "index") } else { &*name == "cell_contents" });
             continue;
         }
         // (the program's function: what the program stored on it on every path, its type's
@@ -1752,6 +1783,23 @@ fn has_attr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // (stored on some paths only: either)
             if row.closed() {
                 verdicts.extend([true, false]);
+                continue;
+            }
+            return unknown;
+        }
+        // (a class of the program's: one it, a base or its metaclass surely holds on this path)
+        if an.heap.kind(o) == Kind::Class && an.heap.class_info_opt(o).is_some() {
+            let (defs, sure) = an.class_lookup_on_path(o, &name, st);
+            if sure {
+                verdicts.push(true);
+                continue;
+            }
+            // (surely none: a public name, not `type`'s, no class of its MRO, closed on this
+            // path, nor its metaclass holds)
+            let meta_has = |an: &Analyzer, c: ObjId| an.heap.class_info(c).meta.as_ref().is_some_and(|m| m.pts.iter().any(|m| an.heap.kind(m) != Kind::Class || an.class_lookup(m, &name).is_some() || an.class_lookup(m, "__getattr__").is_some()) || !m.kv.is_bot());
+            let closed = an.hierarchy_closed(o) && an.heap.mro(o).iter().all(|c| st.row(*c, Ns::Attr).closed() && !meta_has(an, *c));
+            if defs.is_empty() && closed && !name.starts_with('_') && &*name != "mro" {
+                verdicts.push(false);
                 continue;
             }
             return unknown;

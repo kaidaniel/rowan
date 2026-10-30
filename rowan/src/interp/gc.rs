@@ -252,6 +252,9 @@ impl Analyzer {
         for h in &self.gens.stop_hooks {
             h.result.iter().for_each(|v| v.push_objs(work));
         }
+        for (c, ns, _) in &self.cx.making_class {
+            work.extend([*c, *ns]);
+        }
         for cells in &self.cx.comp_cells {
             work.extend(cells.values().copied());
         }

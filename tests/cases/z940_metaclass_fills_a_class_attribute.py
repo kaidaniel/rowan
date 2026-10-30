@@ -27,7 +27,7 @@ class Ops(metaclass=Registry):
     def lookup(self, name):
         try:
             entry = self.TABLE[name]
-            #@value entry: unknown
+            # (entry: a dict the metaclass made at L17; rowan ran no metaclass when this said unknown)
         except KeyError:
             return None
         return entry["arity"]

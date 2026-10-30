@@ -157,6 +157,9 @@ pub struct Context {
     /// one the program picks for the arguments it is given: what fails in one fails where the
     /// program picks it (`possibly`), not on every path (`missing`)
     pub picked: Vec<(String, String)>,
+    /// the classes class statements are making through a metaclass of the program's (innermost
+    /// last): the class, the namespace its metaclass is given, whether `type.__new__` made it
+    pub making_class: Vec<(ObjId, ObjId, bool)>,
 }
 
 /// Modes an evaluation sets for the code it calls, restored after: how an access reports, how
