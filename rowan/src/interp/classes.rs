@@ -383,6 +383,7 @@ impl Analyzer {
         let kv = crate::domain::join_values(base_vals.iter().cloned()).kv;
         let bases = self.alloc_positional(Kind::Tuple, &cnode.sub(0x6d62), Some(base_vals.to_vec()), Value::new(), kv, state);
         let args = [name, bases, Value::obj(ns)];
+        let skipped = self.budget.skipped;
         let made = match self.class_lookup(m, "__new__") {
             Some(defc) => {
                 let pos = [&[Value::obj(m)][..], &args[..]].concat();
@@ -409,6 +410,11 @@ impl Analyzer {
                     self.call_user(f, Some(Value::obj(coid)), Args::new(&args, &kwargs, &[], &[]), state, cnode, false);
                 }
             }
+        }
+        // (a call that did not run — its own or one it makes — may have done to the class what
+        // its code says, as code rowan does not run)
+        if through_type && self.budget.skipped > skipped {
+            self.metaclass_not_run(&Value::obj(m), coid, cnode, state);
         }
         if made.pts.is_empty() { made.join(&Value::obj(coid)) } else { made }
     }
