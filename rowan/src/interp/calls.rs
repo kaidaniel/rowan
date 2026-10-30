@@ -136,21 +136,14 @@ impl Analyzer {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), a, state, node);
         }
-        // (more than `WIDE_READ` methods of the program on one receiver — `getattr(self,
-        // name)(…)` of a name not known; not a method of each of many classes: one call that
-        // does not run for all of them, beside the other callees)
+        // (more than `WIDE_READ` functions of the program — `getattr(self, name)(…)` of a name
+        // not known, a table of handlers — not one on many receivers: one call that does not
+        // run for all of them, beside the other callees)
         let (wide, other): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| self.function_callee(**o).is_some());
-        // (by receiver: the most methods one has)
-        let mut by_recv: rustc_hash::FxHashMap<ObjId, Vec<ObjId>> = Default::default();
-        for (f, r) in wide.iter().filter_map(|o| self.function_callee(*o)) {
-            for r in r.iter().flat_map(|r| r.pts.iter()) {
-                let fs = by_recv.entry(r).or_default();
-                if !fs.contains(&f) {
-                    fs.push(f);
-                }
-            }
-        }
-        if by_recv.values().any(|fs| fs.len() > super::WIDE_READ) {
+        let mut functions: Vec<ObjId> = wide.iter().filter_map(|o| self.function_callee(*o)).map(|(f, _)| f).collect();
+        functions.sort_unstable();
+        functions.dedup();
+        if functions.len() > super::WIDE_READ {
             let parts = 1 + usize::from(!other.is_empty() || unknown.is_some());
             return self.alternatives(parts, false, state, &mut |an, i, st| {
                 if i == 0 {
