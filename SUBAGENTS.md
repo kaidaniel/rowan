@@ -77,7 +77,7 @@ its golden cases go or become `#@todo` with a reason, and your final message say
 4. **Implement one item at a time,** as `AGENTS.md` says (repro first, then fix, then
    measure; never commit a failing state), one measured commit per item, so the owner can
    keep or revert each step.
-5. **Measure.** Locally, `bench/all.py` (main vs your branch, ~TOTAL; `--only` re-runs a
+5. **Measure.** Locally, `bench/all.py` (main vs your branch, ~1¾ h; `--only` re-runs a
    part): every check, the tracked set's 31 programs and the held-out corpus in both modes,
    site-packages, hovers on all eight, interleaved for timing, in one table. A new false
    `missing` blocks the merge. Use the `ROWAN_DEBUG=1` `work:` counters for reproducible
