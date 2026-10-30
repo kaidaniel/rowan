@@ -499,9 +499,10 @@ def main() -> None:
     t_start = time.monotonic()
     GUARD = setup_worktree()
     if shutil.which("caffeinate"):
-        # (macOS: no idle sleep while this runs; a sleeping machine's timings are worthless.
+        # (macOS: no idle or system sleep (on AC power) while this runs; a sleeping machine's timings are worthless.
         # A closed lid still sleeps it: rerun with the same --out, finished timing steps are kept)
-        subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+        subprocess.Popen(["caffeinate", "-u", "-t", "2"])  # (out of a dark wake into a full one)
+        subprocess.Popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())])
     if GUARD is None and sys.platform == "darwin":
         print("all.py: no .guard/run here or in the main checkout: rowan runs unguarded", file=sys.stderr)
     out = Path(a.out) if a.out else WORK / time.strftime("%Y%m%d-%H%M%S")

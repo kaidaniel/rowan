@@ -556,7 +556,9 @@ def value_problem(claim: dict, s: list) -> str | None:
 
 def run_tests(p: dict, points: dict, roots: list[str], out: Path) -> dict:
     py = venv_python(p)
-    d = src_dir(p)
+    # (resolved, as check_package's: the tests' file names are the watched points' wherever
+    # bench/work/heldout/src is linked from)
+    d = src_dir(p).resolve()
     # (files an sdist leaves out that its tests import: the manifest's `shims`)
     for rel, text in p["tests"].get("shims", {}).items():
         (d / rel).write_text(text)
@@ -577,7 +579,7 @@ def run_tests(p: dict, points: dict, roots: list[str], out: Path) -> dict:
 
 
 def check_package(binary: Path, p: dict, verbose: bool) -> dict:
-    d = fetch_one(p)
+    d = fetch_one(p).resolve()
     roots = [str(d / p["root"])]
     points, claims, per_mod = {}, {}, {}
     for mod in p["modules"]:
