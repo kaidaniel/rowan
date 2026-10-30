@@ -33,7 +33,8 @@ Steps (STEPS; `--only` / `--skip` by name, a skipped step is listed as such in t
     hovers       bench/hovers.py and bench/first_hover.py on all eight
 
 Prints one table (metric, base, head) and the tracked set's per-program table; writes them and
-every log under bench/work/all/<time>/ (`--out`). From a scratch worktree: `.guard/run` and the
+every log under bench/work/all/<time>/ (`--out`; run again with the same `--out`, the timing
+steps it finished are kept, the checks come from the cache: an interrupted run resumes). From a scratch worktree: `.guard/run` and the
 prepared programs, corpora and venvs of the main checkout's bench/work are linked in (gitignored;
 nothing tracked is written in the main checkout). `--tags`: then a scoreboard row
 (bench/scoreboard.py run --tags), only from a scratch worktree.
@@ -281,13 +282,32 @@ def source(ref: str | None) -> dict:
 
 
 # ---------------------------------------------------------------- timing (interleaved)
+def awake(fn, what: str):
+    """fn() measured while the machine stayed awake: the wall clock runs on in sleep, the
+    monotonic clock (macOS) does not; a unit the machine slept through is measured again."""
+    for _ in range(5):
+        w0, m0 = time.time(), time.monotonic()
+        r = fn()
+        if (time.time() - w0) - (time.monotonic() - m0) < 2:
+            return r
+        print(f"  {what}: the machine slept, measured again", file=sys.stderr, flush=True)
+    sys.exit(f"all.py: {what}: the machine kept sleeping; rerun with the same --out")
+
+
 def timing(step: str, bins: dict[str, Path], out: Path) -> dict:
     """{side: result}; the two binaries alternate per program (ABBA), nothing else running."""
     sides = list(bins)
     res: dict = {s: {} for s in sides}
     order = lambda i: sides if i % 2 == 0 else sides[::-1]  # noqa: E731
     t0 = time.monotonic()
-    if step in ("tracked", "heldout"):
+    done = [out / f"{step}-{s}.json" for s in sides]
+    if step in ("tracked", "heldout", "sitepackages") and all(f.exists() for f in done):
+        # (`--out` of an earlier run: its results kept, as `--fresh` would not)
+        for s, f in zip(sides, done):
+            d = json.loads(f.read_text())
+            res[s] = {m: r["runs"] for m, r in d["modes"].items()} if step != "sitepackages" else d
+        print(f"  {step}: the results in {out} kept", file=sys.stderr, flush=True)
+    elif step in ("tracked", "heldout"):
         import heldout
         import tracked
         if step == "tracked":
@@ -298,11 +318,12 @@ def timing(step: str, bins: dict[str, Path], out: Path) -> dict:
             for mode in tracked.MODES:
                 for s in order(i):
                     if step == "tracked":
-                        r = tracked.run_one(bins[s], p, path, mode, None, out / "logs" / f"tracked-{s}")
+                        r = awake(lambda: tracked.run_one(bins[s], p, path, mode, None, out / "logs" / f"tracked-{s}"), f"{name} {mode} {s}")
                         r["lines"] = tracked.lines_of(p, path)
                     else:
-                        r = heldout.run_module(bins[s], path, tracked.limits_for(mode, None),
-                                               heldout.DEFAULT_TIMEOUT_S if mode == "default" else heldout.NODEADLINE_TIMEOUT_S, out / "logs" / f"heldout-{s}" / mode)
+                        r = awake(lambda: heldout.run_module(bins[s], path, tracked.limits_for(mode, None),
+                                                             heldout.DEFAULT_TIMEOUT_S if mode == "default" else heldout.NODEADLINE_TIMEOUT_S,
+                                                             out / "logs" / f"heldout-{s}" / mode), f"{name} {mode} {s}")
                         r["kind"] = p["kind"]
                     res[s].setdefault(mode, {})[name] = r
                     print(f"  {step} {name} {mode} {s}: {r.get('wall_s')} s {r.get('rss_mb')} MB{'' if r.get('finished') else ' ' + str(r.get('why'))}", file=sys.stderr, flush=True)
@@ -311,14 +332,19 @@ def timing(step: str, bins: dict[str, Path], out: Path) -> dict:
     elif step == "sitepackages":
         for s in sides:
             js = out / f"sitepackages-{s}.json"
-            run(py("bench/sitepackages.py", "--rowan", str(bins[s]), "--json", "--no-check", "--out", str(js)), out / "logs" / f"sitepackages-{s}.log")
+            awake(lambda: run(py("bench/sitepackages.py", "--rowan", str(bins[s]), "--json", "--no-check", "--out", str(js)), out / "logs" / f"sitepackages-{s}.log"), f"sitepackages {s}")
             res[s] = json.loads(js.read_text()) if js.exists() else {"error": "no result"}
     elif step == "hovers":
         for i, p in enumerate(EIGHT):
+            have = [(out / f"hovers-{s}" / f"{p}-hovers.json", out / f"hovers-{s}" / f"{p}-first.json") for s in sides]
+            if all(h.exists() and f.exists() for h, f in have):
+                for s, (h, f) in zip(sides, have):
+                    res[s][p] = {"hovers": json.loads(h.read_text())["summary"], "first": json.loads(f.read_text())["summary"]}
+                continue
             for s in order(i):
                 d = out / f"hovers-{s}"
-                run(py("bench/hovers.py", str(bins[s]), p, "-j", "3", "--out", str(d)), out / "logs" / f"hovers-{s}-{p}.log")
-                run(py("bench/first_hover.py", str(bins[s]), p, "--out", str(d)), out / "logs" / f"first-{s}-{p}.log")
+                awake(lambda: run(py("bench/hovers.py", str(bins[s]), p, "-j", "3", "--out", str(d)), out / "logs" / f"hovers-{s}-{p}.log"), f"hovers {p} {s}")
+                awake(lambda: run(py("bench/first_hover.py", str(bins[s]), p, "--out", str(d)), out / "logs" / f"first-{s}-{p}.log"), f"first hover {p} {s}")
                 h = d / f"{p}-hovers.json"
                 f = d / f"{p}-first.json"
                 res[s][p] = {"hovers": json.loads(h.read_text())["summary"] if h.exists() else None,
@@ -472,6 +498,10 @@ def main() -> None:
     steps = [s for s in STEPS if (not a.only or s in a.only.split(",")) and (not a.skip or s not in a.skip.split(","))]
     t_start = time.monotonic()
     GUARD = setup_worktree()
+    if shutil.which("caffeinate"):
+        # (macOS: no idle sleep while this runs; a sleeping machine's timings are worthless.
+        # A closed lid still sleeps it: rerun with the same --out, finished timing steps are kept)
+        subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
     if GUARD is None and sys.platform == "darwin":
         print("all.py: no .guard/run here or in the main checkout: rowan runs unguarded", file=sys.stderr)
     out = Path(a.out) if a.out else WORK / time.strftime("%Y%m%d-%H%M%S")

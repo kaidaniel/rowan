@@ -1,18 +1,22 @@
 # Benchmarks: everything that measures rowan beyond ci.yml's blocking bounds, on every push and
-# pull request, one runner per piece (times measured on GitHub's runners, per job, in AGENTS.md):
+# pull request, one runner per piece. Each job's time on GitHub's runners (PR #107, 2026-10-29):
 #   tracked      the tracked set (bench/tracked.py: the eight benchmarks + the cost set's 23
 #                modules) in both modes, the 10 s deadline and none, in 4 shards; `perf` profiles
-#                of each program (top functions in the job summary, flamegraphs as artifacts)
+#                of each program (top functions in the job summary, flamegraphs as artifacts):
+#                4–7 min a shard (pyflakes' checker hits the 180 s cut with no deadline)
 #   hovers       every function on demand (bench/hovers.py) and the first hover in a file
-#                (bench/first_hover.py) for all eight benchmarks
-#   sitepackages bench/sitepackages.py, capped and --uncapped
-#   heldout      the held-out corpus's metrics (bench/heldout.py, default limits)
-#   golden       the golden suites at budget=0
+#                (bench/first_hover.py) for all eight benchmarks: 0.3 (stdlib12k) to 15 min
+#                (functional; timm 11, sktime 8, pip 7)
+#   sitepackages bench/sitepackages.py, capped (0.7 min) and --uncapped (21 min)
+#   heldout      the held-out corpus's metrics (bench/heldout.py, default limits): 3 min
+#   golden       the golden suites at budget=0: 0.5 min
 #   protocols    every protocol enumerator ci.yml runs on a sample, on all its programs instead
-#                (bench/protocols.py full: ~930k program runs in 4 jobs of 4 processes)
-#   metamorphic  tests/metamorphic.py in full (ci.yml: every 40th case), 2 shards
-#   kani         the bounded proofs (cargo kani --lib)
-# Not run here: `heldout.py sound` (heldout.yml, after every merge: ~25 min), the scoreboard
+#                (bench/protocols.py full: ~930k program runs, 5.1M points, in 4 jobs of 4
+#                processes): 5–7.5 min a job
+#   metamorphic  tests/metamorphic.py in full (ci.yml: every 40th case), 2 shards: under 30 s
+#                each (red while it finds misses: an informational finding)
+#   kani         the bounded proofs (cargo kani --lib): 1–1.5 min
+# Not run here: `heldout.py sound` (heldout.yml, after every merge: 8–25 min), the scoreboard
 # (bench/scoreboard.py: every release, hours; the owner's).
 # Informational only: every job has continue-on-error, and this workflow must not be a required
 # status check, so it never blocks a merge.
