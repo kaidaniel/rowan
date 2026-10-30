@@ -1,9 +1,9 @@
 """A method called by a name read from data (`getattr(self, name)(…)`) may be any of the
 class's two dozen methods, each calling back into the dispatcher. Running every one of them at
 every such call, each again through the dispatcher, ran each function to its budget: a hundred
-thousand statements for this file. More functions than a wide read's bound at one call are one
-call that does not run, for all of them (what each may change, what each may return), beside the
-other callees.
+thousand statements for this file. More methods of one receiver than a wide read's bound at one
+call are one call that does not run, for all of them (what each may change, what each may
+return), beside the other callees.
 
 Expectations were written from the program text before running the engine."""
 import json
