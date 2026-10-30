@@ -249,6 +249,9 @@ pub struct ClassInfo {
     pub dc_order: Cell<bool>,
     /// the attributes its body annotates `Any` / `object` (computed on first use)
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
+    /// its metaclass (not ABCMeta), named by it or inherited from a base: code rowan does not
+    /// run when the class statement completes
+    pub meta: Option<Value>,
 }
 
 impl ClassInfo {

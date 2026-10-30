@@ -24,8 +24,8 @@ n = len(lines)
 #@value n: exactly={2}
 plain = list(orders.itertuples(index=False, name=None))
 p1 = plain[1][1]
-#@value p1: includes={7}
-#@todo value p1: exactly={7}  (a plain tuple's items: its fields by position)
+#@value p1: exactly={7}
+# (a plain tuple's items: its fields by position)
 qty = None
 for _, row in orders.iterrows():
     qty = row["qty"]

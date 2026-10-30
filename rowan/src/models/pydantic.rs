@@ -1374,6 +1374,7 @@ pub fn pyd_specialise(an: &mut Analyzer, cls: ObjId, slice: &'static ast::Expr, 
         dc_kw_only: std::cell::Cell::new(ci.dc_kw_only.get()),
         dc_order: std::cell::Cell::new(ci.dc_order.get()),
         any_fields: std::cell::RefCell::new(None),
+        meta: None,
     });
     let spec = an.heap.alloc_raw(Kind::Class, &site, "", true, &label, Payload::Class(info));
     an.m.pyd_generic.insert(spec, bind);

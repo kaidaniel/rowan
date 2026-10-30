@@ -50,7 +50,7 @@ UNIT = 20_000  # program runs per shard: about 2 minutes on a CI runner
 
 def ci_steps() -> list[dict]:
     """ci.yml's enumerator steps: {name, script, args, deps}; `name` is the enumerator, `-pairs`
-    for its pair mode."""
+    for its pair mode, `-unrun` for call_protocol.py's calls that do not run."""
     out = []
     for line in CI.read_text().splitlines():
         m = STEP.match(line)
@@ -58,7 +58,7 @@ def ci_steps() -> list[dict]:
             continue
         deps = m.group(1).split()[1::2]
         args = m.group(4).split()
-        name = m.group(3) + ("-pairs" if "--pairs" in args else "")
+        name = m.group(3) + ("-pairs" if "--pairs" in args else "") + ("-unrun" if "--unrun" in args else "")
         out.append({"name": name, "script": m.group(2), "args": args, "deps": deps})
     return out
 

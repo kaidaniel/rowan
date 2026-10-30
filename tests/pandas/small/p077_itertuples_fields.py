@@ -27,7 +27,7 @@ def region_of(df):
 def plain(df):
     for t in df.itertuples(index=False, name=None):
         n = len(t)                                       #@value n: exactly={2,3}
-        return t.qty                                     #@ missing qty
+        return t.qty                                     #@todo missing qty  (a plain tuple is a builtin tuple, whose attributes rowan does not check: it was a namespace without items, `t[1]` missing)
     return None
 
 

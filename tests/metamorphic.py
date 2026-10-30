@@ -8,7 +8,10 @@ keep its meaning; the changed program's claims must cover the original's at the 
   rename   every local and global variable renamed (`x` -> `x_m`; not parameters, class
            attributes, imported names or keywords): names mean nothing
   wrap     the module code after the last `def` / `class` run as a function's body (`def
-           _m(): …` then `_m()`), where no function reads the names it binds
+           _m(): …` then `_m()`), where no function reads the names it binds; module code's
+           claims are compared with the call `_m()`'s (the same code from the same state), not
+           with `_m`'s run for any call, which starts after any code ran (that it covers the
+           call's is `general`'s relation, whose own check it is)
   swap     two adjacent module-level assignments that share no names and call nothing,
            swapped
   general  in the original: the claim for any call of a function covers its main run's claim
@@ -191,7 +194,7 @@ def wrap(src: str, tree: ast.Module):
     start = tail[0].lineno
     # (a decorator or comment block before the first statement stays where it is)
     new = lines[: start - 1] + ["def _m():\n"] + ["    " + ln if ln.strip() else ln for ln in lines[start - 1:]] + ["\n", "_m()\n"]
-    return "".join(new), (lambda ln: ln + 1 if ln >= start else ln), (lambda n: n)
+    return "".join(new), (lambda ln: ln + 1 if ln >= start else ln), (lambda n: n), (lambda ln: ln >= start)
 
 
 def pure(st: ast.stmt) -> bool:
@@ -237,13 +240,16 @@ def check_case(path: Path, checks: list) -> dict:
         return {"case": path.name, "skipped": "rowan failed"}
     res = {"case": path.name, "points": len(points), "checked": Counter(), "misses": {}}
 
-    def compare(name, other, lmap, nmap):
+    def compare(name, other, lmap, nmap, called=lambda ln: False):
         miss = []
         for (ln, nm, gen), claim in base.items():
             if ln not in points or points[ln] != nm:
                 continue
             res["checked"][name] += 1
-            got = other.get((lmap(ln), nmap(nm), gen))
+            # (module code's claim, at a line now run by a call: that call's claim)
+            got = other.get((lmap(ln), nmap(nm), False)) if gen and called(ln) else None
+            if got is None:
+                got = other.get((lmap(ln), nmap(nm), gen))
             # (an uncalled function's entry run holds for any call or for one, by where it
             # starts: either kind of claim for the other)
             if got is None:
@@ -278,7 +284,7 @@ def check_case(path: Path, checks: list) -> dict:
         made = {"rename": rename, "wrap": wrap, "swap": swap}[c](src, tree)
         if made is None:
             continue
-        text, lmap, nmap = made
+        text, lmap, nmap = made[:3]
         try:
             t2 = ast.parse(text)
         except SyntaxError:
@@ -286,7 +292,7 @@ def check_case(path: Path, checks: list) -> dict:
         pts2 = assignments(t2)
         other = run("".join(instrument(text.splitlines(True), pts2)), limits)
         if other is not None:
-            compare(c, other, lmap, nmap)
+            compare(c, other, lmap, nmap, *made[3:])
     return res
 
 

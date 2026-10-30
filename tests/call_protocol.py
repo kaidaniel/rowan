@@ -13,17 +13,22 @@ skipped calls and what `effects.rs` lets them change, result summaries, unknown 
   lambda, a dict of functions, a comprehension);
 - then the caller uses what the call may have given away (the result, the keeper, the global
   name, a stored callback) and observes the lengths, the attribute, `G`, the class attribute, a
-  module dict and the result.
+  module dict and the result; the helper and the method the callee may call observe the list's
+  length and the receiver's attribute as they start (a line of a function some call of which
+  did not run, past the budget, still holds what that call gives there).
 
 Each batch runs under every limit set (`LIMITS`): the default, `budget=0` (calls skipped: what
 large programs fall back to) and `budget=6` (the first runs, later ones skipped). Rowan's claims
 must cover CPython's runs in all of them.
 
+`--unrun`: only callees that call the helper or the method (`OBSERVING`), called twice or in a
+loop (`unrun_programs`).
+
 `--pairs`: two callees `fN` and `gN`, each with one effect of `PAIRED` (plain or under `c1`) and
 a result, called one after the other on the same values (`CALLS2`: in sequence, `g` given `f`'s
 result, both in a loop, in one `try`, through a wrapper calling both).
 
-    uv run --no-project python tests/call_protocol.py [--pairs] [--rowan N | --all] [--seed S] [--limits L] [-v]
+    uv run --no-project python tests/call_protocol.py [--pairs | --unrun] [--rowan N | --all] [--seed S] [--limits L] [-v]
 """
 from __future__ import annotations
 
@@ -137,6 +142,8 @@ def program(effects, cond, result, call, second=None) -> Prog:
         "    v = 0",
         "    count = 0",
         "    def m(self, a):",
+        "        global O",
+        "        O = self.v",
         "        self.v = len(a)",
         "        a.append(6)",
         "    def call(self, f, a, d):",
@@ -187,6 +194,8 @@ def program(effects, cond, result, call, second=None) -> Prog:
         "    return o + 1",
         "",
         "def h{N}(a, o):",
+        "    global O",
+        "    O = len(a)",
         "    a.append(4)",
         "    o.v = 4",
         "",
@@ -249,7 +258,25 @@ def pair_programs():
             yield program((e1,), c1, r1, call, ((e2,), c2, r2))
 
 
+# (callees whose own callees observe what they are given: the helper, the receiver's method)
+OBSERVING = ["helper", "method", "getattr"]
+
+
+def unrun_programs():
+    """`--unrun`: a callee calling the helper or the receiver's method (alone, or beside another
+    effect), called twice or in a loop: past the budget, a later call does not run, and the
+    helper's and the method's lines still hold what it would give them there."""
+    for e in OBSERVING:
+        for effects in [(e,)] + [(e, x) for x in PAIRED if x != "boom"]:
+            for cond, result, call in itertools.product(CONDS, RESULTS, ["twice", "loop"]):
+                yield program(effects, cond, result, call)
+
+
 LIMITS = (None, "budget=0", "budget=6")
 
 if __name__ == "__main__":
+    import sys
+    if "--unrun" in sys.argv:
+        sys.argv.remove("--unrun")
+        programs = unrun_programs
     cli(programs, NAMES, limit_sets=LIMITS, pairs=pair_programs)

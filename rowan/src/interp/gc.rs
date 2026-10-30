@@ -130,6 +130,11 @@ impl Analyzer {
                 }
             }
             Payload::Cls(c) => work.push(*c),
+            Payload::Class(ci) => {
+                if let Some(m) = &ci.meta {
+                    m.push_objs(work);
+                }
+            }
             Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(work),
             Payload::Bound(f, v) | Payload::Super(f, v) => {
                 work.push(*f);

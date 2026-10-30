@@ -671,6 +671,10 @@ impl Analyzer {
             // closure's; a closure cached is another walk's)
             let resumed = walk_so_far.is_some() && !self.closure_cached(&roots, state);
             let full = self.code_closure(&roots, &mut walk_so_far, state);
+            // (code that may run here unseen: not the program followed whole, which is no run)
+            if memo {
+                self.findings.unseen.extend(full.code.iter().filter(|f| self.heap.kind(**f) == Kind::Function));
+            }
             // (a later round: what the closure gained, the rest was applied)
             let gained;
             let cl: &super::effects::Closure = match &prev {
