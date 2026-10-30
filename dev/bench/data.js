@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793347131940,
+  "lastUpdate": 1793376622442,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -54328,6 +54328,3204 @@ window.BENCHMARK_DATA = {
           {
             "name": "metamorphic: seconds",
             "value": 13.4,
+            "unit": "s",
+            "extra": "all shards"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ae2e8611f31f76c871776d9fbd6780b2dfb43d17",
+          "message": "Merge pull request #108 from kaidaniel/iter/metamorphic-105\n\nIteration 105: metamorphic misses (budget0, general, wrap) to 0",
+          "timestamp": "2026-10-30T15:48:14Z",
+          "tree_id": "4750cdb95692c25f3fe6d882d6c342dbf90562ac",
+          "url": "https://github.com/kaidaniel/rowan/commit/ae2e8611f31f76c871776d9fbd6780b2dfb43d17"
+        },
+        "date": 1793376621469,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "click first hover: p50",
+            "value": 200,
+            "unit": "ms",
+            "extra": "11 modules, 4 on demand"
+          },
+          {
+            "name": "click first hover: max",
+            "value": 1044,
+            "unit": "ms",
+            "extra": "11 modules, 4 on demand"
+          },
+          {
+            "name": "click first hover: peak memory",
+            "value": 120,
+            "unit": "MB",
+            "extra": "11 modules, 4 on demand"
+          },
+          {
+            "name": "click hovers: setup",
+            "value": 39,
+            "unit": "ms",
+            "extra": "477 functions on demand"
+          },
+          {
+            "name": "click hovers: p50",
+            "value": 1.3,
+            "unit": "ms",
+            "extra": "477 functions on demand"
+          },
+          {
+            "name": "click hovers: p99",
+            "value": 608.1,
+            "unit": "ms",
+            "extra": "477 functions on demand"
+          },
+          {
+            "name": "click hovers: max",
+            "value": 995.5,
+            "unit": "ms",
+            "extra": "477 functions on demand"
+          },
+          {
+            "name": "email first hover: p50",
+            "value": 52,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "email first hover: max",
+            "value": 1303,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "email first hover: peak memory",
+            "value": 89,
+            "unit": "MB",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "email hovers: setup",
+            "value": 64,
+            "unit": "ms",
+            "extra": "535 functions on demand"
+          },
+          {
+            "name": "email hovers: p50",
+            "value": 1.3,
+            "unit": "ms",
+            "extra": "535 functions on demand"
+          },
+          {
+            "name": "email hovers: p99",
+            "value": 1037.8,
+            "unit": "ms",
+            "extra": "535 functions on demand"
+          },
+          {
+            "name": "email hovers: max",
+            "value": 1370.7,
+            "unit": "ms",
+            "extra": "535 functions on demand"
+          },
+          {
+            "name": "functional first hover: p50",
+            "value": 67,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "functional first hover: max",
+            "value": 1211,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "functional first hover: peak memory",
+            "value": 194,
+            "unit": "MB",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "functional hovers: setup",
+            "value": 12293,
+            "unit": "ms",
+            "extra": "9418 functions on demand"
+          },
+          {
+            "name": "functional hovers: p50",
+            "value": 0.4,
+            "unit": "ms",
+            "extra": "9418 functions on demand"
+          },
+          {
+            "name": "functional hovers: p99",
+            "value": 1088.3,
+            "unit": "ms",
+            "extra": "9418 functions on demand"
+          },
+          {
+            "name": "functional hovers: max",
+            "value": 16881.6,
+            "unit": "ms",
+            "extra": "9418 functions on demand"
+          },
+          {
+            "name": "golden tab=0: failing cases",
+            "value": 718,
+            "unit": "cases",
+            "extra": "930 passing"
+          },
+          {
+            "name": "kani: failed harnesses",
+            "value": 0,
+            "unit": "harnesses",
+            "extra": "4 harnesses"
+          },
+          {
+            "name": "kani: seconds",
+            "value": 41,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "pip first hover: p50",
+            "value": 1015,
+            "unit": "ms",
+            "extra": "12 modules, 7 on demand"
+          },
+          {
+            "name": "pip first hover: max",
+            "value": 10117,
+            "unit": "ms",
+            "extra": "12 modules, 7 on demand"
+          },
+          {
+            "name": "pip first hover: peak memory",
+            "value": 298,
+            "unit": "MB",
+            "extra": "12 modules, 7 on demand"
+          },
+          {
+            "name": "pip hovers: setup",
+            "value": 10520,
+            "unit": "ms",
+            "extra": "4829 functions on demand"
+          },
+          {
+            "name": "pip hovers: p50",
+            "value": 1.9,
+            "unit": "ms",
+            "extra": "4829 functions on demand"
+          },
+          {
+            "name": "pip hovers: p99",
+            "value": 778.5,
+            "unit": "ms",
+            "extra": "4829 functions on demand"
+          },
+          {
+            "name": "pip hovers: max",
+            "value": 1895.1,
+            "unit": "ms",
+            "extra": "4829 functions on demand"
+          },
+          {
+            "name": "rich first hover: p50",
+            "value": 1011,
+            "unit": "ms",
+            "extra": "12 modules, 8 on demand"
+          },
+          {
+            "name": "rich first hover: max",
+            "value": 1460,
+            "unit": "ms",
+            "extra": "12 modules, 8 on demand"
+          },
+          {
+            "name": "rich first hover: peak memory",
+            "value": 169,
+            "unit": "MB",
+            "extra": "12 modules, 8 on demand"
+          },
+          {
+            "name": "rich hovers: setup",
+            "value": 400,
+            "unit": "ms",
+            "extra": "832 functions on demand"
+          },
+          {
+            "name": "rich hovers: p50",
+            "value": 5.4,
+            "unit": "ms",
+            "extra": "832 functions on demand"
+          },
+          {
+            "name": "rich hovers: p99",
+            "value": 973.2,
+            "unit": "ms",
+            "extra": "832 functions on demand"
+          },
+          {
+            "name": "rich hovers: max",
+            "value": 1757.9,
+            "unit": "ms",
+            "extra": "832 functions on demand"
+          },
+          {
+            "name": "site-packages s1_small_deps uncapped: wall time",
+            "value": 0.93,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps uncapped: peak memory",
+            "value": 57,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps uncapped: unknown hovers",
+            "value": 9,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps unbounded: wall time",
+            "value": 1.25,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps unbounded: peak memory",
+            "value": 61,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps unbounded: unknown hovers",
+            "value": 9,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal uncapped: wall time",
+            "value": 0.51,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal uncapped: peak memory",
+            "value": 57,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal uncapped: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal unbounded: wall time",
+            "value": 0.54,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal unbounded: peak memory",
+            "value": 57,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal unbounded: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli uncapped: wall time",
+            "value": 37.16,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli uncapped: peak memory",
+            "value": 162,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli uncapped: unknown hovers",
+            "value": 14,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli unbounded: wall time",
+            "value": 130.73,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s4_web uncapped: wall time",
+            "value": 5.81,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web uncapped: peak memory",
+            "value": 138,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web uncapped: unknown hovers",
+            "value": 8,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web unbounded: wall time",
+            "value": 131.17,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s5_data uncapped: wall time",
+            "value": 130.49,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s5_data unbounded: wall time",
+            "value": 131.19,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s6_symbolic uncapped: wall time",
+            "value": 130.04,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s6_symbolic unbounded: wall time",
+            "value": 130.54,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s7_orm uncapped: wall time",
+            "value": 76.43,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm uncapped: peak memory",
+            "value": 363,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm uncapped: unknown hovers",
+            "value": 8,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm unbounded: wall time",
+            "value": 131.2,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s8_schema uncapped: wall time",
+            "value": 7.49,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema uncapped: peak memory",
+            "value": 78,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema uncapped: unknown hovers",
+            "value": 10,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema unbounded: wall time",
+            "value": 130.01,
+            "unit": "s",
+            "extra": "cut"
+          },
+          {
+            "name": "site-packages s9_graph uncapped: wall time",
+            "value": 0.72,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph uncapped: peak memory",
+            "value": 121,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph uncapped: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph unbounded: wall time",
+            "value": 0.92,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph unbounded: peak memory",
+            "value": 123,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph unbounded: unknown hovers",
+            "value": 8,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps follow: wall time",
+            "value": 1.41,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps follow: peak memory",
+            "value": 55,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s1_small_deps follow: unknown hovers",
+            "value": 9,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal follow: wall time",
+            "value": 0.74,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal follow: peak memory",
+            "value": 57,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal follow: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal only: wall time",
+            "value": 0.19,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal only: peak memory",
+            "value": 36,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s2_internal only: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli follow: wall time",
+            "value": 1.44,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli follow: peak memory",
+            "value": 87,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s3_cli follow: unknown hovers",
+            "value": 14,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web follow: wall time",
+            "value": 0.63,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web follow: peak memory",
+            "value": 115,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s4_web follow: unknown hovers",
+            "value": 8,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s5_data follow: wall time",
+            "value": 5.31,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s5_data follow: peak memory",
+            "value": 377,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s5_data follow: unknown hovers",
+            "value": 21,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s6_symbolic follow: wall time",
+            "value": 5.23,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s6_symbolic follow: peak memory",
+            "value": 426,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s6_symbolic follow: unknown hovers",
+            "value": 16,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm follow: wall time",
+            "value": 5.18,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm follow: peak memory",
+            "value": 215,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s7_orm follow: unknown hovers",
+            "value": 8,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema follow: wall time",
+            "value": 1.68,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema follow: peak memory",
+            "value": 75,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s8_schema follow: unknown hovers",
+            "value": 10,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph follow: wall time",
+            "value": 0.86,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph follow: peak memory",
+            "value": 121,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "site-packages s9_graph follow: unknown hovers",
+            "value": 7,
+            "unit": "facts",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime first hover: p50",
+            "value": 199,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "sktime first hover: max",
+            "value": 1316,
+            "unit": "ms",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "sktime first hover: peak memory",
+            "value": 154,
+            "unit": "MB",
+            "extra": "12 modules, 2 on demand"
+          },
+          {
+            "name": "sktime hovers: setup",
+            "value": 3271,
+            "unit": "ms",
+            "extra": "8364 functions on demand"
+          },
+          {
+            "name": "sktime hovers: p50",
+            "value": 15.3,
+            "unit": "ms",
+            "extra": "8364 functions on demand"
+          },
+          {
+            "name": "sktime hovers: p99",
+            "value": 888.4,
+            "unit": "ms",
+            "extra": "8364 functions on demand"
+          },
+          {
+            "name": "sktime hovers: max",
+            "value": 5562.4,
+            "unit": "ms",
+            "extra": "8364 functions on demand"
+          },
+          {
+            "name": "stdlib12k first hover: p50",
+            "value": 1037,
+            "unit": "ms",
+            "extra": "1 modules, 1 on demand"
+          },
+          {
+            "name": "stdlib12k first hover: max",
+            "value": 1037,
+            "unit": "ms",
+            "extra": "1 modules, 1 on demand"
+          },
+          {
+            "name": "stdlib12k first hover: peak memory",
+            "value": 149,
+            "unit": "MB",
+            "extra": "1 modules, 1 on demand"
+          },
+          {
+            "name": "stdlib12k hovers: setup",
+            "value": 186,
+            "unit": "ms",
+            "extra": "488 functions on demand"
+          },
+          {
+            "name": "stdlib12k hovers: p50",
+            "value": 5.6,
+            "unit": "ms",
+            "extra": "488 functions on demand"
+          },
+          {
+            "name": "stdlib12k hovers: p99",
+            "value": 604.9,
+            "unit": "ms",
+            "extra": "488 functions on demand"
+          },
+          {
+            "name": "stdlib12k hovers: max",
+            "value": 1045,
+            "unit": "ms",
+            "extra": "488 functions on demand"
+          },
+          {
+            "name": "timm first hover: p50",
+            "value": 987,
+            "unit": "ms",
+            "extra": "12 modules, 5 on demand"
+          },
+          {
+            "name": "timm first hover: max",
+            "value": 1539,
+            "unit": "ms",
+            "extra": "12 modules, 5 on demand"
+          },
+          {
+            "name": "timm first hover: peak memory",
+            "value": 664,
+            "unit": "MB",
+            "extra": "12 modules, 5 on demand"
+          },
+          {
+            "name": "timm hovers: setup",
+            "value": 1511,
+            "unit": "ms",
+            "extra": "5615 functions on demand"
+          },
+          {
+            "name": "timm hovers: p50",
+            "value": 16.6,
+            "unit": "ms",
+            "extra": "5615 functions on demand"
+          },
+          {
+            "name": "timm hovers: p99",
+            "value": 637.1,
+            "unit": "ms",
+            "extra": "5615 functions on demand"
+          },
+          {
+            "name": "timm hovers: max",
+            "value": 2449.3,
+            "unit": "ms",
+            "extra": "5615 functions on demand"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: wall time",
+            "value": 12.75,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: peak memory",
+            "value": 368,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: work",
+            "value": 251072,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: work units",
+            "value": 269058,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: tabulations",
+            "value": 48736,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k, 10 s deadline: objects",
+            "value": 35351,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: wall time",
+            "value": 10.89,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: peak memory",
+            "value": 241,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: work",
+            "value": 216320,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: work units",
+            "value": 240188,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: tabulations",
+            "value": 55754,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pip, 10 s deadline: objects",
+            "value": 20340,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "argparse, 10 s deadline: wall time",
+            "value": 7.94,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse, 10 s deadline: peak memory",
+            "value": 193,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse, 10 s deadline: work",
+            "value": 183139,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse, 10 s deadline: work units",
+            "value": 195954,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse, 10 s deadline: tabulations",
+            "value": 39303,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse, 10 s deadline: objects",
+            "value": 20235,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle, 10 s deadline: wall time",
+            "value": 12.85,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pickle, 10 s deadline: peak memory",
+            "value": 137,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pickle, 10 s deadline: work",
+            "value": 204422,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pickle, 10 s deadline: work units",
+            "value": 220552,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pickle, 10 s deadline: tabulations",
+            "value": 36578,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pickle, 10 s deadline: objects",
+            "value": 15506,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: wall time",
+            "value": 10.49,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: peak memory",
+            "value": 287,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: work",
+            "value": 139246,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: work units",
+            "value": 339055,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: tabulations",
+            "value": 27952,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core, 10 s deadline: objects",
+            "value": 31450,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: wall time",
+            "value": 10.29,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: peak memory",
+            "value": 146,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: work",
+            "value": 193490,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: work units",
+            "value": 206082,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: tabulations",
+            "value": 35152,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console, 10 s deadline: objects",
+            "value": 10693,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: wall time",
+            "value": 10.44,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: peak memory",
+            "value": 158,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: work",
+            "value": 117085,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: work units",
+            "value": 288413,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: tabulations",
+            "value": 15631,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "httplib2, 10 s deadline: objects",
+            "value": 29755,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: wall time",
+            "value": 10.44,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: peak memory",
+            "value": 110,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: work",
+            "value": 133819,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: work units",
+            "value": 162893,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: tabulations",
+            "value": 38115,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "marshmallow_schema, 10 s deadline: objects",
+            "value": 14535,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 23.98,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 518,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 542397,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 577194,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 95868,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 57626,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: wall time",
+            "value": 63.9,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: peak memory",
+            "value": 433,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: work",
+            "value": 1180051,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: work units",
+            "value": 1366302,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: tabulations",
+            "value": 247157,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: objects",
+            "value": 96037,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: wall time",
+            "value": 7.69,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: peak memory",
+            "value": 193,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: work",
+            "value": 183139,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: work units",
+            "value": 195954,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: tabulations",
+            "value": 39303,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "argparse: objects",
+            "value": 20235,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: wall time",
+            "value": 16.31,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: peak memory",
+            "value": 158,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: work",
+            "value": 295781,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: work units",
+            "value": 333724,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: tabulations",
+            "value": 56122,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pickle: objects",
+            "value": 22781,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pyparsing_core: wall time",
+            "value": 37.57,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core: peak memory",
+            "value": 1700,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core: work",
+            "value": 239124,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core: work units",
+            "value": 521059,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core: tabulations",
+            "value": 47897,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyparsing_core: objects",
+            "value": 59724,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_console: wall time",
+            "value": 27.18,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_console: peak memory",
+            "value": 253,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_console: work",
+            "value": 482648,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_console: work units",
+            "value": 545208,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_console: tabulations",
+            "value": 88976,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_console: objects",
+            "value": 37200,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: wall time",
+            "value": 22.13,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: peak memory",
+            "value": 281,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: work",
+            "value": 184879,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: work units",
+            "value": 496652,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: tabulations",
+            "value": 29842,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "httplib2: objects",
+            "value": 36022,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: wall time",
+            "value": 29.64,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: peak memory",
+            "value": 128,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: work",
+            "value": 188145,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: work units",
+            "value": 232131,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: tabulations",
+            "value": 100212,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "marshmallow_schema: objects",
+            "value": 22861,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email, 10 s deadline: wall time",
+            "value": 10.14,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email, 10 s deadline: peak memory",
+            "value": 88,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email, 10 s deadline: work",
+            "value": 242521,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email, 10 s deadline: work units",
+            "value": 288379,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email, 10 s deadline: tabulations",
+            "value": 41046,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email, 10 s deadline: objects",
+            "value": 15740,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "timm, 10 s deadline: wall time",
+            "value": 2.27,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "timm, 10 s deadline: peak memory",
+            "value": 285,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "timm, 10 s deadline: work",
+            "value": 54207,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "timm, 10 s deadline: work units",
+            "value": 66571,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "timm, 10 s deadline: tabulations",
+            "value": 9498,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "timm, 10 s deadline: objects",
+            "value": 41047,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: wall time",
+            "value": 10.04,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: peak memory",
+            "value": 237,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: work",
+            "value": 152020,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: work units",
+            "value": 174944,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: tabulations",
+            "value": 13601,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp, 10 s deadline: objects",
+            "value": 21222,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: wall time",
+            "value": 4.52,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: peak memory",
+            "value": 74,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: work",
+            "value": 64338,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: work units",
+            "value": 83605,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: tabulations",
+            "value": 4850,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "ast, 10 s deadline: objects",
+            "value": 3024,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: wall time",
+            "value": 10.29,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: peak memory",
+            "value": 171,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: work",
+            "value": 108481,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: work units",
+            "value": 143311,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: tabulations",
+            "value": 16766,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "hypothesis_core, 10 s deadline: objects",
+            "value": 19063,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: wall time",
+            "value": 10.44,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: peak memory",
+            "value": 163,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: work",
+            "value": 217428,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: work units",
+            "value": 244201,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: tabulations",
+            "value": 38327,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_markdown, 10 s deadline: objects",
+            "value": 19374,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: wall time",
+            "value": 2.17,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: peak memory",
+            "value": 93,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: work",
+            "value": 58035,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: work units",
+            "value": 59269,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: tabulations",
+            "value": 10664,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor, 10 s deadline: objects",
+            "value": 6486,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: wall time",
+            "value": 10.34,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: peak memory",
+            "value": 457,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: work",
+            "value": 92796,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: work units",
+            "value": 103737,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: tabulations",
+            "value": 26798,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyflakes_checker, 10 s deadline: objects",
+            "value": 12782,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "email: wall time",
+            "value": 11.69,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 97,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work",
+            "value": 310208,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work units",
+            "value": 358865,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email: tabulations",
+            "value": 53349,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email: objects",
+            "value": 26243,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: wall time",
+            "value": 2.27,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: peak memory",
+            "value": 287,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: work",
+            "value": 54207,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: work units",
+            "value": 66571,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: tabulations",
+            "value": 9498,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: objects",
+            "value": 41047,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: wall time",
+            "value": 9.79,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: peak memory",
+            "value": 234,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: work",
+            "value": 152020,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: work units",
+            "value": 174944,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: tabulations",
+            "value": 13601,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email_hvp: objects",
+            "value": 21222,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: wall time",
+            "value": 4.52,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: peak memory",
+            "value": 78,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: work",
+            "value": 64338,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: work units",
+            "value": 83605,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: tabulations",
+            "value": 4850,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "ast: objects",
+            "value": 3024,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: wall time",
+            "value": 68.63,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: peak memory",
+            "value": 427,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: work",
+            "value": 551558,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: work units",
+            "value": 1156655,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: tabulations",
+            "value": 99486,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "hypothesis_core: objects",
+            "value": 69527,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: wall time",
+            "value": 18.91,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: peak memory",
+            "value": 212,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: work",
+            "value": 414616,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: work units",
+            "value": 470770,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: tabulations",
+            "value": 72208,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_markdown: objects",
+            "value": 32143,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: wall time",
+            "value": 2.12,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: peak memory",
+            "value": 91,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: work",
+            "value": 58035,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: work units",
+            "value": 59269,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: tabulations",
+            "value": 10664,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "yaml_constructor: objects",
+            "value": 6486,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pyflakes_checker: wall time",
+            "value": 180,
+            "unit": "s",
+            "extra": "cut at the 180 s timeout"
+          },
+          {
+            "name": "rich, 10 s deadline: wall time",
+            "value": 10.45,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich, 10 s deadline: peak memory",
+            "value": 131,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich, 10 s deadline: work",
+            "value": 221845,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich, 10 s deadline: work units",
+            "value": 244809,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich, 10 s deadline: tabulations",
+            "value": 38447,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich, 10 s deadline: objects",
+            "value": 14629,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: wall time",
+            "value": 10.24,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: peak memory",
+            "value": 220,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: work",
+            "value": 268188,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: work units",
+            "value": 359805,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: tabulations",
+            "value": 50327,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "sktime, 10 s deadline: objects",
+            "value": 71255,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: wall time",
+            "value": 10.69,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: peak memory",
+            "value": 188,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: work",
+            "value": 171526,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: work units",
+            "value": 245266,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: tabulations",
+            "value": 38511,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pydoc, 10 s deadline: objects",
+            "value": 23700,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "inspect, 10 s deadline: wall time",
+            "value": 9.79,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect, 10 s deadline: peak memory",
+            "value": 222,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect, 10 s deadline: work",
+            "value": 122483,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect, 10 s deadline: work units",
+            "value": 163970,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect, 10 s deadline: tabulations",
+            "value": 31258,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect, 10 s deadline: objects",
+            "value": 20480,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: wall time",
+            "value": 5.48,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: peak memory",
+            "value": 137,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: work",
+            "value": 143805,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: work units",
+            "value": 157206,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: tabulations",
+            "value": 33574,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers, 10 s deadline: objects",
+            "value": 17588,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table, 10 s deadline: wall time",
+            "value": 10.39,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_table, 10 s deadline: peak memory",
+            "value": 133,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_table, 10 s deadline: work",
+            "value": 210325,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_table, 10 s deadline: work units",
+            "value": 229831,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_table, 10 s deadline: tabulations",
+            "value": 36735,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich_table, 10 s deadline: objects",
+            "value": 15969,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: wall time",
+            "value": 10.29,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: peak memory",
+            "value": 129,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: work",
+            "value": 153780,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: work units",
+            "value": 172875,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: tabulations",
+            "value": 30243,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "jinja2_parser, 10 s deadline: objects",
+            "value": 11414,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: wall time",
+            "value": 10.54,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: peak memory",
+            "value": 505,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: work",
+            "value": 104933,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: work units",
+            "value": 152266,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: tabulations",
+            "value": 25989,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser, 10 s deadline: objects",
+            "value": 9063,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 13.25,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 156,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: work",
+            "value": 297527,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: work units",
+            "value": 333482,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: tabulations",
+            "value": 48526,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: objects",
+            "value": 23050,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: wall time",
+            "value": 12.5,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: peak memory",
+            "value": 229,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: work",
+            "value": 303184,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: work units",
+            "value": 444163,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: tabulations",
+            "value": 57587,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: objects",
+            "value": 81279,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: wall time",
+            "value": 25.33,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: peak memory",
+            "value": 334,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: work",
+            "value": 424269,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: work units",
+            "value": 514623,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: tabulations",
+            "value": 81617,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pydoc: objects",
+            "value": 36196,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: wall time",
+            "value": 9.74,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: peak memory",
+            "value": 225,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: work",
+            "value": 122483,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: work units",
+            "value": 163970,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: tabulations",
+            "value": 31258,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "inspect: objects",
+            "value": 20480,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: wall time",
+            "value": 5.43,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: peak memory",
+            "value": 135,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: work",
+            "value": 143805,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: work units",
+            "value": 157206,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: tabulations",
+            "value": 33574,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "packaging_specifiers: objects",
+            "value": 17588,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: wall time",
+            "value": 14.65,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: peak memory",
+            "value": 189,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: work",
+            "value": 313002,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: work units",
+            "value": 354039,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: tabulations",
+            "value": 52060,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich_table: objects",
+            "value": 27730,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: wall time",
+            "value": 17.36,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: peak memory",
+            "value": 167,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: work",
+            "value": 227112,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: work units",
+            "value": 281329,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: tabulations",
+            "value": 38582,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "jinja2_parser: objects",
+            "value": 16268,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "html5lib_parser: wall time",
+            "value": 29.69,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser: peak memory",
+            "value": 1547,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser: work",
+            "value": 150028,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser: work units",
+            "value": 324102,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser: tabulations",
+            "value": 46818,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "html5lib_parser: objects",
+            "value": 9459,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: wall time",
+            "value": 10.24,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: peak memory",
+            "value": 97,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: work",
+            "value": 215882,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: work units",
+            "value": 272918,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: tabulations",
+            "value": 56524,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click, 10 s deadline: objects",
+            "value": 13171,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: wall time",
+            "value": 10.84,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: peak memory",
+            "value": 378,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: work",
+            "value": 292066,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: work units",
+            "value": 358434,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: tabulations",
+            "value": 53639,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "functional, 10 s deadline: objects",
+            "value": 62203,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "tarfile, 10 s deadline: wall time",
+            "value": 9.08,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile, 10 s deadline: peak memory",
+            "value": 243,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile, 10 s deadline: work",
+            "value": 216970,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile, 10 s deadline: work units",
+            "value": 237232,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile, 10 s deadline: tabulations",
+            "value": 32011,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile, 10 s deadline: objects",
+            "value": 33541,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "glom_core, 10 s deadline: wall time",
+            "value": 10.43,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core, 10 s deadline: peak memory",
+            "value": 230,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core, 10 s deadline: work",
+            "value": 62611,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core, 10 s deadline: work units",
+            "value": 73056,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core, 10 s deadline: tabulations",
+            "value": 18749,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core, 10 s deadline: objects",
+            "value": 18498,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: wall time",
+            "value": 10.24,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: peak memory",
+            "value": 151,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: work",
+            "value": 233484,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: work units",
+            "value": 283358,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: tabulations",
+            "value": 56438,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core, 10 s deadline: objects",
+            "value": 15444,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: wall time",
+            "value": 10.69,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: peak memory",
+            "value": 222,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: work",
+            "value": 193516,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: work units",
+            "value": 244377,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: tabulations",
+            "value": 46389,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pyasn1_ber_decoder, 10 s deadline: objects",
+            "value": 31770,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: wall time",
+            "value": 12.84,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: peak memory",
+            "value": 370,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: work",
+            "value": 178660,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: work units",
+            "value": 195940,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: tabulations",
+            "value": 28787,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "pycparser_c_parser, 10 s deadline: objects",
+            "value": 35256,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click: wall time",
+            "value": 24.97,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "click: peak memory",
+            "value": 165,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "click: work",
+            "value": 476902,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "click: work units",
+            "value": 588086,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "click: tabulations",
+            "value": 105947,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "click: objects",
+            "value": 39710,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: wall time",
+            "value": 21.26,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: peak memory",
+            "value": 498,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: work",
+            "value": 451197,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: work units",
+            "value": 638134,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: tabulations",
+            "value": 83429,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: objects",
+            "value": 101115,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: wall time",
+            "value": 9.08,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: peak memory",
+            "value": 240,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: work",
+            "value": 216970,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: work units",
+            "value": 237232,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: tabulations",
+            "value": 32011,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "tarfile: objects",
+            "value": 33541,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "glom_core: wall time",
+            "value": 42.4,
+            "unit": "s",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core: peak memory",
+            "value": 1764,
+            "unit": "MB",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core: work",
+            "value": 63702,
+            "unit": "statements",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core: work units",
+            "value": 76742,
+            "unit": "units",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core: tabulations",
+            "value": 18972,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "glom_core: objects",
+            "value": 27466,
+            "unit": "count",
+            "extra": "finished, analysis cut"
+          },
+          {
+            "name": "click_core: wall time",
+            "value": 20.21,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "click_core: peak memory",
+            "value": 271,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "click_core: work",
+            "value": 487034,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "click_core: work units",
+            "value": 599231,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "click_core: tabulations",
+            "value": 95863,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "click_core: objects",
+            "value": 45651,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: wall time",
+            "value": 50.38,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: peak memory",
+            "value": 259,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: work",
+            "value": 692739,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: work units",
+            "value": 917615,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: tabulations",
+            "value": 163071,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pyasn1_ber_decoder: objects",
+            "value": 39315,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: wall time",
+            "value": 109.69,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: peak memory",
+            "value": 439,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: work",
+            "value": 884765,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: work units",
+            "value": 1219662,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: tabulations",
+            "value": 358086,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pycparser_c_parser: objects",
+            "value": 121827,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "protocol anycall --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "724,614 points"
+          },
+          {
+            "name": "protocol anycall --all: seconds",
+            "value": 1347.4,
+            "unit": "s",
+            "extra": "724,614 points"
+          },
+          {
+            "name": "protocol call --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "1,917,243 points"
+          },
+          {
+            "name": "protocol call --all: seconds",
+            "value": 3164.5,
+            "unit": "s",
+            "extra": "1,917,243 points"
+          },
+          {
+            "name": "protocol call-pairs --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "141,786 points"
+          },
+          {
+            "name": "protocol call-pairs --all: seconds",
+            "value": 226.3,
+            "unit": "s",
+            "extra": "141,786 points"
+          },
+          {
+            "name": "protocol class-pairs --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "453,164 points"
+          },
+          {
+            "name": "protocol class-pairs --all: seconds",
+            "value": 349,
+            "unit": "s",
+            "extra": "453,164 points"
+          },
+          {
+            "name": "protocol closure --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "23,526 points"
+          },
+          {
+            "name": "protocol closure --all: seconds",
+            "value": 15.3,
+            "unit": "s",
+            "extra": "23,526 points"
+          },
+          {
+            "name": "protocol container-pairs --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "30,288 points"
+          },
+          {
+            "name": "protocol container-pairs --all: seconds",
+            "value": 16,
+            "unit": "s",
+            "extra": "30,288 points"
+          },
+          {
+            "name": "protocol deferred --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "159,300 points"
+          },
+          {
+            "name": "protocol deferred --all: seconds",
+            "value": 496.2,
+            "unit": "s",
+            "extra": "159,300 points"
+          },
+          {
+            "name": "protocol dunder-pairs --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "127,050 points"
+          },
+          {
+            "name": "protocol dunder-pairs --all: seconds",
+            "value": 128,
+            "unit": "s",
+            "extra": "127,050 points"
+          },
+          {
+            "name": "protocol gen --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "323,340 points"
+          },
+          {
+            "name": "protocol gen --all: seconds",
+            "value": 270.2,
+            "unit": "s",
+            "extra": "323,340 points"
+          },
+          {
+            "name": "protocol iter --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "20,329 points"
+          },
+          {
+            "name": "protocol iter --all: seconds",
+            "value": 7.3,
+            "unit": "s",
+            "extra": "20,329 points"
+          },
+          {
+            "name": "protocol method --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "600,120 points"
+          },
+          {
+            "name": "protocol method --all: seconds",
+            "value": 425.7,
+            "unit": "s",
+            "extra": "600,120 points"
+          },
+          {
+            "name": "protocol narrow --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "60,996 points"
+          },
+          {
+            "name": "protocol narrow --all: seconds",
+            "value": 26.9,
+            "unit": "s",
+            "extra": "60,996 points"
+          },
+          {
+            "name": "protocol narrow-pairs --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "426,170 points"
+          },
+          {
+            "name": "protocol narrow-pairs --all: seconds",
+            "value": 188.2,
+            "unit": "s",
+            "extra": "426,170 points"
+          },
+          {
+            "name": "protocol rec --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "71,928 points"
+          },
+          {
+            "name": "protocol rec --all: seconds",
+            "value": 49.2,
+            "unit": "s",
+            "extra": "71,928 points"
+          },
+          {
+            "name": "protocol try --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "69,961 points"
+          },
+          {
+            "name": "protocol try --all: seconds",
+            "value": 29.7,
+            "unit": "s",
+            "extra": "69,961 points"
+          },
+          {
+            "name": "protocol with --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "30,695 points"
+          },
+          {
+            "name": "protocol with --all: seconds",
+            "value": 13.6,
+            "unit": "s",
+            "extra": "30,695 points"
+          },
+          {
+            "name": "protocols --all: missed points",
+            "value": 0,
+            "unit": "points",
+            "extra": "16 enumerators"
+          },
+          {
+            "name": "metamorphic: missed places",
+            "value": 0,
+            "unit": "places",
+            "extra": "budget0 0, general 0, rename 0, swap 0, wrap 0"
+          },
+          {
+            "name": "metamorphic: seconds",
+            "value": 14.3,
             "unit": "s",
             "extra": "all shards"
           }
