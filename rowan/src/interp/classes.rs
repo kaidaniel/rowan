@@ -19,7 +19,9 @@ impl Analyzer {
         let fr_ctx = self.frame().ctx.clone();
         let fr_single = self.frame().single;
         let fr_cells = self.frame().cells.clone();
-        let (bases, mut open_base, lib, ek) = self.class_bases(c, state);
+        let (bases, mut open_base, lib, ek, own_meta) = self.class_bases(c, state);
+        // (its metaclass: the one it names, else its first base's that has one)
+        let meta = own_meta.or_else(|| bases.iter().find_map(|b| self.heap.class_info_opt(*b).and_then(|ci| ci.meta.clone())));
         open_base |= lib.open;
         let mut lek = lib.enum_kind;
         lek.join(ek);
@@ -38,6 +40,7 @@ impl Analyzer {
             dc_kw_only: std::cell::Cell::new(false),
             dc_order: std::cell::Cell::new(false),
             any_fields: std::cell::RefCell::new(None),
+            meta: meta.clone(),
         };
         let info = std::rc::Rc::new(info);
         let cnode = frontend::node(c);
@@ -73,7 +76,7 @@ impl Analyzer {
         self.run_init_subclass(c, coid, &info, &cnode, state);
         // (its metaclass's `__new__` / `__init__`, its bases' too, made it: code rowan does not
         // run — it may rebind the data the body defined, or change it; the methods it keeps)
-        if let Some(meta) = self.metaclass_of(c, state) {
+        if let Some(meta) = meta {
             let any = Value::obj(super::any_object(&mut self.heap));
             let mut given = vec![meta];
             for (k, v) in state.obj_slots(coid, Ns::Attr) {
@@ -95,9 +98,6 @@ impl Analyzer {
         self.store_name(s(c.name.id.as_str()), cv, state);
     }
 
-    /// The bases a class statement names: the program's classes, whether the class is open
-    /// (a base rowan does not see, a metaclass other than ABCMeta), what its library bases make
-    /// of it, and the Enum kind its Enum bases give.
     /// `name = property(fget, fset, fdel, doc)` in a class body (`self.frame()` its frame): as
     /// the decorators make it — a copy of the getter that is a property, the setter and deleter
     /// registered under `name`. False (nothing done) for any other statement, or a getter, setter
@@ -156,7 +156,11 @@ impl Analyzer {
         true
     }
 
-    fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind) {
+    /// The bases a class statement names: the program's classes, whether the class is open
+    /// (a base rowan does not see, a metaclass other than ABCMeta), what its library bases make
+    /// of it, the Enum kind its Enum bases give, and the metaclass it names (not ABCMeta).
+    fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind, Option<Value>) {
+        let mut meta = None;
         let mut bases: Vec<u32> = Vec::new();
         let mut open_base = false;
         let mut lib = crate::models::ClassBase::default();
@@ -200,35 +204,12 @@ impl Analyzer {
                     let abc = mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
                     if !abc {
                         open_base = true;
+                        meta = Some(mv);
                     }
                 }
             }
         }
-        (bases, open_base, lib, ek)
-    }
-
-    /// The metaclass a class statement, or one of its bases' (the program's classes), names when
-    /// it is not ABCMeta; None for none.
-    fn metaclass_of(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> Option<Value> {
-        let args = c.arguments.as_deref()?;
-        for kw in args.keywords.iter().filter(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "metaclass")) {
-            let mv = self.eval(&kw.value, state);
-            let abc = !mv.pts.is_empty() && mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta"));
-            if !abc {
-                return Some(mv);
-            }
-        }
-        for b in args.args.iter() {
-            let bv = self.eval(b, state);
-            for o in bv.pts.iter() {
-                if let Some(ci) = self.heap.class_info_opt(o).filter(|_| self.heap.kind(o) == Kind::Class) {
-                    if let Some(m) = self.metaclass_of(ci.node, state) {
-                        return Some(m);
-                    }
-                }
-            }
-        }
-        None
+        (bases, open_base, lib, ek, meta)
     }
 
     /// `__set_name__(owner, name)` on the descriptor objects assigned in the class body.
