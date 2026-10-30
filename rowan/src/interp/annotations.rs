@@ -98,6 +98,58 @@ impl Analyzer {
         })
     }
 
+    /// Do a call's arguments fit `fi`'s parameters as its run for any call takes them from their
+    /// annotations (`param_from_annotation`, `param_from_members`)? Not where an annotation names
+    /// only the program's classes and an argument may be something else: an instance of another
+    /// class, a container, a literal (None where the annotation does not allow it). Unknowns
+    /// fit: annotations are trusted for values whose class is unknown. `bound`: the receiver is
+    /// not among `a`.
+    pub(in crate::interp) fn args_fit_annotations(&mut self, fi: &FuncInfo, bound: bool, a: &super::Args, state: &State) -> bool {
+        let Some(ps) = fi.node.params() else { return true };
+        let positional: Vec<&'static ast::Parameter> = ps.posonlyargs.iter().chain(ps.args.iter()).skip(usize::from(bound)).map(|p| &p.parameter).collect();
+        let named = |n: &str| positional.iter().copied().chain(ps.kwonlyargs.iter().map(|p| &p.parameter)).find(|p| p.name.id.as_str() == n);
+        let mut given: Vec<(&'static ast::Parameter, &Value)> = a.pos.iter().zip(positional.iter()).map(|(v, p)| (*p, v)).collect();
+        given.extend(a.kw.iter().filter_map(|(k, v)| Some((named(&intern::str_get(*k))?, v))));
+        let mut probe = state.copy();
+        given.into_iter().all(|(p, v)| match p.annotation.as_deref().and_then(Self::strip_annotation) {
+            Some(_) => self.fits_annotation(p.annotation.as_deref().unwrap(), fi.module, v, &mut probe),
+            None => true,
+        })
+    }
+
+    /// Does `v` fit annotation `ann` (written in `module`): see `args_fit_annotations`.
+    fn fits_annotation(&mut self, ann: &'static ast::Expr, module: ObjId, v: &Value, state: &mut State) -> bool {
+        let (members, none) = self.members_in(ann, module, 0);
+        let mut classes = Vec::new();
+        for (m, mm) in members {
+            if builtin_annotation(m).is_some() || matches!(m, ast::Expr::Subscript(_)) {
+                return true;
+            }
+            let cv = self.in_module(mm, "ann", "<annotation>", |an| {
+                let v = an.eval_annotation(m, state)?;
+                Some(match m {
+                    ast::Expr::Name(n) if !v.pts.iter().any(|o| an.heap.kind(o) == Kind::Class) => an.type_only_name(n.id.as_str(), state).unwrap_or(v),
+                    _ => v,
+                })
+            });
+            match cv.and_then(|v| v.single()).filter(|c| self.heap.kind(*c) == Kind::Class && self.heap.class_info_opt(*c).is_some()) {
+                Some(c) => classes.push(c),
+                None => return true,
+            }
+        }
+        if classes.is_empty() {
+            return true;
+        }
+        if crate::domain::kv_literals(&v.kv).iter().any(|k| !(none && k == intern::key_none())) {
+            return false;
+        }
+        v.pts.iter().all(|o| match self.heap.kind(o) {
+            Kind::Unknown => true,
+            Kind::Instance => self.heap.instance_class(o).is_some_and(|c| self.heap.mro(c).iter().any(|x| classes.contains(x))),
+            _ => false,
+        })
+    }
+
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
     /// tensor or module, an instance of a class of the program (`annotated_instance`), an open
     /// DataFrame; None when the annotation names none of those (or raises).

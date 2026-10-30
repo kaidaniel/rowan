@@ -923,6 +923,8 @@ impl Analyzer {
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
         let returned = self.returned_args(foid, self_v, &Args::new(args, kwargs, star_args, star_kwargs), state, true);
+        // (its result's shape holds for arguments as its parameters' annotations say)
+        let fits = self.args_fit_annotations(&fi, self_v.is_some(), &Args::new(args, kwargs, star_args, star_kwargs), state);
         // (a getter: the attribute it returns, read here; it changes nothing, it may raise)
         if let Some(v) = self.getter_result(foid, self_v, &positional, &Args::new(args, kwargs, star_args, star_kwargs), node, state) {
             self.flag_may_raise(state);
@@ -961,7 +963,7 @@ impl Analyzer {
         // (a shape holds for parameters that are no instances of the program's — a method's
         // receiver is one there —: given ones whose dunders change them, run unseen there by
         // operators, loops, `with`, not here)
-        let r = if dunder_recvs.pts.is_empty() { self.summarized(foid, r, node, state) } else { r };
+        let r = if dunder_recvs.pts.is_empty() && fits { self.summarized(foid, r, node, state) } else { r };
         let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
         // (what the code run with the receiver stores, where its text says: `AttrStores`)
         let mut put_by: FxHashMap<StrId, AttrStores> = FxHashMap::default();
