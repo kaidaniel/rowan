@@ -805,6 +805,11 @@ impl Analyzer {
         // (an alias the program binds stands for what it names, in the module that writes it)
         let resolved = a.annotation.as_deref().map(|x| self.resolved_annotation(x, fi.module));
         let (ann, amod) = (resolved.map(|r| r.0), resolved.map_or(fi.module, |r| r.1));
+        // (a default the annotation excludes is no value for any call: `default_as_annotated`)
+        let d = match (d, ann) {
+            (Some(d), Some(x)) => Some(self.default_as_annotated(x, amod, d, st)),
+            (d, _) => d,
+        };
         // (a union of several members, a `Literal`: member by member)
         if let Some(v) = ann.filter(|_| !self.entry.torch_modules.contains(&fi.module)).and_then(|x| self.param_from_members(x, amod, fi, a, d.is_some(), st)) {
             return match d {

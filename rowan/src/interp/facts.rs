@@ -285,7 +285,8 @@ pub fn held_objects(heap: &crate::interp::Heap, roots: Vec<ObjId>, st: &crate::s
 
 /// Whether what the program's calls at `sites` passed for a parameter has what the function
 /// reads of it: the worst of the accesses of those calls' runs (in the function, its callees
-/// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠~ ⚠ ✗).
+/// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠ ✗; the hedged
+/// tiers are not shown: `Tier::reported_failure`).
 fn call_check(an: &Analyzer, f: &Fact, sites: &[CallSite]) -> J {
     let passed: Vec<&(Chain, u32, Vec<ObjId>)> = f.passed.iter().filter(|(c, m, _)| c.last().is_some_and(|l| sites.contains(&(*m, *l)))).collect();
     let Some(st) = &an.findings.final_state else { return J::Null };
@@ -296,7 +297,7 @@ fn call_check(an: &Analyzer, f: &Fact, sites: &[CallSite]) -> J {
     let reach: rustc_hash::FxHashSet<ObjId> = held_objects(&an.heap, passed.iter().flat_map(|(_, _, o)| o.iter().copied()).collect(), st).into_iter().collect();
     // (a chain into the function: the access's chain goes through it)
     let within = |vc: &[u32], c: &[u32]| (0..vc.len()).any(|p| vc[..=p].len() <= c.len() && c.ends_with(&vc[..=p]) && vc[p] == *c.last().unwrap());
-    const ORDER: [Tier; 6] = [Tier::Missing, Tier::Possibly, Tier::LikelyMissing, Tier::Input, Tier::Likely, Tier::Proven];
+    const ORDER: [Tier; 5] = [Tier::Missing, Tier::Possibly, Tier::Input, Tier::Likely, Tier::Proven];
     let mut worst: Option<usize> = None;
     let mut fails: Vec<String> = Vec::new();
     for v in an.findings.verdicts() {
@@ -305,7 +306,7 @@ fn call_check(an: &Analyzer, f: &Fact, sites: &[CallSite]) -> J {
         }
         let Some(i) = ORDER.iter().position(|t| *t == v.tier) else { continue };
         worst = Some(worst.map_or(i, |w| w.min(i)));
-        if i <= 2 && !fails.contains(&v.text) {
+        if v.tier.reported_failure() && !fails.contains(&v.text) {
             fails.push(v.text.clone());
         }
     }

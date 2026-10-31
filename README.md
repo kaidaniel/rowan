@@ -347,7 +347,9 @@ type or default when known), followed by up to four sections:
 | --- | --- |
 | `✗` | fails on every path that reaches it |
 | `⚠` | fails on some paths |
-| `⚠~` | fails unless code rowan cannot see sets the key first |
+
+rowan does not warn about a key computed from data, nor about one only code it cannot see could
+have set (a decorator of a library, say): it can't tell, and such warnings were mostly wrong.
 
 Files are analysed when opened or saved, or with **Rowan: Analyse current file**. When a whole
 file takes longer than a second, rowan answers each function when you first hover in it, alone

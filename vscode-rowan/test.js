@@ -356,6 +356,8 @@ assert.strictEqual(severityFor("missing"), "error");
 assert.strictEqual(severityFor("possibly"), "warning");
 assert.strictEqual(severityFor("input"), null);
 assert.strictEqual(severityFor("likely"), null);
+assert.strictEqual(severityFor("likely-missing"), null);
+assert.strictEqual(severityFor("datakey"), null);
 const v13 = (a01idx.verdicts.get(13) || [])[0];
 assert.strictEqual(diagnosticMessage(v13), 'key "rolle" is never set');
 assert.strictEqual(diagnosticMessage({ message: "m", chain: [5, 9] }), "m (via L5→L9)");
@@ -589,6 +591,18 @@ assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx
   assert(hr.includes('"tags"'), hr);
 }
 
+// ---- hedged reads (a data key of a closed dict, an attribute only unknown code may have set)
+// are verdicts in the document but no diagnostics
+{
+  const z944 = path.join(root, "tests", "cases", "z944_hedged_reads_are_not_warnings.py");
+  const lines = fs.readFileSync(z944, "utf8").split("\n");
+  const idx = indexResult(facts(z944));
+  for (const [pre, tier] of [["fee = PRICES[item]", "datakey"], ["tag = box.label", "likely-missing"]]) {
+    const vs = idx.verdicts.get(lines.findIndex((l) => l.startsWith(pre)) + 1) || [];
+    assert(vs.some((v) => v.tier === tier) && vs.every((v) => severityFor(v.tier) === null), JSON.stringify(vs));
+  }
+}
+
 // ---- a function one of several a dict holds, picked by a key rowan cannot compute: what
 // fails in it is said to fail where the program picks it (a warning), not on every path
 {
@@ -668,7 +682,7 @@ const USES = {
   "…": (t) => t.includes("…"),
   "(only if x)": (t) => t.includes("(only if `"),
 };
-const MARKS = ["✗", "⚠~", "⚠", "◌"];
+const MARKS = ["✗", "⚠", "◌"];
 /** How a whole program's or a function's run was cut: its Note's opening words. */
 const CUT_NOTE = /^- (analysed alone, for any call |from the module's own code only |the analysis stopped at its )/;
 /**
@@ -717,7 +731,7 @@ function checkFormat(h, name, where, facts = []) {
   const explained = (key) => legendKeys.includes(key) || notes.some((l) => l.startsWith(`- \`${key}\`:`));
   for (const [key, used] of Object.entries(USES)) if (used(key === "(only if x)" ? body : code)) assert(explained(key), `unexplained ${key} in ${where}`);
   for (const m of (code.match(/\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/g) || [])) assert(explained(m), `unexplained ${m} in ${where}`);
-  for (const m of MARKS) if (body.replace(/⚠~/g, m === "⚠" ? "" : "⚠~").includes(m)) assert(legendKeys.includes(m), `unexplained ${m} in ${where}`);
+  for (const m of MARKS) if (body.includes(m)) assert(legendKeys.includes(m), `unexplained ${m} in ${where}`);
   // (every Note and legend entry is about something shown: above it, or in a Note's description)
   const descs = notes.map((x) => x.replace(/^- `[^`]*`: /, ""));
   const shownFor = (key, rest) => {

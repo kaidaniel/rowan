@@ -44,6 +44,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Bench scripts import (no work at import; every import, also inside functions, resolves)
+        run: uv run --no-project python bench/check_imports.py
+
       - name: Build (release)
         working-directory: rowan
         run: cargo build --release --locked

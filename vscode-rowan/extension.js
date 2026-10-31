@@ -22,13 +22,12 @@ try {
  * The mark of a call's check of a parameter (the engine's `--facts` verdict tiers), worst first.
  * Accesses that work (`proven`, `likely`) get no mark: the hover says only what may fail.
  */
-const MARK = { missing: "✗", possibly: "⚠", "likely-missing": "⚠~", input: "◌" };
-const CHECK_ORDER = ["missing", "possibly", "likely-missing", "input", "likely", "proven"];
+const MARK = { missing: "✗", possibly: "⚠", input: "◌" };
+const CHECK_ORDER = ["missing", "possibly", "input", "likely", "proven"];
 /** What each mark means (Notes). */
 const MARK_TEXT = {
   "⚠": "fails on some paths",
   "✗": "fails on every path",
-  "⚠~": "fails unless code rowan cannot see set the key",
   "◌": "works if the input has what the function reads",
 };
 
@@ -640,13 +639,15 @@ function verdictsForWord(verdicts, name, start, end) {
   });
 }
 
-/** The editor severity of a finding: only accesses that may fail are diagnostics. */
+/**
+ * The editor severity of a finding: only accesses that may fail are diagnostics. A key from
+ * data (`datakey`) and one nothing set but unknown code might have (`likely-missing`) are
+ * guesses, not shown (the engine's report leaves them out too: `Tier::reported_failure`).
+ */
 function severityFor(tier) {
   switch (tier) {
     case "missing": return "error";
-    case "possibly":
-    case "likely-missing":
-    case "datakey": return "warning";
+    case "possibly": return "warning";
     default: return null;
   }
 }
