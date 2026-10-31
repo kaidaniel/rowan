@@ -239,7 +239,8 @@ def compare(base: dict, run: dict, show: str | None = None) -> dict:
             c[what] += 1
             if show and what != "changed":
                 print(f"{show} {what} L{k[0]} {k[1]}: {fa['text'][:70]}  ->  {fb['text'][:70]}", file=sys.stderr)
-    warn = lambda vs: {(v["file"], v["line"], v["col"], v["key"]): v for v in vs if MARKS.get(v["tier"], "") in ("⚠", "⚠~", "✗")}
+    # (the warnings users see: `missing` and `possibly`, not the hedged `datakey` / `likely-missing`)
+    warn = lambda vs: {(v["file"], v["line"], v["col"], v["key"]): v for v in vs if v["tier"] in ("possibly", "missing")}
     new = warn(run["verdicts"]).keys() - warn(base["verdicts"]).keys()
     c["new_warn"] = len(new)
     for k in sorted(new) if show else []:

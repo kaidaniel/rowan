@@ -740,7 +740,9 @@ pub fn chain_extend(chain: &[u32], files: &[u32], module: u32, line: u32) -> (Ch
 
 /// The verdict of a read, `del` or `pop` of a key on one object, in order of severity
 /// (`rank`). `Proven`, `Possibly`, `Missing` and `Input` hold for every run; `Likely` /
-/// `LikelyMissing` assume unknown code removed (added) nothing.
+/// `LikelyMissing` assume unknown code removed (added) nothing. Only `Missing` and `Possibly`
+/// are reported as accesses that may fail (`reported_failure`); `DataKey` and `LikelyMissing`
+/// stay verdicts (the JSON, golden directives) but say too little to be worth a warning.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Tier {
     /// there on every path (✓)
@@ -755,9 +757,9 @@ pub enum Tier {
     Input,
     /// set on some paths only (⚠)
     Possibly,
-    /// a key computed from data read from a closed record: may not be one of its keys (⚠)
+    /// a key computed from data read from a closed record: may not be one of its keys (not shown)
     DataKey,
-    /// missing unless unknown code added it (⚠~)
+    /// missing unless unknown code added it (not shown)
     LikelyMissing,
     /// missing on every path (✗)
     Missing,
@@ -798,6 +800,13 @@ impl Tier {
             Tier::Map => "·map",
             Tier::Unknown => "?",
         }
+    }
+    /// Whether the report and the editor show the verdict as an access that may fail: `Missing`
+    /// and `Possibly` only. A data key of a closed record (`DataKey`) and a key nothing set but
+    /// unknown code may have (`LikelyMissing`) are hedged guesses, not shown (the read still may
+    /// raise into handlers: the model is unchanged).
+    pub fn reported_failure(self) -> bool {
+        matches!(self, Tier::Missing | Tier::Possibly)
     }
 }
 

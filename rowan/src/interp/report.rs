@@ -57,7 +57,7 @@ fn combine(an: &Analyzer, vs: &[&Verdict]) -> Option<Verdict> {
     // finds the key in others: it may fail)
     let mut mixed: Vec<Verdict> = Vec::new();
     for (o, v) in by_obj.iter() {
-        if matches!(v.tier, Tier::Missing | Tier::LikelyMissing) && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
+        if v.tier == Tier::Missing && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
             mixed.push(Verdict { tier: Tier::Possibly, note: "is missing on some of the times this line runs".into(), ..(*v).clone() });
         }
     }
@@ -99,9 +99,10 @@ fn combine(an: &Analyzer, vs: &[&Verdict]) -> Option<Verdict> {
         Tier::Likely
     } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
         Tier::Input
-    } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
-        // (missing on some objects only unless code rowan cannot see set it: as hedged)
-        Tier::LikelyMissing
+    } else if let Some(hedged) = tiers.iter().filter(|t| matches!(t, Tier::DataKey | Tier::LikelyMissing)).max().filter(|_| tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::DataKey | Tier::LikelyMissing))) {
+        // (missing on some objects only unless code rowan cannot see set it, or by a key from
+        // data: as hedged, not shown)
+        *hedged
     } else {
         Tier::Possibly
     };
@@ -242,27 +243,19 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     lines.join("\n")
 }
 
-/// The mark of a verdict in reports: one per kind of finding.
-fn tier_mark(t: Tier) -> &'static str {
-    match t {
-        Tier::DataKey => "⚠",
-        t => t.symbol(),
-    }
-}
-
-/// One line per access that may fail (✗, ⚠, ⚠~): the reasons in words; an access reached
+/// One line per access that may fail (✗, ⚠: `Tier::reported_failure`): the reasons in words; an access reached
 /// through several calls once, with the shortest call path and how many others there are.
 fn problem_lines(an: &Analyzer, vs: &[Verdict]) -> Vec<String> {
     // (per access and key: the most severe finding, with the call paths of all of them)
     let mut groups: IndexMap<(String, u32, u32, String, String), Vec<&Verdict>> = IndexMap::new();
-    for v in vs.iter().filter(|v| matches!(v.tier, Tier::Missing | Tier::Possibly | Tier::LikelyMissing | Tier::DataKey)) {
+    for v in vs.iter().filter(|v| v.tier.reported_failure()) {
         groups.entry((v.file.clone(), v.line, v.col, v.text.clone(), key_repr(v.key))).or_default().push(v);
     }
     let mut groups: IndexMap<(String, u32, u32, String, String), Vec<&Verdict>> = groups
         .into_iter()
         .map(|((f, l, c, t, _), mut vs)| {
             vs.sort_by_key(|v| (std::cmp::Reverse(v.tier.rank()), v.chain.len()));
-            let mm = format!("{}\u{0}{}", tier_mark(vs[0].tier), verdict_message(an, vs[0]));
+            let mm = format!("{}\u{0}{}", vs[0].tier.symbol(), verdict_message(an, vs[0]));
             ((f, l, c, t, mm), vs)
         })
         .collect();
@@ -745,7 +738,6 @@ fn legend(text: &str) -> Vec<String> {
     };
     add(has_mark("✗"), "✗", "fails on every path that reaches it");
     add(has_mark("⚠"), "⚠", "fails on some paths");
-    add(has_mark("⚠~"), "⚠~", "fails unless code rowan cannot see sets the key first");
     add(text.lines().any(|l| l.contains(" ×") && (l.contains(" ✗ ") || l.contains(" ⚠"))), "×2", "written that many times on the line, each with this finding");
     add(text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
     add(text.contains("  always:"), "always", "read on every path through the code");
