@@ -150,6 +150,39 @@ impl Analyzer {
         })
     }
 
+    /// A parameter's default `d` as its annotation `ann` (written in `module`) allows it, in a
+    /// run for any call: without the instances of the program's plain classes that are surely
+    /// none of the classes the annotation names (typer's `config: Path = typer.Option(…)`: a
+    /// marker the framework replaces before every call it makes). Everything else stays: None,
+    /// literals, other objects, and all of `d` where a member is no class (`Any`, a builtin
+    /// type, a subscript, a TypeVar).
+    pub(in crate::interp) fn default_as_annotated(&mut self, ann: &'static ast::Expr, module: ObjId, d: Value, state: &mut State) -> Value {
+        let marker = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| an.plain_program_class(c));
+        if !d.pts.iter().any(|o| marker(self, o)) {
+            return d;
+        }
+        let mut classes = Vec::new();
+        for (m, mm) in self.members_in(ann, module, 0).0 {
+            if builtin_annotation(m).is_some() || matches!(m, ast::Expr::Subscript(_)) {
+                return d;
+            }
+            let mut probe = state.copy();
+            let cv = self.in_module(mm, "ann", "<annotation>", |an| an.eval_annotation(m, &mut probe));
+            match cv.and_then(|v| v.single()).filter(|c| matches!(self.heap.kind(*c), Kind::Class | Kind::External)) {
+                Some(c) => classes.push(c),
+                None => return d,
+            }
+        }
+        if classes.is_empty() {
+            return d;
+        }
+        let drop: Vec<ObjId> = d.pts.iter().filter(|o| marker(self, *o) && self.instance_of(*o, &classes, state) == Some(false)).collect();
+        if drop.is_empty() {
+            return d;
+        }
+        Value { pts: crate::domain::ObjSet::from_vec(d.pts.iter().filter(|o| !drop.contains(o)).collect()), ..d }
+    }
+
     /// The value a parameter annotated `ann` takes in a run for any call: the torch model's
     /// tensor or module, an instance of a class of the program (`annotated_instance`), an open
     /// DataFrame; None when the annotation names none of those (or raises).
